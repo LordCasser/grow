@@ -37,6 +37,7 @@ pub mod minimal_api;
 #[path = "minimal/hook.rs"]
 pub mod minimal_hook;
 pub mod models;
+pub mod motion;
 pub mod notifications;
 #[allow(unused_imports, unused_macros)]
 pub mod plugin_cmd;

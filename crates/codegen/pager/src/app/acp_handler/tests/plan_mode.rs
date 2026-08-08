@@ -445,7 +445,10 @@
             }),
         });
         agent.behavior_switch_warning_pending = true;
-        agent.mode_switch_banner = Some(("banner".into(), 69));
+        agent.mode_switch_banner = Some((
+            "banner".into(),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        ));
 
         detect_plan_mode_change(&behavior_change_update("applied", "default"), &mut agent);
 

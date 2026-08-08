@@ -1315,6 +1315,7 @@ pub fn render_modal(
     mode: &ShortcutsHelpMode,
     theme: &crate::theme::Theme,
     compact: bool,
+    frame: crate::motion::FrameStamp,
 ) {
     use crate::views::modal_window as mw;
     use crate::views::picker::{self, PickerHitAreas};
@@ -1382,7 +1383,7 @@ pub fn render_modal(
         &[],
         Some(theme.bg_base),
         false,
-        0,
+        frame,
         inner_x + inner_width - 1,
     );
     state.hit_areas = Some(PickerHitAreas {
@@ -3555,6 +3556,7 @@ mod tests {
                 &ShortcutsHelpMode::Browse,
                 &theme,
                 false,
+                crate::motion::FrameStamp::default(),
             );
             let mut out = String::new();
             for y in area.y..area.y + area.height {

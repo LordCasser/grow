@@ -380,7 +380,7 @@ pub(super) fn do_cancel_turn_with_pause(
         // Full state reset: tracker cleanup + state Idle + clear timing
         // fields + clear current_prompt_id.
         agent.session.finish_turn(&mut agent.scrollback);
-        agent.turn_started_at = None;
+        agent.mark_turn_finished();
         agent.activity_started_at = None;
         agent.last_activity = None;
     } else {
@@ -436,7 +436,10 @@ pub(crate) const PROMPT_STATUS_WATCHDOG_DELAY: std::time::Duration =
 pub(crate) const PROMPT_STATUS_RUNNING_WATCHDOG_DELAY: std::time::Duration =
     std::time::Duration::from_secs(30);
 
-pub(crate) fn poll_stalled_prompt_submissions(app: &mut AppView) -> Option<Vec<Effect>> {
+pub(crate) fn poll_stalled_prompt_submissions(
+    app: &mut AppView,
+    now: std::time::Instant,
+) -> Option<Vec<Effect>> {
     let stalled_submissions = app
         .agents
         .iter()
@@ -450,11 +453,11 @@ pub(crate) fn poll_stalled_prompt_submissions(app: &mut AppView) -> Option<Vec<E
             let stalled = if agent.session.state.is_turn_submitting() {
                 // Submission is silent client-side (no activity can exist),
                 // so the elapsed window alone decides.
-                agent
-                    .turn_started_at
-                    .is_some_and(|started| started.elapsed() >= PROMPT_STATUS_WATCHDOG_DELAY)
+                agent.turn_started_at.is_some_and(|started| {
+                    now.saturating_duration_since(started) >= PROMPT_STATUS_WATCHDOG_DELAY
+                })
             } else if agent.session.state.is_turn_running() {
-                running_turn_stalled(agent)
+                running_turn_stalled(agent, now)
             } else {
                 false
             };
@@ -486,11 +489,9 @@ pub(crate) fn poll_stalled_prompt_submissions(app: &mut AppView) -> Option<Vec<E
 /// Whether a `TurnRunning` turn looks stalled: the running window elapsed
 /// since the turn started, and no NEW activity arrived for the full window.
 ///
-/// "New activity" is the render-maintained phase anchor (`activity_started_at`),
-/// refreshed on every activity transition — thinking → responding → tool →
-/// wait — exactly the pair `views::turn_status` consumes. A turn that never
-/// rendered (background pane, nothing streamed) has no anchor and counts as
-/// stalled once the turn window elapsed.
+/// "New activity" is reducer-owned: accepted prompt events and authoritative
+/// Running status observations re-arm the window. Rendering and visibility
+/// never participate in lifecycle recovery.
 ///
 /// The tracker cannot gate this on its own: its in-flight state only clears
 /// via `finish_turn`, which never runs when TurnCompleted AND PromptResponse
@@ -499,16 +500,53 @@ pub(crate) fn poll_stalled_prompt_submissions(app: &mut AppView) -> Option<Vec<E
 /// status query per window whose `Running` response refreshes the anchors
 /// without re-running the turn-start shim (see the `PromptStatusResolved`
 /// `Running` arm), so it is safe by construction.
-fn running_turn_stalled(agent: &AgentView) -> bool {
+fn running_turn_stalled(agent: &AgentView, now: std::time::Instant) -> bool {
     let Some(started) = agent.turn_started_at else {
         return false;
     };
-    if started.elapsed() < PROMPT_STATUS_RUNNING_WATCHDOG_DELAY {
+    if now.saturating_duration_since(started) < PROMPT_STATUS_RUNNING_WATCHDOG_DELAY {
         return false;
     }
-    agent
-        .activity_started_at
-        .is_none_or(|at| at.elapsed() >= PROMPT_STATUS_RUNNING_WATCHDOG_DELAY)
+    let liveness = [
+        agent.last_prompt_event_at,
+        agent.last_status_observed_at,
+        Some(started),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(started);
+    now.saturating_duration_since(liveness) >= PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+}
+
+/// Earliest lifecycle reconciliation deadline across every local agent.
+pub(crate) fn next_prompt_watchdog_deadline(app: &AppView) -> Option<std::time::Instant> {
+    app.agents
+        .values()
+        .filter_map(|agent| {
+            let prompt_id = agent.session.current_prompt_id.as_deref()?;
+            if agent.prompt_status_query_for.as_deref() == Some(prompt_id) {
+                return None;
+            }
+            if agent.session.state.is_turn_submitting() {
+                return agent
+                    .turn_started_at?
+                    .checked_add(PROMPT_STATUS_WATCHDOG_DELAY);
+            }
+            if !agent.session.state.is_turn_running() {
+                return None;
+            }
+            [
+                agent.last_prompt_event_at,
+                agent.last_status_observed_at,
+                agent.turn_started_at,
+            ]
+            .into_iter()
+            .flatten()
+            .max()?
+            .checked_add(PROMPT_STATUS_RUNNING_WATCHDOG_DELAY)
+        })
+        .min()
 }
 
 pub(super) fn dispatch_cancel_scheduled_task(app: &mut AppView, task_id: String) -> Vec<Effect> {

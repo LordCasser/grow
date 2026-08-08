@@ -1867,8 +1867,6 @@ pub struct PickerContentHitAreas {
 /// can draw entries into a provided content area without the picker's
 /// built-in frame, tab bar, or search bar.
 ///
-/// The existing [`render_picker`] calls this internally for backwards
-/// compatibility with non-migrated callers.
 #[allow(clippy::too_many_arguments)]
 pub fn render_picker_content(
     buf: &mut Buffer,
@@ -1880,6 +1878,7 @@ pub fn render_picker_content(
     non_selectable_clickable: &[bool],
     bg: Option<ratatui::style::Color>,
     loading: bool,
+    frame: crate::motion::FrameStamp,
 ) -> PickerContentHitAreas {
     render_picker_content_inner(
         buf,
@@ -1891,7 +1890,7 @@ pub fn render_picker_content(
         non_selectable_clickable,
         bg,
         loading,
-        0,
+        frame,
         None,
     )
 }
@@ -1900,7 +1899,6 @@ pub fn render_picker_content(
 /// x-position. When `scrollbar_x` is `Some(x)`, the scrollbar is
 /// rendered at that column instead of `content_area.x + content_area.width - 1`.
 /// Used by modals with h_pad to place the scrollbar flush against the border.
-/// `loading_tick` animates the loading spinner (pass 0 for a static frame).
 #[allow(clippy::too_many_arguments)]
 pub fn render_picker_content_with_scrollbar_x(
     buf: &mut Buffer,
@@ -1912,7 +1910,7 @@ pub fn render_picker_content_with_scrollbar_x(
     non_selectable_clickable: &[bool],
     bg: Option<ratatui::style::Color>,
     loading: bool,
-    loading_tick: u64,
+    frame: crate::motion::FrameStamp,
     scrollbar_x: u16,
 ) -> PickerContentHitAreas {
     render_picker_content_inner(
@@ -1925,7 +1923,7 @@ pub fn render_picker_content_with_scrollbar_x(
         non_selectable_clickable,
         bg,
         loading,
-        loading_tick,
+        frame,
         Some(scrollbar_x),
     )
 }
@@ -1941,6 +1939,7 @@ pub fn render_picker_in_modal(
     entries: &[PickerEntry<'_>],
     non_selectable: &[bool],
     loading: bool,
+    frame: crate::motion::FrameStamp,
 ) {
     render_picker_in_modal_ex(
         buf,
@@ -1952,6 +1951,7 @@ pub fn render_picker_in_modal(
         entries,
         non_selectable,
         loading,
+        frame,
         false,
     );
 }
@@ -1969,6 +1969,7 @@ pub fn render_picker_in_modal_ex(
     entries: &[PickerEntry<'_>],
     non_selectable: &[bool],
     loading: bool,
+    frame: crate::motion::FrameStamp,
     disable_search: bool,
 ) {
     let search_active = state.search_active;
@@ -1982,6 +1983,7 @@ pub fn render_picker_in_modal_ex(
         entries,
         non_selectable,
         loading,
+        frame,
         search_active,
         true,
         disable_search,
@@ -2000,6 +2002,7 @@ pub fn render_picker_in_modal_inner(
     entries: &[PickerEntry<'_>],
     non_selectable: &[bool],
     loading: bool,
+    frame: crate::motion::FrameStamp,
     search_active: bool,
     show_search_hint: bool,
 ) {
@@ -2013,6 +2016,7 @@ pub fn render_picker_in_modal_inner(
         entries,
         non_selectable,
         loading,
+        frame,
         search_active,
         show_search_hint,
         false,
@@ -2030,6 +2034,7 @@ fn render_picker_in_modal_body(
     entries: &[PickerEntry<'_>],
     non_selectable: &[bool],
     loading: bool,
+    frame: crate::motion::FrameStamp,
     search_active: bool,
     show_search_hint: bool,
     disable_search: bool,
@@ -2076,7 +2081,7 @@ fn render_picker_in_modal_body(
         &[],
         Some(theme.bg_base),
         loading,
-        0,
+        frame,
         inner_x + inner_width - 1,
     );
     state.hit_areas = Some(PickerHitAreas {
@@ -2100,7 +2105,7 @@ fn render_picker_content_inner(
     non_selectable_clickable: &[bool],
     bg: Option<ratatui::style::Color>,
     loading: bool,
-    loading_tick: u64,
+    frame: crate::motion::FrameStamp,
     scrollbar_x_override: Option<u16>,
 ) -> PickerContentHitAreas {
     // Cleared each paint; set below if a row underlines its last description line.
@@ -2118,8 +2123,8 @@ fn render_picker_content_inner(
     // Loading state — animated dot spinner centered in the content area.
     if loading {
         let spinner_frames = crate::glyphs::dot_spinner_frames();
-        let frame = spinner_frames[(loading_tick / 4) as usize % spinner_frames.len()];
-        let msg = format!("{frame} Loading\u{2026}");
+        let spinner = crate::motion::spinner_glyph(frame, spinner_frames);
+        let msg = format!("{spinner} Loading\u{2026}");
         let msg_style = Style::default().fg(theme.gray);
         let cx = content_area.x + content_area.width.saturating_sub(msg.width() as u16) / 2;
         let cy = content_area.y + content_area.height / 2;
@@ -2301,7 +2306,6 @@ fn render_picker_content_inner(
 ///
 /// Returns hit areas for mouse interaction. The caller stores these in
 /// `state.hit_areas` for use by `handle_picker_input`.
-/// `loading_tick` animates the loading spinner (pass 0 for a static frame).
 #[allow(clippy::too_many_arguments)]
 pub fn render_picker(
     buf: &mut Buffer,
@@ -2311,7 +2315,7 @@ pub fn render_picker(
     entries: &[PickerEntry<'_>],
     config: &PickerConfig<'_>,
     loading: bool,
-    loading_tick: u64,
+    frame_stamp: crate::motion::FrameStamp,
 ) -> PickerHitAreas {
     let empty_hit = PickerHitAreas {
         close_button: Rect::default(),
@@ -2565,7 +2569,7 @@ pub fn render_picker(
         config.non_selectable_clickable,
         bg,
         loading,
-        loading_tick,
+        frame_stamp,
         None,
     );
     let item_rects = content_hit.item_rects;

@@ -389,6 +389,7 @@ pub(super) fn render_hero(
     announcement_expanded: bool,
     promo_cta: Option<&str>,
     interactive: bool,
+    frame: crate::motion::FrameStamp,
 ) -> HeroRects {
     let hover = interactive.then_some(mouse_pos).flatten();
 
@@ -397,7 +398,7 @@ pub(super) fn render_hero(
             HeroMode::SideBySide(size) | HeroMode::Stacked(size) => size.art(),
             HeroMode::TextOnly => unreachable!("no logo rect in text-only mode"),
         };
-        logo::render_logo_into(layout.logo, buf, theme, logo);
+        logo::render_logo_into(layout.logo, buf, theme, logo, frame);
     }
 
     super::render_version_badge(
@@ -869,6 +870,7 @@ managed devices and accounts. Report security incidents";
             false,
             None,
             true,
+            crate::motion::FrameStamp::default(),
         );
         let border_chars = [
             '╭', '╮', '╰', '╯', '│', '─', '┌', '┐', '└', '┘', '┼', '├', '┤', '┬', '┴',
@@ -910,6 +912,7 @@ managed devices and accounts. Report security incidents";
             false,
             None,
             true,
+            crate::motion::FrameStamp::default(),
         );
         assert_eq!(rects.menu_rects.len(), 3);
         assert!(rects.menu_rects[1].y > rects.menu_rects[0].y);

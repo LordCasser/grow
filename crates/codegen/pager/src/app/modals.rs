@@ -1716,6 +1716,7 @@ impl AgentView {
         buf: &mut Buffer,
         theme: Theme,
         compact: bool,
+        frame_stamp: crate::motion::FrameStamp,
     ) {
         if let Some(ref mut active_modal) = self.active_modal {
             use crate::views::modal_window::{
@@ -1815,6 +1816,7 @@ impl AgentView {
                         &picker_entries,
                         &non_sel,
                         false,
+                        frame_stamp,
                     );
                 }
             } else if let modal::ActiveModal::ArgPicker {
@@ -1920,6 +1922,7 @@ impl AgentView {
                         &picker_entries,
                         &[],
                         false,
+                        frame_stamp,
                         profile.disable_search(),
                     );
                 }
@@ -2093,7 +2096,7 @@ impl AgentView {
                     let spinner_label = build_content_header_label(
                         effective_content_loading,
                         has_content_rows,
-                        self.scrollback.tick_count(),
+                        frame_stamp,
                     );
                     let show_content_header = has_content_rows
                         || (effective_content_loading && !filter_query.trim().is_empty());
@@ -2166,7 +2169,7 @@ impl AgentView {
                             entries.as_deref(),
                             *loading,
                         ),
-                        self.scrollback.tick_count(),
+                        frame_stamp,
                         mca.inner_x + mca.inner_width - 1,
                     );
                     state.hit_areas = Some(picker::PickerHitAreas {
@@ -2187,7 +2190,14 @@ impl AgentView {
             {
                 let compact = self.scrollback.appearance().prompt.compact;
                 modal::render_doc_picker_overlay(
-                    buf, area, window, entries, state, compact, &theme,
+                    buf,
+                    area,
+                    window,
+                    entries,
+                    state,
+                    compact,
+                    &theme,
+                    frame_stamp,
                 );
             } else if let modal::ActiveModal::DocViewer {
                 title,
@@ -2356,6 +2366,7 @@ impl AgentView {
                         &picker_entries,
                         &non_sel,
                         false,
+                        frame_stamp,
                         searching,
                         !searching,
                     );

@@ -20,7 +20,7 @@ use crate::app::app_view::AppView;
 
 /// Per-frame minimal render entry point
 /// (`pager_minimal::draw`).
-pub type MinimalDrawFn = fn(&mut AppView, &mut PagerTerminal);
+pub type MinimalDrawFn = fn(&mut AppView, &mut PagerTerminal, crate::motion::FrameStamp);
 
 /// The set of hooks the minimal crate installs.
 ///

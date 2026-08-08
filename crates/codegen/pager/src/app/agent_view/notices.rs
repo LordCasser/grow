@@ -1,20 +1,24 @@
 //! Transient user feedback: toasts, ephemeral tips, mode-switch banners,
-//! terminal-size notes, clipboard-copy feedback, and their tick timers.
+//! terminal-size notes, clipboard-copy feedback, and their expiry clocks.
 
 #[cfg(test)]
 use super::{AgentPane, test_fixtures};
-use super::{AgentView, CLIPBOARD_TOAST_DEBOUNCE_MS, MODE_BANNER_TOTAL_TICKS, PromptInputMode};
+use super::{
+    AgentView, CLIPBOARD_TOAST_DEBOUNCE_MS, MODE_BANNER_DURATION, MODE_BANNER_FADE, PromptInputMode,
+};
 use crate::app::actions::Action;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+const DEFAULT_TOAST_DURATION: Duration = Duration::from_secs(3);
 
 impl AgentView {
     /// Show a brief toast message (e.g., "Copied!").
     ///
-    /// Displayed for ~3 seconds (90 ticks at 30fps). Previous transient toast
+    /// Displayed for three seconds. Previous transient toast
     /// is replaced; [`Self::sticky_toast`] is preserved and returns after this
     /// expires or is dismissed.
     pub fn show_toast(&mut self, msg: &str) {
-        self.toast = Some((crate::glyphs::sanitize_toast_message(msg).into_owned(), 90));
+        self.show_toast_for(msg, DEFAULT_TOAST_DURATION);
     }
 
     /// Show an ephemeral tip in the banner row above the prompt, gated by the
@@ -77,21 +81,16 @@ impl AgentView {
         None
     }
 
-    /// Whether the ephemeral tip needs tick / animation this frame.
-    /// False when the session announcement banner occludes the tip slot so a
-    /// session-long freeze cannot keep the metronome hot.
-    /// Ambient tips extend that freeze to EVERY occluder (permission ask,
-    /// modal, dropdown): their TTL burns only while the row can paint, so an
-    /// occluder pauses rather than expires them off-screen.
-    pub(crate) fn ephemeral_tip_needs_tick(&self) -> bool {
+    fn ephemeral_tip_clock_running(&self, visible: bool) -> bool {
         self.ephemeral_tip.is_active()
             && !self.session_banner_active
-            && (!self.ephemeral_tip.active_is_ambient() || self.ephemeral_tip_can_render())
+            && (!self.ephemeral_tip.active_is_ambient()
+                || (visible && self.ephemeral_tip_can_render()))
     }
 
-    /// Advance tip TTL only when the tip is allowed to tick (see
-    /// [`Self::ephemeral_tip_needs_tick`]).
-    pub(crate) fn tick_ephemeral_tip(&mut self) -> bool {
+    /// Reconcile prompt-sensitive retirement and the tip's absolute expiry
+    /// clock. Ambient tips pause while occluded; contextual tips keep burning.
+    pub(crate) fn maintain_ephemeral_tip(&mut self, now: Instant, visible: bool) -> bool {
         // Word-select tip lifecycle: any prompt divergence since the tip was
         // shown (typed, pasted, dropped — every edit path funnels into the
         // prompt text) retires it, and the snapshot drops once the tip is
@@ -107,10 +106,17 @@ impl AgentView {
         } else if self.word_select_tip_prompt_snapshot.is_some() {
             self.word_select_tip_prompt_snapshot = None;
         }
-        if !self.ephemeral_tip_needs_tick() {
-            return false;
-        }
-        self.ephemeral_tip.tick()
+        let counting = self.ephemeral_tip_clock_running(visible);
+        self.ephemeral_tip.maintain(now, counting)
+    }
+
+    pub(crate) fn sync_ephemeral_tip_clock(&mut self, now: Instant, visible: bool) {
+        let counting = self.ephemeral_tip_clock_running(visible);
+        self.ephemeral_tip.sync_clock_policy(now, counting);
+    }
+
+    pub(crate) fn ephemeral_tip_deadline(&self) -> Option<Instant> {
+        self.ephemeral_tip.deadline()
     }
 
     /// Unified visibility for the ephemeral tip row: no occluding view, a
@@ -122,7 +128,7 @@ impl AgentView {
     /// Most occluders leave an edit-contextual tip active with TTL still
     /// burning (tip may repaint on close). The announcement banner (critical
     /// or promo) is the exception for every tip, and AMBIENT tips freeze
-    /// under any occluder: paint yields **and** [`Self::tick_ephemeral_tip`]
+    /// under any occluder: paint yields **and** the absolute expiry clock
     /// freezes TTL so a long-lived occluder cannot burn the tip off-screen
     /// or keep `needs_animation` hot.
     ///
@@ -219,11 +225,11 @@ impl AgentView {
         }
     }
 
-    /// Show a toast with an explicit tick duration.
-    pub fn show_toast_ticks(&mut self, msg: &str, ticks: u8) {
+    /// Show a toast for an explicit duration.
+    pub fn show_toast_for(&mut self, msg: &str, duration: Duration) {
         self.toast = Some((
             crate::glyphs::sanitize_toast_message(msg).into_owned(),
-            ticks,
+            Instant::now() + duration,
         ));
     }
 
@@ -242,32 +248,53 @@ impl AgentView {
     /// Renders at full visibility for 2 s, then fades out over the final 0.3 s.
     pub fn show_mode_switch_banner(&mut self, mode_name: &str) {
         let msg = format!("Switched to mode: {}", mode_name);
-        self.mode_switch_banner = Some((msg, MODE_BANNER_TOTAL_TICKS));
+        self.mode_switch_banner = Some((msg, Instant::now() + MODE_BANNER_DURATION));
     }
 
     pub fn show_behavior_switch_warning(&mut self, message: &str) {
-        self.mode_switch_banner = Some((message.to_string(), MODE_BANNER_TOTAL_TICKS));
+        self.mode_switch_banner =
+            Some((message.to_string(), Instant::now() + MODE_BANNER_DURATION));
         self.behavior_switch_warning_pending = true;
     }
 
-    /// Tick the mode-switch banner timer. Returns true if redraw needed
-    /// (active or just expired).
-    pub fn tick_mode_banner(&mut self) -> bool {
+    /// Expire the mode-switch banner at its absolute deadline.
+    pub fn maintain_mode_banner(&mut self, now: Instant) -> bool {
         if self.behavior_switch_warning_pending {
-            // An interrupting-switch warning is pinned: it must NOT expire
-            // while awaiting Enter (confirm) / Esc (cancel). Keep the banner
-            // frozen and keep requesting redraws.
-            return self.mode_switch_banner.is_some();
+            return false;
         }
-        if let Some((_, ref mut remaining)) = self.mode_switch_banner {
-            if *remaining == 0 {
-                self.mode_switch_banner = None;
-                return true;
-            }
-            *remaining = remaining.saturating_sub(1);
-            return true; // redraw to advance fade
+        if self
+            .mode_switch_banner
+            .as_ref()
+            .is_some_and(|(_, deadline)| now >= *deadline)
+        {
+            self.mode_switch_banner = None;
+            return true;
         }
         false
+    }
+
+    pub(crate) fn mode_banner_ui_deadline(&self, now: Instant) -> Option<Instant> {
+        if self.behavior_switch_warning_pending {
+            return None;
+        }
+        let deadline = self.mode_switch_banner.as_ref()?.1;
+        let fade_start = deadline.checked_sub(MODE_BANNER_FADE).unwrap_or(deadline);
+        Some(if now < fade_start {
+            fade_start
+        } else {
+            deadline
+        })
+    }
+
+    pub(crate) fn mode_banner_animating(&self, now: Instant) -> bool {
+        if self.behavior_switch_warning_pending {
+            return false;
+        }
+        self.mode_switch_banner
+            .as_ref()
+            .is_some_and(|(_, deadline)| {
+                now < *deadline && deadline.saturating_duration_since(now) <= MODE_BANNER_FADE
+            })
     }
 
     /// Copy text to clipboard (a backup file is always written too — see
@@ -280,7 +307,10 @@ impl AgentView {
     /// the copy actually landed (clipboard, backup file, or nowhere).
     pub fn copy_to_clipboard(&mut self, text: &str) -> crate::clipboard::CopyDelivery {
         let delivery = crate::clipboard::copy_text_or_file(text);
-        self.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
+        self.show_toast_for(
+            delivery.toast_message().as_ref(),
+            Duration::from_millis(u64::from(delivery.toast_ticks()) * 33),
+        );
         delivery
     }
 
@@ -310,30 +340,29 @@ impl AgentView {
             Some("tmux") => "Inline images disabled within tmux.",
             _ => "Image rendering not supported in this terminal",
         };
-        self.show_toast_ticks(msg, 60);
+        self.show_toast_for(msg, Duration::from_secs(2));
         false
     }
 
-    /// Tick the transient toast timer. Call once per animation tick.
-    /// Returns true if the transient toast was removed (needs redraw so a
-    /// sticky banner can reappear).
-    pub fn tick_toast(&mut self) -> bool {
-        if let Some((_, ref mut remaining)) = self.toast {
-            if *remaining == 0 {
-                self.toast = None;
-                return true;
-            }
-            *remaining = remaining.saturating_sub(1);
+    /// Expire the transient toast at its absolute deadline.
+    pub fn maintain_toast(&mut self, now: Instant) -> bool {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, deadline)| now >= *deadline)
+        {
+            self.toast = None;
+            return true;
         }
         false
     }
 
     /// Tick the extensions modal's transient result notice. Returns true if it
     /// just expired (needs a redraw to erase the badge / status line).
-    pub fn tick_extensions_result_notice(&mut self) -> bool {
+    pub fn maintain_extensions_result_notice(&mut self, now: Instant) -> bool {
         self.extensions_modal
             .as_mut()
-            .is_some_and(|m| m.tick_result_notice())
+            .is_some_and(|m| m.maintain_result_notice(now))
     }
 
     /// Open `url` in the system browser. When the opener cannot run (headless
@@ -409,13 +438,13 @@ mod sticky_banner_tests {
     }
 
     #[test]
-    fn show_toast_ticks_scrubs_control_chars() {
+    fn show_toast_for_scrubs_control_chars() {
         let mut view = make_running_agent();
-        view.show_toast_ticks("x\ny\tz", 10);
+        view.show_toast_for("x\ny\tz", Duration::from_secs(1));
         let msg = view.toast.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
         assert!(
             !msg.chars().any(char::is_control),
-            "show_toast_ticks must scrub controls: {msg:?}"
+            "show_toast_for must scrub controls: {msg:?}"
         );
     }
 

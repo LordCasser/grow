@@ -262,7 +262,10 @@ fn confirm_behavior_switch_warning_without_prompt_issues_set_session_mode() {
             prompt: None,
         });
         agent.behavior_switch_warning_pending = true;
-        agent.mode_switch_banner = Some(("banner".into(), 69));
+        agent.mode_switch_banner = Some((
+            "banner".into(),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        ));
     }
 
     let effects = dispatch(Action::ConfirmBehaviorSwitchWarning, &mut app);

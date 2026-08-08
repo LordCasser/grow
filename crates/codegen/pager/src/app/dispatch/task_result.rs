@@ -405,6 +405,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent.prompt_status_query_for = None;
             match status {
                 Ok(PromptStatusWire::Running { turn_start_ms }) => {
+                    let observed_at = std::time::Instant::now();
                     // The turn-start shim adopts a server-confirmed running
                     // turn and belongs to the still-Submitting window only
                     // (queue/changed's own shim is gated the same way). When
@@ -427,9 +428,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     let turn_start_ms = i64::try_from(turn_start_ms).unwrap_or(i64::MAX);
                     agent.turn_start_ms = Some(turn_start_ms);
                     agent.turn_start_ms_prompt = Some(prompt_id);
-                    agent.turn_started_at = Some(crate::app::acp_handler::viewer_turn_anchor(
-                        Some(turn_start_ms),
-                    ));
+                    if agent.turn_started_at.is_none() {
+                        agent.turn_started_at = Some(crate::app::acp_handler::viewer_turn_anchor(
+                            Some(turn_start_ms),
+                        ));
+                    }
+                    agent.last_status_observed_at = Some(observed_at);
                     super::queue::note_peek_page_flip(app, agent_id, page_flip);
                     vec![]
                 }
@@ -452,9 +456,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         agent.session.in_flight_prompt = None;
                         agent.mark_turn_finished();
                     } else {
-                        // Running-prompt watchdog: keep a fresh observation
-                        // window so the query stays bounded.
-                        agent.turn_started_at = Some(std::time::Instant::now());
+                        // A non-terminal observation must never rewrite the
+                        // display anchor or fabricate completion. Re-arm the
+                        // reducer-owned liveness window only.
+                        agent.last_status_observed_at = Some(std::time::Instant::now());
                     }
                     vec![]
                 }
@@ -493,6 +498,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     vec![]
                 }
                 Ok(PromptStatusWire::Unknown) => {
+                    if agent.session.state.is_turn_running() {
+                        agent.last_status_observed_at = Some(std::time::Instant::now());
+                        return vec![];
+                    }
                     agent.session.state = crate::app::agent::AgentState::Idle;
                     agent.session.current_prompt_id = None;
                     agent.session.in_flight_prompt = None;
@@ -503,6 +512,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     drain.effects
                 }
                 Err(error) => {
+                    if agent.session.state.is_turn_running() {
+                        agent.last_status_observed_at = Some(std::time::Instant::now());
+                        tracing::warn!(%error, %prompt_id, "prompt watchdog status query failed");
+                        return vec![];
+                    }
                     agent.session.state = crate::app::agent::AgentState::Idle;
                     agent.session.current_prompt_id = None;
                     agent.session.in_flight_prompt = None;
@@ -678,6 +692,44 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 show_clipboard_failure(&target, failure, app);
             }
             effects
+        }
+        TaskResult::ImageViewerLoaded {
+            agent_id,
+            child_session_id,
+            owner_id,
+            result,
+        } => {
+            let Some(root) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            let target = match child_session_id.as_deref() {
+                Some(child_id) => {
+                    let Some(child) = root.subagent_views.get_mut(child_id) else {
+                        return vec![];
+                    };
+                    child
+                }
+                None => root,
+            };
+            let current_owner = target
+                .image_viewer
+                .as_ref()
+                .map(|viewer| viewer.overlay_owner_id);
+            if current_owner != Some(owner_id) {
+                return vec![];
+            }
+            match result {
+                crate::prompt_images::ImageLoadResult::Loaded(data) => {
+                    if let Some(viewer) = target.image_viewer.as_mut() {
+                        viewer.apply_loaded(data);
+                    }
+                }
+                crate::prompt_images::ImageLoadResult::Failed => {
+                    target.image_viewer = None;
+                    target.show_toast("Couldn't load image preview");
+                }
+            }
+            vec![]
         }
         TaskResult::PromptImagePreviewPrepared => vec![],
         TaskResult::DoctorFixPlanned { target, result } => {

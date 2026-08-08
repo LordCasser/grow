@@ -139,7 +139,10 @@ pub(super) fn dispatch_copy_assistant_message(
                     .push_block(RenderBlock::system(format!("Copy failed{stats}")));
             }
         }
-        agent.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
+        agent.show_toast_for(
+            delivery.toast_message().as_ref(),
+            std::time::Duration::from_millis(u64::from(delivery.toast_ticks()) * 33),
+        );
     });
 }
 

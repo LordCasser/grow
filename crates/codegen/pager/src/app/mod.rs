@@ -10,6 +10,7 @@
 //! - [`acp_handler`] — ACP notification routing
 //! - [`event_loop`] — biased tokio::select! loop
 pub mod actions;
+pub mod activity;
 pub mod agent;
 pub mod agent_view;
 pub mod app_view;

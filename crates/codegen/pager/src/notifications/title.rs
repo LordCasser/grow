@@ -9,24 +9,7 @@ const TITLE_SPINNER: &[char] = &[
     '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
 ];
 
-/// Hold each spinner frame for this many ticks before advancing.
-///
-/// Terminals (notably Ghostty) debounce tab title updates, so writing a
-/// new title every tick (~33ms at 30fps) produces more OSC 0 writes than
-/// the tab bar can render. A divisor of 8 gives ~264ms per frame — slow
-/// enough for debounced renderers while still looking animated.
-const TITLE_SPINNER_DIVISOR: u64 = 8;
-
-/// Hold the "⚠ Action Required" label for this many ticks before toggling
-/// (only while unfocused; see focused field below).
-///
-/// A divisor of 15 at 30fps gives ~500ms visible, ~500ms hidden — a calm 1s
-/// blink cycle that reads as intentional rather than broken flickering. When
-/// focused we show the prefix statically to eliminate oscillation during
-/// active interaction (e.g. typing in permission modals).
-const ACTION_REQUIRED_BLINK_DIVISOR: u64 = 15;
-
-/// State passed into `TitleManager::update()` each tick.
+/// State passed into `TitleManager::update_at()` for a rendered frame.
 pub struct TitleState<'a> {
     pub session_name: Option<&'a str>,
     pub model: Option<&'a str>,
@@ -47,8 +30,7 @@ pub struct TitleManager {
     items: Vec<TitleItem>,
     last_title: String,
     composed: String,
-    spinner_frame: usize,
-    tick_count: u64,
+    motion_origin: std::time::Instant,
 }
 
 impl TitleManager {
@@ -57,8 +39,7 @@ impl TitleManager {
             items: config.items.clone(),
             last_title: String::new(),
             composed: String::new(),
-            spinner_frame: 0,
-            tick_count: 0,
+            motion_origin: std::time::Instant::now(),
         }
     }
 
@@ -68,6 +49,16 @@ impl TitleManager {
     /// composed title differs from the last one emitted. Returns `None` when
     /// the title is unchanged (dedup).
     pub fn update(&mut self, state: &TitleState<'_>) -> Option<String> {
+        let frame = crate::motion::FrameStamp::capture(self.motion_origin);
+        self.update_at(state, frame)
+    }
+
+    /// Compose the title using the application's single frame sample.
+    pub fn update_at(
+        &mut self,
+        state: &TitleState<'_>,
+        frame: crate::motion::FrameStamp,
+    ) -> Option<String> {
         self.composed.clear();
         let mut has_parts = false;
 
@@ -75,14 +66,7 @@ impl TitleManager {
         // self.items while we mutate self.composed.
         for i in 0..self.items.len() {
             let item = self.items[i];
-            if write_item(
-                &mut self.composed,
-                &mut has_parts,
-                item,
-                state,
-                self.spinner_frame,
-                self.tick_count,
-            ) {
+            if write_item(&mut self.composed, &mut has_parts, item, state, frame) {
                 continue;
             }
         }
@@ -103,12 +87,6 @@ impl TitleManager {
             std::mem::swap(&mut self.last_title, &mut self.composed);
         }
 
-        // Advance counters after rendering so the first tick sees
-        // tick_count=0 (phase 0, ActionRequired visible) and spinner_frame=0.
-        self.tick_count = self.tick_count.wrapping_add(1);
-        self.spinner_frame =
-            (self.tick_count / TITLE_SPINNER_DIVISOR) as usize % TITLE_SPINNER.len();
-
         result
     }
 
@@ -116,8 +94,6 @@ impl TitleManager {
         let esc = build_title_escape("grow");
         self.last_title.clear();
         self.last_title.push_str("grow");
-        self.spinner_frame = 0;
-        self.tick_count = 0;
         esc
     }
 }
@@ -128,8 +104,7 @@ fn write_item(
     has_parts: &mut bool,
     item: TitleItem,
     state: &TitleState<'_>,
-    spinner_frame: usize,
-    tick_count: u64,
+    frame: crate::motion::FrameStamp,
 ) -> bool {
     match item {
         TitleItem::Grow => {
@@ -141,7 +116,7 @@ fn write_item(
                 return false;
             }
             push_separator(buf, has_parts);
-            buf.push(TITLE_SPINNER[spinner_frame]);
+            buf.push(crate::motion::title_spinner_glyph(frame, TITLE_SPINNER));
         }
         TitleItem::Activity => {
             if let Some(activity) = state.activity {
@@ -197,8 +172,7 @@ fn write_item(
             // Blink (oscillate) only while unfocused, for tab attention.
             // When focused (user actively interacting, e.g. in permission
             // modal or prompt), show static prefix to stop distracting flash.
-            let should_blink =
-                !state.focused && !(tick_count / ACTION_REQUIRED_BLINK_DIVISOR).is_multiple_of(2);
+            let should_blink = !state.focused && !crate::motion::action_required_visible(frame);
             if should_blink {
                 return false;
             }
@@ -304,6 +278,11 @@ mod tests {
         }
     }
 
+    fn frame_at(elapsed: std::time::Duration) -> crate::motion::FrameStamp {
+        let origin = std::time::Instant::now();
+        crate::motion::FrameStamp::at(origin, origin + elapsed)
+    }
+
     // --- Title composition tests ---
 
     #[test]
@@ -383,11 +362,12 @@ mod tests {
             ..idle_state()
         };
 
-        // Run through one full cycle (DIVISOR ticks per frame * frame count).
-        let total = TITLE_SPINNER_DIVISOR as usize * TITLE_SPINNER.len();
         let mut frames = Vec::new();
-        for _ in 0..total {
-            mgr.update(&state);
+        for index in 0..TITLE_SPINNER.len() {
+            mgr.update_at(
+                &state,
+                frame_at(crate::motion::TITLE_SPINNER_FRAME * index as u32),
+            );
             frames.push(mgr.last_title.clone());
         }
         // Across a full cycle we should see all spinner frames.
@@ -405,18 +385,14 @@ mod tests {
             ..idle_state()
         };
 
-        // First frame should be stable for DIVISOR ticks.
-        mgr.update(&state);
+        mgr.update_at(&state, frame_at(std::time::Duration::ZERO));
         let first = mgr.last_title.clone();
-        for _ in 1..TITLE_SPINNER_DIVISOR {
-            mgr.update(&state);
-            assert_eq!(
-                mgr.last_title, first,
-                "spinner should hold frame during divisor window"
-            );
-        }
-        // After DIVISOR ticks, the frame should advance.
-        mgr.update(&state);
+        mgr.update_at(
+            &state,
+            frame_at(crate::motion::TITLE_SPINNER_FRAME - std::time::Duration::from_millis(1)),
+        );
+        assert_eq!(mgr.last_title, first);
+        mgr.update_at(&state, frame_at(crate::motion::TITLE_SPINNER_FRAME));
         assert_ne!(
             mgr.last_title, first,
             "spinner should advance after divisor ticks"
@@ -433,15 +409,12 @@ mod tests {
             ..idle_state()
         };
 
-        // Run through more than one full cycle.
-        mgr.update(&state);
+        mgr.update_at(&state, frame_at(std::time::Duration::ZERO));
         let first = mgr.last_title.clone();
-        let total = TITLE_SPINNER_DIVISOR as usize * TITLE_SPINNER.len();
-        for _ in 1..total {
-            mgr.update(&state);
-        }
-        // After a full cycle, the frame should wrap back to the first char.
-        mgr.update(&state);
+        mgr.update_at(
+            &state,
+            frame_at(crate::motion::TITLE_SPINNER_FRAME * TITLE_SPINNER.len() as u32),
+        );
         assert_eq!(mgr.last_title, first);
     }
 
@@ -583,8 +556,7 @@ mod tests {
             ..idle_state()
         };
 
-        // tick_count=0 (even) on first render → ActionRequired visible.
-        mgr.update(&state);
+        mgr.update_at(&state, frame_at(std::time::Duration::ZERO));
         assert!(
             mgr.last_title.contains("Action Required"),
             "first tick should show ActionRequired, got: {}",
@@ -602,21 +574,9 @@ mod tests {
             ..idle_state()
         };
 
-        // First tick: tick_count=0, phase=0 (visible).
-        mgr.update(&state);
+        mgr.update_at(&state, frame_at(std::time::Duration::ZERO));
         let t1 = mgr.last_title.clone();
-
-        // Title stays stable for the rest of the visible phase.
-        for _ in 1..ACTION_REQUIRED_BLINK_DIVISOR {
-            mgr.update(&state);
-            assert_eq!(
-                mgr.last_title, t1,
-                "title should stay stable within a blink phase"
-            );
-        }
-
-        // Crossing into the hidden phase.
-        mgr.update(&state);
+        mgr.update_at(&state, frame_at(crate::motion::ACTION_REQUIRED_HALF_CYCLE));
         let t2 = mgr.last_title.clone();
 
         assert_ne!(t1, t2);
@@ -773,8 +733,6 @@ mod tests {
 
         mgr.reset();
         assert_eq!(mgr.last_title, "grow");
-        assert_eq!(mgr.spinner_frame, 0);
-        assert_eq!(mgr.tick_count, 0);
     }
 
     // --- Full default config integration ---
@@ -792,15 +750,9 @@ mod tests {
             ..idle_state()
         };
 
-        // First tick: ActionRequired visible.
-        mgr.update(&state);
+        mgr.update_at(&state, frame_at(std::time::Duration::ZERO));
         let t1 = mgr.last_title.clone();
-
-        // Advance through the blink divisor to reach the hidden phase.
-        for _ in 1..ACTION_REQUIRED_BLINK_DIVISOR {
-            mgr.update(&state);
-        }
-        mgr.update(&state);
+        mgr.update_at(&state, frame_at(crate::motion::ACTION_REQUIRED_HALF_CYCLE));
         let t2 = mgr.last_title.clone();
 
         // Both should contain the persistent parts.

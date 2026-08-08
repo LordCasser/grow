@@ -22,7 +22,6 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::context_bar::SEPARATOR;
-use super::turn_status::SPINNER_DIVISOR;
 use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
 use crate::app::agent_view::McpInitProgress;
 use crate::theme::Theme;
@@ -189,13 +188,12 @@ pub fn active_phase_label(goal: &GoalDisplayState) -> String {
 /// Format: `[Goal: {label}]  {tokens}  {elapsed}`
 ///
 /// When `hovered` is true the label is bolded/underlined to signal
-/// clickability.  When the goal is `Active`, a braille spinner driven
-/// by `tick` is prepended.
+/// clickability. When the goal is `Active`, the shared frame drives its spinner.
 pub fn goal_status_line(
     goal: &GoalDisplayState,
     theme: &Theme,
     hovered: bool,
-    tick: usize,
+    frame_stamp: crate::motion::FrameStamp,
     context_used: Option<u64>,
     active_subagent_tokens: u64,
 ) -> Line<'static> {
@@ -210,7 +208,7 @@ pub fn goal_status_line(
         _ => format!("{} tokens", tokens_str),
     };
 
-    let elapsed_str = format_elapsed_compact(goal.live_elapsed_ms());
+    let elapsed_str = format_elapsed_compact(goal.live_elapsed_ms_at(frame_stamp.now()));
 
     let dim_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
     // Paused goals use an inverted warning-colour chip so the chip background
@@ -232,7 +230,7 @@ pub fn goal_status_line(
     let chip_name = "Goal";
     let goal_text = if is_active {
         let frames = crate::glyphs::dot_spinner_frames();
-        let frame = frames[(tick / 4) % frames.len()];
+        let frame = crate::motion::spinner_glyph(frame_stamp, frames);
         format!("{frame} {chip_name}: {label}")
     } else {
         format!("{chip_name}: {label}")
@@ -252,8 +250,8 @@ pub fn goal_status_line(
 
 /// Build the compact MCP-connecting indicator for the agent status bar.
 ///
-/// Format: `⠋ MCP (1/4)` — a braille spinner (driven by `tick`, same cadence as
-/// the turn-status spinner) followed by the connected/total server count.
+/// Format: `⠋ MCP (1/4)` — a time-based braille spinner followed by the
+/// connected/total server count.
 /// Rendered in `theme.gray_dim` so it reads as dim, matching the directory path
 /// shown on the same row.
 ///
@@ -263,17 +261,17 @@ pub fn goal_status_line(
 /// only shows real server counts once the shell reports `total > 0`.
 pub fn mcp_status_line(
     progress: &McpInitProgress,
-    tick: u64,
+    frame: crate::motion::FrameStamp,
     theme: &Theme,
 ) -> Option<Line<'static>> {
     if progress.total == 0 {
         return None;
     }
     let frames = crate::glyphs::braille_spinner_frames();
-    let frame_idx = (tick / SPINNER_DIVISOR) as usize % frames.len();
+    let spinner = crate::motion::spinner_glyph(frame, frames);
     let style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
     Some(Line::from(vec![
-        Span::styled(format!("{} ", frames[frame_idx]), style),
+        Span::styled(format!("{} ", spinner), style),
         Span::styled(
             format!("MCP ({}/{})", progress.connected, progress.total),
             style,

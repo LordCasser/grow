@@ -241,6 +241,7 @@ impl PeekPanelState {
 pub fn compute_peek_fields(
     row: &DashboardRowId,
     agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    now: std::time::Instant,
 ) -> Option<PeekFields> {
     use crate::views::session_title::{entry_title, sanitize_display_text};
     match row {
@@ -251,7 +252,7 @@ pub fn compute_peek_fields(
             let last_user_message = extract_last_user_message(agent);
             let time_ago = agent
                 .last_active_at
-                .map(|t| crate::util::format_time_ago(t.elapsed()))
+                .map(|t| crate::util::format_time_ago(now.saturating_duration_since(t)))
                 .unwrap_or_default();
             // A pending permission takes the question slot; otherwise a
             // single-question, single-select agent `AskUserQuestion`
@@ -359,7 +360,8 @@ pub fn compute_peek_fields(
                 .map(|c| extract_last_response_type(c))
                 .unwrap_or_else(|| "Subagent".to_string());
             let last_user_message = child.and_then(|c| extract_last_user_message(c));
-            let time_ago = crate::util::format_time_ago(info.last_progress_at.elapsed());
+            let time_ago =
+                crate::util::format_time_ago(now.saturating_duration_since(info.last_progress_at));
             Some(PeekFields {
                 label,
                 time_ago,

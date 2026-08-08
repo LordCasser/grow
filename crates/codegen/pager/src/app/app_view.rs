@@ -245,22 +245,6 @@ impl DashboardReturn {
         matches!(self, Self::Overlay(_))
     }
 }
-/// Tick cadence demanded by the current view state — see
-/// [`AppView::tick_demand`]. Ordered: `None < Slow < Fast`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum TickDemand {
-    /// Nothing animates or polls: the event loop parks (zero wakeups).
-    None,
-    /// Only low-frequency work is pending (welcome logo shimmer at ~12fps,
-    /// the macOS Cmd link-hover poll): tick at [`SLOW_TICK_INTERVAL`].
-    Slow,
-    /// Real animation is on screen: tick at the configured animation fps.
-    Fast,
-}
-/// Tick cadence for [`TickDemand::Slow`] (~12fps). Matches the welcome logo's
-/// `SHIMMER_FPS` so slow ticks sample every shimmer frame, and bounds the
-/// latency of the macOS Cmd link-hover underline.
-pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
 const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(2);
@@ -428,6 +412,9 @@ pub struct ScreenModeRelaunch {
 }
 /// Root view component — owns all application state.
 pub struct AppView {
+    /// Stable monotonic origin shared by every rendered animation surface.
+    /// This is process-local render state and is never persisted.
+    pub(crate) motion_origin: Instant,
     /// Which view is currently active.
     pub active_view: ActiveView,
     /// Per-agent views (keyed by AgentId).
@@ -484,22 +471,18 @@ pub struct AppView {
     /// to the frame's `post_flush_escapes` so they are written inside the
     /// synchronized output block.
     pub(crate) pending_notification_escapes: Option<String>,
-    /// Notification deferred by several ticks so the terminal has time to
+    /// Notification deferred to an absolute deadline so the terminal has time to
     /// process the idle title escape before the notification fires.
     ///
     /// The idle title goes through the frame pipeline (writer thread
     /// channel), then Ghostty must read it from the PTY and apply it.
     /// Ghostty debounces `setTitle()` by 75 ms, so we need >75 ms
     /// before the notification reads `self.title` for the subtitle.
-    /// 3 ticks × 33 ms ≈ 99 ms covers the debounce comfortably.
-    ///
-    /// The `u8` counts remaining ticks; the notification fires when it
-    /// reaches 0.
-    pub(crate) deferred_notification: Option<(crate::notifications::NotificationEvent, u8)>,
+    /// 100 ms covers the debounce comfortably without depending on FPS.
+    pub(crate) deferred_notification: Option<(crate::notifications::NotificationEvent, Instant)>,
     /// Tracing log channel receiver. Set by the event loop after
     /// `init_tracing()`. Drained into `tracing_pane` each tick in debug/dev
     /// builds; otherwise drained-and-discarded.
-    pub tracing_rx: Option<crate::tracing::LogRx>,
     /// Scroll-diagnostics HUD (`GROW_SCROLL_DEBUG` env / `/scroll-debug`).
     /// Release-compiled behind its runtime gate — see the module doc.
     pub scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud,
@@ -676,13 +659,6 @@ pub struct AppView {
     /// [`crate::views::session_picker::effective_filter_query`], skips the
     /// local fuzzy re-filter for server search results.
     pub session_picker_entries_query: Option<String>,
-    /// Tick counter for welcome screen spinner animation.
-    pub welcome_tick: u64,
-    /// Last shimmer frame drawn for a logo animation — the welcome screen or
-    /// the agent empty-state logo (Task B), which share one wall-clock
-    /// shimmer. Lets `tick` throttle the animation to a few fps instead of
-    /// the full tick rate.
-    pub welcome_shimmer_frame: u64,
     /// CLI model override (`-m` / `--model`). Seeded into every new
     /// `AgentSession.deferred_model_switch` so the model is applied once
     /// the session is created.
@@ -863,6 +839,16 @@ fn paint_welcome_toast(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout:
     }
 }
 impl AppView {
+    /// Reconcile reducer-derived display phases for every agent, including
+    /// hidden tabs and fullscreen subagent children.
+    pub(crate) fn reconcile_activity_phases(&mut self, now: Instant) {
+        for agent in self.agents.values_mut() {
+            agent.reconcile_activity_phase(now);
+            for child in agent.subagent_views.values_mut() {
+                child.reconcile_activity_phase(now);
+            }
+        }
+    }
     /// Whether deferred session-startup actions may run.
     pub fn session_startup_allowed(&self) -> bool {
         matches!(self.trust_state, TrustState::Done)
@@ -878,6 +864,7 @@ impl AppView {
         let command_tags =
             std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
         Self {
+            motion_origin: Instant::now(),
             active_view: ActiveView::Welcome,
             agents: IndexMap::new(),
             next_agent_id: 0,
@@ -903,7 +890,6 @@ impl AppView {
             notification_service: NotificationService::new(Default::default()),
             pending_notification_escapes: None,
             deferred_notification: None,
-            tracing_rx: None,
             scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
             fps_hud: crate::views::fps_hud::FpsHud::new(),
             active_announcements: Vec::new(),
@@ -942,8 +928,6 @@ impl AppView {
             session_picker_list_seq: 0,
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
-            welcome_tick: 0,
-            welcome_shimmer_frame: 0,
             cli_model_override: None,
             cli_effort_token: None,
             default_yolo: false,
@@ -2786,10 +2770,12 @@ impl AppView {
     /// synchronized output, cursor blink preservation). See that module's
     /// docs for the full rationale.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
+        let frame_stamp = crate::motion::FrameStamp::capture(self.motion_origin);
+        self.update_notifications(frame_stamp);
         self.resync_announcement_slash_gate_on_divergence();
         if self.screen_mode.is_minimal() {
             if let Some(hooks) = crate::minimal_hook::hooks() {
-                (hooks.draw)(self, terminal);
+                (hooks.draw)(self, terminal, frame_stamp);
             }
             return;
         }
@@ -2915,7 +2901,7 @@ impl AppView {
                             session_picker_entries_query: self
                                 .session_picker_entries_query
                                 .as_deref(),
-                            welcome_tick: self.welcome_tick,
+                            frame: frame_stamp,
                             session_picker_grouped: self.session_picker_grouped,
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
                             promo_cta: hero_cta.map(|(_owner, label, _)| label),
@@ -2958,6 +2944,7 @@ impl AppView {
                                 view_area,
                                 tutorial,
                                 compact,
+                                frame_stamp,
                             );
                         }
                         if let Some(fps) = &fps_overlay {
@@ -3074,6 +3061,7 @@ impl AppView {
                                 link_spans,
                                 AppRenderParams {
                                     esc_owned_before_agent,
+                                    frame: frame_stamp,
                                 },
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {
@@ -3092,6 +3080,7 @@ impl AppView {
                                     view_area,
                                     tutorial,
                                     compact,
+                                    frame_stamp,
                                 );
                             }
                             if let Some(fps) = &fps_overlay {
@@ -3118,6 +3107,7 @@ impl AppView {
                     }
                     ActiveView::AgentDashboard => {
                         if let Some(dashboard) = self.dashboard.as_mut() {
+                            dashboard.motion_frame = frame_stamp;
                             if let Some(id) = dashboard.attached_agent
                                 && !agents.contains_key(&id)
                             {
@@ -3189,7 +3179,7 @@ impl AppView {
                                                     link_spans,
                                                     AppRenderParams {
                                                         esc_owned_before_agent,
-                                                        ..Default::default()
+                                                        frame: frame_stamp,
                                                     },
                                                 )
                                                 } else {
@@ -3212,6 +3202,7 @@ impl AppView {
                                     view_area,
                                     tutorial,
                                     compact,
+                                    frame_stamp,
                                 );
                             }
                             if let Some(fps) = &fps_overlay {
@@ -3414,7 +3405,7 @@ impl AppView {
     }
     /// Opportunistic, throttled clipboard-image poll. Driven from event-loop
     /// iterations that already run for another reason (input, FocusGained,
-    /// resize, an animation tick) — never from a timer and never by forcing
+    /// resize, or another draw request) — never from a timer and never by forcing
     /// `needs_animation`, so an idle/hibernating/unfocused app polls zero times.
     /// In-window it does at most one cheap `changeCount` read per `POLL_INTERVAL`
     /// and pays for the heavier type classification ONLY on a changeCount delta.
@@ -3465,53 +3456,74 @@ impl AppView {
         }
         false
     }
-    /// Advance animation timers and drain tracing channel.
-    ///
-    /// Called at a fixed rate (~30fps) from the event loop. Produces
-    /// redraws when there are running entries with animated accents,
-    /// when a pending action expires (to clear the "press again" hint),
-    /// or when new tracing entries arrive via the channel.
-    pub fn tick(&mut self) -> bool {
+    fn maintain_ephemeral_tip_clocks(&mut self, now: Instant) -> bool {
+        let active_agent = match self.active_view {
+            ActiveView::Agent(id) => Some(id),
+            _ => None,
+        };
+        let mut changed = false;
+        for (id, agent) in &mut self.agents {
+            let active_child = if active_agent == Some(*id) {
+                agent.active_subagent.clone()
+            } else {
+                None
+            };
+            changed |= agent
+                .maintain_ephemeral_tip(now, active_agent == Some(*id) && active_child.is_none());
+            for (child_id, child) in &mut agent.subagent_views {
+                changed |= child.maintain_ephemeral_tip(
+                    now,
+                    active_child.as_deref() == Some(child_id.as_str()),
+                );
+            }
+        }
+        changed
+    }
+
+    fn sync_ephemeral_tip_clocks(&mut self, now: Instant) {
+        let active_agent = match self.active_view {
+            ActiveView::Agent(id) => Some(id),
+            _ => None,
+        };
+        for (id, agent) in &mut self.agents {
+            let active_child = if active_agent == Some(*id) {
+                agent.active_subagent.clone()
+            } else {
+                None
+            };
+            agent
+                .sync_ephemeral_tip_clock(now, active_agent == Some(*id) && active_child.is_none());
+            for (child_id, child) in &mut agent.subagent_views {
+                child.sync_ephemeral_tip_clock(
+                    now,
+                    active_child.as_deref() == Some(child_id.as_str()),
+                );
+            }
+        }
+    }
+
+    /// Advance transient UI state and poll legacy completion receivers.
+    /// Motion is render-only and is deliberately absent from this reducer.
+    pub fn maintain_ui(&mut self, now: Instant) -> bool {
         let mut needs_redraw = false;
-        needs_redraw |= self.minimal_state.transcript.is_some();
+        let mut completion_effects = Vec::new();
+        needs_redraw |= self.maintain_ephemeral_tip_clocks(now);
         needs_redraw |= self.poll_clipboard_focus_tip();
         if matches!(self.active_view, ActiveView::Welcome) {
-            self.welcome_tick = self.welcome_tick.wrapping_add(1);
             if let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at) {
-                if std::time::Instant::now() >= expires_at {
+                if now >= expires_at {
                     self.welcome_toast = None;
+                    needs_redraw = true;
                 }
-                needs_redraw = true;
-            }
-            if self.session_picker_content_loading
-                || crate::views::session_picker::loading_spinner_active(
-                    self.session_picker_entries.as_deref(),
-                    self.session_picker_loading,
-                )
-            {
-                needs_redraw = true;
-            } else {
-                needs_redraw |= self.advance_logo_shimmer();
             }
         }
         // The agent empty-state logo (bare centered wordmark over an empty
         // scrollback) uses the same wall-clock shimmer as the welcome screen,
         // so keep advancing the shared throttle while it is on screen. Minimal
         // mode never draws it — pager-minimal renders its own card.
-        if !self.screen_mode.is_minimal()
-            && let ActiveView::Agent(id) = self.active_view
-            && self
-                .agents
-                .get(&id)
-                .is_some_and(|agent| agent.scrollback.is_empty())
-        {
-            needs_redraw |= self.advance_logo_shimmer();
-        }
         if matches!(self.active_view, ActiveView::AgentDashboard)
             && let Some(d) = self.dashboard.as_mut()
         {
-            d.spinner_tick = d.spinner_tick.wrapping_add(1);
-            needs_redraw = true;
             d.dispatch.poll_file_search();
             d.peek_reply.poll_file_search();
         }
@@ -3520,9 +3532,6 @@ impl AppView {
         {
             self.pending_action = None;
             needs_redraw = true;
-        }
-        if let Some(rx) = &mut self.tracing_rx {
-            while rx.try_recv().is_ok() {}
         }
         let mut bootstrap_commands_update: Option<Vec<agent_client_protocol::AvailableCommand>> =
             None;
@@ -3535,51 +3544,26 @@ impl AppView {
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
-            needs_redraw |= agent.scrollback.tick();
-            needs_redraw |= agent.todo.list_state.tick();
-            needs_redraw |= agent.todo.badge_tick();
-            needs_redraw |= agent.tasks.tick();
-            for child_view in agent.subagent_views.values_mut() {
-                needs_redraw |= child_view.scrollback.tick();
-                needs_redraw |= child_view.tick_toast();
-                needs_redraw |= child_view.tick_ephemeral_tip();
-                needs_redraw |= child_view.tick_mode_banner();
+            needs_redraw |= agent.scrollback.maintain(now);
+            needs_redraw |= agent.todo.list_state.maintain(now);
+            needs_redraw |= agent.tasks.list_state.maintain(now);
+            needs_redraw |= agent.todo.maintain_badge(now);
+            for (child_id, child_view) in &mut agent.subagent_views {
+                needs_redraw |= child_view.scrollback.maintain(now);
+                needs_redraw |= child_view.maintain_toast(now);
+                needs_redraw |= child_view.maintain_mode_banner(now);
                 needs_redraw |= child_view.tick_selection_highlight();
                 needs_redraw |= child_view.tick_drag_autoscroll();
                 needs_redraw |= child_view.poll_link_modifier();
                 needs_redraw |= child_view.poll_scrollback_search();
                 needs_redraw |= child_view.mermaid_tick();
-                needs_redraw |= Self::tick_agent_image_load(child_view);
+                if let Some(effect) =
+                    Self::prepare_agent_image_load(child_view, id, Some(child_id.clone()))
+                {
+                    completion_effects.push(effect);
+                }
                 needs_redraw |= Self::tick_agent_block_viewer(child_view);
             }
-            let spinner_frame_tick =
-                agent.scrollback.animation_tick() % crate::views::turn_status::SPINNER_DIVISOR == 0;
-            // Same predicate as `tick_demand`: the goal chip / watcher cue /
-            // running-count chip all need repaints while the session may be
-            // Idle (goal stages run shell-side; bg tasks run under an idle
-            // turn). Gated to the spinner cadence like the other spinners.
-            needs_redraw |= Self::agent_surface_animating(agent) && spinner_frame_tick;
-            needs_redraw |= agent
-                .mcp_init_progress
-                .as_ref()
-                .is_some_and(McpInitProgress::is_visible)
-                && spinner_frame_tick;
-            needs_redraw |= matches!(
-                agent.btw_state,
-                Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
-            ) && spinner_frame_tick;
-            needs_redraw |= agent.plugin_cta.phase.is_spinner() && spinner_frame_tick;
-            needs_redraw |= matches!(
-                agent.active_modal.as_ref(),
-                Some(crate::views::modal::ActiveModal::SessionPicker {
-                    entries,
-                    loading,
-                    ..
-                }) if crate::views::session_picker::loading_spinner_active(
-                    entries.as_deref(),
-                    *loading,
-                )
-            ) && spinner_frame_tick;
             needs_redraw |= agent.drain_blocked();
             agent.prompt.slash_controller.set_workflows_available(
                 AgentSession::workflows_available(
@@ -3601,19 +3585,16 @@ impl AppView {
             needs_redraw |= agent.prompt.poll_file_search();
             needs_redraw |= agent.prompt.history_search.poll();
             needs_redraw |= agent.poll_scrollback_search();
-            needs_redraw |= agent.tick_toast();
-            needs_redraw |= agent.tick_extensions_result_notice();
-            needs_redraw |= agent.tick_ephemeral_tip();
-            needs_redraw |= agent.tick_mode_banner();
+            needs_redraw |= agent.maintain_toast(now);
+            needs_redraw |= agent.maintain_extensions_result_notice(now);
+            needs_redraw |= agent.maintain_mode_banner(now);
             needs_redraw |= agent.tick_selection_highlight();
             needs_redraw |= agent.tick_drag_autoscroll();
             needs_redraw |= agent.poll_link_modifier();
-            needs_redraw |= Self::tick_agent_image_load(agent);
-            needs_redraw |= Self::tick_agent_block_viewer(agent);
-            if let Some(ref mut gboom) = agent.gboom {
-                gboom.tick();
-                needs_redraw = true;
+            if let Some(effect) = Self::prepare_agent_image_load(agent, id, None) {
+                completion_effects.push(effect);
             }
+            needs_redraw |= Self::tick_agent_block_viewer(agent);
             needs_redraw |= agent.mermaid_tick();
         }
         if let Some(commands) = bootstrap_commands_update {
@@ -3622,31 +3603,127 @@ impl AppView {
             }
             self.bootstrap_acp_commands = commands;
         }
-        self.update_notifications();
-        if let Some((_, remaining)) = self.deferred_notification.as_mut() {
-            if *remaining == 0 {
-                let event = self.deferred_notification.take().unwrap().0;
-                self.notification_service.notify(event);
-            } else {
-                *remaining -= 1;
-            }
+        if self
+            .deferred_notification
+            .as_ref()
+            .is_some_and(|(_, deadline)| now >= *deadline)
+        {
+            let event = self.deferred_notification.take().unwrap().0;
+            self.notification_service.notify(event);
         }
-        needs_redraw |= self.tick_scroll();
+        self.pending_effects.extend(completion_effects);
         needs_redraw
     }
-    /// Advance the shared logo-shimmer throttle (welcome screen and the agent
-    /// empty-state logo). The wall-clock animation is quantized to ~12fps;
-    /// returns true only when the quantized frame advanced, i.e. a redraw is
-    /// due, so an idle logo redraws a few times per second instead of at the
-    /// full tick rate.
-    fn advance_logo_shimmer(&mut self) -> bool {
-        let frame = crate::views::welcome::shimmer_frame();
-        if frame != self.welcome_shimmer_frame {
-            self.welcome_shimmer_frame = frame;
-            true
-        } else {
-            false
+
+    /// Earliest deadline for transient UI mutation or legacy async receiver
+    /// polling. This clock is independent from both motion and lifecycle.
+    pub fn next_ui_deadline(
+        &mut self,
+        now: Instant,
+        maintenance_interval: Duration,
+    ) -> Option<Instant> {
+        self.sync_ephemeral_tip_clocks(now);
+        let mut deadline = self
+            .pending_action
+            .as_ref()
+            .map(|pending| pending.expires_at);
+        let mut include = |candidate: Option<Instant>| {
+            if let Some(candidate) = candidate {
+                deadline = Some(deadline.map_or(candidate, |current| current.min(candidate)));
+            }
+        };
+        include(self.welcome_toast.as_ref().map(|(_, at)| *at));
+        include(self.deferred_notification.as_ref().map(|(_, at)| *at));
+
+        if let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get(&id)
+        {
+            include(agent.scrollback.next_ui_deadline());
+            include(agent.todo.badge_deadline());
+            include(agent.todo.list_state.copy_toast_deadline());
+            include(agent.tasks.list_state.copy_toast_deadline());
+            include(agent.toast.as_ref().map(|(_, at)| *at));
+            include(agent.mode_banner_ui_deadline(now));
+            include(agent.ephemeral_tip_deadline());
+            include(
+                agent
+                    .extensions_modal
+                    .as_ref()
+                    .and_then(|modal| modal.result_notice_deadline()),
+            );
+            if let Some(child_id) = agent.active_subagent.as_deref()
+                && let Some(child) = agent.subagent_views.get(child_id)
+            {
+                include(child.scrollback.next_ui_deadline());
+                include(child.toast.as_ref().map(|(_, at)| *at));
+                include(child.mode_banner_ui_deadline(now));
+                include(child.ephemeral_tip_deadline());
+            }
         }
+
+        if self.ui_maintenance_needed() {
+            include(Some(crate::motion::next_aligned_deadline(
+                self.motion_origin,
+                now,
+                maintenance_interval,
+            )));
+        }
+        deadline
+    }
+
+    fn ui_maintenance_needed(&self) -> bool {
+        // Minimal transcript construction is incremental render work, not
+        // motion. Keep its pump on the UI clock so a static minimal session
+        // parks as soon as the build completes.
+        if self.minimal_state.transcript.is_some() {
+            return true;
+        }
+        if self.agents.values().any(|agent| {
+            agent.edit_hl_needs_tick()
+                || agent
+                    .subagent_views
+                    .values()
+                    .any(|child| child.edit_hl_needs_tick())
+        }) {
+            return true;
+        }
+        match self.active_view {
+            ActiveView::Welcome => false,
+            ActiveView::AgentDashboard => self.dashboard.as_ref().is_some_and(|dashboard| {
+                dashboard.dispatch.file_search.context().is_some()
+                    || dashboard.peek_reply.file_search.context().is_some()
+            }),
+            ActiveView::Agent(id) => self.agents.get(&id).is_some_and(|agent| {
+                agent.acp_synced_generation != agent.session.available_commands_generation
+                    || agent.prompt.file_search.context().is_some()
+                    || agent.prompt.history_search.is_active()
+                    || agent.scrollback_search.is_some()
+                    || agent.has_drag_autoscroll()
+                    || agent.selection_created_at.is_some()
+                    || agent.block_viewer.is_some()
+                    || agent
+                        .image_viewer
+                        .as_ref()
+                        .is_some_and(|viewer| viewer.has_deferred_source())
+                    || agent.mermaid_needs_tick()
+                    || agent.subagent_views.values().any(|child| {
+                        child.has_drag_autoscroll()
+                            || child.selection_created_at.is_some()
+                            || child.scrollback_search.is_some()
+                            || child.block_viewer.is_some()
+                            || child
+                                .image_viewer
+                                .as_ref()
+                                .is_some_and(|viewer| viewer.has_deferred_source())
+                            || child.mermaid_needs_tick()
+                    })
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tick(&mut self) -> bool {
+        self.maintain_ui(Instant::now())
     }
     /// Flush pending scroll lines (stream gap detection, redraw cadence).
     /// Without this, stale streams are never finalized after the user stops
@@ -3680,6 +3757,27 @@ impl AppView {
         matches!(self.active_view, ActiveView::Agent(id)
             if self.agents.get(&id).is_some_and(|a| a.gboom.is_some()))
     }
+
+    /// Gboom is a real simulation, not render-only motion. It owns this
+    /// process-local clock and advances only while its surface is visible.
+    pub(crate) fn simulation_frame_interval(&self, configured: Duration) -> Option<Duration> {
+        self.gboom_active().then_some(configured)
+    }
+
+    pub(crate) fn advance_simulation(&mut self) -> bool {
+        let ActiveView::Agent(id) = self.active_view else {
+            return false;
+        };
+        let Some(game) = self
+            .agents
+            .get_mut(&id)
+            .and_then(|agent| agent.gboom.as_mut())
+        else {
+            return false;
+        };
+        game.tick();
+        true
+    }
     /// Un-latch held movement on every open `/gboom` game.
     ///
     /// In release-aware (Kitty) mode a key stays latched until its release
@@ -3712,54 +3810,20 @@ impl AppView {
             }
         }
     }
-    /// Tick-interval ceiling requested by the current view state, if any.
-    ///
-    /// The `/gboom` easter egg targets ~30 fps even when the user configured
-    /// a lower `animation.fps`; the simulation steps with wall-clock `dt`,
-    /// so this only affects smoothness, never game speed.
-    pub fn tick_interval_ceiling(&self) -> Option<std::time::Duration> {
-        if self.gboom_active() {
-            return Some(std::time::Duration::from_millis(33));
-        }
-        if self.minimal_state.transcript.is_some() {
-            return Some(std::time::Duration::from_millis(16));
-        }
-        None
-    }
-    /// Deferred image viewer load (background thread). Shared by parent agent
-    /// and fullscreen subagent children so gate/tick stay symmetric.
-    fn tick_agent_image_load(agent: &mut AgentView) -> bool {
-        if let Some(ref mut viewer) = agent.image_viewer
-            && viewer.loading
-        {
-            if agent.image_load_rx.is_none()
-                && let Some(path) = viewer.take_source_path()
-            {
-                let (tx, rx) = std::sync::mpsc::channel();
-                agent.image_load_rx = Some(rx);
-                std::thread::spawn(move || {
-                    let _ = tx.send(crate::prompt_images::load_image_data(&path));
-                });
-            }
-            if let Some(ref rx) = agent.image_load_rx {
-                use crate::prompt_images::ImageLoadResult;
-                match rx.try_recv() {
-                    Ok(ImageLoadResult::Loaded(data)) => {
-                        viewer.apply_loaded(data);
-                        agent.image_load_rx = None;
-                    }
-                    Ok(ImageLoadResult::Failed)
-                    | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        agent.image_viewer = None;
-                        agent.image_load_rx = None;
-                        agent.toast = Some(("Couldn't load image preview".into(), 6));
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                }
-            }
-            return true;
-        }
-        false
+    fn prepare_agent_image_load(
+        agent: &mut AgentView,
+        agent_id: super::agent::AgentId,
+        child_session_id: Option<String>,
+    ) -> Option<crate::app::actions::Effect> {
+        let viewer = agent.image_viewer.as_mut()?;
+        let owner_id = viewer.overlay_owner_id;
+        let path = viewer.take_source_path()?;
+        Some(crate::app::actions::Effect::LoadImageViewer {
+            agent_id,
+            child_session_id,
+            owner_id,
+            path,
+        })
     }
     /// Block viewer streaming / follow-mode ticks (parent or subagent child).
     fn tick_agent_block_viewer(agent: &mut AgentView) -> bool {
@@ -3780,9 +3844,10 @@ impl AppView {
         }
         needs_redraw
     }
-    /// Check if animation ticks should be scheduled.
+    /// Check if the visible surface needs another motion frame.
     pub fn needs_animation(&self) -> bool {
-        self.tick_demand() != TickDemand::None
+        self.visible_frame_interval(Duration::from_millis(33))
+            .is_some()
     }
     /// Whether the active agent's always-visible status surfaces show live
     /// time-based content that must keep advancing:
@@ -3795,70 +3860,28 @@ impl AppView {
     ///   (`GoalDisplayStatus::Active` — goal stages run shell-side while
     ///   the pager session is Idle, so this must NOT derive from `is_idle`).
     ///
-    /// Shared by [`AppView::tick`] (redraw gating) and [`AppView::tick_demand`]
-    /// (tick arming) so the two layers cannot drift: demand without a redraw
-    /// would spin the tick loop while the screen stays frozen.
+    /// Shared by every visible status surface through the read-only activity
+    /// projection. Lifecycle recovery is deliberately not part of this test.
     fn agent_surface_animating(agent: &AgentView) -> bool {
-        !agent.session.state.is_idle()
-            || agent.watchers().total() > 0
-            || agent
-                .goal_state
-                .as_ref()
-                .is_some_and(|g| g.status == crate::app::agent::GoalDisplayStatus::Active)
+        crate::app::activity::AgentActivityProjection::from_agent(agent).animates()
     }
-    /// What tick cadence the current view state demands.
-    ///
-    /// [`TickDemand::Fast`] runs at the configured animation fps (default
-    /// 30). [`TickDemand::Slow`] runs at [`SLOW_TICK_INTERVAL`] and is used
-    /// when the only reasons to tick are low-frequency by construction —
-    /// the ~12fps welcome logo shimmer and the macOS Cmd link-hover poll —
-    /// so an app that *looks* idle doesn't spin a 30fps loop for them.
-    pub fn tick_demand(&self) -> TickDemand {
-        if self.pending_action.is_some() {
-            return TickDemand::Fast;
-        }
-        if self.minimal_state.transcript.is_some() {
-            return TickDemand::Fast;
-        }
-        if self.deferred_notification.is_some() {
-            return TickDemand::Fast;
-        }
-        if self.session_picker_content_loading {
-            return TickDemand::Fast;
-        }
-        // A background agent stuck in TurnSubmitting keeps the animation
-        // loop alive so the submission watchdog
-        // (`poll_stalled_prompt_submissions`, driven by the animation tick)
-        // can re-query the shell for the prompt's authoritative status. The
-        // focused-agent `!is_idle()` check below cannot see background
-        // agents, so without this the stall would never be re-queried.
-        if self
-            .agents
-            .values()
-            .any(|a| a.session.state.is_turn_submitting())
-        {
-            return TickDemand::Fast;
-        }
-        if self.agents.values().any(|agent| {
-            agent.edit_hl_needs_tick()
-                || agent
-                    .subagent_views
-                    .values()
-                    .any(|c| c.edit_hl_needs_tick())
-        }) {
-            return TickDemand::Fast;
-        }
+    /// Effective redraw interval for currently visible time-varying pixels.
+    /// The configured interval is a sampling cap; semantic motion cadence is
+    /// defined in [`crate::motion`] and never changes with FPS.
+    pub fn visible_frame_interval(&self, configured: Duration) -> Option<Duration> {
+        let now = Instant::now();
+        let fast_interval = || Some(configured);
+        let slow = || Some(configured.max(crate::motion::SLOW_FRAME_INTERVAL));
         match self.active_view {
             ActiveView::Agent(id) => {
                 let Some(agent) = self.agents.get(&id) else {
-                    return TickDemand::None;
+                    return None;
                 };
-                let fast = Self::agent_surface_animating(agent)
+                let surface_fast = Self::agent_surface_animating(agent)
+                    || agent.edit_hl_needs_tick()
+                    || agent.mode_banner_animating(now)
                     || agent.scrollback.needs_animation()
-                    || agent.todo.list_state.needs_tick()
-                    || agent.todo.badge_needs_tick()
-                    || agent.tasks.needs_tick()
-                    || agent.acp_synced_generation != agent.session.available_commands_generation
+                    || agent.tasks.has_live_motion()
                     || agent.session.loading_replay
                     || agent
                         .mcp_init_progress
@@ -3870,23 +3893,7 @@ impl AppView {
                         Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
                     )
                     || agent.drain_blocked()
-                    || agent.prompt.file_search.context().is_some()
-                    || agent.prompt.history_search.is_active()
-                    || agent.scrollback_search.is_some()
-                    || agent.line_viewer.is_some()
-                    || agent.toast.is_some()
-                    || agent
-                        .extensions_modal
-                        .as_ref()
-                        .is_some_and(|m| m.result_notice.is_some())
-                    || agent.ephemeral_tip_needs_tick()
-                    || agent.mode_switch_banner.is_some()
-                    || agent.has_drag_autoscroll()
-                    || agent.selection_created_at.is_some()
-                    || agent.block_viewer.is_some()
                     || agent.image_viewer.as_ref().is_some_and(|v| v.loading)
-                    || agent.image_load_rx.is_some()
-                    || agent.gboom.is_some()
                     || agent.mermaid_needs_tick()
                     || !agent.permission_queue.is_empty()
                     || matches!(
@@ -3900,29 +3907,24 @@ impl AppView {
                             *loading,
                         )
                     )
-                    || agent.subagent_views.iter().any(|(sid, child)| {
-                        child.toast.is_some()
-                            || child.ephemeral_tip_needs_tick()
-                            || child.mode_switch_banner.is_some()
-                            || child.has_drag_autoscroll()
-                            || child.selection_created_at.is_some()
-                            || (agent.active_subagent.as_deref() == Some(sid.as_str())
-                                && child.scrollback.needs_animation())
-                            || child.scrollback_search.is_some()
-                            || child.block_viewer.is_some()
-                            || child.image_viewer.as_ref().is_some_and(|v| v.loading)
-                            || child.image_load_rx.is_some()
-                            || child.mermaid_needs_tick()
+                    || agent.active_subagent.as_deref().is_some_and(|sid| {
+                        agent.subagent_views.get(sid).is_some_and(|child| {
+                            child.edit_hl_needs_tick()
+                                || child.mode_banner_animating(now)
+                                || child.scrollback.needs_animation()
+                                || child.image_viewer.as_ref().is_some_and(|v| v.loading)
+                                || child.mermaid_needs_tick()
+                        })
                     });
-                if fast {
-                    return TickDemand::Fast;
+                if surface_fast {
+                    return fast_interval();
                 }
                 // The empty-state logo (bare centered wordmark over an empty
                 // scrollback) shimmers like the welcome screen, so keep Slow
                 // ticks alive while it is on screen. Minimal mode never draws
                 // it — pager-minimal renders its own card.
                 if !self.screen_mode.is_minimal() && agent.scrollback.is_empty() {
-                    return TickDemand::Slow;
+                    return slow();
                 }
                 if cfg!(target_os = "macos")
                     && (agent.needs_link_modifier_poll()
@@ -3931,9 +3933,9 @@ impl AppView {
                             .values()
                             .any(|child| child.needs_link_modifier_poll()))
                 {
-                    return TickDemand::Slow;
+                    return slow();
                 }
-                TickDemand::None
+                None
             }
             ActiveView::AgentDashboard => {
                 // Row classification is the dashboard's own single source of
@@ -3956,7 +3958,7 @@ impl AppView {
                 });
                 // Leader-roster sessions are not local agents; a Working /
                 // NeedsInput roster row still paints a spinner / blinking
-                // bullet driven by `spinner_tick`.
+                // bullet driven by the shared frame stamp.
                 let roster_need = self.leader_roster.iter().any(|entry| {
                     matches!(
                         entry.activity,
@@ -3969,12 +3971,18 @@ impl AppView {
                         || d.peek_reply.file_search.context().is_some()
                 });
                 if agents_need || dash_search || roster_need {
-                    TickDemand::Fast
+                    fast_interval()
                 } else {
-                    TickDemand::None
+                    None
                 }
             }
-            ActiveView::Welcome => TickDemand::Slow,
+            ActiveView::Welcome => {
+                if self.session_picker_loading || self.session_picker_content_loading {
+                    fast_interval()
+                } else {
+                    slow()
+                }
+            }
         }
     }
     /// Update the terminal tab title and OSC 9;4 progress bar.
@@ -3985,7 +3993,7 @@ impl AppView {
     ///
     /// Also clears the permission notification flag when no permissions
     /// remain queued, so the next batch fires a fresh bell/popup.
-    pub fn update_notifications(&mut self) {
+    pub fn update_notifications(&mut self, frame: crate::motion::FrameStamp) {
         let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
             if let ActiveView::Agent(id) = self.active_view
                 && let Some(agent) = self.agents.get(&id)
@@ -4002,17 +4010,18 @@ impl AppView {
                     agent.resolve_turn_activity()
                 };
                 let has_perms = !agent.permission_queue.is_empty();
-                let elapsed = if parked { None } else { agent.turn_elapsed() };
+                let elapsed = if parked {
+                    None
+                } else {
+                    agent.turn_elapsed_at(frame.now())
+                };
                 // Goal stages (planning / verifying / inter-round gaps) run
                 // while the session is Idle but the goal stays Active — the
                 // tab-title spinner and OSC 9;4 progress must keep running so
                 // the "still working" chrome matches the status-bar goal chip
                 // (same Active predicate as `agent_surface_animating`).
-                let goal_stage_live = agent
-                    .goal_state
-                    .as_ref()
-                    .is_some_and(|g| g.status == crate::app::agent::GoalDisplayStatus::Active);
-                let is_busy = agent.session.state.is_busy() || goal_stage_live;
+                let is_busy =
+                    crate::app::activity::AgentActivityProjection::from_agent(agent).working();
                 (name, model, activity, has_perms, elapsed, is_busy)
             } else {
                 (None, None, None, false, None, false)
@@ -4032,7 +4041,7 @@ impl AppView {
             is_busy,
             focused: self.notification_service.focus_tracker.is_focused(),
         };
-        if let Some(esc) = self.notification_service.on_tick(&title_state) {
+        if let Some(esc) = self.notification_service.on_frame(&title_state, frame) {
             self.pending_notification_escapes
                 .get_or_insert_with(String::new)
                 .push_str(&esc);
@@ -4051,6 +4060,7 @@ pub(crate) mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+    const TEST_FRAME_INTERVAL: Duration = Duration::from_millis(33);
     #[test]
     fn parse_esc_ttl_bounds() {
         let default = PendingAction::ESC_DOUBLE_PRESS_TTL;
@@ -4075,6 +4085,7 @@ pub(crate) mod tests {
     pub(crate) fn test_app() -> AppView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AppView {
+            motion_origin: Instant::now(),
             active_view: ActiveView::Welcome,
             agents: indexmap::IndexMap::new(),
             next_agent_id: 0,
@@ -4097,7 +4108,6 @@ pub(crate) mod tests {
             notification_service: NotificationService::new(Default::default()),
             pending_notification_escapes: None,
             deferred_notification: None,
-            tracing_rx: None,
             active_announcements: vec![],
             hidden_announcement_ids: Default::default(),
             announcement: None,
@@ -4168,8 +4178,6 @@ pub(crate) mod tests {
             session_picker_list_seq: 0,
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
-            welcome_tick: 0,
-            welcome_shimmer_frame: 0,
             startup_warnings: Vec::new(),
             pending_update_version: None,
             quit_for_update: false,
@@ -4271,13 +4279,7 @@ pub(crate) mod tests {
             .push_block(crate::scrollback::RenderBlock::system("boot"));
     }
     #[test]
-    fn background_agent_turn_submitting_demands_fast_ticks() {
-        // W2: the stalled-submission watchdog (`poll_stalled_prompt_submissions`)
-        // runs on the animation tick, so a BACKGROUND agent stuck in
-        // TurnSubmitting must keep the tick loop alive even while the focused
-        // agent is idle — otherwise the prompt is never re-queried and stays
-        // "Submitting…" forever. Replaces the deleted
-        // `needs_animation_gates_pending_turn_end_reconcile` equivalent.
+    fn background_submission_arms_lifecycle_without_visible_frames() {
         let mut app = test_app_with_agent();
         let background = super::super::agent::AgentId(1);
         let agent = AgentView::new(
@@ -4289,22 +4291,35 @@ pub(crate) mod tests {
         idle_agent_with_content(&mut app, super::super::agent::AgentId(0));
 
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::None,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
             "idle focused + idle background must not tick"
         );
         app.agents.get_mut(&background).unwrap().session.state = AgentState::TurnSubmitting;
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::Fast,
-            "a background TurnSubmitting agent must keep the watchdog ticking"
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
+            "a hidden lifecycle state must not create an animation demand"
         );
-        // Back to idle: the tick demand must drop again (no 30fps leak).
+        app.agents
+            .get_mut(&background)
+            .unwrap()
+            .session
+            .current_prompt_id = Some("background-prompt".into());
+        app.agents.get_mut(&background).unwrap().turn_started_at = Some(
+            Instant::now()
+                - crate::app::dispatch::PROMPT_STATUS_WATCHDOG_DELAY
+                - Duration::from_millis(1),
+        );
+        assert!(
+            crate::app::dispatch::next_prompt_watchdog_deadline(&app).is_some(),
+            "the independent lifecycle clock must still observe background submissions"
+        );
         app.agents.get_mut(&background).unwrap().session.state = AgentState::Idle;
-        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
     }
     #[test]
-    fn tick_demand_fast_while_goal_active_on_idle_session() {
+    fn visible_frame_interval_is_fast_while_goal_active_on_idle_session() {
         // Goal stages (planning / verifying / inter-round classifier gaps)
         // run shell-side while the pager session is Idle, but the status-bar
         // goal chip keeps its spinner + live elapsed clock for the whole
@@ -4316,8 +4331,8 @@ pub(crate) mod tests {
         goal.status = crate::app::agent::GoalDisplayStatus::Active;
         app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::Fast,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL),
             "an Active goal on an Idle session must keep the tick loop alive"
         );
         // Paused goals freeze their chip (no spinner, no live clock): no
@@ -4330,13 +4345,13 @@ pub(crate) mod tests {
             .unwrap()
             .status = crate::app::agent::GoalDisplayStatus::Paused;
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::None,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
             "a paused goal must not keep ticks alive"
         );
     }
     #[test]
-    fn tick_demand_fast_while_idle_with_running_bg_task() {
+    fn visible_frame_interval_is_fast_while_idle_with_running_bg_task() {
         // A turn-idle agent with a running background task shows the
         // "still running" watcher cue + the status-bar running-count chip.
         // Demand must come from live `watchers()` data, not the tasks pane's
@@ -4344,7 +4359,7 @@ pub(crate) mod tests {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
-        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
         app.agents
             .get_mut(&id)
             .unwrap()
@@ -4352,8 +4367,8 @@ pub(crate) mod tests {
             .bg_tasks
             .insert("bg-1".into(), running_bg_task("bg-1"));
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::Fast,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL),
             "a running bg task under an Idle turn must keep ticks alive"
         );
         app.agents
@@ -4362,10 +4377,10 @@ pub(crate) mod tests {
             .session
             .bg_tasks
             .remove("bg-1");
-        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
     }
     #[test]
-    fn tick_demand_fast_while_dashboard_open_with_bg_work() {
+    fn visible_frame_interval_is_fast_while_dashboard_open_with_bg_work() {
         // Dashboard rows classify a turn-idle agent with a running bg task
         // as Working (spinner row + header chip); demand must follow the
         // dashboard's own row classification.
@@ -4373,7 +4388,7 @@ pub(crate) mod tests {
         let id = super::super::agent::AgentId(0);
         app.active_view = ActiveView::AgentDashboard;
         app.dashboard = Some(crate::views::dashboard::DashboardState::new());
-        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
         app.agents
             .get_mut(&id)
             .unwrap()
@@ -4381,20 +4396,20 @@ pub(crate) mod tests {
             .bg_tasks
             .insert("bg-1".into(), running_bg_task("bg-1"));
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::Fast,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL),
             "a Working dashboard row must keep the spinner animating"
         );
     }
     #[test]
-    fn tick_demand_fast_while_dashboard_roster_working() {
+    fn visible_frame_interval_is_fast_while_dashboard_roster_working() {
         // Leader-roster sessions are not local agents; their Working /
         // NeedsInput rows (spinner icon / blinking bullet) must still arm
         // ticks while the dashboard is open.
         let mut app = test_app();
         app.active_view = ActiveView::AgentDashboard;
         app.dashboard = Some(crate::views::dashboard::DashboardState::new());
-        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
         app.leader_roster = vec![crate::app::roster::RosterEntry {
             session_id: "s1".into(),
             title: None,
@@ -4408,81 +4423,12 @@ pub(crate) mod tests {
             origin: crate::app::roster::RosterOrigin::default(),
         }];
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::Fast,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL),
             "a Working roster row must keep the dashboard spinner animating"
         );
         app.leader_roster[0].activity = crate::app::roster::RosterActivity::Idle;
-        assert_eq!(app.tick_demand(), TickDemand::None);
-    }
-    #[test]
-    fn tick_redraws_while_goal_active_on_idle_session() {
-        // Second layer: demand alone would spin the tick loop while the
-        // screen stays frozen — `tick()` must request redraws for the goal
-        // chip's spinner + live clock at the spinner cadence.
-        let mut app = test_app_with_agent();
-        let id = super::super::agent::AgentId(0);
-        idle_agent_with_content(&mut app, id);
-        app.contextual_hints.image_input = false; // no clipboard-tip noise
-        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
-        goal.status = crate::app::agent::GoalDisplayStatus::Active;
-        app.agents.get_mut(&id).unwrap().goal_state = Some(goal);
-        let redraws = (0..8).filter(|_| app.tick()).count();
-        assert!(
-            redraws >= 1,
-            "an Active goal on an Idle session must drive redraws, got {redraws} in 8 ticks"
-        );
-        // Paused goal: the chip has no time-based content; tick must not
-        // redraw for it.
-        app.agents
-            .get_mut(&id)
-            .unwrap()
-            .goal_state
-            .as_mut()
-            .unwrap()
-            .status = crate::app::agent::GoalDisplayStatus::Paused;
-        let redraws = (0..8).filter(|_| app.tick()).count();
-        assert_eq!(redraws, 0, "a paused goal must not drive redraws");
-    }
-    #[test]
-    fn tick_redraws_while_idle_plugin_cta_spinner_is_visible() {
-        let mut app = test_app_with_agent();
-        let id = super::super::agent::AgentId(0);
-        idle_agent_with_content(&mut app, id);
-        app.contextual_hints.image_input = false;
-        app.agents.get_mut(&id).unwrap().plugin_cta.phase =
-            crate::app::agent_view::CtaPhase::Installing {
-                plugin_relative_path: "plugins/example".into(),
-                name: "example".into(),
-            };
-
-        assert_eq!(app.tick_demand(), TickDemand::Fast);
-        let redraws = (0..8).filter(|_| app.tick()).count();
-        assert!(
-            redraws >= 1,
-            "a visible plugin install spinner must repaint, got {redraws} redraws in 8 ticks"
-        );
-    }
-    #[test]
-    fn tick_redraws_while_idle_watchers_running() {
-        // The idle "still running" cue + running-count chip pulse at the
-        // spinner cadence from live watchers data (minimal mode never syncs
-        // the tasks pane, so `tasks.tick()` cannot be the redraw source).
-        let mut app = test_app_with_agent();
-        let id = super::super::agent::AgentId(0);
-        idle_agent_with_content(&mut app, id);
-        app.contextual_hints.image_input = false; // no clipboard-tip noise
-        app.agents
-            .get_mut(&id)
-            .unwrap()
-            .session
-            .bg_tasks
-            .insert("bg-1".into(), running_bg_task("bg-1"));
-        let redraws = (0..8).filter(|_| app.tick()).count();
-        assert!(
-            redraws >= 1,
-            "a running bg task under an Idle turn must drive redraws, got {redraws} in 8 ticks"
-        );
+        assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
     }
     #[test]
     fn notifications_stay_busy_while_goal_active_on_idle_session() {
@@ -4504,7 +4450,7 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         );
-        app.update_notifications();
+        app.update_notifications(crate::motion::FrameStamp::default());
         assert!(
             app.notification_service.is_progress_active(),
             "an Active goal must keep the OSC 9;4 progress alive while the session is Idle"
@@ -4527,7 +4473,7 @@ pub(crate) mod tests {
             .unwrap()
             .status = crate::app::agent::GoalDisplayStatus::Paused;
         app.pending_notification_escapes = None;
-        app.update_notifications();
+        app.update_notifications(crate::motion::FrameStamp::default());
         assert!(
             !app.notification_service.is_progress_active(),
             "a paused goal must let the OSC 9;4 progress clear"
@@ -4778,26 +4724,13 @@ pub(crate) mod tests {
         })
     }
     #[test]
-    fn needs_animation_ignores_tracing_rx_outside_dev_builds() {
-        let mut app = test_app_with_agent();
-        let id = super::super::agent::AgentId(0);
-        idle_agent_with_content(&mut app, id);
-        let (_tx, rx) = tokio::sync::mpsc::channel::<String>(4);
-        app.tracing_rx = Some(rx);
-        assert!(
-            !app.needs_animation(),
-            "release builds must not request animation ticks just because \
-             tracing_rx exists (always true after startup)"
-        );
-    }
-    #[test]
-    fn needs_animation_gates_prompt_history_tick_delivery() {
+    fn ui_maintenance_delivers_prompt_history_without_motion_demand() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
         assert!(
             !app.needs_animation(),
-            "an idle agent with no history overlay must not request animation ticks"
+            "an idle agent with no history overlay must not request motion frames"
         );
         {
             let agent = app.agents.get_mut(&id).unwrap();
@@ -4806,8 +4739,13 @@ pub(crate) mod tests {
             agent.prompt.history_search.activate(&history, "");
         }
         assert!(
-            app.needs_animation(),
-            "an open prompt history overlay must request animation ticks"
+            !app.needs_animation(),
+            "polling search results must not create a motion demand"
+        );
+        assert!(
+            app.next_ui_deadline(Instant::now(), TEST_FRAME_INTERVAL)
+                .is_some(),
+            "the independent UI clock must poll the active search"
         );
         let mut delivered = false;
         for _ in 0..1000 {
@@ -4829,11 +4767,11 @@ pub(crate) mod tests {
             .deactivate();
         assert!(
             !app.needs_animation(),
-            "closing the history overlay stops the animation ticks"
+            "closing the history overlay stops motion frames"
         );
     }
     #[test]
-    fn needs_animation_gates_scrollback_search_tick_delivery() {
+    fn ui_maintenance_delivers_scrollback_search_without_motion_demand() {
         use crate::scrollback::ScrollbackSearchState;
         use crate::scrollback::block::RenderBlock;
         let mut app = test_app_with_agent();
@@ -4850,7 +4788,7 @@ pub(crate) mod tests {
         }
         assert!(
             !app.needs_animation(),
-            "an idle agent with no search open must not request animation ticks"
+            "an idle agent with no search open must not request motion frames"
         );
         {
             let agent = app.agents.get_mut(&id).unwrap();
@@ -4864,8 +4802,13 @@ pub(crate) mod tests {
             );
         }
         assert!(
-            app.needs_animation(),
-            "an open scrollback search must request animation ticks"
+            !app.needs_animation(),
+            "polling search results must not create a motion demand"
+        );
+        assert!(
+            app.next_ui_deadline(Instant::now(), TEST_FRAME_INTERVAL)
+                .is_some(),
+            "the independent UI clock must poll the active search"
         );
         let mut delivered = false;
         for _ in 0..1000 {
@@ -4894,103 +4837,90 @@ pub(crate) mod tests {
         app.agents.get_mut(&id).unwrap().scrollback_search = None;
         assert!(
             !app.needs_animation(),
-            "closing the search stops the animation ticks"
+            "closing the search stops motion frames"
         );
     }
     /// The welcome screen shimmer only advances ~12fps, so a resting welcome
     /// screen must demand Slow ticks — not a 30fps loop; the deep-search
     /// spinner upgrades it to Fast while loading.
     #[test]
-    fn tick_demand_welcome_is_slow_unless_loading() {
+    fn visible_frame_interval_welcome_is_slow_unless_loading() {
         let mut app = test_app();
         assert_eq!(app.active_view, ActiveView::Welcome);
-        assert_eq!(app.tick_demand(), TickDemand::Slow);
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(crate::motion::SLOW_FRAME_INTERVAL)
+        );
         assert!(app.needs_animation(), "slow still counts as animating");
         app.session_picker_content_loading = true;
-        assert_eq!(app.tick_demand(), TickDemand::Fast);
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL)
+        );
     }
     /// The agent empty-state logo (bare centered wordmark over an empty
     /// scrollback) shimmers like the welcome screen, so an empty agent must
     /// demand Slow ticks; any entry (here a system block) parks again.
     #[test]
-    fn tick_demand_slow_while_agent_empty_state_logo_shows() {
+    fn visible_frame_interval_is_slow_while_agent_empty_state_logo_shows() {
         let mut app = test_app_with_agent();
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::Slow,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(crate::motion::SLOW_FRAME_INTERVAL),
             "an empty agent scrollback shows the shimmering logo"
         );
         assert!(app.needs_animation(), "slow still counts as animating");
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::None,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
             "content in the scrollback hides the logo and parks the agent"
         );
     }
     /// Minimal mode never draws the agent empty-state logo (pager-minimal
     /// renders its own welcome card), so it must not demand shimmer ticks.
     #[test]
-    fn tick_demand_agent_empty_state_is_not_slow_in_minimal_mode() {
+    fn visible_frame_interval_agent_empty_state_is_not_slow_in_minimal_mode() {
         let mut app = test_app_with_agent();
         app.screen_mode = ScreenMode::Minimal;
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::None,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
             "minimal mode must not tick for an empty-state logo it never draws"
         );
     }
-    /// `tick` keeps advancing the shared shimmer throttle while the active
-    /// agent's scrollback is empty (the logo is on screen), redrawing only
-    /// when the ~12fps wall-clock frame advances.
+
     #[test]
-    fn tick_advances_shimmer_while_agent_empty_state_shows() {
-        let mut app = test_app_with_agent();
-        // Force the throttle stale: the next tick must advance it.
-        app.welcome_shimmer_frame = crate::views::welcome::shimmer_frame().wrapping_sub(1);
-        assert!(
-            app.tick(),
-            "an empty-state logo must keep shimmer ticks alive"
-        );
-        assert_eq!(
-            app.welcome_shimmer_frame,
-            crate::views::welcome::shimmer_frame(),
-            "tick must advance the shared shimmer throttle"
-        );
-        // A second tick with an already-current frame is a no-op from the
-        // shimmer's perspective (other redraw sources may still fire).
-        app.tick();
-        assert_eq!(
-            app.welcome_shimmer_frame,
-            crate::views::welcome::shimmer_frame(),
-            "the throttle must stay in sync with the wall-clock frame"
-        );
-    }
-    /// With content in the scrollback the empty-state logo is gone, so `tick`
-    /// must not advance the shimmer throttle for it (the welcome-screen branch
-    /// is not active here either).
-    #[test]
-    fn tick_does_not_advance_shimmer_for_content_agent() {
+    fn minimal_transcript_pump_uses_ui_clock_not_motion() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
-        app.welcome_shimmer_frame = crate::views::welcome::shimmer_frame().wrapping_sub(1);
-        let stale = app.welcome_shimmer_frame;
-        let _ = app.tick();
-        assert_eq!(
-            app.welcome_shimmer_frame, stale,
-            "a content scrollback must not advance the shimmer throttle"
+        app.minimal_state.transcript = Some(crate::minimal_api::TranscriptBuild {
+            agent: id,
+            ids: Vec::new(),
+            next: 0,
+            out: String::new(),
+        });
+        assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
+        assert!(
+            app.next_ui_deadline(Instant::now(), TEST_FRAME_INTERVAL)
+                .is_some(),
+            "incremental transcript work must wake through the UI clock"
         );
     }
     /// An open modal session picker that is still fetching keeps fast ticks
     /// alive on an otherwise-idle agent so its loading spinner can animate.
     #[test]
-    fn tick_demand_fast_while_modal_session_picker_loads() {
+    fn visible_frame_interval_is_fast_while_modal_session_picker_loads() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
-        assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
+            "idle agent parks"
+        );
         app.agents.get_mut(&id).unwrap().active_modal =
             Some(crate::views::modal::ActiveModal::SessionPicker {
                 state: crate::views::picker::PickerState::default(),
@@ -5005,8 +4935,8 @@ pub(crate) mod tests {
                 pending_delete: None,
             });
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::Fast,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL),
             "loading modal picker must keep the spinner animating"
         );
         if let Some(crate::views::modal::ActiveModal::SessionPicker { loading, .. }) =
@@ -5015,8 +4945,8 @@ pub(crate) mod tests {
             *loading = false;
         }
         assert_eq!(
-            app.tick_demand(),
-            TickDemand::None,
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
             "settled picker must not keep demanding ticks"
         );
     }
@@ -5024,13 +4954,17 @@ pub(crate) mod tests {
     /// poll (when it is the only pending work) demands Slow, never Fast.
     #[test]
     #[cfg(target_os = "macos")]
-    fn tick_demand_link_poll_is_slow_only() {
+    fn visible_frame_interval_link_poll_is_slow_only() {
         use crate::render::osc8::{LinkOverlay, OverlayLink};
         use std::sync::Arc;
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
-        assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
+            "idle agent parks"
+        );
         {
             let agent = app.agents.get_mut(&id).unwrap();
             let mut overlay = LinkOverlay::new();
@@ -5048,14 +4982,14 @@ pub(crate) mod tests {
         }
         if !crate::app::agent_view::has_native_link_hover() {
             assert_eq!(
-                app.tick_demand(),
-                TickDemand::Slow,
+                app.visible_frame_interval(TEST_FRAME_INTERVAL),
+                Some(crate::motion::SLOW_FRAME_INTERVAL),
                 "link poll alone must not spin the fast loop"
             );
         }
     }
     #[test]
-    fn needs_animation_gates_mode_switch_banner_countdown() {
+    fn ui_maintenance_owns_mode_switch_banner_countdown() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
@@ -5065,17 +4999,15 @@ pub(crate) mod tests {
             .unwrap()
             .show_mode_switch_banner("Plan");
         assert!(
-            app.needs_animation(),
-            "mode_switch_banner must request ticks (tick_mode_banner countdown)"
+            !app.needs_animation(),
+            "a transient banner must not arm the motion scheduler"
         );
-        let mut cleared = false;
-        for _ in 0..512 {
-            app.tick();
-            if app.agents[&id].mode_switch_banner.is_none() {
-                cleared = true;
-                break;
-            }
-        }
+        assert!(
+            app.next_ui_deadline(Instant::now(), TEST_FRAME_INTERVAL)
+                .is_some()
+        );
+        let deadline = app.agents[&id].mode_switch_banner.as_ref().unwrap().1;
+        let cleared = app.maintain_ui(deadline + Duration::from_millis(1));
         assert!(
             cleared,
             "tick() must decrement mode_switch_banner until it expires"
@@ -5126,8 +5058,7 @@ pub(crate) mod tests {
             "a live critical must re-open the gate"
         );
     }
-    /// Critical freezes tip TTL and must not arm needs_animation for a tip
-    /// that is not counting down (session-long metronome heat).
+    /// Critical freezes tip TTL without arming either the motion or UI clock.
     #[test]
     fn ephemeral_tip_frozen_under_critical_does_not_request_animation_or_burn_ttl() {
         use std::collections::HashMap;
@@ -5142,42 +5073,41 @@ pub(crate) mod tests {
             );
             agent.session_banner_active = true;
         }
-        let before = app.agents[&id]
-            .ephemeral_tip
-            .ticks_remaining()
-            .expect("tip active");
-        assert!(
-            !app.agents[&id].ephemeral_tip_needs_tick(),
-            "critical must freeze tip tick policy"
-        );
+        let paused_at = Instant::now();
         assert!(
             !app.needs_animation(),
             "frozen tip under critical must not arm the metronome on an idle agent"
         );
-        for _ in 0..10 {
-            app.tick();
-        }
         assert_eq!(
-            app.agents[&id].ephemeral_tip.ticks_remaining(),
+            app.next_ui_deadline(paused_at, TEST_FRAME_INTERVAL),
+            None,
+            "paused absolute expiry must not keep the UI clock hot"
+        );
+        let before = app.agents[&id]
+            .ephemeral_tip
+            .remaining_at(paused_at)
+            .expect("tip active");
+        let much_later = paused_at + Duration::from_secs(30);
+        app.maintain_ui(much_later);
+        assert_eq!(
+            app.agents[&id].ephemeral_tip.remaining_at(much_later),
             Some(before),
             "TTL must not burn while critical occludes"
         );
         app.agents.get_mut(&id).unwrap().session_banner_active = false;
-        assert!(
-            app.needs_animation(),
-            "unfreezing must re-arm tip countdown ticks"
-        );
-        app.tick();
-        let after = app.agents[&id]
-            .ephemeral_tip
-            .ticks_remaining()
-            .expect("tip still active");
-        assert!(after < before, "TTL must resume when critical clears");
+        assert!(!app.needs_animation(), "tip expiry is UI state, not motion");
+        let resumed_deadline = app
+            .next_ui_deadline(much_later, TEST_FRAME_INTERVAL)
+            .expect("unoccluded tip must re-arm its absolute deadline");
+        assert_eq!(resumed_deadline, much_later + before);
+        assert!(app.maintain_ui(resumed_deadline));
+        assert!(!app.agents[&id].ephemeral_tip.is_active());
     }
     /// The word-select tip's long TTL is bounded by prompt divergence: ANY
     /// prompt change since the tip was shown (typed here; the snapshot guard
     /// covers paste/drop identically) refuses the chord immediately and
-    /// retires the tip on the next tick, so Ctrl+Y goes back to yank.
+    /// retires the tip on the next UI maintenance pass, so Ctrl+Y goes back
+    /// to yank.
     #[test]
     fn word_select_tip_retires_on_prompt_divergence_and_accepts_before() {
         use std::collections::HashMap;
@@ -5215,7 +5145,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn needs_animation_gates_image_viewer_loading() {
+    fn image_viewer_load_uses_task_completion_channel() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
@@ -5224,31 +5154,33 @@ pub(crate) mod tests {
             std::path::Path::new("/nonexistent/image_gate_test.png"),
         );
         assert!(viewer.loading, "deferred open must be in loading state");
+        let owner_id = viewer.overlay_owner_id;
         app.agents.get_mut(&id).unwrap().image_viewer = Some(viewer);
         assert!(
             app.needs_animation(),
-            "image_viewer.loading must request ticks (poll/spawn load path)"
+            "the visible loading spinner must request frames"
         );
-        let mut terminal = false;
-        for _ in 0..200 {
-            app.tick();
-            let agent = &app.agents[&id];
-            if agent.image_viewer.is_none()
-                || agent.toast.is_some()
-                || agent.image_load_rx.is_some()
-                || agent.image_viewer.as_ref().is_some_and(|v| !v.loading)
-            {
-                terminal = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        assert!(
-            terminal,
-            "tick() must progress image load (spawn rx, fail toast, or clear loading)"
+        app.tick();
+        assert!(matches!(
+            app.pending_effects.as_slice(),
+            [crate::app::actions::Effect::LoadImageViewer {
+                agent_id,
+                child_session_id: None,
+                owner_id: queued_owner,
+                ..
+            }] if *agent_id == id && *queued_owner == owner_id
+        ));
+        let _ = crate::app::dispatch::dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::ImageViewerLoaded {
+                agent_id: id,
+                child_session_id: None,
+                owner_id,
+                result: crate::prompt_images::ImageLoadResult::Failed,
+            }),
+            &mut app,
         );
-        app.agents.get_mut(&id).unwrap().image_viewer = None;
-        app.agents.get_mut(&id).unwrap().image_load_rx = None;
+        assert!(app.agents[&id].image_viewer.is_none());
+        assert!(app.agents[&id].toast.is_some());
         app.agents.get_mut(&id).unwrap().toast = None;
         assert!(!app.needs_animation());
     }
@@ -5283,7 +5215,7 @@ pub(crate) mod tests {
         );
         assert!(
             !app.needs_animation(),
-            "scroll streams must not demand animation ticks (scroll clock owns pacing)"
+            "scroll streams must not demand motion frames (scroll clock owns pacing)"
         );
         assert!(
             app.scroll_state
@@ -5426,38 +5358,8 @@ pub(crate) mod tests {
         assert!(!app.needs_animation());
     }
     #[test]
-    fn tick_drains_tracing_rx_and_does_not_metronome_on_channel() {
-        let mut app = test_app_with_agent();
-        let id = super::super::agent::AgentId(0);
-        idle_agent_with_content(&mut app, id);
-        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
-        for i in 0..5 {
-            tx.try_send(format!("trace line {i}"))
-                .expect("queue tracer line");
-        }
-        app.tracing_rx = Some(rx);
-        assert!(
-            !app.needs_animation(),
-            "non-dev: queued tracer lines must not request animation ticks"
-        );
-        let _ = app.tick();
-        assert!(
-            matches!(
-                app.tracing_rx.as_mut().unwrap().try_recv(),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-            ),
-            "tick() must drain the tracer channel (bounded; cannot grow unbounded)"
-        );
-        assert!(
-            !app.needs_animation(),
-            "non-dev: a present-but-drained tracer channel must not request ticks"
-        );
-        drop(tx);
-    }
-    #[test]
     fn needs_animation_gates_btw_loading_spinner() {
         use crate::views::btw_overlay::BtwOverlayState;
-        use crate::views::turn_status::SPINNER_DIVISOR;
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
@@ -5466,11 +5368,6 @@ pub(crate) mod tests {
             question: "what is X?".into(),
         });
         assert!(app.needs_animation());
-        let saw_redraw = (0..SPINNER_DIVISOR).any(|_| app.tick());
-        assert!(
-            saw_redraw,
-            "Loading must redraw at spinner cadence while idle"
-        );
         app.agents.get_mut(&id).unwrap().btw_state =
             Some(BtwOverlayState::done("what is X?".into(), "X is …".into()));
         assert!(!app.needs_animation());
@@ -5481,7 +5378,7 @@ pub(crate) mod tests {
         assert!(!app.needs_animation());
     }
     #[test]
-    fn needs_animation_gates_todo_badge_flash() {
+    fn todo_badge_flash_uses_one_absolute_ui_deadline() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
@@ -5497,12 +5394,12 @@ pub(crate) mod tests {
                 meta: None,
             }]);
         assert!(
-            app.agents[&id].todo.badge_needs_tick(),
+            app.agents[&id].todo.badge_deadline().is_some(),
             "fixture: a counts change must arm the badge flash"
         );
         assert!(
-            app.needs_animation(),
-            "an active todo badge flash must request animation ticks"
+            !app.needs_animation(),
+            "a static badge flash must not request animation frames"
         );
         app.agents
             .get_mut(&id)
@@ -5511,8 +5408,8 @@ pub(crate) mod tests {
             .expire_badge_flash_for_test();
         let _ = app.tick();
         assert!(
-            !app.agents[&id].todo.badge_needs_tick(),
-            "tick() must clear the expired badge flash (badge_tick)"
+            app.agents[&id].todo.badge_deadline().is_none(),
+            "UI maintenance must clear the expired badge flash"
         );
         assert!(
             !app.needs_animation(),
@@ -5520,7 +5417,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn needs_animation_gates_pending_acp_command_sync() {
+    fn ui_maintenance_reconciles_pending_acp_command_sync() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
@@ -5539,8 +5436,12 @@ pub(crate) mod tests {
             "fixture: a commands update must leave the catalog sync pending"
         );
         assert!(
-            app.needs_animation(),
-            "a pending ACP command-catalog sync must request animation ticks"
+            !app.needs_animation(),
+            "catalog reconciliation must not request animation frames"
+        );
+        assert!(
+            app.next_ui_deadline(Instant::now(), TEST_FRAME_INTERVAL)
+                .is_some()
         );
         let _ = app.tick();
         assert_eq!(
@@ -5554,7 +5455,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn needs_animation_gates_subagent_image_viewer_loading() {
+    fn subagent_image_loading_animates_only_when_visible() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         // The idle baseline refers to the ROOT agent (the subagent child
@@ -5576,6 +5477,7 @@ pub(crate) mod tests {
             std::path::Path::new("/nonexistent/child_img_gate.png"),
         );
         assert!(viewer.loading, "deferred open must be in loading state");
+        let owner_id = viewer.overlay_owner_id;
         app.agents
             .get_mut(&id)
             .unwrap()
@@ -5584,26 +5486,32 @@ pub(crate) mod tests {
             .unwrap()
             .image_viewer = Some(viewer);
         assert!(
-            app.needs_animation(),
-            "a loading image viewer on a subagent CHILD must request ticks (child arm)"
+            !app.needs_animation(),
+            "a hidden child must not request visible frames"
         );
-        let mut terminal = false;
-        for _ in 0..200 {
-            app.tick();
-            let child = &app.agents[&id].subagent_views[child_sid];
-            if child.image_viewer.is_none()
-                || child.toast.is_some()
-                || child.image_load_rx.is_some()
-                || child.image_viewer.as_ref().is_some_and(|v| !v.loading)
-            {
-                terminal = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
+        app.agents.get_mut(&id).unwrap().active_subagent = Some(child_sid.to_string());
         assert!(
-            terminal,
-            "tick() must progress the CHILD image load (shared tick_agent_image_load)"
+            app.needs_animation(),
+            "the same loading spinner must animate when the child becomes visible"
+        );
+        app.tick();
+        assert!(app.pending_effects.iter().any(|effect| matches!(
+            effect,
+            crate::app::actions::Effect::LoadImageViewer {
+                agent_id,
+                child_session_id: Some(session_id),
+                owner_id: queued_owner,
+                ..
+            } if *agent_id == id && session_id == child_sid && *queued_owner == owner_id
+        )));
+        let _ = crate::app::dispatch::dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::ImageViewerLoaded {
+                agent_id: id,
+                child_session_id: Some(child_sid.to_string()),
+                owner_id,
+                result: crate::prompt_images::ImageLoadResult::Failed,
+            }),
+            &mut app,
         );
         {
             let child = app
@@ -5614,7 +5522,6 @@ pub(crate) mod tests {
                 .get_mut(child_sid)
                 .unwrap();
             child.image_viewer = None;
-            child.image_load_rx = None;
             child.toast = None;
         }
         assert!(

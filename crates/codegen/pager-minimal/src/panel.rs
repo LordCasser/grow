@@ -89,13 +89,14 @@ pub(super) fn render(
     agent: &mut AgentView,
     kind: ListPanel,
     theme: &Theme,
+    frame: pager::motion::FrameStamp,
 ) -> Option<(u16, u16)> {
     if area.height < 2 || area.width < 8 {
         return None;
     }
     match kind {
-        ListPanel::Resume => render_resume(buf, area, agent, theme),
-        ListPanel::Mcps => render_mcps(buf, area, agent, theme),
+        ListPanel::Resume => render_resume(buf, area, agent, theme, frame),
+        ListPanel::Mcps => render_mcps(buf, area, agent, theme, frame),
     }
 }
 
@@ -194,6 +195,7 @@ fn render_resume(
     area: Rect,
     agent: &mut AgentView,
     theme: &Theme,
+    frame: pager::motion::FrameStamp,
 ) -> Option<(u16, u16)> {
     let cwd = agent.session.cwd.to_string_lossy().to_string();
     let Some(ActiveModal::SessionPicker { entries, state, .. }) = &mut agent.active_modal else {
@@ -252,6 +254,7 @@ fn render_resume(
         &nsc,
         None,
         false,
+        frame,
     );
     state.hit_areas = Some(PickerHitAreas {
         close_button: Rect::default(),
@@ -292,6 +295,7 @@ fn render_mcps(
     area: Rect,
     agent: &mut AgentView,
     theme: &Theme,
+    frame: pager::motion::FrameStamp,
 ) -> Option<(u16, u16)> {
     let (title_row, subtitle_row, divider_row, list_area, footer_row) = chrome_layout(area);
     render_title(buf, title_row, theme, "Manage MCP servers");
@@ -462,6 +466,7 @@ fn render_mcps(
         &non_sel,
         None,
         loading,
+        frame,
     );
     s.picker_state.hit_areas = Some(PickerHitAreas {
         close_button: Rect::default(),
@@ -621,7 +626,14 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme);
+        render(
+            &mut buf,
+            area,
+            &mut a,
+            ListPanel::Mcps,
+            &theme,
+            pager::motion::FrameStamp::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(text.contains("Manage MCP servers"), "title:\n{text}");
@@ -655,7 +667,14 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut a, ListPanel::Resume, &theme);
+        render(
+            &mut buf,
+            area,
+            &mut a,
+            ListPanel::Resume,
+            &theme,
+            pager::motion::FrameStamp::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(text.contains("Resume session"), "title:\n{text}");
@@ -681,7 +700,14 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 14, 5);
         let mut actual = Buffer::empty(area);
-        render(&mut actual, area, &mut agent, ListPanel::Resume, &theme);
+        render(
+            &mut actual,
+            area,
+            &mut agent,
+            ListPanel::Resume,
+            &theme,
+            pager::motion::FrameStamp::default(),
+        );
 
         let Some(ActiveModal::SessionPicker { state, .. }) = &agent.active_modal else {
             panic!("expected session picker");

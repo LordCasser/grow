@@ -1050,20 +1050,17 @@ pub struct ButtonArea {
 
 /// Transient, non-covering feedback shown after an extensions action
 /// completes, so the list (the surface that actually changed — a bumped
-/// version, a refreshed list) stays visible. Auto-expires via a per-tick
-/// countdown, mirroring `AgentView::toast`.
+/// version, a refreshed list) stays visible until an absolute deadline.
 #[derive(Debug, Clone)]
 pub struct ActionResultNotice {
     /// Full result text (used verbatim for the tab-wide status line).
     pub message: String,
     /// Row to anchor a badge to; `None` renders a tab-wide status line.
     pub entry_index: Option<usize>,
-    /// Remaining animation ticks before auto-dismiss.
-    pub ticks_remaining: u16,
+    pub expires_at: std::time::Instant,
 }
 
-/// How long a result notice stays on screen, in animation ticks (~2.5s at 30fps).
-pub const RESULT_NOTICE_TICKS: u16 = 75;
+pub const RESULT_NOTICE_DURATION: std::time::Duration = std::time::Duration::from_millis(2_500);
 
 /// Single source of truth for the McpServers tab action keys. Consumed by
 /// the renderer (hint bar), the picker (`PickerConfig::action_keys`), and
@@ -1854,17 +1851,20 @@ impl ExtensionsModalState {
         }
     }
 
-    /// Advance the result-notice countdown by one animation tick. Returns
-    /// `true` if it just expired (a redraw is needed to erase it).
-    pub fn tick_result_notice(&mut self) -> bool {
-        if let Some(ref mut n) = self.result_notice {
-            if n.ticks_remaining == 0 {
-                self.result_notice = None;
-                return true;
-            }
-            n.ticks_remaining = n.ticks_remaining.saturating_sub(1);
+    pub fn maintain_result_notice(&mut self, now: std::time::Instant) -> bool {
+        if self
+            .result_notice
+            .as_ref()
+            .is_some_and(|notice| now >= notice.expires_at)
+        {
+            self.result_notice = None;
+            return true;
         }
         false
+    }
+
+    pub fn result_notice_deadline(&self) -> Option<std::time::Instant> {
+        self.result_notice.as_ref().map(|notice| notice.expires_at)
     }
 
     /// Switch to a different tab and reset the per-tab transient UI state.
@@ -2416,8 +2416,6 @@ pub(crate) fn marketplace_components_summary(
 /// scrollable entry list inside.
 ///
 /// `full_area` is the total area available (everything above the shortcuts bar).
-/// Show each spinner frame for this many animation ticks.
-const SPINNER_DIVISOR: u64 = 4;
 
 pub fn render_extensions_modal(
     buf: &mut Buffer,
@@ -2425,7 +2423,7 @@ pub fn render_extensions_modal(
     state: &mut ExtensionsModalState,
     _shortcuts_area: Option<Rect>,
     compact: bool,
-    tick: u64,
+    frame: crate::motion::FrameStamp,
 ) {
     let theme = Theme::current();
 
@@ -3488,7 +3486,7 @@ pub fn render_extensions_modal(
             &non_selectable_clickable,
             Some(theme.bg_base),
             loading,
-            0,
+            frame,
             inner_x + inner_width - 1,
         );
         (content_hit.item_rects, content_hit.entry_indices)
@@ -3537,8 +3535,7 @@ pub fn render_extensions_modal(
     {
         let label = state.pending_action.as_deref().unwrap_or("Processing...");
         let frames = crate::glyphs::braille_spinner_frames();
-        let frame_idx = (tick / SPINNER_DIVISOR) as usize % frames.len();
-        let display = format!("{} {label}", frames[frame_idx]);
+        let display = format!("{} {label}", crate::motion::spinner_glyph(frame, frames));
         let msg_content_y = popup_rect.y + 2;
         let popup_bottom = popup_rect.y + popup_rect.height.saturating_sub(1);
         let msg_content_height = popup_bottom.saturating_sub(msg_content_y);
@@ -4656,7 +4653,14 @@ mod tests {
         }]);
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
-        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        render_extensions_modal(
+            &mut buf,
+            area,
+            &mut state,
+            None,
+            false,
+            crate::motion::FrameStamp::default(),
+        );
 
         assert!(
             buffer_count(&buf, "Workflows") >= 1,
@@ -4700,7 +4704,14 @@ mod tests {
         ]);
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
-        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        render_extensions_modal(
+            &mut buf,
+            area,
+            &mut state,
+            None,
+            false,
+            crate::motion::FrameStamp::default(),
+        );
         assert_eq!(buffer_count(&buf, "valid-workflow"), 1);
         assert_eq!(buffer_count(&buf, "Not Launchable"), 0);
     }
@@ -6109,21 +6120,18 @@ mod tests {
     }
 
     #[test]
-    fn result_notice_tick_counts_down_then_expires() {
+    fn result_notice_expires_at_absolute_deadline() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Plugins);
+        let now = std::time::Instant::now();
         state.result_notice = Some(ActionResultNotice {
             message: "x: updated".into(),
             entry_index: Some(0),
-            ticks_remaining: 2,
+            expires_at: now + std::time::Duration::from_millis(2),
         });
-        assert!(!state.tick_result_notice(), "2 -> 1, still showing");
-        assert!(
-            !state.tick_result_notice(),
-            "1 -> 0, still showing this frame"
-        );
-        assert!(state.tick_result_notice(), "0 -> expired (redraw to erase)");
+        assert!(!state.maintain_result_notice(now), "still showing");
+        assert!(state.maintain_result_notice(now + std::time::Duration::from_millis(2)));
         assert!(state.result_notice.is_none(), "cleared after expiry");
-        assert!(!state.tick_result_notice(), "no notice -> no redraw");
+        assert!(!state.maintain_result_notice(now + std::time::Duration::from_secs(1)));
     }
 
     #[test]
@@ -6405,7 +6413,14 @@ mod tests {
     fn render_marketplace_into_buffer(state: &mut ExtensionsModalState, w: u16, h: u16) -> Buffer {
         let area = Rect::new(0, 0, w, h);
         let mut buf = Buffer::empty(area);
-        render_extensions_modal(&mut buf, area, state, None, false, 0);
+        render_extensions_modal(
+            &mut buf,
+            area,
+            state,
+            None,
+            false,
+            crate::motion::FrameStamp::default(),
+        );
         buf
     }
 
@@ -6517,7 +6532,14 @@ mod tests {
     fn render_plugins_into_buffer(state: &mut ExtensionsModalState, w: u16, h: u16) -> Buffer {
         let area = Rect::new(0, 0, w, h);
         let mut buf = Buffer::empty(area);
-        render_extensions_modal(&mut buf, area, state, None, false, 0);
+        render_extensions_modal(
+            &mut buf,
+            area,
+            state,
+            None,
+            false,
+            crate::motion::FrameStamp::default(),
+        );
         buf
     }
 

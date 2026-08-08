@@ -20,7 +20,7 @@ use layout::LayoutCache;
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use ratatui::layout::Rect;
@@ -61,14 +61,14 @@ pub struct ScrollbackState {
     next_id: u64,
 
     /// Set of currently running entry IDs.
-    /// Used for O(running) iteration in tick_running().
+    /// Used for O(running) visible animation checks.
     running: HashSet<EntryId>,
 
     /// Entry IDs whose finish-flash (accent stays bright for
     /// [`FINISH_FLASH_DURATION_MS`] after completion) may still be active.
-    /// Lets `tick()` check O(flashing) recently-finished entries instead of
-    /// scanning every entry's `finished_at` on every animation tick.
-    /// Pushed by `finish_running_with_time`, drained by `tick()` on expiry.
+    /// Lets UI-deadline maintenance check O(flashing) recently-finished entries
+    /// instead of scanning every entry's `finished_at`.
+    /// Pushed by `finish_running_with_time`, drained by [`Self::maintain`].
     flashing: Vec<EntryId>,
 
     /// Set of entry IDs with potentially stale cached heights.
@@ -167,10 +167,6 @@ pub struct ScrollbackState {
     /// Toggled by `expand_all_thinking()` (Ctrl+E) between `Expanded` and `Collapsed`.
     thinking_display_mode: DisplayMode,
 
-    // Animation
-    /// Frame tick counter for animations (increments each render tick).
-    tick: u64,
-
     // Appearance
     /// Current appearance configuration (hot-reloadable).
     appearance: AppearanceConfig,
@@ -250,7 +246,6 @@ impl ScrollbackState {
             last_width: 0,
             layout_cache: None,
             thinking_display_mode: DisplayMode::Collapsed,
-            tick: 0,
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
             gaps_may_be_dirty: false,
@@ -422,34 +417,12 @@ impl ScrollbackState {
         &self.appearance
     }
 
-    /// Current animation tick value (for spinner frame selection, etc.).
-    pub fn animation_tick(&self) -> u64 {
-        self.tick
-    }
-
-    /// Advance the animation tick counter.
-    /// Returns `true` if a redraw is needed (there are running/animated entries).
-    ///
-    /// Call this at a fixed rate (e.g., 30fps) from the main loop.
-    /// The return value tells you whether to keep ticking and whether to redraw.
-    ///
-    /// A redraw is requested only when an animated entry (running wave accent
-    /// or unexpired finish-flash) is actually inside the viewport window. An
-    /// off-screen running entry — a background task scrolled far away, or a
-    /// running entry in another tab's scrollback — must not force ~30fps full
-    /// redraws of an otherwise static screen (the frame diff would be empty;
-    /// all the layout/render work would be pure waste).
-    pub fn tick(&mut self) -> bool {
-        self.tick = self.tick.wrapping_add(1);
-
-        let mut needs_redraw = !self.running.is_empty() && self.any_running_in_viewport();
-
-        // Finish-flash: O(flashing) over recently-finished entries, not
-        // O(entries) over the whole scrollback. Emit one final redraw when a
-        // flash expires so the accent repaints in its static state (otherwise
-        // the last-painted bright frame would linger until the next event).
+    /// Expire transient scrollback UI state at an explicit UI deadline.
+    /// Returns true when a visible entry needs one final static repaint.
+    pub fn maintain(&mut self, now: Instant) -> bool {
+        let mut needs_redraw = false;
         if !self.flashing.is_empty() {
-            let flash_dur = FINISH_FLASH_DURATION_MS as u128;
+            let flash_dur = Duration::from_millis(FINISH_FLASH_DURATION_MS);
             let mut still_flashing = std::mem::take(&mut self.flashing);
             still_flashing.retain(|id| {
                 let Some(idx) = self.entries.get_index_of(id) else {
@@ -460,10 +433,8 @@ impl ScrollbackState {
                     .entries
                     .get_index(idx)
                     .and_then(|(_, e)| e.finished_at)
-                    .is_some_and(|t| t.elapsed().as_millis() < flash_dur);
-                // Redraw while the flash animates and once when it expires,
-                // but only if the entry can be seen.
-                if self.entry_index_in_viewport(idx) {
+                    .is_some_and(|t| now.saturating_duration_since(t) < flash_dur);
+                if !active && self.entry_index_in_viewport(idx) {
                     needs_redraw = true;
                 }
                 active
@@ -490,29 +461,25 @@ impl ScrollbackState {
         })
     }
 
-    /// Get the current tick counter (for animation synchronization).
-    pub fn tick_count(&self) -> u64 {
-        self.tick
-    }
-
-    /// Check if animation ticks are needed.
+    /// Check whether visible time-based pixels need motion frames.
     /// Returns `true` if there is a running entry inside the viewport window.
     /// Off-screen running entries don't need ticks — the wave phase simply
     /// resumes when they scroll back in (any scroll input re-arms the tick
-    /// via `schedule_tick`).
+    /// via the pager's visible-frame scheduler).
     ///
-    /// Finish-flashes deliberately do NOT demand ticks (matching long-standing
-    /// behavior): they animate opportunistically while ticks flow for other
-    /// reasons — `tick()` tracks them in O(flashing) and repaints once on
-    /// expiry when possible.
     /// Use this to decide whether to start the animation timer.
     pub fn needs_animation(&self) -> bool {
         !self.running.is_empty() && self.any_running_in_viewport()
     }
 
-    /// Get the current animation tick value.
-    pub fn current_tick(&self) -> u64 {
-        self.tick
+    /// Earliest finish-flash expiry, for the UI-state deadline scheduler.
+    pub fn next_ui_deadline(&self) -> Option<Instant> {
+        let duration = Duration::from_millis(FINISH_FLASH_DURATION_MS);
+        self.flashing
+            .iter()
+            .filter_map(|id| self.entries.get(id).and_then(|e| e.finished_at))
+            .filter_map(|at| at.checked_add(duration))
+            .min()
     }
 
     // Link map generation
@@ -2488,7 +2455,7 @@ mod tests {
             "running entry far above the viewport must not demand ticks"
         );
         assert!(
-            !state.tick(),
+            !state.maintain(Instant::now()),
             "tick with only off-screen running entries must not redraw"
         );
 
@@ -2500,12 +2467,12 @@ mod tests {
             state.needs_animation(),
             "running entry inside the viewport demands ticks again"
         );
-        assert!(state.tick(), "visible running entry redraws per tick");
+        assert!(!state.maintain(Instant::now()), "motion is render-only");
     }
 
-    /// `finish_running` tracks the finish-flash in the O(flashing) list:
-    /// ticks keep flowing (and redraw) while the flash is active, emit one
-    /// final repaint on expiry, then the list drains and animation stops.
+    /// `finish_running` tracks the finish-flash in the O(flashing) list. The
+    /// accent is static until its absolute expiry, so it arms one UI deadline
+    /// rather than a periodic animation frame.
     #[test]
     fn finish_flash_is_tracked_and_drained() {
         let mut state = ScrollbackState::new();
@@ -2519,19 +2486,22 @@ mod tests {
         assert_eq!(state.flashing.len(), 1, "finish tracked for the flash");
         assert!(
             !state.needs_animation(),
-            "flash alone must not demand ticks (compat: no self-driven metronome)"
+            "a static flash must not drive frames"
         );
-        assert!(state.tick(), "flash animates while ticks flow anyway");
+        assert!(
+            !state.maintain(Instant::now()),
+            "active flash has not expired"
+        );
 
-        // Sleep past FINISH_FLASH_DURATION_MS: the next tick repaints once
-        // (restoring the static accent) and drains the tracking list.
-        std::thread::sleep(std::time::Duration::from_millis(
-            FINISH_FLASH_DURATION_MS + 50,
-        ));
-        assert!(state.tick(), "one final repaint when the flash expires");
+        // The UI-state deadline repaints once and drains the tracking list.
+        let expired = Instant::now() + Duration::from_millis(FINISH_FLASH_DURATION_MS + 50);
+        assert!(
+            state.maintain(expired),
+            "one final repaint when the flash expires"
+        );
         assert!(state.flashing.is_empty(), "expired flash is drained");
         assert!(!state.needs_animation(), "nothing left to animate");
-        assert!(!state.tick(), "and ticks stop redrawing");
+        assert!(!state.maintain(expired), "and maintenance stays quiet");
     }
 
     /// Rewound/removed entries can't strand ids in the flash list.
@@ -2543,7 +2513,7 @@ mod tests {
         state.finish_running(id);
         assert_eq!(state.flashing.len(), 1);
         state.remove_entry(id);
-        state.tick();
+        state.maintain(Instant::now());
         assert!(
             state.flashing.is_empty(),
             "removed entry dropped from flash"

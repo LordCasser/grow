@@ -95,27 +95,6 @@ pub fn pick_logo(area_w: u16, area_h: u16) -> Option<&'static str> {
     }
 }
 
-/// Animation phase in seconds since the first render. Wall-clock based so the
-/// shimmer speed is independent of the frame rate.
-fn anim_phase_secs() -> f32 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_secs_f32()
-}
-
-/// Shimmer redraw cadence in frames per second. The sweep is slow, so a few fps
-/// looks smooth while sparing the long-lived welcome screen from full-rate
-/// repaints.
-const SHIMMER_FPS: f32 = 12.0;
-
-/// Quantized shimmer frame for the current wall-clock phase. The welcome screen
-/// redraws only when this advances, throttling the animation to ~`SHIMMER_FPS`
-/// rather than the full event-loop tick rate.
-pub fn shimmer_frame() -> u64 {
-    (anim_phase_secs() * SHIMMER_FPS) as u64
-}
-
 /// Per-glyph shine opacity in `[0, 1]` at normalized diagonal position `diag`
 /// (0 = bottom-left .. 1 = top-right) and animation time `secs`. A raised-cosine
 /// band sweeps bottom-left → top-right and parks off-screen between sweeps; a
@@ -143,7 +122,13 @@ fn shine_opacity(diag: f32, secs: f32) -> f32 {
     (pulse + SHINE * shine).clamp(0.0, 1.0)
 }
 
-fn render_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &str) {
+fn render_into(
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    logo: &str,
+    frame: crate::motion::FrameStamp,
+) {
     let lines: Vec<&str> = non_empty_lines(logo).collect();
     let rows = lines.len().max(1) as f32;
     let cols = lines
@@ -153,7 +138,7 @@ fn render_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &str) {
         .unwrap_or(1)
         .max(1);
     let cols_f32 = cols as f32;
-    let secs = anim_phase_secs();
+    let secs = frame.elapsed().as_secs_f32();
 
     // Blend each glyph from the resting gray toward the bright text color by its
     // shine opacity, so a sheen sweeps across the character art. Adjacent glyphs
@@ -200,17 +185,30 @@ pub fn logo_line_count(area_w: u16, area_h: u16) -> u16 {
 }
 
 /// Render the picked logo (stacked arrangement), centered into `area`.
-pub fn render_logo(area: Rect, buf: &mut Buffer, theme: &Theme, area_w: u16, area_h: u16) {
+pub fn render_logo(
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    area_w: u16,
+    area_h: u16,
+    frame: crate::motion::FrameStamp,
+) {
     if let Some(logo) = pick_logo(area_w, area_h) {
-        render_into(area, buf, theme, logo);
+        render_into(area, buf, theme, logo, frame);
     }
 }
 
 /// Render a specific logo art (centered) into `area`. Used by the hero, which
 /// picks the tier itself from its own side-by-side gates, and by the agent
 /// empty-state (Task B), which tiers via the same asset extents.
-pub(crate) fn render_logo_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &'static str) {
-    render_into(area, buf, theme, logo);
+pub(crate) fn render_logo_into(
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    logo: &'static str,
+    frame: crate::motion::FrameStamp,
+) {
+    render_into(area, buf, theme, logo, frame);
 }
 
 #[cfg(test)]

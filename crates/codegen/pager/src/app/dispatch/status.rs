@@ -180,9 +180,8 @@ pub(super) fn dispatch_open_gboom(app: &mut AppView) -> Vec<Effect> {
     }
     // Close other media modals: they share the kitty placement id. Drop the
     // image viewer's in-flight loader too (its close path clears both —
-    // a leaked rx would mis-feed the next image viewer's poll loop).
+    // a stale completion is rejected by the viewer owner id).
     agent.image_viewer = None;
-    agent.image_load_rx = None;
     agent.gboom = Some(crate::gboom::GboomState::new());
     vec![]
 }

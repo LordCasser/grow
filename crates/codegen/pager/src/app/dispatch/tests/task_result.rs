@@ -444,7 +444,10 @@ fn clipboard_failure_routes_to_originating_agent_without_duplicate() {
     );
     assert!(app.agents[&active].toast.is_none());
 
-    app.agents[&origin].toast = Some(("Couldn't save pasted image".to_owned(), 90));
+    app.agents[&origin].toast = Some((
+        "Couldn't save pasted image".to_owned(),
+        std::time::Instant::now() + std::time::Duration::from_secs(3),
+    ));
     show_clipboard_failure(
         &target,
         crate::app::actions::ClipboardPasteFailure::AlreadyReported,

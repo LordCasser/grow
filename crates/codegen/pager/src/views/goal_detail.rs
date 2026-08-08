@@ -436,7 +436,7 @@ pub fn render_goal_detail(
     buf: &mut Buffer,
     area: Rect,
     goal: &GoalDisplayState,
-    tick: usize,
+    frame_stamp: crate::motion::FrameStamp,
     context_used: Option<u64>,
     active_subagent_tokens: u64,
     close_hovered: bool,
@@ -484,7 +484,7 @@ pub fn render_goal_detail(
     let is_active = matches!(goal.status, GoalDisplayStatus::Active);
     let spinner_prefix = if is_active {
         let frames = crate::glyphs::dot_spinner_frames();
-        let frame = frames[(tick / 4) % frames.len()];
+        let frame = crate::motion::spinner_glyph(frame_stamp, frames);
         format!("{frame} ")
     } else {
         String::new()
@@ -593,7 +593,7 @@ pub fn render_goal_detail(
     // ── Budget / tokens line with optional progress bar ──
     let tokens_str =
         format_tokens_compact(goal.live_tokens_used(context_used, active_subagent_tokens));
-    let elapsed_str = format_elapsed(goal.live_elapsed_ms());
+    let elapsed_str = format_elapsed(goal.live_elapsed_ms_at(frame_stamp.now()));
 
     let (pct, budget_display) = if let Some(budget) = goal.token_budget.filter(|&b| b > 0) {
         let live = goal.live_tokens_used(context_used, active_subagent_tokens);
@@ -928,7 +928,15 @@ mod tests {
         let screen = Rect::new(0, 0, 100, 32);
         let area = goal_detail_area(screen, &goal);
         let mut buf = Buffer::empty(screen);
-        render_goal_detail(&mut buf, area, &goal, 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            crate::motion::FrameStamp::default(),
+            None,
+            0,
+            false,
+        );
         let text = buffer_text(&buf);
         assert!(text.contains("Plan r4 (objective r2):"));
         assert!(text.contains("- [x] implementation"));

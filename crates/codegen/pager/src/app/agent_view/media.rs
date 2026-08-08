@@ -32,7 +32,6 @@ impl AgentView {
                     let _ = clear.write_to(stderr);
                 });
                 self.image_viewer = None;
-                self.image_load_rx = None;
                 // The viewer's decoded/re-encoded overlay image (tens of MB
                 // for screenshots/renders) just dropped; input path, so a
                 // synchronous purge lands between interactions.

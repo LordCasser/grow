@@ -322,7 +322,13 @@ fn topic_body(content: &str) -> &str {
 }
 
 /// Render the tutorial overlay (list or topic screen) over `area`.
-pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bool) {
+pub fn render_tutorial(
+    buf: &mut Buffer,
+    area: Rect,
+    st: &mut TutorialState,
+    compact: bool,
+    frame: crate::motion::FrameStamp,
+) {
     let theme = Theme::current();
     match st.screen {
         TutorialScreen::Topic { index } => {
@@ -391,11 +397,18 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
                 &theme,
             );
         }
-        TutorialScreen::List => render_list(buf, area, st, compact, &theme),
+        TutorialScreen::List => render_list(buf, area, st, compact, &theme, frame),
     }
 }
 
-fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bool, theme: &Theme) {
+fn render_list(
+    buf: &mut Buffer,
+    area: Rect,
+    st: &mut TutorialState,
+    compact: bool,
+    theme: &Theme,
+    frame: crate::motion::FrameStamp,
+) {
     let progress = format!("{}/{} explored", st.viewed.len(), TUTORIAL_TOPICS.len());
     let shortcuts = [
         Shortcut {
@@ -508,7 +521,7 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
         &[],
         Some(theme.bg_base),
         false,
-        0,
+        frame,
         mca.inner_x + mca.inner_width.saturating_sub(1),
     );
     st.picker.hit_areas = Some(PickerHitAreas {
@@ -673,7 +686,13 @@ mod tests {
         let mut st = TutorialState::new();
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
-        render_tutorial(&mut buf, area, &mut st, false);
+        render_tutorial(
+            &mut buf,
+            area,
+            &mut st,
+            false,
+            crate::motion::FrameStamp::default(),
+        );
         let hit = st.picker.hit_areas.as_ref().expect("hit areas populated");
         assert_eq!(
             hit.item_rects.len(),
@@ -688,6 +707,12 @@ mod tests {
         st.open_topic(0);
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
-        render_tutorial(&mut buf, area, &mut st, false);
+        render_tutorial(
+            &mut buf,
+            area,
+            &mut st,
+            false,
+            crate::motion::FrameStamp::default(),
+        );
     }
 }

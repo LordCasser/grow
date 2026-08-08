@@ -57,6 +57,7 @@ use std::time::Instant;
 fn test_app() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
+        motion_origin: Instant::now(),
         active_view: ActiveView::Welcome,
         agents: IndexMap::new(),
         next_agent_id: 0,
@@ -79,7 +80,6 @@ fn test_app() -> AppView {
         notification_service: crate::notifications::NotificationService::new(Default::default()),
         pending_notification_escapes: None,
         deferred_notification: None,
-        tracing_rx: None,
         active_announcements: vec![],
         hidden_announcement_ids: Default::default(),
         announcement: None,
@@ -148,8 +148,6 @@ fn test_app() -> AppView {
         session_picker_list_seq: 0,
         session_picker_detail_generation: 0,
         session_picker_entries_query: None,
-        welcome_tick: 0,
-        welcome_shimmer_frame: 0,
         startup_warnings: Vec::new(),
         pending_update_version: None,
         quit_for_update: false,

@@ -306,21 +306,19 @@ impl TodoPane {
         self.prev_counts
     }
 
-    /// Whether the badge flash animation is currently active.
-    pub fn badge_flash_active(&self) -> bool {
-        self.badge_flash_until.is_some_and(|t| Instant::now() < t)
+    /// Whether the static badge flash is active at this frame's time sample.
+    pub fn badge_flash_active_at(&self, now: Instant) -> bool {
+        self.badge_flash_until.is_some_and(|t| now < t)
     }
 
-    /// Whether the badge needs animation ticks (flash expiry).
-    pub fn badge_needs_tick(&self) -> bool {
-        self.badge_flash_until.is_some()
+    pub fn badge_deadline(&self) -> Option<Instant> {
+        self.badge_flash_until
     }
 
-    /// Advance badge flash timer. Returns `true` if a redraw is needed
-    /// (flash just expired).
-    pub fn badge_tick(&mut self) -> bool {
+    /// Expire the static badge flash at its absolute deadline.
+    pub fn maintain_badge(&mut self, now: Instant) -> bool {
         if let Some(t) = self.badge_flash_until
-            && Instant::now() >= t
+            && now >= t
         {
             self.badge_flash_until = None;
             return true;
@@ -329,7 +327,7 @@ impl TodoPane {
     }
 
     /// Test-only: backdate an armed badge flash so it reads as expired, letting
-    /// a single `badge_tick()` clear it deterministically (no 1200ms sleep).
+    /// a single maintenance pass clears it deterministically.
     #[cfg(test)]
     pub(crate) fn expire_badge_flash_for_test(&mut self) {
         if self.badge_flash_until.is_some() {

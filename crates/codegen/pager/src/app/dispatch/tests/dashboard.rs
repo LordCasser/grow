@@ -700,8 +700,12 @@ fn dashboard_second_stash_does_not_overwrite_first() {
     app.project_picker_shown = true;
     open_dashboard(&mut app);
     let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
-    let fields = crate::views::dashboard::peek::compute_peek_fields(&row, &app.agents)
-        .expect("agent must be peekable");
+    let fields = crate::views::dashboard::peek::compute_peek_fields(
+        &row,
+        &app.agents,
+        std::time::Instant::now(),
+    )
+    .expect("agent must be peekable");
     if let Some(d) = app.dashboard.as_mut() {
         d.focus_row(row.clone());
         d.peek = Some(crate::views::dashboard::peek::PeekPanelState::new(
@@ -4652,7 +4656,8 @@ fn dashboard_question_answer_walks_multiple_questions() {
     app.agents.get_mut(&AgentId(0)).unwrap().question_view = Some(qv);
     open_dashboard(&mut app);
     let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
-    let fields = compute_peek_fields(&row, &app.agents).expect("ask surfaced");
+    let fields =
+        compute_peek_fields(&row, &app.agents, std::time::Instant::now()).expect("ask surfaced");
     assert!(fields.question.as_deref().unwrap().starts_with("(1/2)"));
     assert!(fields.request_id.is_none());
     assert_eq!(fields.reject_option, Some(2));

@@ -3,7 +3,7 @@
 //! A thin `tokio::select!` loop. All input routing, rendering, and state
 //! management is delegated to [`AppView`]. The event loop only handles
 //! IO plumbing: terminal events, ACP channel, spawned task results,
-//! animation ticks, and hot-reloadable config changes.
+//! independent motion/UI/lifecycle/scroll deadlines, and hot-reloadable config changes.
 
 use std::time::Duration;
 
@@ -736,10 +736,8 @@ pub(crate) async fn run(
     >,
     mut writer_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
 ) -> anyhow::Result<RunResult> {
-    // Initialize tracing capture. The channel `rx` will be wired to a
-    // TracingModel (and ultimately a tracing pane) once integrated.
-    // For now we drain-and-discard in `AppView::tick()` to avoid unbounded
-    // memory growth.
+    // Initialize tracing capture. Until the tracing pane is integrated, its
+    // completion channel is drained directly by the event loop.
     if args.log_sampling {
         // SAFETY: called before any threads are spawned by init_tracing.
         unsafe { std::env::set_var("GROW_LOG_SAMPLING", "1") };
@@ -753,7 +751,8 @@ pub(crate) async fn run(
         connection.models,
         connection.available_commands,
     );
-    app.tracing_rx = Some(tracing_handle.rx);
+    let mut tracing_rx = tracing_handle.rx;
+    let mut tracing_open = true;
     // Startup terminal height for the auto-compact derivation; kept fresh by
     // `Event::Resize` from here on. 0 (probe failure) never forces compact.
     app.last_known_terminal_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(0);
@@ -1279,9 +1278,12 @@ pub(crate) async fn run(
     let connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
-    // Animation tick: only scheduled when there are running entries.
+    // Independent clocks: motion only requests frames; transient UI state and
+    // session lifecycle each have their own reducer deadline.
     let mut tick_interval = tick_interval;
-    let mut animation_tick_at: Option<Instant> = None;
+    let mut animation_deadline: Option<Instant> = None;
+    let mut ui_state_deadline: Option<Instant> = None;
+    let mut simulation_deadline: Option<Instant> = None;
 
     // Whether the extra Kitty keyboard layer (WASD release events) is
     // currently pushed for the /gboom game. Synced to `gboom_active` each
@@ -1468,9 +1470,11 @@ pub(crate) async fn run(
         }
     }
 
-    // Schedule the first animation tick so live updates start immediately
+    // Schedule the first visible animation frame so live updates start immediately
     // (without waiting for user input).
-    schedule_tick(&mut animation_tick_at, &app, tick_interval);
+    schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
+    schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
+    schedule_simulation(&mut simulation_deadline, &app, tick_interval);
 
     // Resize debounce: during continuous terminal drags, dozens of resize
     // events fire per second. Each would trigger a full layout rebuild of all
@@ -1521,6 +1525,9 @@ pub(crate) async fn run(
     crate::app::signal_handler::set_quit_notify(quit_notify.clone());
 
     loop {
+        schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
+        schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
+        schedule_simulation(&mut simulation_deadline, &app, tick_interval);
         // Pending $EDITOR / $PAGER suspends first: they can be armed by ANY
         // arm of the select below (input, ticks — e.g. minimal's incremental
         // /transcript build finishing inside a tick draw — tasks, ACP), so
@@ -1569,10 +1576,32 @@ pub(crate) async fn run(
             roster_poll_at = Some(Instant::now());
         }
 
-        // Future that sleeps until the next animation tick, or waits forever if none.
-        let animation_tick = async {
-            match animation_tick_at {
+        // Future that sleeps until the next visible frame, or parks if none.
+        let animation_frame = async {
+            match animation_deadline {
                 Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+
+        let ui_state_maintenance = async {
+            match ui_state_deadline {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+
+        let simulation_frame = async {
+            match simulation_deadline {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+
+        let lifecycle_tick_at = dispatch::next_prompt_watchdog_deadline(&app);
+        let lifecycle_tick = async {
+            match lifecycle_tick_at {
+                Some(at) => sleep_until(at.into()).await,
                 None => std::future::pending().await,
             }
         };
@@ -1686,16 +1715,29 @@ pub(crate) async fn run(
                 let Some(msg) = msg else { break };
                 // A continuously-ready ACP stream must not outrank an expired
                 // animation deadline. Check once before every bounded batch.
-                if take_due_animation_tick(&mut animation_tick_at, Instant::now()) {
-                    let (should_quit, needs_draw) =
-                        advance_animation_tick(&mut app, &mut tasks);
-                    if should_quit {
-                        break;
-                    }
-                    if needs_draw {
+                if take_due_deadline(&mut animation_deadline, Instant::now()) {
+                    presenter.request(false);
+                    schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
+                }
+                let now = Instant::now();
+                if take_due_deadline(&mut ui_state_deadline, now) {
+                    if app.maintain_ui(now.into_std()) {
                         presenter.request(false);
                     }
-                    schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                    schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
+                }
+                if take_due_deadline(&mut simulation_deadline, now) {
+                    if app.advance_simulation() {
+                        presenter.request(false);
+                    }
+                    schedule_simulation(&mut simulation_deadline, &app, tick_interval);
+                }
+                if lifecycle_deadline_due(lifecycle_tick_at, now.into_std())
+                    && let Some(effs) =
+                        dispatch::poll_stalled_prompt_submissions(&mut app, now.into_std())
+                    && process_effects(effs, &mut tasks, &mut app)
+                {
+                    break;
                 }
                 let mut state_changed = acp_handler::handle(msg, &mut app);
                 if !app.pending_effects.is_empty() {
@@ -1725,14 +1767,12 @@ pub(crate) async fn run(
                 }
 
                 if state_changed {
-                    schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                    schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
                     resize_debounce_at = None;
                     // Cap paint rate so terminal input isn't starved during
                     // heavy ACP streaming.
                     let now = Instant::now();
-                    if presenter.request_throttled(now, min_draw_interval) {
-                        app.update_notifications();
-                    }
+                    presenter.request_throttled(now, min_draw_interval);
                 }
             }
 
@@ -1743,7 +1783,7 @@ pub(crate) async fn run(
                         if process_effects(effs, &mut tasks, &mut app) {
                             break;
                         }
-                        schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                        schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
                         resize_debounce_at = None;
 
                         presenter.request(false);
@@ -1805,10 +1845,10 @@ pub(crate) async fn run(
                 // Opportunistic clipboard-image poll: this iteration already ran
                 // for input / FocusGained / resize, so ride it (throttled,
                 // changeCount-first). Never scheduled by a timer — an idle app
-                // polls zero times. Run before schedule_tick so a freshly shown
-                // tip's TTL arms the animation ticks that later clear it.
+                // polls zero times. Run before schedule_animation_frame so a freshly shown
+                // tip expiry arms UI maintenance that later clears it.
                 let tip_shown = app.poll_clipboard_focus_tip();
-                schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
                 if result.needs_draw || tip_shown {
                     if result.force_repaint {
                         // Refocus heal wins over the resize debounce: a coalesced same-size
@@ -1835,7 +1875,7 @@ pub(crate) async fn run(
             _ = resize_debounce => {
                 resize_debounce_at = None;
                 presenter.request(false);
-                schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
             }
 
             // Deferred draw: fires when an ACP-triggered draw was throttled.
@@ -1860,22 +1900,50 @@ pub(crate) async fn run(
                 }
                 // Scroll dispatch can start work that animates (e.g. viewport
                 // state), so keep the animation arm in sync too.
-                schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
             }
 
-            _ = animation_tick => {
-                animation_tick_at = None;
-                let (should_quit, needs_draw) =
-                    advance_animation_tick(&mut app, &mut tasks);
-                if should_quit {
-                    break;
-                }
-                if needs_draw {
+            _ = animation_frame => {
+                animation_deadline = None;
+                presenter.request(false);
+                schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
+            }
+
+            _ = ui_state_maintenance => {
+                ui_state_deadline = None;
+                if app.maintain_ui(Instant::now().into_std()) {
                     presenter.request(false);
                 }
-                // Keep ticking as long as there are running animations
-                // or pending actions waiting to expire.
-                schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                if !app.pending_effects.is_empty() {
+                    let effects = std::mem::take(&mut app.pending_effects);
+                    if process_effects(effects, &mut tasks, &mut app) {
+                        break;
+                    }
+                }
+                schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
+            }
+
+            _ = simulation_frame => {
+                simulation_deadline = None;
+                if app.advance_simulation() {
+                    presenter.request(false);
+                }
+                schedule_simulation(&mut simulation_deadline, &app, tick_interval);
+            }
+
+            trace = tracing_rx.recv(), if tracing_open => {
+                if trace.is_none() {
+                    tracing_open = false;
+                }
+            }
+
+            _ = lifecycle_tick => {
+                if let Some(effs) =
+                    dispatch::poll_stalled_prompt_submissions(&mut app, Instant::now().into_std())
+                    && process_effects(effs, &mut tasks, &mut app)
+                {
+                    break;
+                }
             }
 
             _ = roster_poll => {
@@ -2291,6 +2359,7 @@ pub(crate) async fn run(
 
         }
 
+        app.reconcile_activity_phases(Instant::now().into_std());
         presenter.present_if_dirty(&mut app, terminal);
     }
 
@@ -2299,31 +2368,20 @@ pub(crate) async fn run(
     Ok(make_run_result(&app))
 }
 
-/// Advance all animation-driven state exactly once.
-fn advance_animation_tick(app: &mut AppView, tasks: &mut JoinSet<TaskResult>) -> (bool, bool) {
-    // UI animation is independent from the submission watchdog. A stalled
-    // prompt can produce effects on every tick; skipping `app.tick()` in that
-    // branch froze every other spinner while elapsed time kept advancing.
-    let mut needs_redraw = app.tick();
-    if let Some(effs) = dispatch::poll_stalled_prompt_submissions(app) {
-        let should_quit = process_effects(effs, tasks, app);
-        needs_redraw = true;
-        (should_quit, needs_redraw)
-    } else {
-        (false, needs_redraw)
-    }
-}
-
 /// Atomically claim an expired animation deadline. The ACP arm calls this
 /// before every bounded drain, so a continuously-ready stream cannot starve
 /// animation indefinitely.
-fn take_due_animation_tick(tick_at: &mut Option<Instant>, now: Instant) -> bool {
+fn take_due_deadline(tick_at: &mut Option<Instant>, now: Instant) -> bool {
     if tick_at.is_some_and(|deadline| now >= deadline) {
         *tick_at = None;
         true
     } else {
         false
     }
+}
+
+fn lifecycle_deadline_due(deadline: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    deadline.is_some_and(|deadline| now >= deadline)
 }
 
 /// Load `UiConfig` from the shell's layered config at startup.
@@ -2405,24 +2463,46 @@ fn should_pregenerate_away_recap(app: &AppView) -> bool {
     })
 }
 
-/// Schedule the next animation tick when demanded and none is pending.
-fn schedule_tick(tick_at: &mut Option<Instant>, app: &AppView, interval: Duration) {
-    if tick_at.is_none() {
-        let interval = match app.tick_demand() {
-            crate::app::app_view::TickDemand::None => return,
-            // A view can request a faster cadence than the configured
-            // animation fps (e.g. the /gboom easter egg targets ~30 fps).
-            crate::app::app_view::TickDemand::Fast => match app.tick_interval_ceiling() {
-                Some(ceiling) => interval.min(ceiling),
-                None => interval,
-            },
-            // Only low-frequency work (welcome shimmer, Cmd link poll):
-            // don't spin the full 30fps loop for it.
-            crate::app::app_view::TickDemand::Slow => {
-                interval.max(crate::app::app_view::SLOW_TICK_INTERVAL)
-            }
-        };
-        *tick_at = Some(Instant::now() + interval);
+/// Keep the visible-frame deadline aligned to the shared motion origin.
+fn schedule_animation_frame(deadline: &mut Option<Instant>, app: &AppView, cap: Duration) {
+    let now = Instant::now();
+    if deadline.is_some_and(|at| at <= now) {
+        return;
+    }
+    let Some(interval) = app.visible_frame_interval(cap) else {
+        *deadline = None;
+        return;
+    };
+    let candidate: Instant =
+        crate::motion::next_aligned_deadline(app.motion_origin, now.into_std(), interval).into();
+    if deadline.is_none_or(|current| candidate < current) {
+        *deadline = Some(candidate);
+    }
+}
+
+fn schedule_ui_maintenance(deadline: &mut Option<Instant>, app: &mut AppView, interval: Duration) {
+    let now = Instant::now();
+    if deadline.is_some_and(|at| at <= now) {
+        return;
+    }
+    *deadline = app
+        .next_ui_deadline(now.into_std(), interval)
+        .map(Into::into);
+}
+
+fn schedule_simulation(deadline: &mut Option<Instant>, app: &AppView, cap: Duration) {
+    let now = Instant::now();
+    if deadline.is_some_and(|at| at <= now) {
+        return;
+    }
+    let Some(interval) = app.simulation_frame_interval(cap) else {
+        *deadline = None;
+        return;
+    };
+    let candidate: Instant =
+        crate::motion::next_aligned_deadline(app.motion_origin, now.into_std(), interval).into();
+    if deadline.is_none_or(|current| candidate < current) {
+        *deadline = Some(candidate);
     }
 }
 
@@ -3096,7 +3176,7 @@ mod tests {
         // helper once per bounded batch before consuming that batch.
         for batch in 0..3 {
             let now = start + Duration::from_millis(batch as u64);
-            if take_due_animation_tick(&mut deadline, now) {
+            if take_due_deadline(&mut deadline, now) {
                 break;
             }
             messages_before_tick += ACP_DRAIN_BATCH_MAX;
@@ -3104,6 +3184,29 @@ mod tests {
 
         assert_eq!(messages_before_tick, ACP_DRAIN_BATCH_MAX);
         assert!(deadline.is_none());
+    }
+
+    #[test]
+    fn simultaneous_animation_and_ui_deadlines_are_both_claimed() {
+        let now = Instant::now();
+        let mut animation = Some(now);
+        let mut ui_state = Some(now);
+
+        assert!(take_due_deadline(&mut animation, now));
+        assert!(take_due_deadline(&mut ui_state, now));
+        assert!(animation.is_none());
+        assert!(ui_state.is_none());
+    }
+
+    #[test]
+    fn simultaneous_animation_and_lifecycle_deadlines_are_independent() {
+        let now = Instant::now();
+        let mut animation = Some(now);
+        let lifecycle = Some(now.into_std());
+
+        assert!(take_due_deadline(&mut animation, now));
+        assert!(lifecycle_deadline_due(lifecycle, now.into_std()));
+        assert!(animation.is_none());
     }
 
     #[test]

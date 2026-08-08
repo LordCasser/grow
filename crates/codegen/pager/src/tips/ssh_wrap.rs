@@ -9,6 +9,7 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::time::Duration;
 
 use super::EphemeralTip;
 use crate::theme::Theme;
@@ -22,11 +23,11 @@ pub(crate) const SSH_WRAP_TIP_SEEN_KEY: &str = "ssh_wrap_tip_shown_count";
 /// Stop showing after this many shows within a single session.
 const SSH_WRAP_TIP_SEEN_CAP: u32 = 1;
 
-/// Tip lifetime (~10 s at the 30 fps animation cadence). The default ~3 s
+/// Tip lifetime. The default 3 s
 /// window suits glanceable notices; this one carries a command the user is
 /// meant to read and act on, so it gets a longer window. Ambient bounds it:
 /// the TTL pauses while occluded instead of burning off-screen.
-pub(crate) const SSH_WRAP_TIP_TICKS: u16 = 300;
+pub(crate) const SSH_WRAP_TIP_DURATION: Duration = Duration::from_secs(10);
 
 /// Build the `/doctor` discovery notice, seen-gated to
 /// [`SSH_WRAP_TIP_SEEN_CAP`] show per session. It is about the transport, not
@@ -39,7 +40,7 @@ pub fn ssh_wrap_tip() -> EphemeralTip {
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
     EphemeralTip {
-        ticks_remaining: SSH_WRAP_TIP_TICKS,
+        lifetime: SSH_WRAP_TIP_DURATION,
         ..EphemeralTip::new(
             SSH_WRAP_TIP_KEY,
             Line::from(vec![
@@ -76,10 +77,10 @@ mod tests {
     #[test]
     fn ssh_wrap_tip_outlives_default_ttl() {
         let tip = ssh_wrap_tip();
-        assert_eq!(tip.ticks_remaining, SSH_WRAP_TIP_TICKS);
+        assert_eq!(tip.lifetime, SSH_WRAP_TIP_DURATION);
         // Read-and-act copy needs more than the glanceable default window.
         assert!(
-            tip.ticks_remaining > super::super::DEFAULT_TIP_TICKS,
+            tip.lifetime > super::super::DEFAULT_TIP_DURATION,
             "ssh wrap tip must outlive the default TTL"
         );
     }

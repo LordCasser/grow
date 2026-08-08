@@ -507,12 +507,9 @@ pub struct DashboardState {
     /// within [`CONFIRM_WINDOW`] deletes it (see [`Self::armed_delete_row`]);
     /// otherwise it lapses. Cleared on any focus change.
     pub delete_confirm: Option<(DashboardRowId, Instant)>,
-    /// Tick counter for spinner animation. The
-    /// counter is bumped by [`crate::app::app_view::AppView::tick`]
-    /// (NOT the renderer, which is read-only).
-    /// `SPINNER_DIVISOR` divides the index so the on-screen
-    /// animation stays under 10 Hz at the ~30 Hz tick rate.
-    pub spinner_tick: u64,
+    /// Shared monotonic sample installed by the app before this frame renders.
+    /// Transient render context; never persisted and never advanced by events.
+    pub motion_frame: crate::motion::FrameStamp,
     /// Last frame's row layout — hit areas keyed by row id. Used by
     /// mouse handling to map (col, row) → row id without scanning the
     /// row list a second time.
@@ -1341,7 +1338,7 @@ impl DashboardState {
             rename: None,
             error_toast: None,
             delete_confirm: None,
-            spinner_tick: 0,
+            motion_frame: crate::motion::FrameStamp::default(),
             row_rects: Vec::new(),
             row_delete_rects: Vec::new(),
             hovered_delete: None,

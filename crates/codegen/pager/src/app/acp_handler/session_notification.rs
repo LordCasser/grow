@@ -1254,7 +1254,7 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
             if status == Some("rejected")
                 && let Some(message) = change.get("message").and_then(serde_json::Value::as_str)
             {
-                agent.show_toast_ticks(message, 30);
+                agent.show_toast_for(message, std::time::Duration::from_millis(990));
             }
         }
     } else {

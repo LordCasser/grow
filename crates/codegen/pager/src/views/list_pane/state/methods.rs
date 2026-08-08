@@ -218,16 +218,15 @@ impl ListPaneState {
             .is_some_and(|t| std::time::Instant::now() < t)
     }
 
-    /// Whether the pane needs animation ticks (for toast expiry).
-    pub fn needs_tick(&self) -> bool {
-        self.copy_toast_until.is_some()
+    pub fn copy_toast_deadline(&self) -> Option<std::time::Instant> {
+        self.copy_toast_until
     }
 
     /// Advance time-based state. Returns `true` if a redraw is needed
     /// (e.g., toast just expired).
-    pub fn tick(&mut self) -> bool {
+    pub fn maintain(&mut self, now: std::time::Instant) -> bool {
         if let Some(t) = self.copy_toast_until
-            && std::time::Instant::now() >= t
+            && now >= t
         {
             self.copy_toast_until = None;
             return true; // toast just expired, need redraw

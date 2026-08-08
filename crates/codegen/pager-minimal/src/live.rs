@@ -93,7 +93,11 @@ pub(super) fn prompt_style(
     }
 }
 /// Draw the pinned live region (tail + status + prompt) into the inline viewport.
-pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
+pub fn draw_live(
+    app: &mut AppView,
+    terminal: &mut PagerTerminal,
+    frame_stamp: pager::motion::FrameStamp,
+) {
     let force_todos = minimal_api::minimal_show_todos(app);
     let auth_hint = crate::startup::minimal_startup_hint(&app.trust_state);
     let pending_hint = minimal_pending_hint(&app.pending_action);
@@ -146,15 +150,15 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         let show_todos = crate::todo::todo_panel_visible(agent, force_todos);
         let queued = agent.session.pending_prompts.len() + agent.shared_queue.len();
         if let Some(kind) = super::panel::active(agent) {
-            let cursor = super::panel::render(frame.buffer_mut(), area, agent, kind, &theme);
+            let cursor =
+                super::panel::render(frame.buffer_mut(), area, agent, kind, &theme, frame_stamp);
             return (cursor, None);
         }
         if super::overlay::app_modal_active(agent) {
-            super::overlay::render_app_modal(frame.buffer_mut(), area, agent, compact);
+            super::overlay::render_app_modal(frame.buffer_mut(), area, agent, compact, frame_stamp);
             return (None, None);
         }
         if minimal_api::extensions_modal(agent).is_some() {
-            let tick = (now_millis() / 100) as u64;
             if let Some(state) = minimal_api::extensions_modal_mut(agent) {
                 pager::views::extensions_modal::render_extensions_modal(
                     frame.buffer_mut(),
@@ -162,7 +166,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                     state,
                     None,
                     compact,
-                    tick,
+                    frame_stamp,
                 );
             }
             return (None, None);
@@ -174,7 +178,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 .min(area.height.saturating_sub(status_h))
                 .max(1);
             let tail_h = area.height.saturating_sub(status_h + modal_h);
-            let tick = (now_millis() / 100) as u64;
+            let tick = pager::motion::base_tick(frame_stamp);
             if tail_h > 0 {
                 let turn_running = agent.session.state.is_turn_running();
                 draw_tail(
@@ -208,6 +212,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 &status_activity,
                 transcript_progress,
                 &theme,
+                frame_stamp,
             );
             let modal_area = Rect {
                 x: area.x,
@@ -261,7 +266,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         let todos_h = (todo_lines.len() as u16).min(after_btw);
         let btw_h = btw_desired;
         let tail_h = rest.saturating_sub(todos_h + btw_h);
-        let tick = agent.scrollback.animation_tick();
+        let tick = pager::motion::base_tick(frame_stamp);
         if tail_h > 0 {
             let tail_area = Rect {
                 x: area.x,
@@ -312,7 +317,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 frame.buffer_mut(),
                 btw,
                 btw_area,
-                tick,
+                frame_stamp,
                 focused,
                 None,
                 &mut agent.last_btw_selection_model,
@@ -337,6 +342,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
             &status_activity,
             transcript_progress,
             &theme,
+            frame_stamp,
         );
         let prompt_area = Rect {
             x: area.x,
@@ -477,20 +483,12 @@ fn draw_tail(
         }
     }
 }
-/// Resolve the current turn activity and advance the phase timer when it
-/// changes. The full TUI runs this inside its own `draw` (reset
-/// `activity_started_at` on every phase transition); minimal has a separate
-/// draw path, so it must drive the same logic or the phase timer would never
-/// reset. Returns the resolved activity for [`render_minimal_status`].
+/// Resolve the current turn activity. Phase transitions are reconciled by the
+/// pager reducer before rendering, identically for visible and hidden agents.
 fn minimal_advance_phase_timer(
     agent: &mut pager::app::agent_view::AgentView,
 ) -> Option<pager::acp::tracker::TurnActivity> {
-    let activity = minimal_api::resolve_turn_activity(agent);
-    if activity.as_ref() != minimal_api::last_activity(agent) {
-        agent.activity_started_at = Some(std::time::Instant::now());
-        minimal_api::set_last_activity(agent, activity.clone());
-    }
-    activity
+    minimal_api::resolve_turn_activity(agent)
 }
 /// Render the one-line minimal status indicator above the prompt.
 ///
@@ -510,6 +508,7 @@ fn render_minimal_status(
     activity: &Option<pager::acp::tracker::TurnActivity>,
     transcript_progress: Option<(usize, usize)>,
     theme: &Theme,
+    frame: pager::motion::FrameStamp,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -546,9 +545,9 @@ fn render_minimal_status(
         turn_status::TurnStatusArgs {
             state: &agent.session.state,
             activity,
-            turn_elapsed: agent.turn_elapsed(),
+            turn_elapsed: agent.turn_elapsed_at(frame.now()),
             activity_started_at: agent.activity_started_at,
-            tick: agent.scrollback.animation_tick(),
+            frame,
             drain_blocked,
             buttons: None,
             has_running_execute: false,
@@ -741,12 +740,6 @@ pub(super) fn tail_height(
     }
     total
 }
-fn now_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,7 +854,15 @@ mod tests {
         pager::app::set_minimal_show_switch_back_to_fullscreen_for_test(false);
         let a = agent();
         let mut buf = Buffer::empty(area);
-        render_minimal_status(&mut buf, area, &a, &None, None, &theme);
+        render_minimal_status(
+            &mut buf,
+            area,
+            &a,
+            &None,
+            None,
+            &theme,
+            pager::motion::FrameStamp::default(),
+        );
         let idle = read(&buf);
         assert!(idle.contains("/help"), "idle hint: {idle:?}");
         assert!(
@@ -870,7 +871,15 @@ mod tests {
         );
         pager::app::set_minimal_show_switch_back_to_fullscreen_for_test(true);
         let mut buf = Buffer::empty(area);
-        render_minimal_status(&mut buf, area, &a, &None, None, &theme);
+        render_minimal_status(
+            &mut buf,
+            area,
+            &a,
+            &None,
+            None,
+            &theme,
+            pager::motion::FrameStamp::default(),
+        );
         let switched = read(&buf);
         assert!(
             switched.contains("/fullscreen to go back"),
@@ -887,6 +896,7 @@ mod tests {
             &Some(TurnActivity::Responding),
             None,
             &theme,
+            pager::motion::FrameStamp::default(),
         );
         let text = read(&buf);
         assert!(text.contains("Responding"), "rich activity: {text:?}");
@@ -902,6 +912,7 @@ mod tests {
             }),
             None,
             &theme,
+            pager::motion::FrameStamp::default(),
         );
         assert!(read(&buf).contains("Retrying"), "retry: {:?}", read(&buf));
     }
@@ -931,7 +942,15 @@ mod tests {
         );
         assert_eq!(minimal_api::watchers(&a).loops, 1);
         let mut buf = Buffer::empty(area);
-        render_minimal_status(&mut buf, area, &a, &None, None, &theme);
+        render_minimal_status(
+            &mut buf,
+            area,
+            &a,
+            &None,
+            None,
+            &theme,
+            pager::motion::FrameStamp::default(),
+        );
         let text = read(&buf);
         assert!(
             text.contains("1 loop still running"),

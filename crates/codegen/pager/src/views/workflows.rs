@@ -94,13 +94,17 @@ impl WorkflowRunSnapshot {
         self.agents.iter().filter(|a| a.state == "running").count()
     }
 
-    pub fn live_elapsed_ms(&self) -> u64 {
+    pub fn live_elapsed_ms_at(&self, now: std::time::Instant) -> u64 {
         let base = self.elapsed_ms;
         if self.is_active() {
-            base.saturating_add(self.received_at.elapsed().as_millis() as u64)
+            base.saturating_add(now.saturating_duration_since(self.received_at).as_millis() as u64)
         } else {
             base
         }
+    }
+
+    pub fn live_elapsed_ms(&self) -> u64 {
+        self.live_elapsed_ms_at(std::time::Instant::now())
     }
 
     pub fn agents_in_phase(&self, phase: Option<&str>) -> Vec<&WorkflowAgentRowView> {
@@ -531,7 +535,7 @@ pub fn render_workflows(
     area: Rect,
     runs: &[&WorkflowRunSnapshot],
     state: &mut WorkflowsViewState,
-    tick: usize,
+    frame: crate::motion::FrameStamp,
     live: &WorkflowAgentLiveMap,
 ) -> Option<Rect> {
     use crate::views::modal_window::{ModalWindowConfig, render_modal_window};
@@ -559,8 +563,8 @@ pub fn render_workflows(
     let inner = content.content;
 
     match state.detail_run(runs) {
-        Some(run) => render_detail(buf, inner, run, state, tick, &theme, live),
-        None => render_list(buf, inner, runs, state, &theme),
+        Some(run) => render_detail(buf, inner, run, state, frame, &theme, live),
+        None => render_list(buf, inner, runs, state, frame, &theme),
     }
     state.window.popup_area
 }
@@ -570,6 +574,7 @@ fn render_list(
     inner: Rect,
     runs: &[&WorkflowRunSnapshot],
     state: &mut WorkflowsViewState,
+    frame: crate::motion::FrameStamp,
     theme: &Theme,
 ) {
     let mut y = inner.y;
@@ -623,7 +628,7 @@ fn render_list(
             run.done_agents(),
             run.agents.len(),
             if run.agents.len() == 1 { "" } else { "s" },
-            format_elapsed(run.live_elapsed_ms()),
+            format_elapsed(run.live_elapsed_ms_at(frame.now())),
         );
         let label = format!(
             "{} — {}",
@@ -672,7 +677,7 @@ fn render_detail(
     inner: Rect,
     run: &WorkflowRunSnapshot,
     state: &mut WorkflowsViewState,
-    tick: usize,
+    frame: crate::motion::FrameStamp,
     theme: &Theme,
     live: &WorkflowAgentLiveMap,
 ) {
@@ -680,7 +685,7 @@ fn render_detail(
     let (glyph, glyph_style) = status_glyph_and_style(&run.status, theme);
     let spinner = if run.is_active() {
         let frames = crate::glyphs::dot_spinner_frames();
-        format!("{} ", frames[(tick / 4) % frames.len()])
+        format!("{} ", crate::motion::spinner_glyph(frame, frames))
     } else {
         format!("{glyph} ")
     };
@@ -689,7 +694,7 @@ fn render_detail(
         run.done_agents(),
         run.agents.len(),
         if run.agents.len() == 1 { "" } else { "s" },
-        format_elapsed(run.live_elapsed_ms()),
+        format_elapsed(run.live_elapsed_ms_at(frame.now())),
     );
     let meta_w = unicode_width::UnicodeWidthStr::width(meta.as_str()) as u16;
     let meta_x = inner.right().saturating_sub(meta_w + 1);
@@ -994,7 +999,7 @@ fn render_detail(
         let (glyph, glyph_style) = if running {
             let frames = crate::glyphs::dot_spinner_frames();
             (
-                frames[(tick / 4) % frames.len()],
+                crate::motion::spinner_glyph(frame, frames),
                 Style::default().fg(theme.accent_plan),
             )
         } else {
@@ -1155,7 +1160,7 @@ mod tests {
             area,
             runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         buf_text(&buf, area)
@@ -1222,7 +1227,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         let text = buf_text(&buf, area);
@@ -1245,7 +1250,7 @@ mod tests {
             narrow,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         let text = buf_text(&buf, narrow);
@@ -1283,7 +1288,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
     }
@@ -1304,7 +1309,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         let text = buf_text(&buf, area);
@@ -1424,7 +1429,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         assert_eq!(
@@ -1448,7 +1453,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         assert!(state.run_hits.is_empty());
@@ -1478,7 +1483,7 @@ mod tests {
             tiny,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         assert!(state.agent_hits.is_empty());
@@ -1572,7 +1577,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         let visible = state.agent_hits.len();
@@ -1587,7 +1592,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         assert_eq!(state.agent_hits[0].1, format!("a{:02}", 30 - visible - 5));
@@ -1611,7 +1616,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         assert_eq!(state.agent_hits[0].1, anchored_top);
@@ -1625,7 +1630,7 @@ mod tests {
             area,
             &runs,
             &mut state,
-            0,
+            crate::motion::FrameStamp::default(),
             &WorkflowAgentLiveMap::default(),
         );
         assert_eq!(state.roster_scroll, 31 - visible);
@@ -1741,7 +1746,14 @@ mod tests {
                 elapsed_ms: Some(75_000),
             },
         );
-        render_workflows(&mut buf, area, &runs, &mut state, 0, &live);
+        render_workflows(
+            &mut buf,
+            area,
+            &runs,
+            &mut state,
+            crate::motion::FrameStamp::default(),
+            &live,
+        );
         let text = buf_text(&buf, area);
         assert!(
             text.contains("● 0/1"),

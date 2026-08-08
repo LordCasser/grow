@@ -167,7 +167,7 @@ impl AgentView {
                 }
                 let preparation = pasted.preview_preparation();
                 if let Err(msg) = self.prompt.insert_image(pasted) {
-                    self.show_toast_ticks(&msg, 150);
+                    self.show_toast_for(&msg, std::time::Duration::from_millis(4_950));
                     ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported)
                 } else {
                     if let Some(preparation) = preparation {
@@ -423,7 +423,7 @@ impl AgentView {
             return false;
         }
         if let Err(msg) = self.prompt.insert_image(pasted) {
-            self.show_toast_ticks(&msg, 150);
+            self.show_toast_for(&msg, std::time::Duration::from_millis(4_950));
             return false;
         }
         if let Some(preparation) = preparation {

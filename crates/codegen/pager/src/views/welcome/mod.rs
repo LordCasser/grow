@@ -27,7 +27,6 @@ pub(crate) mod logo;
 mod menu;
 mod top_bar;
 
-pub(crate) use logo::shimmer_frame;
 use logo::{logo_line_count, render_logo};
 use menu::render_menu;
 pub(crate) use top_bar::location_line_at;
@@ -272,7 +271,7 @@ pub struct WelcomeRenderParams<'a> {
     /// The query the picker entries were server-fetched with (see
     /// [`crate::views::session_picker::effective_filter_query`]).
     pub session_picker_entries_query: Option<&'a str>,
-    pub welcome_tick: u64,
+    pub frame: crate::motion::FrameStamp,
     pub session_picker_grouped: bool,
     /// Live working directory (tracks `Effect::SetWorkingDir`), used to pin
     /// the current repo's session group to the top of the picker.
@@ -329,6 +328,7 @@ pub fn render_welcome(
             params.selected,
             h_margin,
             params.compact,
+            params.frame,
         )
     } else {
         render_welcome_done(content_area, buf, &theme, params, session_picker_state)
@@ -353,6 +353,7 @@ fn render_welcome_trust(
     selected: Option<usize>,
     h_margin: u16,
     compact: bool,
+    frame: crate::motion::FrameStamp,
 ) -> WelcomeRenderResult {
     let menu_items = [("y", "Yes, proceed"), ("n", "No, quit")];
     let lines = vec![
@@ -399,6 +400,7 @@ fn render_welcome_trust(
         theme,
         content_area.width,
         content_area.height,
+        frame,
     );
     Paragraph::new(lines).render(layout.error, buf);
 
@@ -545,7 +547,7 @@ fn render_welcome_done(
                 content_results: p.session_picker_content_results,
                 content_loading: p.session_picker_content_loading,
                 entries_query: p.session_picker_entries_query,
-                tick: p.welcome_tick,
+                frame: p.frame,
                 grouped: p.session_picker_grouped,
                 cwd: p.cwd,
             },
@@ -565,6 +567,7 @@ fn render_welcome_done(
             p.welcome_announcement_expanded,
             p.promo_cta,
             true,
+            p.frame,
         );
         announcement_truncated = rects.announcement_truncated;
         announcement_rect = rects.announcement_rect;
@@ -638,7 +641,7 @@ pub(crate) struct SessionPickerRenderCtx<'a> {
     /// The query `sessions` were server-fetched with (see
     /// [`crate::views::session_picker::effective_filter_query`]).
     pub(crate) entries_query: Option<&'a str>,
-    pub(crate) tick: u64,
+    pub(crate) frame: crate::motion::FrameStamp,
     /// When true, entries are grouped by `repo_name` with non-selectable headers.
     pub(crate) grouped: bool,
 }
@@ -743,7 +746,7 @@ pub(crate) fn render_session_picker(
     // Show header only if there are actual deduped content rows to display.
     let has_content_rows = !content_entry_data.is_empty();
     let content_loading = ctx.content_loading;
-    let spinner_label = build_content_header_label(content_loading, has_content_rows, ctx.tick);
+    let spinner_label = build_content_header_label(content_loading, has_content_rows, ctx.frame);
     // Only show the header when content results exist or when content
     // search is in progress with a non-empty query.  This must match the
     // header condition inside `build_entry_map` as called from
@@ -861,7 +864,7 @@ pub(crate) fn render_session_picker(
         &picker_entries,
         &config,
         ctx.loading,
-        ctx.tick,
+        ctx.frame,
     )
 }
 
@@ -957,7 +960,7 @@ mod tests {
             session_picker_content_results: None,
             session_picker_content_loading: false,
             session_picker_entries_query: None,
-            welcome_tick: 0,
+            frame: crate::motion::FrameStamp::default(),
             session_picker_grouped: false,
             cwd: std::path::Path::new("/repo"),
             welcome_announcement_expanded: false,
@@ -1054,7 +1057,7 @@ mod tests {
                     content_results: None,
                     content_loading: true,
                     entries_query,
-                    tick: 0,
+                    frame: crate::motion::FrameStamp::default(),
                     grouped: false,
                 },
             );

@@ -115,13 +115,16 @@ Goal Planning/Verifying 只更新 Goal chip，不把 Pager session 伪装成 Run
 
 ## 6. 动画与忙状态
 
-动画 tick demand 统一由可观察的真实活动推导：foreground turn、Active Goal 后台阶段、watcher/bg task，以及视图自身动画。
+Pager 使用只读 `AgentActivityProjection` 统一投影 foreground turn、Active Goal 后台阶段、watcher/bg task、workflow、subagent 和 needs-input；Agent 页、Dashboard、状态栏、terminal title 与可见动画 demand 共用这份投影。
 
 - parked 只改变展示，不能把仍在执行的 foreground 伪装为 idle；
-- Active Goal 即使 foreground idle，Goal chip 仍保持 tick；
-- watcher/bg task 即使 foreground idle，状态提示仍保持 tick；
-- ACP token firehose 每次只 drain 有界 batch，并在每个 batch 前优先领取已到期 animation deadline，所以 tick 延迟最多再等一个 ACP batch，而不是等流结束。
-- submission watchdog 与视图动画在同一 tick 都会推进；watchdog 产生 effect 时不能跳过 spinner/CTA/Goal chip 的 repaint。
+- 每次 draw 只捕获一个 `FrameStamp`，所有 spinner、wave、Goal 计时与 title 使用同一单调时间样本；
+- FPS 只限制重绘频率，动画周期不随 FPS 或 ACP event 数量变化；
+- animation、UI expiry、prompt watchdog、scroll 与真正模拟器的 simulation clock 相互独立；watchdog 不再借动画 frame 获得运行机会；
+- ACP token firehose 每次只 drain 有界 batch，并在每个 batch 前领取到期 deadline，因此动画最多再等一个 batch；
+- 隐藏页面和静态 idle 页面不请求 frame，恢复可见时按当前时间直接追上相位。
+
+具体契约见 [pager-motion.md](./pager-motion.md)。
 
 ## 7. 必须保持的不变量
 

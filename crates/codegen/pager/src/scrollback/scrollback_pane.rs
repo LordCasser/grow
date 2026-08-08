@@ -29,6 +29,8 @@ use crate::theme::Theme;
 /// creates a temporary scratch buffer for API compatibility but is less efficient.
 #[derive(Debug, Clone, Default)]
 pub struct ScrollbackPane {
+    /// Time-derived animation sample supplied by the owning frame.
+    pub motion_tick: u64,
     pub is_active: bool,
     pub mouse_pos: Option<(u16, u16)>,
     pub dim_from_entry: Option<usize>,
@@ -56,6 +58,7 @@ impl ScrollbackPane {
     /// Create a new scrollback pane.
     pub fn new() -> Self {
         Self {
+            motion_tick: 0,
             is_active: false,
             mouse_pos: None,
             dim_from_entry: None,
@@ -68,6 +71,11 @@ impl ScrollbackPane {
     /// Set active state.
     pub fn active(mut self, active: bool) -> Self {
         self.is_active = active;
+        self
+    }
+
+    pub fn with_motion_tick(mut self, tick: u64) -> Self {
+        self.motion_tick = tick;
         self
     }
 
@@ -952,7 +960,7 @@ impl ScrollbackPane {
             theme,
             state.appearance(),
             entry_layouts_cache,
-            state.current_tick(),
+            self.motion_tick,
             self.mouse_pos,
             relative_dim_from,
             self.search_highlight.as_ref(),

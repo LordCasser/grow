@@ -586,11 +586,12 @@ pub fn render_app_modal(
     area: Rect,
     agent: &mut AgentView,
     compact: bool,
+    frame: pager::motion::FrameStamp,
 ) -> bool {
     if agent.active_modal.is_none() {
         return false;
     }
-    minimal_api::draw_active_modal(agent, area, buf, Theme::current(), compact);
+    minimal_api::draw_active_modal(agent, area, buf, Theme::current(), compact, frame);
     true
 }
 

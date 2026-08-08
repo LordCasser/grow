@@ -2,16 +2,13 @@
 //! and the show/seen-count gating state that drives it.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use ratatui::text::Line;
 
-/// Default tip lifetime in animation ticks (~3 s: 90 ticks at the default
-/// 30 fps animation cadence).
-///
-/// Expiry takes N+1 ticks: [`EphemeralTipState::tick`] checks `== 0` *before*
-/// decrementing, so a tip shown with `ticks_remaining = N` survives N ticks
-/// and is cleared on the (N+1)th.
-pub const DEFAULT_TIP_TICKS: u16 = 90;
+/// Default tip lifetime. UI expiry is wall-clock based and independent from
+/// the configured animation sampling rate.
+pub const DEFAULT_TIP_DURATION: Duration = Duration::from_secs(3);
 
 /// Whether the tip row can render given UI occlusion and the screen height.
 /// Single predicate shared by the show gate, the banner-height reservation,
@@ -30,8 +27,8 @@ pub struct EphemeralTip {
     pub key: &'static str,
     /// Pre-styled spans (dim text with a highlighted key chord).
     pub line: Line<'static>,
-    /// Remaining animation ticks before the tip expires.
-    pub ticks_remaining: u16,
+    /// Visible lifetime before the tip expires.
+    pub lifetime: Duration,
     /// In-memory seen-count map key paired with the per-session show cap:
     /// `Some((key, cap))` stops showing once this session's count for `key`
     /// reaches `cap`; `None` for tips that are never seen-gated. The count
@@ -41,7 +38,7 @@ pub struct EphemeralTip {
     /// ([`EphemeralTipState::clear_on_submit`]) does NOT retire it, and its
     /// TTL burns only while the tip row can actually paint (occlusion pauses
     /// instead of expiring it off-screen — see
-    /// `AgentView::ephemeral_tip_needs_tick`). Default `false` keeps the
+    /// `AgentView::reconcile_ephemeral_tip_clock`). Default `false` keeps the
     /// edit-contextual tips' retire-on-submit + burn-while-occluded behavior.
     pub ambient: bool,
 }
@@ -52,7 +49,7 @@ impl EphemeralTip {
         Self {
             key,
             line,
-            ticks_remaining: DEFAULT_TIP_TICKS,
+            lifetime: DEFAULT_TIP_DURATION,
             session_seen: None,
             ambient: false,
         }
@@ -78,6 +75,8 @@ impl EphemeralTip {
 #[derive(Debug, Default)]
 pub struct EphemeralTipState {
     slot: Option<EphemeralTip>,
+    expires_at: Option<Instant>,
+    paused_remaining: Option<Duration>,
 }
 
 impl EphemeralTipState {
@@ -97,9 +96,20 @@ impl EphemeralTipState {
         tip: EphemeralTip,
         seen_counts: &mut HashMap<&'static str, u32>,
     ) -> bool {
+        self.show_at(tip, seen_counts, Instant::now())
+    }
+
+    fn show_at(
+        &mut self,
+        tip: EphemeralTip,
+        seen_counts: &mut HashMap<&'static str, u32>,
+        now: Instant,
+    ) -> bool {
         // Refresh before gating so a visible tip never goes dark mid-TTL
         // just because its first show already reached the cap.
         if self.slot.as_ref().is_some_and(|cur| cur.key == tip.key) {
+            self.expires_at = Some(now + tip.lifetime);
+            self.paused_remaining = None;
             self.slot = Some(tip);
             return false;
         }
@@ -120,21 +130,41 @@ impl EphemeralTipState {
             let count = seen_counts.get(key).copied().unwrap_or(0).saturating_add(1);
             seen_counts.insert(key, count);
         }
+        self.expires_at = Some(now + tip.lifetime);
+        self.paused_remaining = None;
         self.slot = Some(tip);
         true
     }
 
-    /// Tick the TTL. Call once per animation tick.
-    /// Returns true when the tip expired and was removed (needs redraw).
-    pub fn tick(&mut self) -> bool {
-        if let Some(ref mut tip) = self.slot {
-            if tip.ticks_remaining == 0 {
-                let key = tip.key;
-                self.slot = None;
-                log_dismissed(key, DismissReason::Expired);
-                return true;
+    /// Reconcile whether the absolute TTL is currently counting down without
+    /// consuming an already-due deadline. The scheduler uses this to pause or
+    /// resume clocks before choosing its next wakeup.
+    pub(crate) fn sync_clock_policy(&mut self, now: Instant, counting: bool) {
+        let Some(tip) = self.slot.as_ref() else {
+            self.expires_at = None;
+            self.paused_remaining = None;
+            return;
+        };
+        if counting {
+            if self.expires_at.is_none() {
+                let remaining = self.paused_remaining.take().unwrap_or(tip.lifetime);
+                self.expires_at = Some(now + remaining);
             }
-            tip.ticks_remaining = tip.ticks_remaining.saturating_sub(1);
+        } else if let Some(deadline) = self.expires_at.take() {
+            self.paused_remaining = Some(deadline.saturating_duration_since(now));
+        }
+    }
+
+    /// Apply clock policy and consume an expired deadline.
+    pub(crate) fn maintain(&mut self, now: Instant, counting: bool) -> bool {
+        self.sync_clock_policy(now, counting);
+        if self.expires_at.is_some_and(|deadline| now >= deadline) {
+            let key = self.slot.as_ref().expect("deadline requires tip").key;
+            self.slot = None;
+            self.expires_at = None;
+            self.paused_remaining = None;
+            log_dismissed(key, DismissReason::Expired);
+            return true;
         }
         false
     }
@@ -144,9 +174,20 @@ impl EphemeralTipState {
         self.slot.is_some()
     }
 
-    /// Remaining TTL ticks, if a tip is active.
-    pub fn ticks_remaining(&self) -> Option<u16> {
-        self.slot.as_ref().map(|t| t.ticks_remaining)
+    /// Absolute expiry deadline while the clock is running.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.expires_at
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remaining_at(&self, now: Instant) -> Option<Duration> {
+        self.slot.as_ref()?;
+        Some(
+            self.expires_at
+                .map(|deadline| deadline.saturating_duration_since(now))
+                .or(self.paused_remaining)
+                .unwrap_or_default(),
+        )
     }
 
     /// The active tip's pre-styled line, if any.
@@ -197,6 +238,8 @@ impl EphemeralTipState {
 
     fn dismiss(&mut self) {
         if let Some(tip) = self.slot.take() {
+            self.expires_at = None;
+            self.paused_remaining = None;
             log_dismissed(tip.key, DismissReason::Cleared);
         }
     }
@@ -236,9 +279,9 @@ fn log_dismissed(key: &'static str, reason: DismissReason) {
 mod tests {
     use super::*;
 
-    fn tip(key: &'static str, ticks: u16) -> EphemeralTip {
+    fn tip(key: &'static str, lifetime: Duration) -> EphemeralTip {
         EphemeralTip {
-            ticks_remaining: ticks,
+            lifetime,
             ..EphemeralTip::new(key, Line::from("test tip"))
         }
     }
@@ -246,14 +289,17 @@ mod tests {
     #[test]
     fn ttl_expires_and_clears_slot() {
         let mut state = EphemeralTipState::default();
-        assert!(state.show(tip("a", 2), &mut HashMap::new()));
+        let now = Instant::now();
+        assert!(state.show_at(tip("a", Duration::from_secs(2)), &mut HashMap::new(), now));
         assert!(state.is_active());
-        assert!(!state.tick()); // 2 -> 1
-        assert!(!state.tick()); // 1 -> 0
-        assert!(state.tick()); // 0 -> expired, needs redraw
+        assert!(!state.maintain(now + Duration::from_secs(1), true));
+        assert!(state.maintain(now + Duration::from_secs(2), true));
         assert!(!state.is_active());
         assert!(state.line().is_none());
-        assert!(!state.tick(), "empty slot ticks are no-ops");
+        assert!(
+            !state.maintain(now + Duration::from_secs(3), true),
+            "empty slot maintenance is a no-op"
+        );
     }
 
     #[test]
@@ -272,13 +318,17 @@ mod tests {
     fn show_same_key_refreshes_ttl() {
         let mut state = EphemeralTipState::default();
         let mut counts = HashMap::new();
-        let _ = state.show(tip("a", 3), &mut counts);
-        assert!(!state.tick()); // 3 -> 2
-        let _ = state.show(tip("a", 3), &mut counts); // refresh back to 3
-        for _ in 0..3 {
-            assert!(!state.tick());
-        }
-        assert!(state.tick(), "expires on the refreshed budget, not the old");
+        let now = Instant::now();
+        let lifetime = Duration::from_secs(3);
+        let _ = state.show_at(tip("a", lifetime), &mut counts, now);
+        assert!(!state.maintain(now + Duration::from_secs(2), true));
+        let refreshed_at = now + Duration::from_secs(2);
+        let _ = state.show_at(tip("a", lifetime), &mut counts, refreshed_at);
+        assert!(!state.maintain(now + Duration::from_secs(4), true));
+        assert!(
+            state.maintain(now + Duration::from_secs(5), true),
+            "expires from the refreshed deadline, not the original one"
+        );
     }
 
     #[test]
@@ -287,14 +337,20 @@ mod tests {
         let mut counts = HashMap::new();
         for expected in 1..=2 {
             assert!(
-                state.show(tip("a", 5).with_session_seen_cap("a_seen", 2), &mut counts),
+                state.show(
+                    tip("a", Duration::from_secs(5)).with_session_seen_cap("a_seen", 2),
+                    &mut counts,
+                ),
                 "a fresh show takes the slot and counts"
             );
             assert_eq!(counts.get("a_seen"), Some(&expected));
             assert!(state.clear_all());
         }
         assert!(
-            !state.show(tip("a", 5).with_session_seen_cap("a_seen", 2), &mut counts),
+            !state.show(
+                tip("a", Duration::from_secs(5)).with_session_seen_cap("a_seen", 2),
+                &mut counts,
+            ),
             "gated show must be a no-op"
         );
         assert!(!state.is_active(), "gated show must be a no-op");
@@ -311,7 +367,10 @@ mod tests {
         // A session count already at the cap (e.g. shown earlier this run)
         // blocks the next show.
         let mut counts = HashMap::from([("a_seen", 1u32)]);
-        assert!(!state.show(tip("a", 5).with_session_seen_cap("a_seen", 1), &mut counts));
+        assert!(!state.show(
+            tip("a", Duration::from_secs(5)).with_session_seen_cap("a_seen", 1),
+            &mut counts
+        ));
         assert!(!state.is_active());
     }
 
@@ -319,11 +378,17 @@ mod tests {
     fn same_key_refresh_skips_gate_and_recount() {
         let mut state = EphemeralTipState::default();
         let mut counts = HashMap::new();
-        assert!(state.show(tip("a", 5).with_session_seen_cap("a_seen", 1), &mut counts));
+        assert!(state.show(
+            tip("a", Duration::from_secs(5)).with_session_seen_cap("a_seen", 1),
+            &mut counts
+        ));
         // Still visible: cap is reached but the refresh must not go dark
         // and must not burn another count.
         assert!(
-            !state.show(tip("a", 5).with_session_seen_cap("a_seen", 1), &mut counts),
+            !state.show(
+                tip("a", Duration::from_secs(5)).with_session_seen_cap("a_seen", 1),
+                &mut counts,
+            ),
             "same-key refresh neither re-counts nor re-shows"
         );
         assert!(state.is_active());
@@ -336,7 +401,7 @@ mod tests {
         let mut counts = HashMap::new();
         for _ in 0..3 {
             assert!(
-                state.show(tip("a", 5), &mut counts),
+                state.show(tip("a", Duration::from_secs(5)), &mut counts),
                 "unkeyed shows always take the slot"
             );
             assert!(state.is_active());
@@ -348,7 +413,7 @@ mod tests {
     #[test]
     fn clear_only_removes_matching_key() {
         let mut state = EphemeralTipState::default();
-        let _ = state.show(tip("a", 5), &mut HashMap::new());
+        let _ = state.show(tip("a", Duration::from_secs(5)), &mut HashMap::new());
         assert!(!state.clear("other"));
         assert!(state.is_active());
         assert!(state.clear("a"));
@@ -360,10 +425,13 @@ mod tests {
     fn current_key_tracks_the_active_tip() {
         let mut state = EphemeralTipState::default();
         assert_eq!(state.current_key(), None, "empty slot has no key");
-        let _ = state.show(tip("undo_tip", 5), &mut HashMap::new());
+        let _ = state.show(tip("undo_tip", Duration::from_secs(5)), &mut HashMap::new());
         assert_eq!(state.current_key(), Some("undo_tip"));
         // A different-keyed show replaces the reported key.
-        let _ = state.show(tip("plan_nudge", 5), &mut HashMap::new());
+        let _ = state.show(
+            tip("plan_nudge", Duration::from_secs(5)),
+            &mut HashMap::new(),
+        );
         assert_eq!(state.current_key(), Some("plan_nudge"));
         assert!(state.clear("plan_nudge"));
         assert_eq!(state.current_key(), None, "cleared slot reports no key");
@@ -373,7 +441,7 @@ mod tests {
     fn clear_all_reports_whether_a_tip_was_removed() {
         let mut state = EphemeralTipState::default();
         assert!(!state.clear_all());
-        let _ = state.show(tip("a", 5), &mut HashMap::new());
+        let _ = state.show(tip("a", Duration::from_secs(5)), &mut HashMap::new());
         assert!(state.clear_all());
         assert!(!state.clear_all());
     }
@@ -383,12 +451,15 @@ mod tests {
         let mut state = EphemeralTipState::default();
 
         // Default (edit-contextual) tip: submit retires it.
-        let _ = state.show(tip("a", 5), &mut HashMap::new());
+        let _ = state.show(tip("a", Duration::from_secs(5)), &mut HashMap::new());
         assert!(state.clear_on_submit());
         assert!(!state.is_active());
 
         // Ambient tip: submit is a no-op; an explicit clear_all still works.
-        let _ = state.show(tip("b", 5).ambient(), &mut HashMap::new());
+        let _ = state.show(
+            tip("b", Duration::from_secs(5)).ambient(),
+            &mut HashMap::new(),
+        );
         assert!(!state.clear_on_submit());
         assert!(state.is_active(), "ambient tip must survive the submit");
         assert!(state.active_is_ambient());

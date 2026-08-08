@@ -3322,10 +3322,8 @@ fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast() {
             "transient wins while active"
         );
         assert_eq!(agent.sticky_toast.as_deref(), Some(MOUSE_OFF_STICKY));
-        if let Some((_, ref mut ticks)) = agent.toast {
-            *ticks = 0;
-        }
-        assert!(agent.tick_toast());
+        let expired = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        assert!(agent.maintain_toast(expired));
         assert!(agent.toast.is_none());
         assert_eq!(
             agent.sticky_toast.as_deref(),

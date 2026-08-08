@@ -784,7 +784,8 @@ fn stalled_unacknowledged_submission_queries_exact_prompt_status() {
         );
     }
 
-    let effects = poll_stalled_prompt_submissions(&mut app).expect("watchdog must fire");
+    let effects = poll_stalled_prompt_submissions(&mut app, std::time::Instant::now())
+        .expect("watchdog must fire");
     assert!(matches!(
         effects.as_slice(),
         [Effect::QueryPromptStatus {
@@ -820,7 +821,8 @@ fn running_turn_stalled_without_activity_queries_prompt_status() {
         // turn (background pane), so the turn counts as stalled.
     }
 
-    let effects = poll_stalled_prompt_submissions(&mut app).expect("watchdog must fire");
+    let effects = poll_stalled_prompt_submissions(&mut app, std::time::Instant::now())
+        .expect("watchdog must fire");
     assert!(matches!(
         effects.as_slice(),
         [Effect::QueryPromptStatus {
@@ -845,9 +847,7 @@ fn running_turn_stalled_without_activity_queries_prompt_status() {
 
 #[test]
 fn running_turn_with_recent_activity_skips_query() {
-    // C1: a busy turn keeps its phase anchor fresh (render refreshes
-    // activity_started_at on every activity transition), so a genuinely
-    // running turn is never re-queried while activity is flowing.
+    // Reducer-owned liveness, not rendering, re-arms the running watchdog.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
@@ -859,12 +859,12 @@ fn running_turn_with_recent_activity_skips_query() {
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(60),
         );
-        agent.activity_started_at =
+        agent.last_prompt_event_at =
             Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
     }
 
     assert!(
-        poll_stalled_prompt_submissions(&mut app).is_none(),
+        poll_stalled_prompt_submissions(&mut app, std::time::Instant::now()).is_none(),
         "recent activity must suppress the running watchdog"
     );
     assert!(app.agents[&id].prompt_status_query_for.is_none());
@@ -872,10 +872,8 @@ fn running_turn_with_recent_activity_skips_query() {
 
 #[test]
 fn running_turn_with_stale_activity_queries_prompt_status() {
-    // C1: an observed-but-unchanged phase anchor for the full window means
-    // the activity stream went quiet (e.g. TurnCompleted lost after the last
-    // chunk) — re-query. A stale anchor on a genuinely busy turn only costs
-    // one bounded query whose Running response refreshes the anchors.
+    // A stale reducer liveness anchor for the full window means the activity
+    // stream went quiet. Rendering cannot affect this decision.
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
@@ -887,7 +885,7 @@ fn running_turn_with_stale_activity_queries_prompt_status() {
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(1),
         );
-        agent.activity_started_at = Some(
+        agent.last_prompt_event_at = Some(
             std::time::Instant::now()
                 - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
                 - std::time::Duration::from_secs(1),
@@ -895,7 +893,8 @@ fn running_turn_with_stale_activity_queries_prompt_status() {
         agent.last_activity = Some(crate::acp::tracker::TurnActivity::Responding);
     }
 
-    let effects = poll_stalled_prompt_submissions(&mut app).expect("watchdog must fire");
+    let effects = poll_stalled_prompt_submissions(&mut app, std::time::Instant::now())
+        .expect("watchdog must fire");
     assert!(matches!(
         effects.as_slice(),
         [Effect::QueryPromptStatus {
@@ -919,7 +918,7 @@ fn running_turn_below_threshold_skips_query() {
     }
 
     assert!(
-        poll_stalled_prompt_submissions(&mut app).is_none(),
+        poll_stalled_prompt_submissions(&mut app, std::time::Instant::now()).is_none(),
         "a running window below the threshold must not query"
     );
     assert!(app.agents[&id].prompt_status_query_for.is_none());
@@ -945,9 +944,100 @@ fn running_turn_query_in_flight_skips_duplicate() {
     }
 
     assert!(
-        poll_stalled_prompt_submissions(&mut app).is_none(),
+        poll_stalled_prompt_submissions(&mut app, std::time::Instant::now()).is_none(),
         "an in-flight status query must suppress a duplicate"
     );
+}
+
+#[test]
+fn running_status_response_rearms_from_observation_time() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let old_start = std::time::Instant::now()
+        - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+        - std::time::Duration::from_secs(10);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-running".into());
+        agent.prompt_status_query_for = Some("pid-running".into());
+        agent.turn_started_at = Some(old_start);
+    }
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-running".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Running { turn_start_ms: 1 }),
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent.turn_started_at,
+        Some(old_start),
+        "display anchor is stable"
+    );
+    assert!(agent.prompt_status_query_for.is_none());
+    assert!(
+        agent
+            .last_status_observed_at
+            .is_some_and(|at| at >= old_start)
+    );
+    assert!(
+        next_prompt_watchdog_deadline(&app)
+            .is_some_and(|deadline| deadline > std::time::Instant::now()),
+        "Running response must arm a fresh silent window"
+    );
+    assert!(
+        poll_stalled_prompt_submissions(&mut app, std::time::Instant::now()).is_none(),
+        "a Running response must not trigger an immediate re-query"
+    );
+}
+
+#[test]
+fn nonterminal_watchdog_answers_never_end_a_running_turn() {
+    for status in [
+        Ok(crate::app::actions::PromptStatusWire::Unknown),
+        Err("temporary status lookup failure".to_string()),
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let old_start = std::time::Instant::now()
+            - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+            - std::time::Duration::from_secs(1);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-running".into());
+            agent.prompt_status_query_for = Some("pid-running".into());
+            agent.turn_started_at = Some(old_start);
+        }
+
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::PromptStatusResolved {
+                agent_id: id,
+                prompt_id: "pid-running".into(),
+                status,
+            }),
+            &mut app,
+        );
+
+        assert!(effects.is_empty());
+        let agent = &app.agents[&id];
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some("pid-running")
+        );
+        assert_eq!(agent.turn_started_at, Some(old_start));
+        assert!(agent.last_status_observed_at.is_some());
+        assert!(
+            next_prompt_watchdog_deadline(&app)
+                .is_some_and(|deadline| deadline > std::time::Instant::now())
+        );
+    }
 }
 
 #[test]
@@ -969,7 +1059,8 @@ fn running_watchdog_terminal_response_finalizes_via_first_wins_finalizer() {
         );
     }
 
-    let effects = poll_stalled_prompt_submissions(&mut app).expect("watchdog must fire");
+    let effects = poll_stalled_prompt_submissions(&mut app, std::time::Instant::now())
+        .expect("watchdog must fire");
     assert!(matches!(
         effects.as_slice(),
         [Effect::QueryPromptStatus { prompt_id, .. }] if prompt_id == "pid-terminal"
@@ -1011,18 +1102,17 @@ fn running_watchdog_terminal_response_finalizes_via_first_wins_finalizer() {
 }
 
 #[test]
-fn queued_prompt_status_rearms_bounded_watchdog_without_claiming_running() {
+fn queued_prompt_status_observes_without_claiming_or_rearming_a_turn() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    let old_start = std::time::Instant::now()
+        - PROMPT_STATUS_WATCHDOG_DELAY
+        - std::time::Duration::from_secs(1);
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.current_prompt_id = Some("pid-queued".into());
         agent.prompt_status_query_for = Some("pid-queued".into());
-        agent.turn_started_at = Some(
-            std::time::Instant::now()
-                - PROMPT_STATUS_WATCHDOG_DELAY
-                - std::time::Duration::from_secs(1),
-        );
+        agent.turn_started_at = Some(old_start);
     }
 
     let effects = dispatch(
@@ -1045,11 +1135,16 @@ fn queued_prompt_status_rearms_bounded_watchdog_without_claiming_running() {
         Some("pid-queued")
     );
     assert!(agent.prompt_status_query_for.is_none());
-    assert!(
-        agent
-            .turn_started_at
-            .is_some_and(|started| started.elapsed() < PROMPT_STATUS_WATCHDOG_DELAY),
-        "a confirmed queue admission must start a fresh bounded watch window"
+    assert_eq!(
+        agent.turn_started_at,
+        Some(old_start),
+        "a queue observation must not rewrite the user-visible turn anchor"
+    );
+    assert!(agent.last_status_observed_at.is_some());
+    assert_eq!(
+        next_prompt_watchdog_deadline(&app),
+        None,
+        "an idle queued prompt does not own a lifecycle watchdog"
     );
 }
 

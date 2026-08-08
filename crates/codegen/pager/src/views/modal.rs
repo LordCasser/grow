@@ -1177,6 +1177,7 @@ pub fn render_doc_picker_overlay(
     state: &mut super::picker::PickerState,
     compact: bool,
     theme: &Theme,
+    frame: crate::motion::FrameStamp,
 ) {
     use super::modal_window::{
         self as mw, ModalSizing, ModalWindowConfig, Shortcut, footer_lines_with_tip_gap,
@@ -1289,6 +1290,7 @@ pub fn render_doc_picker_overlay(
         &picker_entries,
         &non_sel,
         false,
+        frame,
     );
 }
 /// Render a DocViewer overlay: modal window chrome + cached markdown content.
@@ -1595,7 +1597,16 @@ mod doc_picker_tip_tests {
         };
         let theme = crate::theme::Theme::current();
         let mut buf = Buffer::empty(area);
-        render_doc_picker_overlay(&mut buf, area, window, entries, state, false, &theme);
+        render_doc_picker_overlay(
+            &mut buf,
+            area,
+            window,
+            entries,
+            state,
+            false,
+            &theme,
+            crate::motion::FrameStamp::default(),
+        );
         let mut all = String::new();
         for y in 0..area.height {
             for x in 0..area.width {

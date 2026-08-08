@@ -382,10 +382,9 @@ pub(super) const CONTEXT_CLICK_DEBOUNCE_MS: u128 = 300;
 /// Default highlight TTL when `keep_text_selection` is `flash`.
 const DEFAULT_SELECTION_HIGHLIGHT_DURATION_MS: u64 = 150;
 /// Duration of the transient Behavior-switch banner shown above the prompt.
-/// 2 s full visibility + 0.3 s fade out @ 30 fps.
-const MODE_BANNER_TOTAL_TICKS: u8 = 69;
+const MODE_BANNER_DURATION: std::time::Duration = std::time::Duration::from_millis(2_300);
 /// Final portion of the banner lifetime spent fading out (full → invisible).
-const MODE_BANNER_FADE_TICKS: u8 = 9;
+const MODE_BANNER_FADE: std::time::Duration = std::time::Duration::from_millis(300);
 /// Whether `Event::Paste(text)` should probe the clipboard for image
 /// bytes / a file reference. See [`crate::clipboard::paste_payload_needs_clipboard_attachment_probe`].
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -854,6 +853,11 @@ pub struct AgentView {
     /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
     /// elapsed time for "Worked for Xm Ys" system messages.
     pub turn_started_at: Option<Instant>,
+    /// Last reducer-observed prompt activity for lifecycle reconciliation.
+    /// Never updated by rendering.
+    pub(crate) last_prompt_event_at: Option<Instant>,
+    /// Last authoritative Running status observation for the current prompt.
+    pub(crate) last_status_observed_at: Option<Instant>,
     /// Turn-start anchor a `turn.first_activity` log was already emitted for (fire-once-per-turn guard).
     pub first_activity_logged_for: Option<Instant>,
     /// Accumulated duration the turn timer was paused (while the user was
@@ -986,7 +990,7 @@ pub struct AgentView {
     pub last_mouse_pos: (u16, u16),
     /// When the pointer last moved (any mouse event). Bounds the macOS
     /// Cmd-key link-hover poll: a pointer merely *resting* over content must
-    /// not keep the ~30fps animation tick (and its per-tick CoreGraphics
+    /// not keep the motion scheduler alive (or run per-frame CoreGraphics
     /// query) alive indefinitely — see [`Self::needs_link_modifier_poll`].
     pub last_mouse_moved_at: Option<Instant>,
     /// Last click info for multi-click detection: (timestamp, entry_index, click_count).
@@ -1061,10 +1065,6 @@ pub struct AgentView {
     /// Active image viewer popup. When `Some`, shows an image preview that
     /// intercepts input (Esc to close).
     pub(crate) image_viewer: Option<crate::prompt_images::ImageViewerState>,
-    /// Receiver for background image loading. Set when a deferred image
-    /// viewer spawns a load thread; polled each tick via `try_recv()`.
-    pub(crate) image_load_rx:
-        Option<std::sync::mpsc::Receiver<crate::prompt_images::ImageLoadResult>>,
     /// Active `/gboom` easter-egg game modal.
     pub(crate) gboom: Option<crate::gboom::GboomState>,
     /// Protocol-prepared image bytes keyed by file path. Used for dimension
@@ -1128,9 +1128,9 @@ pub struct AgentView {
     /// Hit area for the [Esc] close button in the /btw panel title.
     pub(crate) hit_btw_close: HitArea,
     /// Toast message to display briefly (e.g., "Copied!" after y).
-    /// Tuple of (message, remaining_ticks). Decremented each tick, removed at 0.
+    /// Tuple of (message, absolute expiry).
     /// Does **not** carry sticky status banners — see [`Self::sticky_toast`].
-    pub(crate) toast: Option<(String, u8)>,
+    pub(crate) toast: Option<(String, Instant)>,
     /// Single-slot ephemeral tip shown in the banner rect above the prompt.
     /// Unlike `toast`, survives typing; cleared by TTL, any prompt-box
     /// submit (prompt/interject/bash/feedback/remember), or explicit clear.
@@ -1154,7 +1154,7 @@ pub struct AgentView {
     /// Transient "Switched to mode: X" banner shown above the prompt after a
     /// Behavior transition. Full brightness for 2 s, then
     /// fades out over the final 0.3 s.
-    pub(crate) mode_switch_banner: Option<(String, u8)>,
+    pub(crate) mode_switch_banner: Option<(String, Instant)>,
     /// An interrupting Behavior change is awaiting a repeated selection.
     pub(crate) behavior_switch_warning_pending: bool,
     /// Parked interrupting Behavior switch (target + optional stashed
@@ -1420,7 +1420,7 @@ pub struct AgentView {
     /// reissue so the freshly attached image chip travels with it.
     pub(crate) deferred_send: Option<AgentDeferredSend>,
     /// Prompt-id currently being reconciled by the submission watchdog. This
-    /// prevents the animation tick from issuing duplicate status RPCs.
+    /// prevents the lifecycle deadline from issuing duplicate status RPCs.
     pub(crate) prompt_status_query_for: Option<String>,
     /// Ids of THIS client's server-queue rows that are still optimistic
     /// echoes — the `session/prompt` RPC is in flight and no

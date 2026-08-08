@@ -26,8 +26,8 @@ pub const PROMPT_IMAGES_TRACING_TARGET: &str = "prompt_images";
 /// State for a modal image viewer.
 ///
 /// Supports deferred loading: [`open_from_path_deferred`] returns instantly
-/// with `loading: true`, then [`finish_loading`] performs the heavy I/O on
-/// the next tick so the UI can show a spinner while the file is read.
+/// with `loading: true`; the pager consumes the source path once and delivers
+/// the load result back through its normal task-completion channel.
 pub struct ImageViewerState {
     /// Original encoded image bytes.
     pub image_bytes: Vec<u8>,
@@ -150,6 +150,10 @@ impl ImageViewerState {
         }
     }
 
+    pub fn has_deferred_source(&self) -> bool {
+        self.loading && self.source_path.is_some()
+    }
+
     /// Apply loaded data from a background thread.
     pub fn apply_loaded(&mut self, data: LoadedImageData) {
         self.image_bytes = data.image_bytes;
@@ -180,12 +184,14 @@ impl ImageViewerState {
 }
 
 /// Result of a background image load.
+#[derive(Debug)]
 pub enum ImageLoadResult {
     Loaded(LoadedImageData),
     Failed,
 }
 
 /// Data loaded from an image file, ready to apply to the viewer.
+#[derive(Debug)]
 pub struct LoadedImageData {
     pub image_bytes: Vec<u8>,
     pub display_bytes: Vec<u8>,

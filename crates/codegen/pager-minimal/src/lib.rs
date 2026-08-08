@@ -88,7 +88,7 @@ use pager::app::app_view::AppView;
 /// every path through this function reaches; its own inner
 /// `BeginSynchronizedUpdate` is redundant-but-harmless (DEC 2026 is a mode,
 /// not a counter — the first End closes it).
-pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal) {
+pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal, frame: pager::motion::FrameStamp) {
     let _ = terminal.backend_mut().queue(BeginSynchronizedUpdate);
     let _ = terminal.autoresize();
     // Pending permission/question marks are synced ONCE, up front, so the
@@ -104,7 +104,7 @@ pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal) {
     overlay::sync_viewport(app, terminal);
     commit::commit_active(app, terminal);
     commit::expand_pending(app, terminal);
-    live::draw_live(app, terminal);
+    live::draw_live(app, terminal, frame);
 }
 
 /// Register the minimal-mode render hooks with `pager`.

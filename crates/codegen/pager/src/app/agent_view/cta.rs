@@ -105,11 +105,16 @@ impl AgentView {
     /// No-op (clears rects) when the phase is `Hidden` or `area` doesn't fit.
     /// Spinner phases (`Installing`/`AwaitingReload`/`AwaitingMcps`) and the
     /// brief `Installed` confirmation render status text without buttons.
-    pub(super) fn draw_plugin_cta(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
-        let tick = self.scrollback.animation_tick();
+    pub(super) fn draw_plugin_cta(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        theme: &Theme,
+        frame: crate::motion::FrameStamp,
+    ) {
         let spinner = {
             let frames = crate::glyphs::braille_spinner_frames();
-            frames[(tick / crate::views::turn_status::SPINNER_DIVISOR) as usize % frames.len()]
+            crate::motion::spinner_glyph(frame, frames)
         };
         let secondary = Style::default().fg(theme.text_secondary);
         let name_style = Style::default().fg(theme.accent_model);
@@ -814,15 +819,20 @@ mod plugin_cta_notify_tests {
         };
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        agent.draw_plugin_cta(&mut buf, area, &crate::theme::Theme::current());
+        agent.draw_plugin_cta(
+            &mut buf,
+            area,
+            &crate::theme::Theme::current(),
+            crate::motion::FrameStamp::default(),
+        );
 
         let row = cta_row_text(&buf, area);
         assert!(row.contains("Installing figma"), "row = {row:?}");
-        // Leading braille spinner (frame 0 at tick 0).
-        assert!(
-            row.contains(crate::glyphs::braille_spinner_frames()[0]),
-            "row = {row:?}"
+        let spinner = crate::motion::spinner_glyph(
+            crate::motion::FrameStamp::default(),
+            crate::glyphs::braille_spinner_frames(),
         );
+        assert!(row.contains(spinner), "row = {row:?}");
         assert!(agent.plugin_cta.hit_connect.rect.is_none());
         assert!(agent.plugin_cta.hit_dismiss.rect.is_none());
     }
@@ -842,14 +852,20 @@ mod plugin_cta_notify_tests {
             agent.plugin_cta.phase = phase;
             let area = ratatui::layout::Rect::new(0, 0, 60, 1);
             let mut buf = ratatui::buffer::Buffer::empty(area);
-            agent.draw_plugin_cta(&mut buf, area, &crate::theme::Theme::current());
+            agent.draw_plugin_cta(
+                &mut buf,
+                area,
+                &crate::theme::Theme::current(),
+                crate::motion::FrameStamp::default(),
+            );
 
             let row = cta_row_text(&buf, area);
             assert!(row.contains("Setting up figma"), "row = {row:?}");
-            assert!(
-                row.contains(crate::glyphs::braille_spinner_frames()[0]),
-                "row = {row:?}"
+            let spinner = crate::motion::spinner_glyph(
+                crate::motion::FrameStamp::default(),
+                crate::glyphs::braille_spinner_frames(),
             );
+            assert!(row.contains(spinner), "row = {row:?}");
             assert!(agent.plugin_cta.hit_connect.rect.is_none());
             assert!(agent.plugin_cta.hit_dismiss.rect.is_none());
         }
@@ -864,7 +880,12 @@ mod plugin_cta_notify_tests {
         };
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        agent.draw_plugin_cta(&mut buf, area, &crate::theme::Theme::current());
+        agent.draw_plugin_cta(
+            &mut buf,
+            area,
+            &crate::theme::Theme::current(),
+            crate::motion::FrameStamp::default(),
+        );
 
         let row = cta_row_text(&buf, area);
         assert!(row.contains("figma plugin installed"), "row = {row:?}");
@@ -884,7 +905,7 @@ mod plugin_cta_notify_tests {
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let theme = crate::theme::Theme::current();
-        agent.draw_plugin_cta(&mut buf, area, &theme);
+        agent.draw_plugin_cta(&mut buf, area, &theme, crate::motion::FrameStamp::default());
 
         let row = cta_row_text(&buf, area);
         assert!(row.contains("Install figma plugin?"), "row = {row:?}");
@@ -917,7 +938,7 @@ mod plugin_cta_notify_tests {
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let theme = crate::theme::Theme::current();
-        agent.draw_plugin_cta(&mut buf, area, &theme);
+        agent.draw_plugin_cta(&mut buf, area, &theme, crate::motion::FrameStamp::default());
 
         let rect = agent.plugin_cta.hit_connect.rect.unwrap();
         for x in rect.x..rect.x + rect.width {
@@ -938,7 +959,12 @@ mod plugin_cta_notify_tests {
         };
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        agent.draw_plugin_cta(&mut buf, area, &crate::theme::Theme::current());
+        agent.draw_plugin_cta(
+            &mut buf,
+            area,
+            &crate::theme::Theme::current(),
+            crate::motion::FrameStamp::default(),
+        );
 
         let row = cta_row_text(&buf, area);
         assert!(row.contains("Couldn't install figma"), "row = {row:?}");
@@ -958,7 +984,12 @@ mod plugin_cta_notify_tests {
         };
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        agent.draw_plugin_cta(&mut buf, area, &crate::theme::Theme::current());
+        agent.draw_plugin_cta(
+            &mut buf,
+            area,
+            &crate::theme::Theme::current(),
+            crate::motion::FrameStamp::default(),
+        );
 
         let row = cta_row_text(&buf, area);
         assert!(row.contains("[Install ctrl+/]"), "row = {row:?}");
@@ -976,7 +1007,12 @@ mod plugin_cta_notify_tests {
         };
         let area = ratatui::layout::Rect::new(0, 0, 20, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        agent.draw_plugin_cta(&mut buf, area, &crate::theme::Theme::current());
+        agent.draw_plugin_cta(
+            &mut buf,
+            area,
+            &crate::theme::Theme::current(),
+            crate::motion::FrameStamp::default(),
+        );
 
         let row = cta_row_text(&buf, area);
         assert!(row.contains("[Install]"), "row = {row:?}");
@@ -996,7 +1032,12 @@ mod plugin_cta_notify_tests {
         };
         let area = ratatui::layout::Rect::new(0, 0, 30, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        agent.draw_plugin_cta(&mut buf, area, &crate::theme::Theme::current());
+        agent.draw_plugin_cta(
+            &mut buf,
+            area,
+            &crate::theme::Theme::current(),
+            crate::motion::FrameStamp::default(),
+        );
 
         let row = cta_row_text(&buf, area);
         assert!(!row.contains("ctrl+/"), "row = {row:?}");

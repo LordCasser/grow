@@ -172,7 +172,7 @@ impl AgentView {
     }
     /// How long after the last pointer movement the Cmd link-hover poll stays
     /// armed. Within this window a Cmd press underlines the hovered link at
-    /// tick latency; after it, the poll (and with it the animation tick loop)
+    /// UI-maintenance latency; after it, the modifier poll
     /// parks so a pointer merely resting over the window costs zero CPU.
     /// Any pointer movement — including the reflexive nudge people make
     /// before Cmd+clicking — re-arms it instantly via the mouse event.
@@ -187,7 +187,7 @@ impl AgentView {
     ///
     /// The poll is bounded by recent pointer activity: `hovered_entry` is set
     /// whenever the pointer rests anywhere over content, so an unbounded gate
-    /// would hold the ~30fps animation tick (each tick running a CoreGraphics
+    /// would hold the UI-maintenance clock (each poll running a CoreGraphics
     /// modifier query) alive for as long as the mouse happens to sit over the
     /// window — i.e. approximately always. An active link highlight
     /// (`hovered_link_idx`) keeps polling regardless of the window so a held
@@ -222,7 +222,7 @@ impl AgentView {
     /// On macOS, crossterm's Kitty protocol does not report modifier-only
     /// key events, so bare Cmd press/release is invisible to the input
     /// handler. This method polls CoreGraphics directly and is meant to
-    /// be called from the animation tick loop.
+    /// be called from the UI-maintenance reducer.
     ///
     /// No-op on non-macOS (Ctrl key events are reported normally).
     pub fn poll_link_modifier(&mut self) -> bool {

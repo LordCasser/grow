@@ -1302,8 +1302,8 @@ pub(super) fn dispatch_action_result(
                             Some(crate::views::extensions_modal::ActionResultNotice {
                                 message: outcome.message.clone(),
                                 entry_index,
-                                ticks_remaining:
-                                    crate::views::extensions_modal::RESULT_NOTICE_TICKS,
+                                expires_at: std::time::Instant::now()
+                                    + crate::views::extensions_modal::RESULT_NOTICE_DURATION,
                             });
                     }
                     modal.pending_action = None;

@@ -19,10 +19,6 @@ use crate::render::line_utils::{truncate_line, truncate_str};
 use crate::theme::Theme;
 use crate::util::format_time_ago;
 
-/// Show each spinner frame for this many animation ticks. The frames
-/// themselves come from [`crate::glyphs::dot_spinner_frames`] so they
-/// degrade to an ASCII pulse on legacy Windows consoles.
-const SPINNER_DIVISOR: u64 = 4;
 /// How many ticks each phase of the `NeedsInput` bullet blink lasts. At the
 /// ~30 Hz dashboard tick this toggles roughly every 0.33 s (≈1.5 Hz blink).
 const NEEDS_INPUT_BLINK_DIVISOR: u64 = 10;
@@ -123,9 +119,6 @@ pub fn render_dashboard(
     // Re-anchor selection BEFORE we build the rows so that the
     // visible set drives selection clamping.
     let theme = Theme::current();
-    // `spinner_tick` is bumped in `AppView::tick()`,
-    // not here, so the spinner advances even when no redraw was
-    // triggered by other state changes.
     state.last_area = area;
 
     // Paint the full area with the theme's base background BEFORE
@@ -203,7 +196,8 @@ pub fn render_dashboard(
     let reply_text_w = layout.dispatch.width.saturating_sub(6);
 
     match state.selected.clone() {
-        Some(sel) => match super::peek::compute_peek_fields(&sel, agents) {
+        Some(sel) => match super::peek::compute_peek_fields(&sel, agents, state.motion_frame.now())
+        {
             Some(fields) => {
                 let question = fields.question.is_some();
                 let peek_min = if question {
@@ -452,6 +446,7 @@ pub fn render_dashboard(
             &modal.mode,
             &theme,
             /* compact */ false,
+            state.motion_frame,
         );
         return None;
     }
@@ -531,7 +526,7 @@ fn rename_cursor_pos(state: &DashboardState, rows: &[DashboardRow]) -> Option<(u
             (
                 UnicodeWidthStr::width(crate::glyphs::selection_bar()) as u16,
                 (r.indent as u16) * 2,
-                UnicodeWidthStr::width(state_icon(r.state, state.spinner_tick)) as u16,
+                UnicodeWidthStr::width(state_icon(r.state, state.motion_frame)) as u16,
             )
         })
         .unwrap_or((1, 0, 1));
@@ -823,7 +818,7 @@ fn render_header(
         // working glyph matches the spinner painted on individual
         // rows (visual consistency).
         let frames = crate::glyphs::dot_spinner_frames();
-        let spin = frames[(state.spinner_tick / SPINNER_DIVISOR) as usize % frames.len()];
+        let spin = crate::motion::spinner_glyph(state.motion_frame, frames);
         status.push(
             "working",
             chip(spin, theme.accent_running, working, "working"),
@@ -1238,6 +1233,7 @@ fn render_location_picker(
         /* non_selectable_clickable */ &[],
         Some(theme.bg_base),
         /* loading */ false,
+        crate::motion::FrameStamp::default(),
     );
     modal.content_hits = Some(hits);
 }
@@ -1973,7 +1969,10 @@ fn render_idle_overflow(
     // marker (1) + gap (1) + icon + gap (1); the Idle group is top-level,
     // so indent is 0.
     let indicator = if expanded { "-" } else { "+" };
-    let icon_w = unicode_width::UnicodeWidthStr::width(state_icon(RowState::Idle, 0)) as u16;
+    let icon_w = unicode_width::UnicodeWidthStr::width(state_icon(
+        RowState::Idle,
+        crate::motion::FrameStamp::default(),
+    )) as u16;
     let indicator_x = rect.x.saturating_add(2);
     let name_x = indicator_x.saturating_add(icon_w + 1);
     if indicator_x < rect.x + rect.width {
@@ -2181,11 +2180,11 @@ fn render_row(
     };
     let marker_w = UnicodeWidthStr::width(marker) as u16;
     let indent_w = (row.indent as u16) * 2;
-    let icon = state_icon(row.state, state.spinner_tick);
+    let icon = state_icon(row.state, state.motion_frame);
     // `NeedsInput` bullets blink yellow ↔ dim yellow; every other state uses
     // its steady state colour.
     let icon_color = if row.state == RowState::NeedsInput {
-        needs_input_bullet_color(state.spinner_tick, theme)
+        needs_input_bullet_color(crate::motion::base_tick(state.motion_frame), theme)
     } else {
         state_color(row.state, theme)
     };
@@ -2613,7 +2612,7 @@ fn render_narrow_rows(
             } else {
                 " "
             };
-            let icon = state_icon(row.state, state.spinner_tick);
+            let icon = state_icon(row.state, state.motion_frame);
             let indent = "  ".repeat(row.indent as usize);
             let chrome = format!("{marker} {indent}{icon} ");
             let chrome_w = UnicodeWidthStr::width(chrome.as_str()) as u16;
@@ -2641,7 +2640,7 @@ fn render_narrow_rows(
                 " "
             };
             let marker_w = UnicodeWidthStr::width(marker) as u16;
-            let icon = state_icon(row.state, state.spinner_tick);
+            let icon = state_icon(row.state, state.motion_frame);
             let icon_w = UnicodeWidthStr::width(icon) as u16;
             let indent = "  ".repeat(row.indent as usize);
             let indent_w = UnicodeWidthStr::width(indent.as_str()) as u16;
@@ -3731,12 +3730,11 @@ fn render_footer(
         .render(inner, buf);
 }
 
-fn state_icon(state: RowState, tick: u64) -> &'static str {
+fn state_icon(state: RowState, frame: crate::motion::FrameStamp) -> &'static str {
     match state {
         RowState::Working => {
             let frames = crate::glyphs::dot_spinner_frames();
-            let i = (tick / SPINNER_DIVISOR) as usize % frames.len();
-            frames[i]
+            crate::motion::spinner_glyph(frame, frames)
         }
         // Hollow diamond for idle rows; filled diamond for every
         // state that needs visual presence (needs-input, completed,
@@ -4338,28 +4336,37 @@ mod tests {
     use crate::views::dashboard::DashboardRowId;
     use crate::views::dashboard::state::DashboardState;
 
-    /// Spinner glyph stays stable for `SPINNER_DIVISOR`
+    fn frame_at_tick(tick: u64) -> crate::motion::FrameStamp {
+        let origin = std::time::Instant::now();
+        crate::motion::FrameStamp::at(
+            origin,
+            origin + crate::motion::BASE_SAMPLE * u32::try_from(tick).unwrap(),
+        )
+    }
+
+    /// Spinner glyph stays stable for four base samples
     /// successive ticks before advancing.
     #[test]
     fn state_icon_spinner_advances_every_n_ticks() {
-        let g0 = state_icon(RowState::Working, 0);
+        let g0 = state_icon(RowState::Working, frame_at_tick(0));
         // Same glyph for divisor-1 more ticks.
-        for t in 1..SPINNER_DIVISOR {
-            assert_eq!(state_icon(RowState::Working, t), g0);
+        for t in 1..4 {
+            assert_eq!(state_icon(RowState::Working, frame_at_tick(t)), g0);
         }
-        let g1 = state_icon(RowState::Working, SPINNER_DIVISOR);
-        assert_ne!(g1, g0, "spinner must advance after SPINNER_DIVISOR ticks");
+        let g1 = state_icon(RowState::Working, frame_at_tick(4));
+        assert_ne!(g1, g0, "spinner must advance after four samples");
     }
 
     /// Every `RowState` variant resolves to a glyph.
     #[test]
     fn state_icon_one_per_variant() {
-        assert!(!state_icon(RowState::Working, 0).is_empty());
-        assert!(!state_icon(RowState::NeedsInput, 0).is_empty());
-        assert!(!state_icon(RowState::Idle, 0).is_empty());
-        assert!(!state_icon(RowState::Completed, 0).is_empty());
-        assert!(!state_icon(RowState::Failed, 0).is_empty());
-        assert!(!state_icon(RowState::Blocked, 0).is_empty());
+        let frame = frame_at_tick(0);
+        assert!(!state_icon(RowState::Working, frame).is_empty());
+        assert!(!state_icon(RowState::NeedsInput, frame).is_empty());
+        assert!(!state_icon(RowState::Idle, frame).is_empty());
+        assert!(!state_icon(RowState::Completed, frame).is_empty());
+        assert!(!state_icon(RowState::Failed, frame).is_empty());
+        assert!(!state_icon(RowState::Blocked, frame).is_empty());
     }
 
     /// Helper: read buffer row-by-row so multi-cell substring checks
@@ -4531,7 +4538,7 @@ mod tests {
         use std::time::SystemTime;
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 32));
         let mut state = DashboardState::new();
-        state.spinner_tick = 8;
+        state.motion_frame = frame_at_tick(8);
         let theme = Theme::current();
         let now = SystemTime::now();
         let rows = vec![
@@ -6742,7 +6749,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.spinner_tick = 8; // → dot_spinner_frames()[2] = `⸬`.
+        state.motion_frame = frame_at_tick(8);
         let row = DashboardRow {
             id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
             label: "who are you?".to_string(),
@@ -6915,7 +6922,7 @@ mod tests {
         let render = |tick: u64| {
             let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
             let mut state = DashboardState::new();
-            state.spinner_tick = tick;
+            state.motion_frame = frame_at_tick(tick);
             render_row(
                 &mut buf,
                 Rect::new(0, 0, 100, 2),

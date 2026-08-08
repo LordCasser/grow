@@ -35,8 +35,6 @@ use super::overlay::OverlayState;
 // Spinner
 // ---------------------------------------------------------------------------
 
-const SPINNER_DIVISOR: u64 = 4;
-
 // ---------------------------------------------------------------------------
 // Shell command syntax highlighting (used by other modules too)
 // ---------------------------------------------------------------------------
@@ -459,7 +457,7 @@ impl TaskEntry {
         }
     }
 
-    fn from_workflow_run(run: &crate::views::workflows::WorkflowRunSnapshot) -> Self {
+    fn from_workflow_run(run: &crate::views::workflows::WorkflowRunSnapshot, now: Instant) -> Self {
         let theme = Theme::current();
         let running = run.is_active();
 
@@ -529,9 +527,11 @@ impl TaskEntry {
             styled: Line::from(spans),
             running,
             stoppable: run.can_stop(),
-            started_at: Instant::now()
-                .checked_sub(std::time::Duration::from_millis(run.live_elapsed_ms()))
-                .unwrap_or_else(Instant::now),
+            started_at: now
+                .checked_sub(std::time::Duration::from_millis(
+                    run.live_elapsed_ms_at(now),
+                ))
+                .unwrap_or(now),
         }
     }
 
@@ -782,7 +782,6 @@ pub struct TasksPane {
     list_style: ListPaneStyle,
     show_done: bool,
     pub overlay: OverlayState,
-    tick: u64,
     pub kill_button_rects: Vec<(TaskEntryId, Rect)>,
     pub view_button_rects: Vec<(TaskEntryId, Rect)>,
     pub hovered_kill: Option<TaskEntryId>,
@@ -884,7 +883,6 @@ impl TasksPane {
             list_style,
             show_done: false,
             overlay: OverlayState::hidden(),
-            tick: 0,
             kill_button_rects: Vec::new(),
             view_button_rects: Vec::new(),
             hovered_kill: None,
@@ -957,7 +955,8 @@ impl TasksPane {
         self.workflow_runs = workflow_runs.to_vec();
         for run in workflow_runs {
             if self.show_done || !run.is_terminal() {
-                self.items.push(TaskEntry::from_workflow_run(run));
+                self.items
+                    .push(TaskEntry::from_workflow_run(run, Instant::now()));
             }
         }
 
@@ -1189,18 +1188,7 @@ impl TasksPane {
         (count as u16).min(max).max(1) + bar
     }
 
-    // -- Tick ----------------------------------------------------------------
-
-    pub fn tick(&mut self) -> bool {
-        self.tick += 1;
-        self.entries.iter().any(|e| e.is_running())
-    }
-
-    pub fn tick_count(&self) -> u64 {
-        self.tick
-    }
-
-    pub fn needs_tick(&self) -> bool {
+    pub fn has_live_motion(&self) -> bool {
         self.entries.iter().any(|e| e.is_running())
     }
 
@@ -1295,6 +1283,7 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
+        frame: crate::motion::FrameStamp,
     ) {
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
@@ -1407,7 +1396,7 @@ impl TasksPane {
             height: list_area.height.saturating_sub(bar_height),
             ..list_area
         };
-        self.render_overlay(overlay_area, buf, bg_tasks, subagents, scheduled);
+        self.render_overlay(overlay_area, buf, bg_tasks, subagents, scheduled, frame);
     }
 
     fn render_overlay(
@@ -1417,6 +1406,7 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         _scheduled: &HashMap<String, ScheduledTaskInfo>,
+        frame: crate::motion::FrameStamp,
     ) {
         let theme = Theme::current();
         let scroll_offset = self.list_state.scroll_offset();
@@ -1460,13 +1450,13 @@ impl TasksPane {
                     let Some(task) = bg_tasks.get(task_id) else {
                         continue;
                     };
-                    self.render_bg_task_overlay(area, buf, y, task_id, task, &theme);
+                    self.render_bg_task_overlay(area, buf, y, task_id, task, &theme, frame);
                 }
                 OverlayEntryData::Agent(ref subagent_id, ref child_session_id) => {
                     let Some(info) = subagents.get(child_session_id) else {
                         continue;
                     };
-                    self.render_agent_overlay(area, buf, y, subagent_id, info, &theme);
+                    self.render_agent_overlay(area, buf, y, subagent_id, info, &theme, frame);
                 }
                 OverlayEntryData::Scheduled(ref task_id, ref linked_subagent) => {
                     self.render_scheduled_overlay(
@@ -1476,6 +1466,7 @@ impl TasksPane {
                         task_id,
                         linked_subagent.as_deref(),
                         &theme,
+                        frame,
                     );
                 }
                 OverlayEntryData::Workflow(ref name) => {
@@ -1483,7 +1474,7 @@ impl TasksPane {
                     else {
                         continue;
                     };
-                    self.render_workflow_overlay(area, buf, y, &run, &theme);
+                    self.render_workflow_overlay(area, buf, y, &run, &theme, frame);
                 }
             }
         }
@@ -1496,13 +1487,18 @@ impl TasksPane {
         y: u16,
         run: &crate::views::workflows::WorkflowRunSnapshot,
         theme: &Theme,
+        frame: crate::motion::FrameStamp,
     ) {
         let running = run.is_active();
-        let elapsed = format_duration(std::time::Duration::from_millis(run.live_elapsed_ms()));
+        let elapsed = format_duration(std::time::Duration::from_millis(
+            run.live_elapsed_ms_at(frame.now()),
+        ));
         let (icon, icon_style) = if running {
             let frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
-            (frames[frame_idx], Style::default().fg(theme.accent_running))
+            (
+                crate::motion::spinner_glyph(frame, frames),
+                Style::default().fg(theme.accent_running),
+            )
         } else if run.status == "complete" {
             (
                 crate::glyphs::check_mark(),
@@ -1566,12 +1562,12 @@ impl TasksPane {
         task_id: &str,
         task: &BgTaskState,
         theme: &Theme,
+        frame: crate::motion::FrameStamp,
     ) {
         let (icon, icon_style, right_text, right_style) = if task.pending_kill {
             let frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
             (
-                frames[frame_idx],
+                crate::motion::spinner_glyph(frame, frames),
                 Style::default().fg(theme.accent_error),
                 "killing\u{2026} ".to_string(),
                 Style::default().fg(theme.accent_error),
@@ -1580,10 +1576,9 @@ impl TasksPane {
             match task.status {
                 BgTaskStatus::Running => {
                     let frames = crate::glyphs::dot_spinner_frames();
-                    let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
                     let elapsed = format_duration(task.elapsed());
                     (
-                        frames[frame_idx],
+                        crate::motion::spinner_glyph(frame, frames),
                         Style::default().fg(theme.accent_running),
                         format!("{elapsed} "),
                         Style::default().fg(theme.gray),
@@ -1714,22 +1709,21 @@ impl TasksPane {
         subagent_id: &str,
         info: &SubagentInfo,
         theme: &Theme,
+        frame: crate::motion::FrameStamp,
     ) {
         let (icon, icon_style, right_text, right_style) = if info.pending_kill {
             let frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
             (
-                frames[frame_idx],
+                crate::motion::spinner_glyph(frame, frames),
                 Style::default().fg(theme.accent_error),
                 "killing\u{2026} ".to_string(),
                 Style::default().fg(theme.accent_error),
             )
         } else if info.is_running() {
             let frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
             let elapsed = format_duration(info.display_elapsed());
             (
-                frames[frame_idx],
+                crate::motion::spinner_glyph(frame, frames),
                 Style::default().fg(theme.accent_running),
                 format!("{elapsed} "),
                 Style::default().fg(theme.gray),
@@ -1863,13 +1857,14 @@ impl TasksPane {
         task_id: &str,
         linked_subagent: Option<&str>,
         theme: &Theme,
+        frame: crate::motion::FrameStamp,
     ) {
         let frames = crate::glyphs::dot_spinner_frames();
-        let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
+        let spinner = crate::motion::spinner_glyph(frame, frames);
         buf.set_span(
             area.x,
             y,
-            &Span::styled(frames[frame_idx], Style::default().fg(theme.accent_running)),
+            &Span::styled(spinner, Style::default().fg(theme.accent_running)),
             2,
         );
 
@@ -2237,6 +2232,7 @@ mod tests {
             bg_tasks,
             &HashMap::new(),
             &HashMap::new(),
+            crate::motion::FrameStamp::default(),
         );
         (0..height)
             .map(|y| {
@@ -2543,6 +2539,7 @@ mod tests {
             &BTreeMap::new(),
             &HashMap::new(),
             &scheduled,
+            crate::motion::FrameStamp::default(),
         );
 
         // Locate the `✗` kill glyph; every cell past the closing `]` must be
@@ -3498,7 +3495,7 @@ mod tests {
                 duration_ms: 0,
             },
         ];
-        let entry = TaskEntry::from_workflow_run(&run);
+        let entry = TaskEntry::from_workflow_run(&run, Instant::now());
         assert!(entry.search_text().contains("1 agent"));
         assert!(!entry.search_text().contains("2 agents"));
     }
@@ -3506,7 +3503,7 @@ mod tests {
     #[test]
     fn workflow_row_stoppable_tracks_can_stop_not_is_active() {
         fn stoppable_of(run: &crate::views::workflows::WorkflowRunSnapshot) -> bool {
-            match TaskEntry::from_workflow_run(run) {
+            match TaskEntry::from_workflow_run(run, Instant::now()) {
                 TaskEntry::Workflow { stoppable, .. } => stoppable,
                 _ => panic!("expected a workflow entry"),
             }
@@ -3524,7 +3521,7 @@ mod tests {
             assert!(!stoppable_of(&run), "{status} row must not be stoppable");
         }
 
-        match TaskEntry::from_workflow_run(&make_workflow_run("wf", "paused")) {
+        match TaskEntry::from_workflow_run(&make_workflow_run("wf", "paused"), Instant::now()) {
             TaskEntry::Workflow {
                 running, stoppable, ..
             } => {

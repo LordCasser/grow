@@ -3,6 +3,7 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::time::Duration;
 
 use super::EphemeralTip;
 use crate::theme::Theme;
@@ -16,12 +17,12 @@ pub(crate) const WORD_SELECT_TIP_SEEN_KEY: &str = "word_select_tip_shown_count";
 /// Stop showing after this many shows within a single session.
 const WORD_SELECT_TIP_SEEN_CAP: u32 = 3;
 
-/// Tip lifetime: ~20s at the 30fps animation cadence (vs the ~3s default).
+/// Tip lifetime: 20 s (vs the 3 s default).
 /// This tip is a call to action (read → decide → press the chord), not a
 /// glanceable notice, so it gets a much longer window. Ambient + the
 /// retire-on-prompt-edit hook bound the window: it pauses while occluded and
 /// dies the moment the user starts doing something else.
-pub(crate) const WORD_SELECT_TIP_TICKS: u16 = 600;
+pub(crate) const WORD_SELECT_TIP_DURATION: Duration = Duration::from_secs(20);
 
 /// The accept chord advertised by the tip: pressing it while the tip is on
 /// screen flips `keep_text_selection` to `word_select` (see
@@ -44,7 +45,7 @@ pub fn word_select_tip() -> EphemeralTip {
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
     EphemeralTip {
-        ticks_remaining: WORD_SELECT_TIP_TICKS,
+        lifetime: WORD_SELECT_TIP_DURATION,
         ..EphemeralTip::new(
             WORD_SELECT_TIP_KEY,
             Line::from(vec![
@@ -85,9 +86,9 @@ mod tests {
     #[test]
     fn word_select_tip_has_long_ambient_window() {
         let tip = word_select_tip();
-        assert_eq!(tip.ticks_remaining, WORD_SELECT_TIP_TICKS);
+        assert_eq!(tip.lifetime, WORD_SELECT_TIP_DURATION);
         assert!(
-            tip.ticks_remaining > super::super::DEFAULT_TIP_TICKS,
+            tip.lifetime > super::super::DEFAULT_TIP_DURATION,
             "CTA tip must outlive the glanceable default"
         );
         assert!(tip.ambient, "occlusion must pause, not burn, the window");

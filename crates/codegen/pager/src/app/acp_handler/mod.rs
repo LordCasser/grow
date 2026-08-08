@@ -141,6 +141,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         .agents
                         .get_mut(&id)
                         .expect("find_session_match returned an existing AgentId");
+                    let observed_at = std::time::Instant::now();
 
                     // Live-only dedup: a per-session `eventId` highwater drops
                     // re-delivered live duplicates (leader fan-out, reconnect
@@ -245,6 +246,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // re-render). Not a mutation, so no redraw.
                         false
                     } else if let acp::SessionUpdate::Plan(plan) = notif.request.update {
+                        if !meta.is_replay {
+                            agent.last_prompt_event_at = Some(observed_at);
+                        }
                         let items: Vec<_> = plan
                             .entries
                             .into_iter()
@@ -257,6 +261,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     } else if let acp::SessionUpdate::ToolCallUpdate(ref tcu) = notif.request.update
                         && route_bg_task_stdout(tcu, &mut agent.session)
                     {
+                        if !meta.is_replay {
+                            agent.last_prompt_event_at = Some(observed_at);
+                        }
                         // Stdout chunk for a bg task — routed to central store,
                         // not to the scrollback tracker.
                         advance_reconnect_cursor(agent, &mut meta);
@@ -290,6 +297,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // always has `attached_as_viewer == false`).
                         !agent.session.loading_replay
                     } else {
+                        if !meta.is_replay {
+                            agent.last_prompt_event_at = Some(observed_at);
+                        }
                         // Adopt a mismatching `promptId` so subsequent chunks for
                         // the same turn match and render — but ONLY for a viewer
                         // watching another client's turn.
@@ -425,6 +435,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             && !matches!(agent.session.state, AgentState::TurnRunning)
                         {
                             agent.session.state = AgentState::TurnRunning;
+                            agent.last_status_observed_at = Some(observed_at);
                             // Back-date from the authoritative `turnStartMs` so a
                             // viewer's elapsed matches the driver's instead of
                             // starting at the time-to-first-delta.

@@ -781,14 +781,13 @@ pub(crate) fn build_content_entry_data(
 pub(crate) fn build_content_header_label(
     content_loading: bool,
     has_content_rows: bool,
-    tick: u64,
+    frame: crate::motion::FrameStamp,
 ) -> String {
     if content_loading {
         let spinner_frames = crate::glyphs::dot_spinner_frames();
-        let frame_idx = (tick / 4) as usize % spinner_frames.len();
         format!(
             "{} Searching session content\u{2026}",
-            spinner_frames[frame_idx]
+            crate::motion::spinner_glyph(frame, spinner_frames)
         )
     } else if has_content_rows {
         "Extended search results".to_string()
@@ -1122,19 +1121,19 @@ mod tests {
 
     #[test]
     fn content_header_label_loading() {
-        let label = build_content_header_label(true, false, 0);
+        let label = build_content_header_label(true, false, crate::motion::FrameStamp::default());
         assert!(label.contains("Searching"));
     }
 
     #[test]
     fn content_header_label_has_rows() {
-        let label = build_content_header_label(false, true, 0);
+        let label = build_content_header_label(false, true, crate::motion::FrameStamp::default());
         assert_eq!(label, "Extended search results");
     }
 
     #[test]
     fn content_header_label_empty() {
-        let label = build_content_header_label(false, false, 0);
+        let label = build_content_header_label(false, false, crate::motion::FrameStamp::default());
         assert!(label.is_empty());
     }
 

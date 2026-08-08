@@ -1558,6 +1558,26 @@ pub(crate) fn execute(
                     TaskResult::PromptImagePreviewPrepared
                 });
         }
+        Effect::LoadImageViewer {
+            agent_id,
+            child_session_id,
+            owner_id,
+            path,
+        } => {
+            tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::prompt_images::load_image_data(&path)
+                })
+                .await
+                .unwrap_or(crate::prompt_images::ImageLoadResult::Failed);
+                TaskResult::ImageViewerLoaded {
+                    agent_id,
+                    child_session_id,
+                    owner_id,
+                    result,
+                }
+            });
+        }
         Effect::PlanDoctorFix { target, report, terminal, request } => {
             tasks
                 .spawn(async move {

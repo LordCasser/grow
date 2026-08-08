@@ -434,8 +434,7 @@ pub(super) fn apply_terminal_notifications(
         // Defer the notification so the terminal has time to apply the idle
         // title. Ghostty debounces setTitle() by 75 ms
         // (SurfaceView_AppKit.swift:576), so we need >75 ms before the
-        // notification reads self.title for the subtitle. 3 ticks × 33 ms ≈
-        // 99 ms.
+        // notification reads self.title for the subtitle.
         let session_id = agent.session.session_id.as_ref().map(|s| s.0.to_string());
         let notif_title = session_name
             .map(|s| s.to_string())
@@ -447,7 +446,7 @@ pub(super) fn apply_terminal_notifications(
                 body,
                 session_id,
             },
-            3,
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
         ));
     }
 }

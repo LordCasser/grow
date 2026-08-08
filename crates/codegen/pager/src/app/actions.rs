@@ -1918,6 +1918,12 @@ pub enum Effect {
     PreparePromptImagePreview {
         preparation: crate::prompt_images::PromptImagePreviewPreparation,
     },
+    LoadImageViewer {
+        agent_id: AgentId,
+        child_session_id: Option<String>,
+        owner_id: u64,
+        path: std::path::PathBuf,
+    },
     PlanDoctorFix {
         target: DoctorFixTarget,
         report: Box<crate::diagnostics::DiagnosticReport>,
@@ -2533,6 +2539,12 @@ pub enum TaskResult {
     },
     /// Shared prompt-image preview state was resolved off-thread.
     PromptImagePreviewPrepared,
+    ImageViewerLoaded {
+        agent_id: AgentId,
+        child_session_id: Option<String>,
+        owner_id: u64,
+        result: crate::prompt_images::ImageLoadResult,
+    },
     DoctorFixPlanned {
         target: DoctorFixTarget,
         result: Result<DoctorPlanningOutcome, String>,

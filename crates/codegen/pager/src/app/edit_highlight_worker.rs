@@ -343,7 +343,7 @@ impl AgentView {
             // Near-unreachable in shipped builds (panic=abort kills the whole
             // pager with the worker, as mermaid_worker documents); cheap
             // insurance so a dead worker can't strand `pending` and pin
-            // `TickDemand::Fast` forever in unwind builds.
+            // fast frame demand forever in unwind builds.
             self.abandon_edit_hl_worker("result channel disconnected");
         }
         redraw

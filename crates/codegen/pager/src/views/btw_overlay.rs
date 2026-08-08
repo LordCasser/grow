@@ -133,9 +133,6 @@ impl BtwOverlayState {
     }
 }
 
-/// Show each spinner frame for this many animation ticks.
-const SPINNER_DIVISOR: u64 = 4;
-
 /// Maximum body lines shown for a Done response.
 pub const DONE_MAX_BODY_LINES: u16 = 12;
 
@@ -185,7 +182,7 @@ pub fn render_btw_panel(
     buf: &mut Buffer,
     state: &BtwOverlayState,
     area: Rect,
-    tick: u64,
+    frame: crate::motion::FrameStamp,
     focused: bool,
     hit_close: Option<&mut crate::app::agent_view::HitArea>,
     selection_model: &mut ResolvedSelectionModel,
@@ -341,8 +338,7 @@ pub fn render_btw_panel(
     match state {
         BtwOverlayState::Loading { .. } => {
             let frames = crate::glyphs::braille_spinner_frames();
-            let frame_idx = ((tick / SPINNER_DIVISOR) % frames.len() as u64) as usize;
-            let spinner = frames[frame_idx];
+            let spinner = crate::motion::spinner_glyph(frame, frames);
             let loading_style = Style::default().fg(theme.gray).bg(bg);
             let line = Line::from(vec![
                 Span::styled(format!("{spinner} "), loading_style),
@@ -473,7 +469,17 @@ mod tests {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let mut model = ResolvedSelectionModel::default();
-        render_btw_panel(&mut buf, state, area, 0, false, None, &mut model, None, &[]);
+        render_btw_panel(
+            &mut buf,
+            state,
+            area,
+            crate::motion::FrameStamp::default(),
+            false,
+            None,
+            &mut model,
+            None,
+            &[],
+        );
         model
     }
 
@@ -482,7 +488,17 @@ mod tests {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let mut model = ResolvedSelectionModel::default();
-        render_btw_panel(&mut buf, state, area, 0, false, None, &mut model, None, &[]);
+        render_btw_panel(
+            &mut buf,
+            state,
+            area,
+            crate::motion::FrameStamp::default(),
+            false,
+            None,
+            &mut model,
+            None,
+            &[],
+        );
         buf
     }
 
@@ -506,7 +522,7 @@ mod tests {
             &mut buf,
             state,
             area,
-            0,
+            crate::motion::FrameStamp::default(),
             false,
             None,
             &mut model,
@@ -883,7 +899,7 @@ mod tests {
             &mut buf,
             &state,
             area,
-            0,
+            crate::motion::FrameStamp::default(),
             false,
             Some(&mut hit),
             &mut model,

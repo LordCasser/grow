@@ -597,8 +597,9 @@ pub fn draw_active_modal(
     buf: &mut Buffer,
     theme: Theme,
     compact: bool,
+    frame: crate::motion::FrameStamp,
 ) {
-    v.draw_active_modal(area, buf, theme, compact);
+    v.draw_active_modal(area, buf, theme, compact, frame);
 }
 
 /// [`AgentView::drain_blocked`].

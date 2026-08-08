@@ -2,7 +2,7 @@
 //! hints and the subagent fullscreen view.
 use super::{
     ActivePane, AgentPane, AgentView, AgentViewLayout, CtaPhase, InlineMediaHitAreas,
-    MODE_BANNER_FADE_TICKS, PromptMode, collect_citation_links, dropdown_items_width,
+    MODE_BANNER_FADE, PromptMode, collect_citation_links, dropdown_items_width,
     render_dropdown_chrome, supports_osc22,
 };
 use crate::actions::{ActionId, ActionRegistry};
@@ -30,7 +30,6 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
-use std::time::Instant;
 /// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
 /// view cannot see itself (currently the app-level Esc ownership).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
@@ -44,6 +43,8 @@ pub struct AppRenderParams {
     /// attached-agent popup). Feeds the hint path so the bar never
     /// advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
+    /// Single monotonic sample shared by every dynamic surface in this frame.
+    pub frame: crate::motion::FrameStamp,
 }
 impl AgentView {
     pub(crate) fn update_scrollback_selection_state(
@@ -421,6 +422,7 @@ impl AgentView {
         scratch: &mut ScratchBuffer,
         theme: &Theme,
         bundle_state: &crate::app::bundle::BundleState,
+        frame_stamp: crate::motion::FrameStamp,
     ) -> (
         Option<(u16, u16)>,
         Option<crate::terminal::overlay::PostFlush>,
@@ -473,9 +475,7 @@ impl AgentView {
         };
         let icon = if is_running {
             let spinner_frames = crate::glyphs::dot_spinner_frames();
-            let tick = self.tasks.tick_count();
-            let frame_idx = (tick / 4) as usize % spinner_frames.len();
-            spinner_frames[frame_idx]
+            crate::motion::spinner_glyph(frame_stamp, spinner_frames)
         } else if info.and_then(|s| s.status.as_deref()) == Some("completed") {
             crate::glyphs::check_mark()
         } else {
@@ -670,7 +670,10 @@ impl AgentView {
                 bundle_state,
                 false,
                 &mut Vec::new(),
-                AppRenderParams::default(),
+                AppRenderParams {
+                    frame: frame_stamp,
+                    ..Default::default()
+                },
             );
             child_post_flush = post_flush;
         }
@@ -710,7 +713,9 @@ impl AgentView {
     ) {
         let AppRenderParams {
             esc_owned_before_agent,
+            frame: frame_stamp,
         } = app_params;
+        let motion_tick = crate::motion::base_tick(frame_stamp);
         self.scrollback.begin_frame();
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
@@ -778,6 +783,7 @@ impl AgentView {
                 scratch,
                 &theme,
                 bundle_state,
+                frame_stamp,
             );
         }
         if let Some(esc) = self.take_subagent_inline_media_clear_escapes() {
@@ -1069,7 +1075,7 @@ impl AgentView {
         };
         {
             use crate::app::agent::PENDING_KILL_TIMEOUT_SECS;
-            let now = Instant::now();
+            let now = frame_stamp.now();
             for task in self.session.bg_tasks.values_mut() {
                 if let Some(requested) = task.kill_requested_at
                     && now.duration_since(requested).as_secs() >= PENDING_KILL_TIMEOUT_SECS
@@ -1307,9 +1313,8 @@ impl AgentView {
         );
         if running_count > 0 {
             let spinner_frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tasks.tick_count() / 4) as usize % spinner_frames.len();
-            let frame = spinner_frames[frame_idx];
-            let indicator = format!("{frame} {running_count}");
+            let spinner = crate::motion::spinner_glyph(frame_stamp, spinner_frames);
+            let indicator = format!("{spinner} {running_count}");
             let mut indicator_style = Style::default().fg(theme.accent_running).bg(theme.bg_base);
             if self.hit_bg_status.hovered {
                 indicator_style = indicator_style.add_modifier(ratatui::style::Modifier::BOLD);
@@ -1327,7 +1332,6 @@ impl AgentView {
             status.push("plan", Line::from(Span::styled("plan", plan_style)));
         }
         if let Some(ref goal) = self.goal_state {
-            let tick = self.tasks.tick_count() as usize;
             let active_subagent_tokens: u64 = self
                 .subagent_sessions
                 .values()
@@ -1340,15 +1344,17 @@ impl AgentView {
                     goal,
                     &theme,
                     self.hit_goal_status.hovered,
-                    tick,
+                    frame_stamp,
                     self.context_state.as_ref().map(|c| c.used),
                     active_subagent_tokens,
                 ),
             );
         }
-        if let Some(mcp_line) = self.mcp_init_progress.as_ref().and_then(|p| {
-            crate::views::agent_status::mcp_status_line(p, self.scrollback.animation_tick(), &theme)
-        }) {
+        if let Some(mcp_line) = self
+            .mcp_init_progress
+            .as_ref()
+            .and_then(|p| crate::views::agent_status::mcp_status_line(p, frame_stamp, &theme))
+        {
             status.push("mcp", mcp_line);
         }
         let ctx_used = self.context_state.as_ref().map(|c| c.used);
@@ -1391,7 +1397,7 @@ impl AgentView {
         if let Some(badge_spans) = agent::render_todo_badge_spans(
             &counts,
             self.hit_badge.hovered,
-            self.todo.badge_flash_active(),
+            self.todo.badge_flash_active_at(frame_stamp.now()),
             appearance.todo.badge_format,
             &theme,
         ) {
@@ -1549,6 +1555,7 @@ impl AgentView {
             self.ensure_media_link_paths();
             let sb_rendered = crate::scrollback::ScrollbackPane::new()
                 .active(sb_focused)
+                .with_motion_tick(motion_tick)
                 .with_mouse_pos(self.last_mouse_pos)
                 .with_dim_from(rewind_dim_from)
                 .with_hovered_entry(self.hovered_entry)
@@ -1590,6 +1597,7 @@ impl AgentView {
                         buf,
                         &theme,
                         size.art(),
+                        frame_stamp,
                     );
                 }
             }
@@ -1874,6 +1882,7 @@ impl AgentView {
                 &self.session.bg_tasks,
                 &self.subagent_sessions,
                 &self.session.scheduled_tasks,
+                frame_stamp,
             );
             let close_rect = agent::render_todo_chrome(
                 buf,
@@ -1952,13 +1961,12 @@ impl AgentView {
         if btw_height > 0
             && let Some(ref btw) = self.btw_state
         {
-            let tick = self.scrollback.animation_tick();
             let mut btw_links = crate::render::osc8::LinkOverlay::new();
             crate::views::btw_overlay::render_btw_panel(
                 buf,
                 btw,
                 layout.btw,
-                tick,
+                frame_stamp,
                 self.btw_focused && self.active_pane == AgentPane::Prompt,
                 Some(&mut self.hit_btw_close),
                 &mut self.last_btw_selection_model,
@@ -2006,37 +2014,14 @@ impl AgentView {
                 width: layout.turn_status.width.saturating_sub(pad_left),
                 height: layout.turn_status.height,
             };
-            let tick = self.scrollback.animation_tick();
             let activity = self.resolve_turn_activity();
-            if activity != self.last_activity {
-                if let Some(prev) = &self.last_activity {
-                    let phase_ms = self
-                        .activity_started_at
-                        .map(|t| t.elapsed().as_millis() as u64)
-                        .unwrap_or(0);
-                    let prev_label = prev.as_label();
-                    let next_label = activity.as_ref().map(|a| a.as_label()).unwrap_or("idle");
-                    let sid = self.session.session_id.as_ref().map(|s| s.0.as_ref());
-                    crate::unified_log::debug(
-                        "turn.phase_transition",
-                        sid,
-                        Some(serde_json::json!({
-                            "from": prev_label,
-                            "to": next_label,
-                            "phase_elapsed_ms": phase_ms,
-                        })),
-                    );
-                }
-                self.activity_started_at = Some(Instant::now());
-                self.last_activity = activity.clone();
-            }
             self.hit_plan_approval_status.clear();
             if self.plan_approval_view.is_some() {
                 let status_label = "Waiting on plan approval";
                 let diamond_color = crate::views::turn_status::pending_diamond_color(
                     &theme,
                     theme.accent_plan,
-                    tick,
+                    frame_stamp,
                 );
                 let text_style = if self.hit_plan_approval_status.hovered {
                     Style::default()
@@ -2085,9 +2070,9 @@ impl AgentView {
                     turn_status::TurnStatusArgs {
                         state: &self.session.state,
                         activity: &activity,
-                        turn_elapsed: self.turn_elapsed(),
+                        turn_elapsed: self.turn_elapsed_at(frame_stamp.now()),
                         activity_started_at: self.activity_started_at,
-                        tick,
+                        frame: frame_stamp,
                         drain_blocked,
                         buttons: Some(turn_status::MouseButtons {
                             cancel_hovered: self.hit_cancel_button.hovered,
@@ -2119,7 +2104,7 @@ impl AgentView {
             self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
         }
-        if let Some((ref msg, remaining)) = self.mode_switch_banner {
+        if let Some((ref msg, deadline)) = self.mode_switch_banner {
             self.hit_announcement_hide.clear();
             self.hit_announcement_cta.clear();
             if layout.banner.height > 0 && layout.banner.width > 4 {
@@ -2131,11 +2116,13 @@ impl AgentView {
                         cell.bg = bg;
                     }
                 }
-                let opacity = if remaining > MODE_BANNER_FADE_TICKS {
-                    1.0
-                } else {
-                    remaining as f32 / MODE_BANNER_FADE_TICKS as f32
-                };
+                let remaining = deadline.saturating_duration_since(frame_stamp.now());
+                let opacity =
+                    if self.behavior_switch_warning_pending || remaining >= MODE_BANNER_FADE {
+                        1.0
+                    } else {
+                        remaining.as_secs_f32() / MODE_BANNER_FADE.as_secs_f32()
+                    };
                 let base_fg = theme.text_secondary;
                 let fg = crate::render::color::blend_color(theme.bg_base, base_fg, opacity)
                     .unwrap_or(base_fg);
@@ -2188,7 +2175,7 @@ impl AgentView {
                 crate::tips::render::render_ephemeral_tip(layout.banner, buf, line);
             }
         }
-        self.draw_plugin_cta(buf, layout.plugin_cta, &theme);
+        self.draw_plugin_cta(buf, layout.plugin_cta, &theme, frame_stamp);
         self.follow_up_chips = match self.follow_ups.as_ref() {
             Some(fu) => agent::render_follow_ups(
                 layout.follow_ups,
@@ -3186,7 +3173,7 @@ impl AgentView {
             self.history_dropdown_area = None;
         }
         if self.active_modal.is_some() {
-            self.draw_active_modal(area, buf, theme, compact);
+            self.draw_active_modal(area, buf, theme, compact, frame_stamp);
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
@@ -3596,12 +3583,10 @@ impl AgentView {
                 }
                 if viewer.loading {
                     if inner_cols > 0 && inner_rows > 0 {
-                        use crate::views::turn_status::SPINNER_DIVISOR;
                         use unicode_width::UnicodeWidthStr;
-                        let tick = self.scrollback.animation_tick();
                         let frames = crate::glyphs::braille_spinner_frames();
-                        let frame = frames[(tick / SPINNER_DIVISOR) as usize % frames.len()];
-                        let loading = format!("{} Loading...", frame);
+                        let spinner = crate::motion::spinner_glyph(frame_stamp, frames);
+                        let loading = format!("{} Loading...", spinner);
                         let lw = loading.width() as u16;
                         let lx = popup_rect.x + 1 + inner_cols.saturating_sub(lw) / 2;
                         let ly = popup_rect.y + 1 + inner_rows / 2;
@@ -3943,14 +3928,13 @@ impl AgentView {
                 }
             };
             let compact = self.scrollback.appearance().prompt.compact;
-            let tick = self.scrollback.animation_tick();
             render_extensions_modal(
                 buf,
                 overlay_area,
                 modal_state,
                 Some(layout.shortcuts),
                 compact,
-                tick,
+                frame_stamp,
             );
             if modal_state.input.is_some() {
                 let hints = vec![
@@ -4005,8 +3989,7 @@ impl AgentView {
                     let rect = placement.screen_rect;
                     let center_x = |len: usize| rect.x + rect.width.saturating_sub(len as u16) / 2;
                     let spinner_frames = crate::glyphs::braille_spinner_frames();
-                    let tick = self.scrollback.current_tick() as usize;
-                    let spinner = spinner_frames[tick % spinner_frames.len()];
+                    let spinner = crate::motion::spinner_glyph(frame_stamp, spinner_frames);
                     let label = format!("{spinner} Loading...");
                     let cy = rect.y + rect.height / 2;
                     buf.set_string_safe(
@@ -4143,7 +4126,6 @@ impl AgentView {
             && let Some(ref goal) = self.goal_state
         {
             let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal);
-            let tick = self.tasks.tick_count() as usize;
             let active_subagent_tokens: u64 = self
                 .subagent_sessions
                 .values()
@@ -4154,7 +4136,7 @@ impl AgentView {
                 buf,
                 overlay_rect,
                 goal,
-                tick,
+                frame_stamp,
                 self.context_state.as_ref().map(|c| c.used),
                 active_subagent_tokens,
                 self.hit_goal_close.hovered,
@@ -4166,7 +4148,6 @@ impl AgentView {
             let runs = self.workflow_runs_newest_first();
             let mut view = self.workflows_view.clone();
             view.normalize(&runs);
-            let tick = self.tasks.tick_count() as usize;
             let live: crate::views::workflows::WorkflowAgentLiveMap = self
                 .subagent_sessions
                 .iter()
@@ -4182,8 +4163,14 @@ impl AgentView {
                     )
                 })
                 .collect();
-            let popup =
-                crate::views::workflows::render_workflows(buf, area, &runs, &mut view, tick, &live);
+            let popup = crate::views::workflows::render_workflows(
+                buf,
+                area,
+                &runs,
+                &mut view,
+                frame_stamp,
+                &live,
+            );
             self.workflows_view = view;
             if let Some(popup) = popup {
                 self.frame_occluder_rects.push(popup);

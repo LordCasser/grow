@@ -127,6 +127,8 @@ impl AgentView {
             turn_start_ms: None,
             turn_start_ms_prompt: None,
             turn_started_at: None,
+            last_prompt_event_at: None,
+            last_status_observed_at: None,
             first_activity_logged_for: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_paused_wall: std::time::Duration::ZERO,
@@ -207,7 +209,6 @@ impl AgentView {
             last_prompt_click_ms: None,
             line_viewer: None,
             image_viewer: None,
-            image_load_rx: None,
             gboom: None,
             inline_media_cache: std::collections::HashMap::new(),
             inline_media_ids: std::collections::HashMap::new(),
@@ -353,6 +354,8 @@ impl AgentView {
     /// [`honest_turn_elapsed`].
     pub fn mark_turn_finished(&mut self) {
         self.prompt_status_query_for = None;
+        self.last_prompt_event_at = None;
+        self.last_status_observed_at = None;
         self.turn_started_at = None;
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_paused_wall = std::time::Duration::ZERO;
@@ -385,6 +388,8 @@ impl AgentView {
         // the reload, and its in-flight guard would otherwise block
         // re-querying the prompt's authoritative status forever.
         self.prompt_status_query_for = None;
+        self.last_prompt_event_at = None;
+        self.last_status_observed_at = None;
         self.optimistic_queue_ids.clear();
         self.send_now_awaiting_confirm = None;
         self.workflow_blocks.clear();
@@ -465,6 +470,8 @@ impl AgentView {
     /// (auto-wake / actor runs): they never call `start_turn`.
     pub(crate) fn start_turn_boundary(&mut self, starting_prompt_id: Option<&str>) {
         self.prompt_status_query_for = None;
+        self.last_prompt_event_at = None;
+        self.last_status_observed_at = None;
         // A new turn invalidates the previous turn's finalized marker: a
         // late PromptResponse for the OLD pid must be discarded (not merged)
         // once a newer turn owns the slot.
@@ -641,12 +648,16 @@ impl AgentView {
     /// Effective turn elapsed time, excluding time spent in question views
     /// (accumulated pauses plus the currently open one, on both clocks).
     pub fn turn_elapsed(&self) -> Option<std::time::Duration> {
-        let instant_elapsed = self.turn_started_at?.elapsed();
+        self.turn_elapsed_at(Instant::now())
+    }
+
+    pub fn turn_elapsed_at(&self, now: Instant) -> Option<std::time::Duration> {
+        let instant_elapsed = now.saturating_duration_since(self.turn_started_at?);
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut instant_paused = self.turn_paused_duration;
         let mut wall_paused = self.turn_paused_wall;
         if let Some(qv) = &self.question_view {
-            instant_paused += qv.opened_at.elapsed();
+            instant_paused += now.saturating_duration_since(qv.opened_at);
             wall_paused += wall_since_ms(qv.opened_at_wall_ms, now_ms);
         }
         Some(honest_turn_elapsed(TurnElapsedParams {
@@ -692,6 +703,32 @@ impl AgentView {
             WaitingReason::Model
         };
         Some(TurnActivity::Waiting(reason))
+    }
+
+    /// Reconcile the derived activity phase outside rendering.
+    pub(crate) fn reconcile_activity_phase(&mut self, now: Instant) {
+        let activity = self.resolve_turn_activity();
+        if activity == self.last_activity {
+            return;
+        }
+        if let Some(previous) = &self.last_activity {
+            let phase_ms = self
+                .activity_started_at
+                .map(|at| now.saturating_duration_since(at).as_millis() as u64)
+                .unwrap_or(0);
+            let session_id = self.session.session_id.as_ref().map(|id| id.0.as_ref());
+            crate::unified_log::debug(
+                "turn.phase_transition",
+                session_id,
+                Some(serde_json::json!({
+                    "from": previous.as_label(),
+                    "to": activity.as_ref().map(|next| next.as_label()).unwrap_or("idle"),
+                    "phase_elapsed_ms": phase_ms,
+                })),
+            );
+        }
+        self.activity_started_at = activity.as_ref().map(|_| now);
+        self.last_activity = activity;
     }
     /// Fill in a `TaskOutput` wait's display subject from live task state.
     fn enrich_waiting_activity(

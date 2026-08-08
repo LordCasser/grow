@@ -27,37 +27,21 @@ use crate::app::agent_view::McpInitProgress;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 
-/// Show each spinner frame for this many animation ticks.
-/// At ~30fps, 4 ticks = ~133ms per frame = ~7.5 spinner fps.
-pub(crate) const SPINNER_DIVISOR: u64 = 4;
-
-/// Show each monitor-pulse frame for this many animation ticks — twice the
-/// [`SPINNER_DIVISOR`] dwell (~3.75 fps). The idle still-running cue should
-/// breathe calmly rather than read like the active turn spinner, so its
-/// `○ ◎ ◉ ◎` cycle runs at roughly half the speed (~1.07s per loop).
-pub(crate) const MONITOR_PULSE_DIVISOR: u64 = 8;
-
-/// Pulse speed for every "waiting on you" diamond — the drain-blocked
-/// status, the pending-user-input status, and the plan-approval status
-/// all share this cadence. `pulse_brightness` returns `sin²(tick*speed)`,
-/// which has period π, so at ~30fps this is ~1.3s per cycle
-/// (`π / (0.08 * 30) ≈ 1.31`).
-///
-/// Always route diamond rendering through [`pending_diamond_color`] so
-/// the three call sites can never silently drift apart.
-pub(crate) const USER_WAITING_PULSE_SPEED: f32 = 0.08;
-
 /// Compute the pulsing diamond color for any "waiting on you" cue.
 ///
-/// Blends `accent` toward `theme.bg_base` using a `sin²` pulse driven by
-/// [`USER_WAITING_PULSE_SPEED`]. Brightness ranges from 0.3 (dim) to 1.0
+/// Blends `accent` toward `theme.bg_base` using the shared time-based `sin²`
+/// pulse. Brightness ranges from 0.3 (dim) to 1.0
 /// (full accent) so the diamond stays visible at the trough.
 ///
 /// Pass `theme.accent_user` for user-input waits (permission prompts,
 /// `ask_user_question`, the drain-blocked idle status) and
 /// `theme.accent_plan` for plan-approval waits.
-pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> Color {
-    let brightness = crate::theme::pulse_brightness(tick, USER_WAITING_PULSE_SPEED);
+pub(crate) fn pending_diamond_color(
+    theme: &Theme,
+    accent: Color,
+    frame: crate::motion::FrameStamp,
+) -> Color {
+    let brightness = crate::motion::pulse01(frame, crate::motion::USER_WAITING_PULSE_PERIOD);
     crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
         .unwrap_or(accent)
 }
@@ -190,7 +174,7 @@ pub struct TurnStatusArgs<'a> {
     pub activity: &'a Option<TurnActivity>,
     pub turn_elapsed: Option<Duration>,
     pub activity_started_at: Option<Instant>,
-    pub tick: u64,
+    pub frame: crate::motion::FrameStamp,
     pub drain_blocked: bool,
     /// Mouse affordances + hover state; `None` for keyboard-only hosts.
     pub buttons: Option<MouseButtons>,
@@ -224,7 +208,7 @@ pub fn render_turn_status(
         activity,
         turn_elapsed,
         activity_started_at,
-        tick,
+        frame,
         drain_blocked,
         buttons,
         has_running_execute,
@@ -259,7 +243,7 @@ pub fn render_turn_status(
         && progress.total == 0
         && progress.is_visible()
     {
-        render_starting_session(buf, area, progress, tick, &theme);
+        render_starting_session(buf, area, progress, frame, &theme);
         return TurnStatusOutput::default();
     }
 
@@ -267,7 +251,7 @@ pub fn render_turn_status(
     // No cancel button in this state.
     if drain_blocked && state.is_idle() {
         // Pulsing diamond in accent_user, blending toward bg.
-        let diamond_color = pending_diamond_color(&theme, theme.accent_user, tick);
+        let diamond_color = pending_diamond_color(&theme, theme.accent_user, frame);
         let spans = vec![
             Span::styled(
                 format!("{} ", crate::glyphs::diamond_filled()),
@@ -307,10 +291,12 @@ pub fn render_turn_status(
         if let Some(cue) = cue {
             // Pulsing concentric circle (○ ◎ ◉ ◎) on a calm ambient cadence:
             // the agent is idle, so this breath runs slower than the active
-            // turn spinner (see MONITOR_PULSE_DIVISOR).
+            // foreground spinner.
             let frames = crate::glyphs::monitor_icon_frames();
-            let frame_idx = (tick / MONITOR_PULSE_DIVISOR) as usize % frames.len();
-            let icon = format!("{} ", frames[frame_idx]);
+            let icon = format!(
+                "{} ",
+                crate::motion::phase_glyph(frame, crate::motion::AMBIENT_PULSE_FRAME, frames,)
+            );
             let label_fg = if buttons.is_some_and(|b| b.watching_hovered) {
                 theme.text_primary
             } else {
@@ -404,8 +390,7 @@ pub fn render_turn_status(
         format!("{} ", crate::glyphs::diamond_filled())
     } else {
         let frames = crate::glyphs::braille_spinner_frames();
-        let frame_idx = (tick / SPINNER_DIVISOR) as usize % frames.len();
-        format!("{} ", frames[frame_idx])
+        format!("{} ", crate::motion::spinner_glyph(frame, frames))
     };
     let spinner_width = spinner_str.width();
 
@@ -423,7 +408,12 @@ pub fn render_turn_status(
         String::new()
     } else {
         activity_started_at
-            .map(|t| format!(" {}", format_turn_timer(t.elapsed())))
+            .map(|t| {
+                format!(
+                    " {}",
+                    format_turn_timer(frame.now().saturating_duration_since(t))
+                )
+            })
             .unwrap_or_default()
     };
     let phase_timer_width = phase_timer_str.width();
@@ -468,7 +458,7 @@ pub fn render_turn_status(
     // plan-approval indicators so every "your turn" status has the same
     // visual cadence.
     let spinner_style = if is_pending_user_input {
-        let diamond_color = pending_diamond_color(&theme, theme.accent_user, tick);
+        let diamond_color = pending_diamond_color(&theme, theme.accent_user, frame);
         Style::default().fg(diamond_color)
     } else {
         activity_style
@@ -757,15 +747,18 @@ fn render_starting_session(
     buf: &mut Buffer,
     area: Rect,
     progress: &McpInitProgress,
-    tick: u64,
+    frame: crate::motion::FrameStamp,
     theme: &Theme,
 ) {
     let frames = crate::glyphs::braille_spinner_frames();
-    let frame_idx = (tick / SPINNER_DIVISOR) as usize % frames.len();
-    let timer_str = format!(" {}", format_turn_timer(progress.started_at.elapsed()));
+    let spinner = crate::motion::spinner_glyph(frame, frames);
+    let timer_str = format!(
+        " {}",
+        format_turn_timer(frame.now().saturating_duration_since(progress.started_at))
+    );
     let style = Style::default().fg(theme.gray_dim);
     let spans = vec![
-        Span::styled(format!("{} ", frames[frame_idx]), style),
+        Span::styled(format!("{} ", spinner), style),
         Span::styled("Starting session…", style),
         Span::styled(timer_str, style),
     ];
@@ -1110,7 +1103,7 @@ mod tests {
             activity: &None,
             turn_elapsed: None,
             activity_started_at: None,
-            tick: 0,
+            frame: crate::motion::FrameStamp::default(),
             drain_blocked: false,
             buttons: Some(MouseButtons::default()),
             has_running_execute: false,
@@ -1147,16 +1140,16 @@ mod tests {
         render_row_text(args, 60)
     }
 
-    /// Invoke `render_turn_status` for an idle agent with the given watcher
-    /// counts at animation tick `tick`.
-    fn render_idle_with_watchers_at_tick(watchers: Watchers, tick: u64) -> String {
-        render_idle_with_watchers_in_width(watchers, tick, 72)
+    fn frame_after(elapsed: Duration) -> crate::motion::FrameStamp {
+        let origin = Instant::now();
+        crate::motion::FrameStamp::at(origin, origin + elapsed)
     }
 
-    /// [`render_idle_with_watchers_at_tick`] with an explicit row width.
-    fn render_idle_with_watchers_in_width(watchers: Watchers, tick: u64, width: u16) -> String {
+    /// Invoke `render_turn_status` for an idle agent with the given watcher
+    /// counts at a deterministic motion phase.
+    fn render_idle_with_watchers_at(watchers: Watchers, elapsed: Duration, width: u16) -> String {
         let mut args = idle_args(watchers);
-        args.tick = tick;
+        args.frame = frame_after(elapsed);
         render_row_text(args, width)
     }
 
@@ -1173,27 +1166,28 @@ mod tests {
     }
 
     /// Invoke `render_turn_status` for an idle agent with the given watcher
-    /// counts at the first animation tick.
+    /// counts at the first motion phase.
     fn render_idle_with_watchers(watchers: Watchers) -> String {
-        render_idle_with_watchers_at_tick(watchers, 0)
+        render_idle_with_watchers_at(watchers, Duration::ZERO, 72)
     }
 
     /// Invoke `render_turn_status` for an idle agent with `n` running
-    /// monitors at animation tick `tick`.
-    fn render_idle_with_monitors_at_tick(n: usize, tick: u64) -> String {
-        render_idle_with_watchers_at_tick(
+    /// monitors at a deterministic motion phase.
+    fn render_idle_with_monitors_at(n: usize, elapsed: Duration) -> String {
+        render_idle_with_watchers_at(
             Watchers {
                 monitors: n,
                 ..Watchers::default()
             },
-            tick,
+            elapsed,
+            72,
         )
     }
 
     /// Invoke `render_turn_status` for an idle agent with `n` running
-    /// monitors at the first animation tick.
+    /// monitors at the first motion phase.
     fn render_idle_with_monitors(n: usize) -> String {
-        render_idle_with_monitors_at_tick(n, 0)
+        render_idle_with_monitors_at(n, Duration::ZERO)
     }
 
     #[test]
@@ -1358,7 +1352,7 @@ mod tests {
             loops: 1,
             ..Watchers::default()
         };
-        let text = render_idle_with_watchers_in_width(watchers, 0, 40);
+        let text = render_idle_with_watchers_at(watchers, Duration::ZERO, 40);
         assert!(
             text.contains("1 command \u{00b7} 2 monitors \u{00b7} 1 loop"),
             "the counts must survive the clip, got: {text:?}"
@@ -1458,7 +1452,7 @@ mod tests {
         let mut args = idle_args(Watchers::default());
         args.state = &AgentState::TurnRunning;
         args.activity = &activity;
-        args.activity_started_at = Some(Instant::now() - Duration::from_secs(359));
+        args.activity_started_at = Some(args.frame.now() - Duration::from_secs(359));
         args.held_queue = 1;
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
@@ -1523,12 +1517,9 @@ mod tests {
     }
 
     #[test]
-    fn idle_monitor_icon_animates_across_ticks() {
-        // The leading glyph cycles through monitor_icon_frames() as `tick`
-        // advances, so two ticks a full frame apart (0 vs MONITOR_PULSE_DIVISOR)
-        // must render different icons — proving the cue is animated, not static.
-        let frame0 = render_idle_with_monitors_at_tick(1, 0);
-        let frame1 = render_idle_with_monitors_at_tick(1, MONITOR_PULSE_DIVISOR);
+    fn idle_monitor_icon_animates_across_time() {
+        let frame0 = render_idle_with_monitors_at(1, Duration::ZERO);
+        let frame1 = render_idle_with_monitors_at(1, crate::motion::AMBIENT_PULSE_FRAME);
         let icon0 = frame0.chars().next();
         let icon1 = frame1.chars().next();
         assert_ne!(
@@ -1623,11 +1614,10 @@ mod tests {
     }
 
     #[test]
-    fn user_waiting_pulse_speed_is_stable() {
-        // The drain-blocked, pending-user-input, and plan-approval cues
-        // all read from this single constant via `pending_diamond_color`,
-        // so this assertion guards against an accidental tweak that
-        // would silently change the cadence of every "your turn" cue.
-        assert_eq!(USER_WAITING_PULSE_SPEED, 0.08);
+    fn user_waiting_pulse_period_is_stable() {
+        assert_eq!(
+            crate::motion::USER_WAITING_PULSE_PERIOD,
+            Duration::from_millis(1_309)
+        );
     }
 }

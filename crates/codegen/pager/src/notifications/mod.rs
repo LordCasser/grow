@@ -172,11 +172,15 @@ impl NotificationService {
     /// Returns escape sequences to emit (title + progress) as a single
     /// `String`, or `None` if nothing changed. The caller should route
     /// these bytes through the frame pipeline's `post_flush_escapes`.
-    pub fn on_tick(&mut self, state: &title::TitleState<'_>) -> Option<String> {
+    pub fn on_frame(
+        &mut self,
+        state: &title::TitleState<'_>,
+        frame: crate::motion::FrameStamp,
+    ) -> Option<String> {
         let mut buf = String::new();
 
         if self.config.title.enabled
-            && let Some(title_esc) = self.title_manager.update(state)
+            && let Some(title_esc) = self.title_manager.update_at(state, frame)
         {
             buf.push_str(&title_esc);
         }
@@ -187,9 +191,9 @@ impl NotificationService {
             let should_be_active = state.is_busy;
             if should_be_active {
                 let needs_emit = !self.progress_active
-                    || self
-                        .progress_last_sent
-                        .is_none_or(|t| t.elapsed() >= PROGRESS_KEEPALIVE);
+                    || self.progress_last_sent.is_none_or(|t| {
+                        frame.now().saturating_duration_since(t) >= PROGRESS_KEEPALIVE
+                    });
                 if needs_emit {
                     if let Some(esc) = progress::build_progress_escape(
                         progress::ProgressState::Indeterminate,
@@ -198,7 +202,7 @@ impl NotificationService {
                         buf.push_str(&esc);
                     }
                     self.progress_active = true;
-                    self.progress_last_sent = Some(Instant::now());
+                    self.progress_last_sent = Some(frame.now());
                 }
             } else {
                 self.clear_progress_into(&mut buf);
@@ -206,6 +210,11 @@ impl NotificationService {
         }
 
         if buf.is_empty() { None } else { Some(buf) }
+    }
+
+    #[cfg(test)]
+    fn on_tick(&mut self, state: &title::TitleState<'_>) -> Option<String> {
+        self.on_frame(state, crate::motion::FrameStamp::default())
     }
 
     pub fn shutdown(&mut self) {

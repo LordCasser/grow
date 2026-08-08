@@ -457,14 +457,18 @@ impl GoalDisplayState {
     /// Return elapsed_ms adjusted with local wall-clock delta since the last
     /// GoalUpdated notification. This makes the timer tick smoothly at render
     /// frequency without requiring the shell to emit notifications every second.
-    pub fn live_elapsed_ms(&self) -> u64 {
+    pub fn live_elapsed_ms_at(&self, now: std::time::Instant) -> u64 {
         let live = if self.status == GoalDisplayStatus::Active {
             self.elapsed_ms
-                .saturating_add(self.received_at.elapsed().as_millis() as u64)
+                .saturating_add(now.saturating_duration_since(self.received_at).as_millis() as u64)
         } else {
             self.elapsed_ms
         };
         live.max(self.elapsed_floor_ms)
+    }
+
+    pub fn live_elapsed_ms(&self) -> u64 {
+        self.live_elapsed_ms_at(std::time::Instant::now())
     }
 }
 /// What the agent is currently doing.
