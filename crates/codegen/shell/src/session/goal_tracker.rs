@@ -392,6 +392,11 @@ impl GoalTracker {
         goal.plan.updated_by = updated_by;
         goal.phase = GoalPhase::Executing;
         goal.in_flight_stage = None;
+        // A plan revision starts a new execution attempt. A candidate belongs
+        // to the plan revision that produced it and must not survive into the
+        // revised plan, even though useful verifier feedback remains on the
+        // blackboard for the implementer.
+        goal.candidate_summary = None;
         goal.planner_failures = 0;
         goal.history
             .push(GoalHistoryEntry::new(GoalEvent::PlanningCompleted, reason));
@@ -743,6 +748,7 @@ mod tests {
         ));
         assert!(!tracker.lease_is_current(&lease, GoalPhase::Verifying));
         assert_eq!(tracker.phase(), Some(GoalPhase::Executing));
+        assert!(tracker.snapshot().unwrap().candidate_summary.is_none());
     }
 
     #[test]

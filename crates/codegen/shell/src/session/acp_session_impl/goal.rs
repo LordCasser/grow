@@ -121,6 +121,33 @@ impl SessionActor {
         true
     }
 
+    /// Cancel the background stage only when it still belongs to `lease`.
+    ///
+    /// A cancelled stage reports its terminal result asynchronously. Matching
+    /// by lease prevents that late result from taking the cancellation handle
+    /// of a newer planner/verifier.
+    fn cancel_goal_stage_for_lease(
+        &self,
+        lease: &crate::session::goal_tracker::StageLease,
+    ) -> bool {
+        let cancel = {
+            let mut running = self.goal_stage_cancel.lock();
+            if running
+                .as_ref()
+                .is_some_and(|(running_lease, _)| running_lease == lease)
+            {
+                running.take().map(|(_, cancel)| cancel)
+            } else {
+                None
+            }
+        };
+        let Some(cancel) = cancel else {
+            return false;
+        };
+        cancel.cancel();
+        true
+    }
+
     pub(super) async fn enforce_goal_token_budget(&self, current_tokens: i64) -> bool {
         let used = self.goal_tokens_used(current_tokens);
         let exhausted = self
@@ -588,13 +615,34 @@ impl SessionActor {
                 return;
             }
             GoalCommand::ReplacePlan { input, respond_to } => {
-                let changed = self.goal_tracker.lock().replace_plan(
-                    input.markdown,
-                    GoalPlanAuthor::Agent,
-                    input.reason,
-                );
+                // Capture the verifier lease under the same tracker lock that
+                // commits the revision. No async work can observe a successful
+                // revision while the old lease is still authoritative.
+                let (changed, invalidated_verifier) = {
+                    let mut tracker = self.goal_tracker.lock();
+                    let invalidated_verifier = tracker
+                        .snapshot()
+                        .filter(|goal| {
+                            goal.phase == crate::session::goal_tracker::GoalPhase::Verifying
+                        })
+                        .and_then(|goal| goal.in_flight_stage.clone());
+                    let changed =
+                        tracker.replace_plan(input.markdown, GoalPlanAuthor::Agent, input.reason);
+                    (changed, changed.then_some(invalidated_verifier).flatten())
+                };
+                let verifier_cancelled = invalidated_verifier
+                    .as_ref()
+                    .is_some_and(|lease| self.cancel_goal_stage_for_lease(lease));
                 let response = changed
-                    .then(|| "Goal plan replaced; stale stage results will be ignored.".to_string())
+                    .then(|| {
+                        if verifier_cancelled {
+                            "Goal plan replaced; prior verification was cancelled and execution will continue from the new revision."
+                                .to_string()
+                        } else {
+                            "Goal plan replaced; execution will continue from the new revision."
+                                .to_string()
+                        }
+                    })
                     .ok_or_else(|| {
                         "The Goal is not active or the Markdown plan is empty.".to_string()
                     });

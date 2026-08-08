@@ -59,6 +59,7 @@ Goal is an exclusive visible Behavior but not an exclusive foreground owner.
 - Active Planning/Verifying keeps the Goal chip active while the session may be idle or run a user turn;
 - ordinary messages add context without changing objective/plan revision;
 - `/goal edit` revises the objective and returns the Goal to Planning;
+- an accepted `update_goal_plan` during Verifying cancels that lease's verifier and returns to Executing; a rejected update leaves the verifier untouched;
 - pause keeps Goal Behavior but stops autonomous admission;
 - complete or clear returns to Normal;
 - an unfinished Goal rejects switching to another Behavior.

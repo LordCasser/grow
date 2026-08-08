@@ -33,7 +33,7 @@ struct StageLease {
 
 - `/goal edit` 修改 objective，推进 `objective_revision`，清除旧 plan/候选/验证证据，并回到 Active/Planning；
 - 普通用户消息或 steer 只是补充上下文，不推进 revision；
-- `update_goal_plan` 完整替换 Markdown，推进 `plan_revision` 并进入 Executing；
+- `update_goal_plan` 完整替换 Markdown，推进 `plan_revision`，丢弃旧候选并进入 Executing；如果此时 verifier 正在运行，session 必须按旧 lease 定向取消它；
 - 任一 revision 变化都会让旧 `StageLease` 的结果失效。
 
 ## 3. 阶段状态机
@@ -43,6 +43,7 @@ stateDiagram-v2
     [*] --> Planning: create / edit
     Planning --> Executing: planner commits Markdown
     Executing --> Verifying: candidate_complete
+    Verifying --> Executing: update_goal_plan / cancel verifier
     Verifying --> Executing: NotAchieved
     Verifying --> Blocked: same gap x3 / explicit blocked
     Verifying --> Summarizing: Achieved
@@ -73,6 +74,8 @@ Verifier 是后台 stage，校验最新 objective revision、plan revision、候
 - 同一 gap fingerprint 连续三次：进入 Blocked；不同 gap 重置计数；
 - verifier 明确判断环境无法完成：直接 Blocked；
 - 过期 lease 的结果静默丢弃。
+
+验证期间成功提交新的 Markdown 计划属于一次新的执行尝试：状态提交会先推进 `plan_revision`、清除旧候选并进入 Executing，然后 session 按被替换的 lease 取消 verifier。取消后的迟到 terminal 只能结算该 subagent 自己的用量，不能提交 verdict，也不能拿走新 stage 的取消句柄。空计划等被拒绝的更新不改变 revision，也不取消 verifier。
 
 Planning/Verifying 期间 foreground 仍可运行普通 user turn，Pager 只用 Goal chip 显示阶段。
 
@@ -148,6 +151,7 @@ Goal 黑板没有 prompt-indexed 快照，因此只要 session 中还存在 Acti
 
 - 同一 Goal 同时至多一个 `StageLease`；
 - revision 不匹配的 stage 不能提交；
+- Verifying 中的计划修订必须取消匹配 verifier；被拒绝的修订不得取消它；
 - planner/verifier 与 regular turn 可并行；
 - cancel regular turn 不取消后台 stage；
 - 用户 FIFO 永远优先于 continuation/finalization；

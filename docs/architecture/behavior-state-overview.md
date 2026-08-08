@@ -93,6 +93,7 @@ Goal 的详细状态机见 [goal-continuation.md](./goal-continuation.md)。
 | Active Goal | Goal interrupt panel 的 Pause | 取消 foreground、使 stage lease 失效并进入 Paused；Behavior 仍为 Goal |
 | Active/Paused/Blocked Goal | 切换到其他 Behavior | 拒绝；只有 verified completion 或 `/goal clear` 能离开 Goal |
 | Active/Paused/Blocked Goal | `/goal edit` | 推进 objective revision、清除旧验证证据、回到 Active/Planning；普通补充消息不做这些事 |
+| Active Goal / Verifying | `update_goal_plan` 成功 | 推进 plan revision、终止匹配 verifier、清除旧候选并回到 Executing；Goal Behavior 不变 |
 | Plan 或运行中的 Deep Research | 第一次切换 | 进入 8 秒确认窗，不改变状态 |
 | Plan 或运行中的 Deep Research | 确认窗内再次选择同一目标 | 取消该 Behavior 拥有的工作，再应用目标 Behavior |
 | Normal / Clarify / static Workflow | Behavior 切换 | 更新后续 turn 的 Behavior；已开始的 turn 继续使用其捕获的 prompt mode/tool surface |

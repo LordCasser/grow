@@ -340,6 +340,140 @@ async fn user_fifo_wins_over_goal_idle_continuation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn plan_revision_cancels_verifier_and_persists_executing_before_next_attempt() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, mut persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = std::sync::Arc::new(
+                create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+            );
+            let old_lease = {
+                let mut tracker = actor.goal_tracker.lock();
+                tracker.create_goal(
+                    "goal-replan".into(),
+                    "revise while verifying".into(),
+                    None,
+                    0,
+                    chrono::Utc::now().to_rfc3339(),
+                    None,
+                );
+                assert!(tracker.replace_plan(
+                    "- [x] first attempt".into(),
+                    crate::session::goal_tracker::GoalPlanAuthor::Agent,
+                    None,
+                ));
+                assert!(tracker.candidate_complete("first candidate".into()));
+                tracker
+                    .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
+                    .expect("old verifier lease")
+            };
+            let old_cancel = tokio_util::sync::CancellationToken::new();
+            *actor.goal_stage_cancel.lock() = Some((old_lease.clone(), old_cancel.clone()));
+
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            actor
+                .handle_goal_command(
+                    tools::implementations::grow_build::update_goal::GoalCommand::ReplacePlan {
+                        input:
+                            tools::implementations::grow_build::update_goal::UpdateGoalPlanInput {
+                                markdown: "- [x] first attempt\n- [ ] address new evidence".into(),
+                                reason: Some("verification exposed a gap".into()),
+                            },
+                        respond_to,
+                    },
+                )
+                .await;
+
+            assert!(response.await.unwrap().is_ok());
+            assert!(old_cancel.is_cancelled(), "the verifier must be terminated");
+            assert!(actor.goal_stage_cancel.lock().is_none());
+            {
+                let tracker = actor.goal_tracker.lock();
+                let goal = tracker.snapshot().unwrap();
+                assert_eq!(
+                    goal.phase,
+                    crate::session::goal_tracker::GoalPhase::Executing
+                );
+                assert_eq!(goal.plan.revision, 2);
+                assert!(goal.in_flight_stage.is_none());
+                assert!(
+                    goal.candidate_summary.is_none(),
+                    "a candidate from the old plan revision must not survive replanning"
+                );
+            }
+
+            let persisted = std::iter::from_fn(|| persistence_rx.try_recv().ok())
+                .find_map(|message| match message {
+                    PersistenceMsg::GoalModeState(goal) => Some(goal),
+                    _ => None,
+                })
+                .expect("the revised Goal state must be persisted");
+            assert_eq!(
+                persisted.phase,
+                crate::session::goal_tracker::GoalPhase::Executing
+            );
+            assert_eq!(persisted.plan.revision, 2);
+            assert!(persisted.candidate_summary.is_none());
+
+            // A late terminal from the cancelled verifier cannot consume the
+            // cancellation handle of a verifier belonging to the next plan.
+            let (new_lease, new_cancel) = {
+                let mut tracker = actor.goal_tracker.lock();
+                assert!(tracker.candidate_complete("second candidate".into()));
+                let lease = tracker
+                    .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
+                    .expect("new verifier lease");
+                let cancel = tokio_util::sync::CancellationToken::new();
+                (lease, cancel)
+            };
+            *actor.goal_stage_cancel.lock() = Some((new_lease.clone(), new_cancel.clone()));
+            actor
+                .handle_goal_stage_completed(crate::session::replay_events::GoalStageCompletion {
+                    lease: old_lease,
+                    kind: crate::session::replay_events::GoalStageKind::Verifier(Err(
+                        "cancelled".into()
+                    )),
+                })
+                .await;
+            assert!(!new_cancel.is_cancelled());
+            assert!(
+                actor
+                    .goal_stage_cancel
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|(lease, _)| lease == &new_lease)
+            );
+
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            actor
+                .handle_goal_command(
+                    tools::implementations::grow_build::update_goal::GoalCommand::ReplacePlan {
+                        input:
+                            tools::implementations::grow_build::update_goal::UpdateGoalPlanInput {
+                                markdown: "   ".into(),
+                                reason: Some("invalid empty revision".into()),
+                            },
+                        respond_to,
+                    },
+                )
+                .await;
+            assert!(response.await.unwrap().is_err());
+            assert!(
+                !new_cancel.is_cancelled(),
+                "a rejected plan update must not terminate the verifier"
+            );
+            assert!(actor.goal_tracker.lock().lease_is_current(
+                &new_lease,
+                crate::session::goal_tracker::GoalPhase::Verifying,
+            ));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn finished_goal_subagent_tokens_are_settled_once_and_persisted() {
     tokio::task::LocalSet::new()
         .run_until(async {
