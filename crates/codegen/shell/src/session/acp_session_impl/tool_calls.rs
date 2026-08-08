@@ -2408,7 +2408,6 @@ impl SessionActor {
         let extraction = if !matches!(
             result.output,
             ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(_))
-                | ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(_))
         ) {
             tools::util::base64_images::extract_base64_images(prompt_text)
         } else {
@@ -2487,70 +2486,44 @@ impl SessionActor {
                 }
             }
         }
-        if let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output {
+        if !extracted_images.is_empty()
+            && let Some(configured_model) = self.image_description_model.as_deref()
+        {
+            use base64::Engine as _;
             let path = tool_parsed_args
                 .get("target_file")
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            if let Some(configured_model) = self.image_description_model.as_deref() {
-                use base64::Engine as _;
-                let images: Result<Vec<_>, _> = pdf
-                    .pages
-                    .iter()
-                    .map(|page| {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(&page.data)
-                            .map(|bytes| (bytes, page.mime_type.clone()))
+            let images: Result<Vec<_>, _> = extracted_images
+                .iter()
+                .map(|image| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&image.data)
+                        .map(|bytes| (bytes, image.mime_type.clone()))
+                })
+                .collect();
+            let description = match images {
+                Ok(images) => self
+                    .describe_read_file_images(
+                        configured_model,
+                        path,
+                        images,
+                        format!("Images extracted from {path}, in attachment order."),
+                    )
+                    .await
+                    .map(|description| {
+                        crate::session::image_describe::render_image_description_block(&description)
                     })
-                    .collect();
-                let page_numbers = pdf
-                    .pages
-                    .iter()
-                    .map(|page| page.page_number.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                prompt_text = match images {
-                    Ok(images) => match self
-                        .describe_read_file_images(
-                            configured_model,
-                            path,
-                            images,
-                            format!(
-                                "Rendered PDF pages from {path}, in attachment order. Page numbers: {page_numbers}."
-                            ),
-                        )
-                        .await
-                    {
-                        Ok(description) => format!(
-                            "Read PDF file: {path} ({} pages rendered, {} total)\n\n{}",
-                            pdf.pages.len(),
-                            pdf.total_pages,
-                            crate::session::image_describe::render_image_description_block(
-                                &description
-                            )
-                        ),
-                        Err(e) => format!(
-                            "[Configured image description failed for PDF {path}: {e}]"
-                        ),
-                    },
-                    Err(e) => format!(
-                        "[Configured image description failed for PDF {path}: invalid page image payload: {e}]"
-                    ),
-                };
-            } else {
-                for page in &pdf.pages {
-                    let url = format!("data:{};base64,{}", page.mime_type, page.data);
-                    inline_images.push(ContentPart::Image {
-                        url: std::sync::Arc::<str>::from(url),
-                    });
-                }
-                prompt_text = format!(
-                    "Read PDF file: {path} ({} pages rendered, {} total)",
-                    pdf.pages.len(),
-                    pdf.total_pages,
-                );
-            }
+                    .unwrap_or_else(|error| {
+                        format!("[Configured image description failed for {path}: {error}]")
+                    }),
+                Err(error) => format!(
+                    "[Configured image description failed for {path}: invalid image payload: {error}]"
+                ),
+            };
+            prompt_text = format!("{prompt_text}\n\n{description}");
+            extracted_images.clear();
         }
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)

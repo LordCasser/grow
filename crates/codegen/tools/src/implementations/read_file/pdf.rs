@@ -1,171 +1,49 @@
-//! PDF text extraction and page rendering shared by read tools.
+//! PDF text extraction and raster-image routing shared by read tools.
 
-use std::fmt::Write as _;
+use std::io::Cursor;
 
 use base64::Engine as _;
-use base64::engine::general_purpose;
+use image::{DynamicImage, GrayImage, ImageFormat, RgbImage};
+use pdf::enc::StreamFilter;
+use pdf::file::FileOptions;
+use pdf::object::{ColorSpace, ImageXObject, Resources, XObject};
+use pdf_inspector::{DetectionConfig, PdfOptions, ScanStrategy};
 
-use crate::types::output::{FileContent, PdfPageImage, PdfPageImages, ReadFileOutput};
+use crate::util::base64_images::ExtractedImage;
 
-use super::metadata::{bytes_to_metadata, is_pdf_magic};
+use super::document::run_bounded_document_task;
+use super::image::compress_image_for_conversation;
 
-pub const MAX_PDF_BYTES: usize = 50 * 1024 * 1024;
-const PDF_AUTO_READ_THRESHOLD: usize = 10;
-const PDF_RENDER_DPI: u32 = 150;
-const PDF_RENDER_JPEG_QUALITY: u8 = 85;
-pub const PDF_PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Maximum pages per read_file call when using explicit `pages` param.
+/// Maximum pages selected explicitly in one `read_file` call.
 pub const PDF_MAX_PAGES_PER_READ: usize = 20;
 
-/// Shared async wrapper for document extraction (PDF, PPTX, etc.).
-pub async fn run_document_extraction<F>(
-    file_bytes: Vec<u8>,
-    path: &std::path::Path,
-    format_label: &str,
-    max_bytes: usize,
-    timeout: std::time::Duration,
-    extract_fn: F,
-) -> Result<ReadFileOutput, tool_runtime::ToolError>
-where
-    F: FnOnce(Vec<u8>) -> Result<ReadFileOutput, String> + Send + 'static,
-{
-    if file_bytes.len() > max_bytes {
-        return Ok(ReadFileOutput::FileReadError(format!(
-            "{format_label} file is {:.1} MB, exceeds the {:.0} MB limit.",
-            file_bytes.len() as f64 / 1_048_576.0,
-            max_bytes as f64 / 1_048_576.0,
-        )));
-    }
+const MAX_IMAGES_PER_PAGE: usize = 4;
+const MAX_EXTRACTED_IMAGES: usize = 20;
+const PDF_AUTO_IMAGE_PAGE_LIMIT: usize = 10;
+const MIN_IMAGE_PIXELS: u64 = 16_384;
+const MAX_FORM_DEPTH: usize = 8;
 
-    tracing::info!(
-        size_bytes = file_bytes.len(),
-        format_label,
-        "processing document"
-    );
-
-    let result = tokio::time::timeout(
-        timeout,
-        tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_fn(file_bytes)))
-        }),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(Ok(Ok(mut output)))) => {
-            if let ReadFileOutput::FileContent(ref mut fc) = output {
-                fc.absolute_path = path.to_path_buf();
-            }
-            Ok(output)
-        }
-        Err(_elapsed) => Ok(ReadFileOutput::FileReadError(format!(
-            "{format_label} processing timed out after {}s: {}",
-            timeout.as_secs(),
-            path.display()
-        ))),
-        Ok(Ok(Ok(Err(e)))) => Ok(ReadFileOutput::FileReadError(e)),
-        Ok(Ok(Err(_panic))) => Ok(ReadFileOutput::FileReadError(format!(
-            "{format_label} processing failed (internal error): {}",
-            path.display()
-        ))),
-        Ok(Err(e)) => Ok(ReadFileOutput::FileReadError(format!(
-            "{format_label} processing failed: {}",
-            e
-        ))),
-    }
+#[derive(Debug)]
+pub struct PdfExtraction {
+    pub markdown: String,
+    pub page_count: usize,
+    pub visual_pages: Vec<usize>,
+    pub images: Vec<ExtractedImage>,
 }
 
-/// Requested PDF output mode, resolved from the `format` parameter.
-#[derive(Clone, Copy)]
-enum PdfFormatKind {
-    /// No format given: classify pages and route automatically.
-    Auto,
-    /// Force full-document page-image rendering.
-    Render,
-    /// Reading-ordered plain text.
-    Text,
-    /// Markdown-style text via the markdown converter.
-    Markdown,
-}
-
-pub(crate) async fn handle_pdf(
+pub async fn extract_pdf(
     file_bytes: Vec<u8>,
     path: &std::path::Path,
     pages: Option<String>,
-    format: Option<&str>,
-) -> Result<ReadFileOutput, tool_runtime::ToolError> {
-    let format_kind = match format {
-        None => PdfFormatKind::Auto,
-        Some("image") => PdfFormatKind::Render,
-        Some("text") => PdfFormatKind::Text,
-        Some("markdown") => PdfFormatKind::Markdown,
-        Some(other) => {
-            return Ok(ReadFileOutput::FileReadError(format!(
-                "Invalid format '{}'. Supported values: 'image' (default), 'text', 'markdown'.",
-                other
-            )));
-        }
-    };
-
-    run_document_extraction(
-        file_bytes,
-        path,
-        "PDF",
-        MAX_PDF_BYTES,
-        PDF_PROCESS_TIMEOUT,
-        move |bytes| match format_kind {
-            PdfFormatKind::Auto => {
-                // Classification scan needs the bytes; the chosen extraction
-                // path re-opens the document itself.
-                if default_route_prefers_text(bytes.clone(), pages.as_deref()) {
-                    extract_pdf_text(bytes, pages.as_deref())
-                } else {
-                    let file_size = bytes.len();
-                    render_pdf_pages(bytes, pages.as_deref(), file_size)
-                }
-            }
-            PdfFormatKind::Render => {
-                let file_size = bytes.len();
-                render_pdf_pages(bytes, pages.as_deref(), file_size)
-            }
-            PdfFormatKind::Text => extract_pdf_text(bytes, pages.as_deref()),
-            PdfFormatKind::Markdown => extract_pdf_markdown(bytes, pages.as_deref()),
-        },
-    )
+    images_only: bool,
+) -> Result<PdfExtraction, String> {
+    run_bounded_document_task(file_bytes, path, "PDF", move |bytes| {
+        extract_pdf_inner(bytes, pages.as_deref(), images_only)
+    })
     .await
 }
 
-/// Decide the default (no `format`) route: text when every requested page has
-/// a usable native text layer, full-page rendering as soon as any page is
-/// scanned or image-based (early-exit scan).
-///
-/// Any classification error — including encrypted/unauthenticated documents —
-/// conservatively falls back to the historical default (rendering), so the
-/// error semantics of the pre-routing behaviour are preserved.
-fn default_route_prefers_text(bytes: Vec<u8>, pages_spec: Option<&str>) -> bool {
-    let (doc, _page_count, page_indices) = match open_pdf_and_resolve_pages(bytes, pages_spec) {
-        Ok(resolved) => resolved,
-        Err(_) => return false, // open/parse errors surface unchanged via the render path
-    };
-    for &page_idx in &page_indices {
-        match doc.classify_page(page_idx) {
-            Ok(cls) => match cls.kind {
-                pdf_oxide::extractors::PageKind::Scanned
-                | pdf_oxide::extractors::PageKind::ImageText
-                | pdf_oxide::extractors::PageKind::Mixed => return false,
-                pdf_oxide::extractors::PageKind::TextLayer
-                | pdf_oxide::extractors::PageKind::Empty => continue,
-                // Unknown future page kinds: conservative fallback to render.
-                _ => return false,
-            },
-            Err(_) => return false, // conservative fallback to render
-        }
-    }
-    true
-}
-
-/// Parse a page range specification into sorted, deduplicated 0-based page indices.
+/// Parse a page range specification into sorted, deduplicated 0-based indices.
 pub fn parse_page_range(spec: &str, page_count: usize) -> Result<Vec<usize>, String> {
     let mut pages = Vec::new();
     for part in spec.split(',') {
@@ -187,40 +65,33 @@ pub fn parse_page_range(spec: &str, page_count: usize) -> Result<Vec<usize>, Str
             };
             if start < 1 || start > page_count {
                 return Err(format!(
-                    "page {} out of range (document has {} pages)",
-                    start, page_count
+                    "page {start} out of range (document has {page_count} pages)"
                 ));
             }
             if start > end {
                 return Err(format!(
-                    "invalid page range: {}-{} (start must be ≤ end)",
-                    start, end
+                    "invalid page range: {start}-{end} (start must be ≤ end)"
                 ));
             }
-            let end = end.min(page_count);
-            for p in start..=end {
-                pages.push(p - 1);
-            }
+            pages.extend((start..=end.min(page_count)).map(|page| page - 1));
         } else {
-            let p: usize = part
+            let page: usize = part
                 .parse()
-                .map_err(|_| format!("invalid page number: '{}'", part))?;
-            if p < 1 || p > page_count {
+                .map_err(|_| format!("invalid page number: '{part}'"))?;
+            if page < 1 || page > page_count {
                 return Err(format!(
-                    "page {} out of range (document has {} pages)",
-                    p, page_count
+                    "page {page} out of range (document has {page_count} pages)"
                 ));
             }
-            pages.push(p - 1);
+            pages.push(page - 1);
         }
     }
     pages.sort_unstable();
     pages.dedup();
     if pages.len() > PDF_MAX_PAGES_PER_READ {
         return Err(format!(
-            "requested {} pages, maximum is {} per call",
-            pages.len(),
-            PDF_MAX_PAGES_PER_READ
+            "requested {} pages, maximum is {PDF_MAX_PAGES_PER_READ} per call",
+            pages.len()
         ));
     }
     if pages.is_empty() {
@@ -229,401 +100,319 @@ pub fn parse_page_range(spec: &str, page_count: usize) -> Result<Vec<usize>, Str
     Ok(pages)
 }
 
-fn open_pdf_document(bytes: Vec<u8>) -> Result<(pdf_oxide::PdfDocument, usize), String> {
-    let doc = pdf_oxide::PdfDocument::from_bytes(bytes)
-        .map_err(|e| format!("Failed to open PDF: {e}"))?;
-
-    let page_count = doc
-        .page_count()
-        .map_err(|e| format!("Failed to read PDF page count: {e}"))?;
-
+fn extract_pdf_inner(
+    bytes: Vec<u8>,
+    pages_spec: Option<&str>,
+    images_only: bool,
+) -> Result<PdfExtraction, String> {
+    let detection = DetectionConfig {
+        strategy: ScanStrategy::Full,
+        ..DetectionConfig::default()
+    };
+    let initial = pdf_inspector::process_pdf_mem_with_options(
+        &bytes,
+        PdfOptions::detect_only().detection(detection),
+    )
+    .map_err(|error| format!("Failed to inspect PDF: {error}"))?;
+    let page_count = initial.page_count as usize;
     if page_count == 0 {
         return Err("PDF has no pages".to_string());
     }
-
-    Ok((doc, page_count))
-}
-
-fn open_pdf_and_resolve_pages(
-    bytes: Vec<u8>,
-    pages_spec: Option<&str>,
-) -> Result<(pdf_oxide::PdfDocument, usize, Vec<usize>), String> {
-    let (doc, page_count) = open_pdf_document(bytes)?;
-
-    let page_indices = match pages_spec {
+    if images_only && pages_spec.is_none() && page_count > PDF_AUTO_IMAGE_PAGE_LIMIT {
+        return Err(format!(
+            "PDF has {page_count} pages, which exceeds the {PDF_AUTO_IMAGE_PAGE_LIMIT}-page automatic image-extraction limit. Use `pages` to select up to {PDF_MAX_PAGES_PER_READ} pages."
+        ));
+    }
+    let selected_pages = match pages_spec {
         Some(spec) => parse_page_range(spec, page_count)?,
-        None => {
-            if page_count > PDF_AUTO_READ_THRESHOLD {
-                return Err(format!(
-                    "PDF has {} pages which exceeds the {} page auto-read limit. \
-                     Use the `pages` parameter to specify which pages to read \
-                     (e.g. pages=\"1-5\"). Maximum {} pages per call.",
-                    page_count, PDF_AUTO_READ_THRESHOLD, PDF_MAX_PAGES_PER_READ
-                ));
-            }
-            (0..page_count).collect()
-        }
+        None => (0..page_count).collect(),
     };
 
-    Ok((doc, page_count, page_indices))
-}
-
-pub(crate) fn render_pdf_pages(
-    bytes: Vec<u8>,
-    pages_spec: Option<&str>,
-    file_size: usize,
-) -> Result<ReadFileOutput, String> {
-    let (doc, page_count, page_indices) = open_pdf_and_resolve_pages(bytes, pages_spec)?;
-
-    let opts = pdf_oxide::rendering::RenderOptions::with_dpi(PDF_RENDER_DPI)
-        .as_jpeg(PDF_RENDER_JPEG_QUALITY);
-
-    let mut page_images = Vec::with_capacity(page_indices.len());
-    for &page_idx in &page_indices {
-        let image = pdf_oxide::rendering::render_page(&doc, page_idx, &opts)
-            .map_err(|e| format!("Failed to render page {}: {e}", page_idx + 1))?;
-
-        let b64 = general_purpose::STANDARD.encode(&image.data);
-        page_images.push(PdfPageImage {
-            data: b64,
-            mime_type: "image/jpeg".to_string(),
-            page_number: page_idx + 1,
-        });
+    let mut visual_pages = if images_only {
+        selected_pages.clone()
+    } else {
+        initial
+            .pages_needing_ocr
+            .iter()
+            .filter_map(|page| usize::try_from(*page).ok()?.checked_sub(1))
+            .filter(|page| selected_pages.binary_search(page).is_ok())
+            .collect::<Vec<_>>()
+    };
+    let markdown = if images_only {
+        String::new()
+    } else {
+        let selected = selected_pages
+            .iter()
+            .map(|page| *page as u32)
+            .collect::<Vec<_>>();
+        let extracted = pdf_inspector::extract_pages_markdown_mem(&bytes, Some(&selected))
+            .map_err(|error| format!("Failed to extract PDF text: {error}"))?;
+        visual_pages.extend(
+            extracted
+                .pages_needing_ocr
+                .iter()
+                .filter_map(|page| usize::try_from(*page).ok()?.checked_sub(1)),
+        );
+        extracted
+            .pages
+            .into_iter()
+            .filter_map(|page| {
+                let markdown = page.markdown.trim();
+                (!markdown.is_empty()).then(|| markdown.to_owned())
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    visual_pages.sort_unstable();
+    visual_pages.dedup();
+    if pages_spec.is_none() && visual_pages.len() > PDF_AUTO_IMAGE_PAGE_LIMIT {
+        return Err(format!(
+            "PDF has {} pages requiring visual analysis, which exceeds the {PDF_AUTO_IMAGE_PAGE_LIMIT}-page automatic image-extraction limit. Use `pages` to select up to {PDF_MAX_PAGES_PER_READ} pages.",
+            visual_pages.len()
+        ));
     }
 
-    Ok(ReadFileOutput::PdfPageImages(PdfPageImages {
-        pages: page_images,
-        total_pages: page_count,
-        file_size,
-    }))
-}
-
-pub fn raw_text_to_file_content(text: String) -> ReadFileOutput {
-    let total_lines = text.matches('\n').count() + 1;
-    let mut content = String::new();
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            content.push('\n');
-        }
-        write!(&mut content, "{}\u{2192}{line}", i + 1).ok();
-    }
-
-    ReadFileOutput::FileContent(FileContent {
-        content,
-        content_concise: None,
-        absolute_path: std::path::PathBuf::new(),
-        offset: None,
-        limit: None,
-        raw_output: text,
-        total_lines,
-        extracted_images: Vec::new(),
+    let images = extract_page_images(bytes, &visual_pages)?;
+    Ok(PdfExtraction {
+        markdown,
+        page_count,
+        visual_pages,
+        images,
     })
 }
 
-enum PageTextStyle {
-    Grow,
-    Cursor { total_pages: usize },
-}
-
-/// Geometric separator between two reading-ordered spans: `'\n'` when the
-/// vertical jump exceeds 0.6 × the page's largest font size (a new line),
-/// `' '` when the horizontal gap exceeds 0.5 pt (a word boundary), otherwise
-/// nothing (tight same-line run). The vertical check must come first: on a
-/// line break the X can regress, producing a negative gap that would
-/// otherwise suppress the line break.
-fn span_separator(
-    prev_x: f32,
-    prev_y: f32,
-    prev_width: f32,
-    cur_x: f32,
-    cur_y: f32,
-    max_font_size: f32,
-) -> Option<char> {
-    let dy = (cur_y - prev_y).abs();
-    if dy > 0.6 * max_font_size {
-        return Some('\n');
-    }
-    let gap = cur_x - (prev_x + prev_width);
-    if gap > 0.5 {
-        return Some(' ');
-    }
-    None
-}
-
-fn append_page_body(text: &mut String, doc: &pdf_oxide::PdfDocument, page_idx: usize) {
-    // Reading-order aware extraction; falls back to the classic extractor
-    // when the typed API fails so the error marker semantics are unchanged.
-    let spans = match doc.extract_page_text(page_idx) {
-        Ok(page_text) => page_text.spans,
-        Err(_) => match doc.extract_text(page_idx) {
-            Ok(page_text) => {
-                text.push_str(&page_text);
-                return;
-            }
-            Err(e) => {
-                writeln!(
-                    text,
-                    "[Failed to extract text from page {}: {e}]",
-                    page_idx + 1
-                )
-                .ok();
-                return;
-            }
-        },
-    };
-    let max_font_size = spans
-        .iter()
-        .map(|span| span.font_size)
-        .fold(0.0_f32, f32::max);
-    let mut prev_span: Option<&pdf_oxide::layout::TextSpan> = None;
-    for span in &spans {
-        // Drop /Artifact-marked spans (headers, footers, page numbers,
-        // decorations) per ISO 32000-1 §14.8.2.2: pdf_oxide tags them via
-        // `artifact_type` but keeps them in the returned spans.
-        if span.artifact_type.is_some() {
-            continue;
-        }
-        // Insert the geometric separator against the previous *kept* span
-        // (artifact spans are skipped without updating the anchor).
-        if let Some(sep) = prev_span.and_then(|prev| {
-            span_separator(
-                prev.bbox.x,
-                prev.bbox.y,
-                prev.bbox.width,
-                span.bbox.x,
-                span.bbox.y,
-                max_font_size,
-            )
-        }) {
-            text.push(sep);
-        }
-        text.push_str(&span.text);
-        prev_span = Some(span);
-    }
-}
-
-/// Append structured extraction warnings (missing ToUnicode maps, xref
-/// recovery, spec violations, …) as diagnostic lines mirroring the
-/// `[Failed to extract text from page N: ...]` style. `Warning` has no
-/// `Display` impl, so the category's `Debug` name is used (PascalCase).
-fn append_extraction_warnings(text: &mut String, doc: &pdf_oxide::PdfDocument) {
-    for warning in doc.take_structured_warnings() {
-        match warning.page {
-            Some(page) => {
-                writeln!(
-                    text,
-                    "[PDF extraction warning: {:?} on page {}]",
-                    warning.category,
-                    page + 1
-                )
-                .ok();
-            }
-            None => {
-                writeln!(text, "[PDF extraction warning: {:?}]", warning.category).ok();
-            }
-        }
-    }
-}
-
-fn extract_page_texts(
-    doc: &pdf_oxide::PdfDocument,
+fn extract_page_images(
+    bytes: Vec<u8>,
     page_indices: &[usize],
-    style: PageTextStyle,
-) -> Result<String, String> {
-    let mut text = String::new();
-    for (i, &page_idx) in page_indices.iter().enumerate() {
-        if i > 0 {
-            text.push('\n');
-        }
-        match style {
-            PageTextStyle::Grow => {
-                writeln!(&mut text, "--- Page {} ---", page_idx + 1).ok();
+) -> Result<Vec<ExtractedImage>, String> {
+    let file = FileOptions::cached()
+        .load(bytes)
+        .map_err(|error| format!("Failed to open PDF images: {error}"))?;
+    let resolver = file.resolver();
+    let mut output = Vec::new();
+
+    'pages: for &page_index in page_indices {
+        let page = file
+            .get_page(page_index as u32)
+            .map_err(|error| format!("Failed to read PDF page {}: {error}", page_index + 1))?;
+        let Ok(resources) = page.resources() else {
+            tracing::warn!(
+                page = page_index + 1,
+                "PDF page requiring visual analysis has no image resources"
+            );
+            continue;
+        };
+        let mut candidates = Vec::new();
+        collect_images(resources, &resolver, 0, &mut candidates);
+        candidates.sort_by_key(|(area, _, _)| std::cmp::Reverse(*area));
+
+        for (_, bytes, mime_type) in candidates.into_iter().take(MAX_IMAGES_PER_PAGE) {
+            match compress_image_for_conversation(bytes, mime_type) {
+                Ok((bytes, mime_type)) => {
+                    output.push(ExtractedImage {
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        mime_type,
+                    });
+                    if output.len() == MAX_EXTRACTED_IMAGES {
+                        tracing::warn!(
+                            limit = MAX_EXTRACTED_IMAGES,
+                            "PDF image extraction reached the per-read image limit"
+                        );
+                        break 'pages;
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    page = page_index + 1,
+                    %error,
+                    "skipping PDF image that cannot be prepared for vision"
+                ),
             }
-            PageTextStyle::Cursor { .. } => {}
         }
-        append_page_body(&mut text, doc, page_idx);
-        if let PageTextStyle::Cursor { total_pages } = style {
-            text.push_str("\n\n");
-            let _ = writeln!(&mut text, "-- {} of {} --", page_idx + 1, total_pages);
-            if i + 1 < page_indices.len() {
-                text.push('\n');
+    }
+    Ok(output)
+}
+
+fn collect_images(
+    resources: &Resources,
+    resolver: &impl pdf::object::Resolve,
+    depth: usize,
+    output: &mut Vec<(u64, Vec<u8>, String)>,
+) {
+    if depth >= MAX_FORM_DEPTH {
+        return;
+    }
+    for reference in resources.xobjects.values() {
+        let Ok(object) = resolver.get(*reference) else {
+            continue;
+        };
+        match &*object {
+            XObject::Image(image) => {
+                let area = u64::from(image.width) * u64::from(image.height);
+                if !image.image_mask && area >= MIN_IMAGE_PIXELS {
+                    match encode_image(image, resolver) {
+                        Ok((bytes, mime)) => output.push((area, bytes, mime)),
+                        Err(error) => tracing::warn!(%error, "skipping unsupported PDF image"),
+                    }
+                }
             }
+            XObject::Form(form) => {
+                if let Some(resources) = &form.dict().resources {
+                    collect_images(resources, resolver, depth + 1, output);
+                }
+            }
+            XObject::Postscript(_) => {}
         }
     }
-    Ok(text)
 }
 
-fn extract_pdf_plain_text(bytes: Vec<u8>, style: PageTextStyle) -> Result<String, String> {
-    let (doc, page_count) = open_pdf_document(bytes)?;
-    let page_indices: Vec<usize> = (0..page_count).collect();
-    let style = match style {
-        PageTextStyle::Grow => PageTextStyle::Grow,
-        PageTextStyle::Cursor { .. } => PageTextStyle::Cursor {
-            total_pages: page_count,
-        },
-    };
-    extract_page_texts(&doc, &page_indices, style)
-}
+fn encode_image(
+    image: &ImageXObject,
+    resolver: &impl pdf::object::Resolve,
+) -> Result<(Vec<u8>, String), String> {
+    let (raw, filter) = image
+        .raw_image_data(resolver)
+        .map_err(|error| error.to_string())?;
+    if matches!(filter, Some(StreamFilter::DCTDecode(_))) {
+        return Ok((raw.to_vec(), "image/jpeg".to_string()));
+    }
+    let samples = image
+        .image_data(resolver)
+        .map_err(|error| error.to_string())?;
+    if image.bits_per_component.unwrap_or(8) != 8 {
+        return Err(format!(
+            "unsupported {}-bit PDF image",
+            image.bits_per_component.unwrap_or(1)
+        ));
+    }
 
-/// Extract plain text from all PDF pages (no auto-read page limit).
-#[cfg(test)]
-pub(crate) fn extract_pdf_plain_text_all(bytes: Vec<u8>) -> Result<String, String> {
-    extract_pdf_plain_text(bytes, PageTextStyle::Grow)
-}
-
-/// Plain text from all PDF pages in the `Read` format.
-pub fn extract_pdf_plain_text_cursor(bytes: Vec<u8>) -> Result<String, String> {
-    extract_pdf_plain_text(bytes, PageTextStyle::Cursor { total_pages: 0 })
-}
-
-pub(crate) fn extract_pdf_text(
-    bytes: Vec<u8>,
-    pages_spec: Option<&str>,
-) -> Result<ReadFileOutput, String> {
-    let (doc, _page_count, page_indices) = open_pdf_and_resolve_pages(bytes, pages_spec)?;
-    let mut text = extract_page_texts(&doc, &page_indices, PageTextStyle::Grow)?;
-    append_extraction_warnings(&mut text, &doc);
-    Ok(raw_text_to_file_content(text))
-}
-
-/// Markdown-style body of a single page. Page-level failures reuse the
-/// text-path error marker so the output skeleton stays uniform.
-fn append_page_markdown(text: &mut String, doc: &pdf_oxide::PdfDocument, page_idx: usize) {
-    // Contract-frozen converter. 0.3.77 deprecates it in favour of the
-    // pipeline converter; that API is out of scope for this change.
-    #[allow(deprecated)]
-    let converter = pdf_oxide::converters::MarkdownConverter::new();
-    let options = pdf_oxide::converters::ConversionOptions {
-        detect_headings: true,
-        ..Default::default()
-    };
-    let spans = match doc.extract_spans(page_idx) {
-        Ok(spans) => spans,
-        Err(e) => {
-            writeln!(
-                text,
-                "[Failed to extract text from page {}: {e}]",
-                page_idx + 1
+    let dynamic = match image.color_space.as_ref() {
+        Some(ColorSpace::DeviceRGB) | Some(ColorSpace::CalRGB(_)) => DynamicImage::ImageRgb8(
+            RgbImage::from_raw(image.width, image.height, samples.to_vec())
+                .ok_or_else(|| "invalid RGB PDF image buffer".to_string())?,
+        ),
+        Some(ColorSpace::DeviceGray) | Some(ColorSpace::CalGray(_)) | None => {
+            DynamicImage::ImageLuma8(
+                GrayImage::from_raw(image.width, image.height, samples.to_vec())
+                    .ok_or_else(|| "invalid grayscale PDF image buffer".to_string())?,
             )
-            .ok();
-            return;
         }
-    };
-    // Same /Artifact filtering as the plain-text path (ISO 32000-1 §14.8.2.2).
-    let spans: Vec<_> = spans
-        .into_iter()
-        .filter(|span| span.artifact_type.is_none())
-        .collect();
-    match converter.convert_page_from_spans(&spans, &options) {
-        Ok(markdown) => text.push_str(&markdown),
-        Err(e) => {
-            writeln!(
-                text,
-                "[Failed to extract text from page {}: {e}]",
-                page_idx + 1
+        Some(ColorSpace::DeviceCMYK) | Some(ColorSpace::CalCMYK(_)) => {
+            let rgb = cmyk_to_rgb(&samples);
+            DynamicImage::ImageRgb8(
+                RgbImage::from_raw(image.width, image.height, rgb)
+                    .ok_or_else(|| "invalid CMYK PDF image buffer".to_string())?,
             )
-            .ok();
         }
+        Some(ColorSpace::Indexed(base, _, lookup)) => {
+            indexed_to_image(image.width, image.height, &samples, base, lookup)?
+        }
+        Some(other) => return Err(format!("unsupported PDF image color space: {other:?}")),
+    };
+    let mut encoded = Cursor::new(Vec::new());
+    dynamic
+        .write_to(&mut encoded, ImageFormat::Png)
+        .map_err(|error| format!("failed to encode PDF image: {error}"))?;
+    Ok((encoded.into_inner(), "image/png".to_string()))
+}
+
+fn indexed_to_image(
+    width: u32,
+    height: u32,
+    samples: &[u8],
+    base: &ColorSpace,
+    lookup: &[u8],
+) -> Result<DynamicImage, String> {
+    let components = match base {
+        ColorSpace::DeviceGray | ColorSpace::CalGray(_) => 1,
+        ColorSpace::DeviceRGB | ColorSpace::CalRGB(_) => 3,
+        _ => return Err(format!("unsupported indexed PDF color space: {base:?}")),
+    };
+    let mut pixels = Vec::with_capacity(samples.len() * components);
+    for &index in samples {
+        let start = usize::from(index) * components;
+        let color = lookup
+            .get(start..start + components)
+            .ok_or_else(|| "invalid indexed PDF image lookup table".to_string())?;
+        pixels.extend_from_slice(color);
+    }
+    if components == 1 {
+        Ok(DynamicImage::ImageLuma8(
+            GrayImage::from_raw(width, height, pixels)
+                .ok_or_else(|| "invalid indexed grayscale buffer".to_string())?,
+        ))
+    } else {
+        Ok(DynamicImage::ImageRgb8(
+            RgbImage::from_raw(width, height, pixels)
+                .ok_or_else(|| "invalid indexed RGB buffer".to_string())?,
+        ))
     }
 }
 
-/// Extract Markdown-style text from all requested pages.
-pub(crate) fn extract_pdf_markdown(
-    bytes: Vec<u8>,
-    pages_spec: Option<&str>,
-) -> Result<ReadFileOutput, String> {
-    let (doc, _page_count, page_indices) = open_pdf_and_resolve_pages(bytes, pages_spec)?;
-    let mut text = String::new();
-    for (i, &page_idx) in page_indices.iter().enumerate() {
-        if i > 0 {
-            text.push('\n');
-        }
-        writeln!(&mut text, "--- Page {} ---", page_idx + 1).ok();
-        append_page_markdown(&mut text, &doc, page_idx);
+fn cmyk_to_rgb(samples: &[u8]) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(samples.len() / 4 * 3);
+    for pixel in samples.chunks_exact(4) {
+        let c = u16::from(pixel[0]);
+        let m = u16::from(pixel[1]);
+        let y = u16::from(pixel[2]);
+        let k = u16::from(pixel[3]);
+        rgb.push((255 - (c + k).min(255)) as u8);
+        rgb.push((255 - (m + k).min(255)) as u8);
+        rgb.push((255 - (y + k).min(255)) as u8);
     }
-    append_extraction_warnings(&mut text, &doc);
-    Ok(raw_text_to_file_content(text))
+    rgb
 }
 
-/// Three-tier PDF detection: infer metadata, magic bytes, or extension.
-pub fn is_pdf_file(file_bytes: &[u8], extension: &str) -> bool {
-    bytes_to_metadata(file_bytes).is_ok_and(|m| m.is_pdf())
-        || is_pdf_magic(file_bytes)
-        || extension == "pdf"
-}
-
-/// Minimal multi-page PDF fixture for unit tests.
+/// Minimal multi-page text PDF fixture for integration tests.
 pub fn make_test_pdf(page_texts: &[&str]) -> Vec<u8> {
     let mut pdf = Vec::new();
     pdf.extend_from_slice(b"%PDF-1.4\n");
-
     let mut offsets = Vec::new();
-
     offsets.push(pdf.len());
     pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-
-    let page_count = page_texts.len();
-    let kids: Vec<String> = (0..page_count)
-        .map(|i| format!("{} 0 R", 3 + i * 3))
-        .collect();
+    let kids = (0..page_texts.len())
+        .map(|index| format!("{} 0 R", 3 + index * 3))
+        .collect::<Vec<_>>();
     offsets.push(pdf.len());
-    let pages_obj = format!(
-        "2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n",
-        kids.join(" "),
-        page_count
-    );
-    pdf.extend_from_slice(pages_obj.as_bytes());
-
-    for (i, text) in page_texts.iter().enumerate() {
-        let page_obj = 3 + i * 3;
-        let content_obj = 4 + i * 3;
-        let font_obj = 5 + i * 3;
-
-        let stream_content = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
-        let stream_len = stream_content.len();
-
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            format!(
-                "{page_obj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-                 /Contents {content_obj} 0 R /Resources << /Font << /F1 {font_obj} 0 R >> >> >>\nendobj\n"
-            )
-            .as_bytes(),
-        );
-
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            format!(
-                "{content_obj} 0 obj\n<< /Length {stream_len} >>\nstream\n{stream_content}\nendstream\nendobj\n"
-            )
-            .as_bytes(),
-        );
-
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            format!(
-                "{font_obj} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
-            )
-            .as_bytes(),
-        );
-    }
-
-    let xref_offset = pdf.len();
-    let total_objects = 2 + page_count * 3 + 1;
-    pdf.extend_from_slice(format!("xref\n0 {total_objects}\n").as_bytes());
-    pdf.extend_from_slice(b"0000000000 65535 f \n");
-    for offset in &offsets {
-        pdf.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
-    }
-
     pdf.extend_from_slice(
         format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-            total_objects, xref_offset
+            "2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n",
+            kids.join(" "),
+            page_texts.len()
         )
         .as_bytes(),
     );
-
+    for (index, text) in page_texts.iter().enumerate() {
+        let page_object = 3 + index * 3;
+        let content_object = 4 + index * 3;
+        let font_object = 5 + index * 3;
+        let stream = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{page_object} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {content_object} 0 R /Resources << /Font << /F1 {font_object} 0 R >> >> >>\nendobj\n").as_bytes());
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "{content_object} 0 obj\n<< /Length {} >>\nstream\n{stream}\nendstream\nendobj\n",
+                stream.len()
+            )
+            .as_bytes(),
+        );
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{font_object} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n").as_bytes());
+    }
+    let xref_offset = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            page_texts.len() * 3 + 3
+        )
+        .as_bytes(),
+    );
     pdf
 }
 
@@ -631,652 +420,136 @@ pub fn make_test_pdf(page_texts: &[&str]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn extract_pdf_plain_text_all_reads_every_page() {
-        let pdf_bytes = make_test_pdf(&["Alpha", "Beta"]);
-        let text = extract_pdf_plain_text_all(pdf_bytes).unwrap();
-        assert!(text.contains("--- Page 1 ---"));
-        assert!(text.contains("--- Page 2 ---"));
-        assert!(text.contains("Alpha"));
-        assert!(text.contains("Beta"));
-    }
+    fn make_scanned_pdf() -> Vec<u8> {
+        let image =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(256, 256, image::Rgb([240, 240, 240])));
+        let mut jpeg = Cursor::new(Vec::new());
+        image.write_to(&mut jpeg, ImageFormat::Jpeg).unwrap();
+        let jpeg = jpeg.into_inner();
 
-    #[test]
-    fn extract_pdf_plain_text_cursor_uses_page_of_markers() {
-        let pdf_bytes = make_test_pdf(&["Alpha", "Beta"]);
-        let text = extract_pdf_plain_text_cursor(pdf_bytes).unwrap();
-        assert!(text.contains("Alpha"));
-        assert!(text.contains("Beta"));
-        assert!(text.contains("-- 1 of 2 --"));
-        assert!(text.contains("-- 2 of 2 --"));
-        assert!(!text.contains("--- Page"));
-    }
-
-    #[test]
-    fn extract_pdf_text_returns_file_content() {
-        let pdf_bytes = make_test_pdf(&["Hello World"]);
-        let result = extract_pdf_text(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("Hello World"));
-                assert!(fc.raw_output.contains("--- Page 1 ---"));
-                assert!(fc.content.contains('\u{2192}'));
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_pdf_text_multi_page() {
-        let pdf_bytes = make_test_pdf(&["Page One", "Page Two"]);
-        let result = extract_pdf_text(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("--- Page 1 ---"));
-                assert!(fc.raw_output.contains("--- Page 2 ---"));
-                assert!(fc.raw_output.contains("Page One"));
-                assert!(fc.raw_output.contains("Page Two"));
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_pdf_text_with_page_spec() {
-        let pdf_bytes = make_test_pdf(&["First", "Second", "Third"]);
-        let result = extract_pdf_text(pdf_bytes, Some("2")).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("--- Page 2 ---"));
-                assert!(fc.raw_output.contains("Second"));
-                assert!(!fc.raw_output.contains("--- Page 1 ---"));
-                assert!(!fc.raw_output.contains("--- Page 3 ---"));
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_pdf_text_invalid_pdf() {
-        let err = extract_pdf_text(b"not a pdf".to_vec(), None).unwrap_err();
-        assert!(err.contains("Failed to open PDF"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn handle_pdf_format_text() {
-        let pdf_bytes = make_test_pdf(&["Test Content"]);
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pdf_path = tmp.path().join("test.pdf");
-        std::fs::write(&pdf_path, &pdf_bytes).unwrap();
-        let result = handle_pdf(pdf_bytes, &pdf_path, None, Some("text"))
-            .await
-            .unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("Test Content"));
-                assert_eq!(fc.absolute_path, pdf_path);
-            }
-            other => panic!("Expected FileContent for format='text', got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_pdf_format_image() {
-        let pdf_bytes = make_test_pdf(&["Some Text"]);
-        let path = std::path::Path::new("/tmp/test.pdf");
-        let result = handle_pdf(pdf_bytes, path, None, Some("image"))
-            .await
-            .unwrap();
-        assert!(matches!(result, ReadFileOutput::PdfPageImages(_)));
-    }
-
-    #[test]
-    fn render_pdf_pages_rejects_invalid_pdf() {
-        let err = render_pdf_pages(b"not a pdf".to_vec(), None, 10).unwrap_err();
-        assert!(err.contains("Failed to open PDF"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_page_range_single_page() {
-        assert_eq!(parse_page_range("3", 10).unwrap(), vec![2]);
-    }
-
-    #[test]
-    fn parse_page_range_rejects_too_many_pages() {
-        let err = parse_page_range("1-21", 30).unwrap_err();
-        assert!(err.contains("maximum is"), "got: {err}");
-    }
-
-    // ── fixtures ──────────────────────────────────────────────────────────
-
-    /// Single-page PDF whose content stream is exactly `content_stream`.
-    fn make_single_page_pdf(content_stream: &str) -> Vec<u8> {
-        let mut pdf = Vec::new();
-        pdf.extend_from_slice(b"%PDF-1.4\n");
+        let mut pdf = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-             /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
-        );
-        let stream_len = content_stream.len();
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            format!(
-                "4 0 obj\n<< /Length {stream_len} >>\nstream\n{content_stream}\nendstream\nendobj\n"
-            )
-            .as_bytes(),
-        );
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
-        );
-        let xref_offset = pdf.len();
-        pdf.extend_from_slice(b"xref\n0 6\n");
-        pdf.extend_from_slice(b"0000000000 65535 f \n");
-        for offset in &offsets {
-            pdf.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
-        }
-        pdf.extend_from_slice(
-            format!(
-                "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-                xref_offset
-            )
-            .as_bytes(),
-        );
-        pdf
-    }
-
-    /// Single-page PDF with an optional image XObject (`name -> jpeg_bytes`).
-    fn make_pdf_with_image(content_stream: &str, image_obj: Option<(&str, Vec<u8>)>) -> Vec<u8> {
-        let mut pdf = Vec::new();
-        pdf.extend_from_slice(b"%PDF-1.4\n");
-        let mut offsets = Vec::new();
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
-        let resources = match &image_obj {
-            Some((name, _)) => {
-                format!("/Resources << /Font << /F1 5 0 R >> /XObject << /{name} 6 0 R >> >>")
-            }
-            None => "/Resources << /Font << /F1 5 0 R >> >>".to_string(),
-        };
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            format!(
-                "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-                 /Contents 4 0 R {resources} >>\nendobj\n"
-            )
-            .as_bytes(),
-        );
-        let stream_len = content_stream.len();
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            format!(
-                "4 0 obj\n<< /Length {stream_len} >>\nstream\n{content_stream}\nendstream\nendobj\n"
-            )
-            .as_bytes(),
-        );
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(
-            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
-        );
-        let mut total_objects = 6;
-        if let Some((_, data)) = &image_obj {
-            let len = data.len();
+        let mut object = |number: usize, body: &[u8]| {
             offsets.push(pdf.len());
-            pdf.extend_from_slice(
-                format!(
-                    "6 0 obj\n<< /Type /XObject /Subtype /Image /Width 400 /Height 400 \
-                     /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {len} >>\nstream\n"
-                )
-                .as_bytes(),
-            );
-            pdf.extend_from_slice(data);
-            pdf.extend_from_slice(b"\nendstream\nendobj\n");
-            total_objects = 7;
-        }
-        let xref_offset = pdf.len();
-        pdf.extend_from_slice(format!("xref\n0 {total_objects}\n").as_bytes());
-        pdf.extend_from_slice(b"0000000000 65535 f \n");
-        for offset in &offsets {
-            pdf.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+            pdf.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+            pdf.extend_from_slice(body);
+            pdf.extend_from_slice(b"\nendobj\n");
+        };
+        object(1, b"<< /Type /Catalog /Pages 2 0 R >>");
+        object(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+        object(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 256 256] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>");
+        object(
+            4,
+            b"<< /Length 31 >>\nstream\nq 256 0 0 256 0 0 cm /Im0 Do Q\nendstream",
+        );
+        let mut image_object = format!("<< /Type /XObject /Subtype /Image /Width 256 /Height 256 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n", jpeg.len()).into_bytes();
+        image_object.extend_from_slice(&jpeg);
+        image_object.extend_from_slice(b"\nendstream");
+        object(5, &image_object);
+        let xref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
         }
         pdf.extend_from_slice(
-            format!(
-                "trailer\n<< /Size {total_objects} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-                xref_offset
-            )
-            .as_bytes(),
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
         );
         pdf
     }
 
-    /// Small solid-colour JPEG, good enough for page classification.
-    fn make_jpeg() -> Vec<u8> {
-        let img = image::RgbImage::from_pixel(400, 400, image::Rgb([10, 20, 30]));
-        let mut jpeg_bytes = Vec::new();
-        image::DynamicImage::ImageRgb8(img)
-            .write_to(
-                &mut std::io::Cursor::new(&mut jpeg_bytes),
-                image::ImageFormat::Jpeg,
-            )
-            .unwrap();
-        jpeg_bytes
-    }
+    fn make_mixed_pdf() -> Vec<u8> {
+        let image =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(256, 256, image::Rgb([220, 220, 220])));
+        let mut jpeg = Cursor::new(Vec::new());
+        image.write_to(&mut jpeg, ImageFormat::Jpeg).unwrap();
+        let jpeg = jpeg.into_inner();
 
-    /// `make_test_pdf` with the final object's `endobj` removed, which makes
-    /// pdf_oxide raise a document-scoped `EofPremature` structured warning
-    /// while still extracting fine.
-    fn make_eof_truncated_pdf(page_texts: &[&str]) -> Vec<u8> {
-        let mut bytes = make_test_pdf(page_texts);
-        let marker = b"\nendobj\nxref".to_vec();
-        if let Some(pos) = bytes.windows(marker.len()).position(|w| w == marker) {
-            bytes.drain(pos..pos + marker.len());
-            bytes.insert(pos, b'\n');
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        let mut object = |number: usize, body: &[u8]| {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+            pdf.extend_from_slice(body);
+            pdf.extend_from_slice(b"\nendobj\n");
+        };
+        object(1, b"<< /Type /Catalog /Pages 2 0 R >>");
+        object(2, b"<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>");
+        object(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 256 256] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>");
+        let text_stream =
+            b"BT /F1 12 Tf 20 220 Td (native text) Tj 0 -20 Td (more text) Tj 0 -20 Td (final text) Tj ET";
+        let mut text_object = format!("<< /Length {} >>\nstream\n", text_stream.len()).into_bytes();
+        text_object.extend_from_slice(text_stream);
+        text_object.extend_from_slice(b"\nendstream");
+        object(4, &text_object);
+        object(5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+        object(6, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 256 256] /Resources << /XObject << /Im0 8 0 R >> >> /Contents 7 0 R >>");
+        object(
+            7,
+            b"<< /Length 31 >>\nstream\nq 256 0 0 256 0 0 cm /Im0 Do Q\nendstream",
+        );
+        let mut image_object = format!("<< /Type /XObject /Subtype /Image /Width 256 /Height 256 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n", jpeg.len()).into_bytes();
+        image_object.extend_from_slice(&jpeg);
+        image_object.extend_from_slice(b"\nendstream");
+        object(8, &image_object);
+        let xref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 9\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
         }
-        bytes
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        pdf
     }
 
-    // ── default smart routing ─────────────────────────────────────────────
+    #[test]
+    fn parses_page_ranges() {
+        assert_eq!(parse_page_range("1,3-4,3", 5).unwrap(), vec![0, 2, 3]);
+        assert_eq!(parse_page_range("3-", 5).unwrap(), vec![2, 3, 4]);
+        assert!(parse_page_range("0", 5).is_err());
+    }
 
-    #[tokio::test]
-    async fn handle_pdf_default_routes_text_layer_to_file_content() {
-        let pdf_bytes = make_test_pdf(&["Hello World"]);
-        let path = std::path::Path::new("/tmp/text-layer.pdf");
-        let result = handle_pdf(pdf_bytes, path, None, None).await.unwrap();
+    #[test]
+    fn text_pdf_uses_markdown_without_images() {
+        let pdf = make_test_pdf(&["hello world", "second page"]);
+        let result = extract_pdf_inner(pdf, None, false).unwrap();
+        assert_eq!(result.page_count, 2);
+        assert!(result.markdown.contains("hello world"));
+        assert!(result.images.is_empty());
+    }
+
+    #[test]
+    fn scanned_pdf_extracts_raster_for_vision() {
+        let result = extract_pdf_inner(make_scanned_pdf(), None, false).unwrap();
+        assert_eq!(result.visual_pages, vec![0]);
+        assert_eq!(result.images.len(), 1);
+        assert!(result.images[0].mime_type.starts_with("image/"));
+        assert!(!result.images[0].data.is_empty());
+    }
+
+    #[test]
+    fn mixed_pdf_keeps_text_and_extracts_visual_page() {
+        let result = extract_pdf_inner(make_mixed_pdf(), None, false).unwrap();
+        assert_eq!(result.page_count, 2);
         assert!(
-            matches!(result, ReadFileOutput::FileContent(_)),
-            "text-layer PDF without format must route to text, got {result:?}"
+            result.markdown.contains("native text"),
+            "markdown was {:?}",
+            result.markdown
         );
-        if let ReadFileOutput::FileContent(fc) = result {
-            assert!(fc.raw_output.contains("Hello World"));
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_pdf_default_routes_scanned_page_to_images() {
-        let pdf_bytes =
-            make_pdf_with_image("q 0 0 612 792 cm /Im1 Do Q", Some(("Im1", make_jpeg())));
-        let path = std::path::Path::new("/tmp/scanned.pdf");
-        let result = handle_pdf(pdf_bytes, path, None, None).await.unwrap();
-        assert!(
-            matches!(result, ReadFileOutput::PdfPageImages(_)),
-            "scanned PDF without format must route to rendering, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_pdf_default_routes_image_text_page_to_images() {
-        let pdf_bytes = make_pdf_with_image(
-            "BT /F1 12 Tf 72 720 Td (This is a longer body of text with enough words) Tj ET\n\
-             q 72 200 300 300 cm /Im1 Do Q",
-            Some(("Im1", make_jpeg())),
-        );
-        let path = std::path::Path::new("/tmp/hybrid.pdf");
-        let result = handle_pdf(pdf_bytes, path, None, None).await.unwrap();
-        assert!(
-            matches!(result, ReadFileOutput::PdfPageImages(_)),
-            "image-text PDF without format must route to rendering, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_pdf_default_routes_classify_error_to_images() {
-        // /MediaBox [0 0] makes classify_page fail (InvalidPdf); the default
-        // route must conservatively fall back to the historical render path
-        // (which itself tolerates the bad MediaBox and renders images).
-        let mut pdf_bytes = make_test_pdf(&["Hello"]);
-        let mb_marker = b"/MediaBox [0 0 612 792]".to_vec();
-        if let Some(pos) = pdf_bytes
-            .windows(mb_marker.len())
-            .position(|w| w == mb_marker)
-        {
-            pdf_bytes.splice(
-                pos..pos + mb_marker.len(),
-                b"/MediaBox [0 0]".iter().copied(),
-            );
-        }
-        let path = std::path::Path::new("/tmp/bad-mediabox.pdf");
-        let result = handle_pdf(pdf_bytes, path, None, None).await.unwrap();
-        assert!(
-            matches!(result, ReadFileOutput::PdfPageImages(_)),
-            "classify failure must fall back to rendering, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_pdf_rejects_unknown_format() {
-        let pdf_bytes = make_test_pdf(&["Hello World"]);
-        let path = std::path::Path::new("/tmp/unknown.pdf");
-        let result = handle_pdf(pdf_bytes, path, None, Some("bogus"))
-            .await
-            .unwrap();
-        match result {
-            ReadFileOutput::FileReadError(msg) => {
-                assert!(
-                    msg.contains("'image' (default), 'text', 'markdown'"),
-                    "supported-values message must list all formats, got: {msg}"
-                );
-            }
-            other => panic!("Expected FileReadError, got {other:?}"),
-        }
-    }
-
-    // ── reading order / artifact filtering (text path) ────────────────────
-
-    #[test]
-    fn extract_pdf_text_two_column_uses_top_to_bottom_order() {
-        // pdf_oxide's default reading order is geometric top-to-bottom
-        // (Y desc, then X asc): the two columns interleave row by row rather
-        // than column-major. This test pins the actual span order.
-        let pdf_bytes = make_single_page_pdf(
-            "BT /F1 12 Tf 72 700 Td (Left One) Tj ET\n\
-             BT /F1 12 Tf 72 680 Td (Left Two) Tj ET\n\
-             BT /F1 12 Tf 360 700 Td (Right One) Tj ET\n\
-             BT /F1 12 Tf 360 680 Td (Right Two) Tj ET",
-        );
-        let text = extract_pdf_text(pdf_bytes, None).unwrap();
-        if let ReadFileOutput::FileContent(fc) = text {
-            let body = fc.raw_output;
-            let left_one = body.find("Left One").expect("Left One present");
-            let right_one = body.find("Right One").expect("Right One present");
-            let left_two = body.find("Left Two").expect("Left Two present");
-            let right_two = body.find("Right Two").expect("Right Two present");
-            assert!(
-                left_one < right_one && right_one < left_two && left_two < right_two,
-                "expected row-major (Y desc, X asc) order, got: {body}"
-            );
-        } else {
-            panic!("Expected FileContent");
-        }
+        assert_eq!(result.visual_pages, vec![1]);
+        assert_eq!(result.images.len(), 1);
     }
 
     #[test]
-    fn extract_pdf_text_skips_artifact_marked_header() {
-        let pdf_bytes = make_single_page_pdf(
-            "/Artifact << /Type /Pagination /Subtype /Header >> BDC\n\
-             BT /F1 12 Tf 72 750 Td (Running Header) Tj ET\n\
-             EMC\n\
-             BT /F1 12 Tf 72 700 Td (Body Text) Tj ET",
-        );
-        let result = extract_pdf_text(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(
-                    fc.raw_output.contains("Body Text"),
-                    "body text must survive artifact filtering"
-                );
-                assert!(
-                    !fc.raw_output.contains("Running Header"),
-                    "/Artifact-marked header must be dropped from text output"
-                );
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
+    fn page_selection_limits_both_text_and_visual_extraction() {
+        let text = extract_pdf_inner(make_mixed_pdf(), Some("1"), false).unwrap();
+        assert!(text.markdown.contains("native text"));
+        assert!(text.visual_pages.is_empty());
+        assert!(text.images.is_empty());
 
-    // ── markdown path ──────────────────────────────────────────────────────
-
-    #[test]
-    fn extract_pdf_markdown_preserves_page_structure() {
-        // Two lines at different Y coordinates render as two markdown lines;
-        // the converter emits no `#` heading markers (block-level converter).
-        let pdf_bytes = make_single_page_pdf(
-            "BT /F1 24 Tf 72 700 Td (Big Title) Tj ET\n\
-             BT /F1 12 Tf 72 660 Td (Some body text here.) Tj ET",
-        );
-        let result = extract_pdf_markdown(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("--- Page 1 ---"));
-                assert!(fc.raw_output.contains("Big Title"));
-                assert!(fc.raw_output.contains("Some body text here."));
-                let title_pos = fc.raw_output.find("Big Title").unwrap();
-                let body_pos = fc.raw_output.find("Some body text here.").unwrap();
-                assert!(
-                    title_pos < body_pos,
-                    "title line must precede body line: {}",
-                    fc.raw_output
-                );
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_pdf_format_markdown_returns_file_content() {
-        let pdf_bytes = make_test_pdf(&["Hello World"]);
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pdf_path = tmp.path().join("doc.pdf");
-        std::fs::write(&pdf_path, &pdf_bytes).unwrap();
-        let result = handle_pdf(pdf_bytes, &pdf_path, None, Some("markdown"))
-            .await
-            .unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("Hello World"));
-                assert!(fc.raw_output.contains("--- Page 1 ---"));
-                assert_eq!(fc.absolute_path, pdf_path);
-            }
-            other => panic!("Expected FileContent for format='markdown', got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_pdf_markdown_with_page_spec() {
-        let pdf_bytes = make_test_pdf(&["First", "Second", "Third"]);
-        let result = extract_pdf_markdown(pdf_bytes, Some("2")).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("--- Page 2 ---"));
-                assert!(fc.raw_output.contains("Second"));
-                assert!(!fc.raw_output.contains("--- Page 1 ---"));
-                assert!(!fc.raw_output.contains("--- Page 3 ---"));
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_pdf_markdown_invalid_pdf() {
-        let err = extract_pdf_markdown(b"not a pdf".to_vec(), None).unwrap_err();
-        assert!(err.contains("Failed to open PDF"), "got: {err}");
-    }
-
-    #[test]
-    fn extract_pdf_markdown_skips_artifact_spans() {
-        let pdf_bytes = make_single_page_pdf(
-            "/Artifact << /Type /Pagination /Subtype /Footer >> BDC\n\
-             BT /F1 12 Tf 72 40 Td (Page 1 of 1) Tj ET\n\
-             EMC\n\
-             BT /F1 12 Tf 72 700 Td (Main Content) Tj ET",
-        );
-        let result = extract_pdf_markdown(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("Main Content"));
-                assert!(
-                    !fc.raw_output.contains("Page 1 of 1"),
-                    "/Artifact-marked footer must be dropped from markdown output"
-                );
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    // ── structured warning diagnostics ─────────────────────────────────────
-
-    #[test]
-    fn extract_pdf_text_appends_warning_diagnostics() {
-        let pdf_bytes = make_eof_truncated_pdf(&["Hello World"]);
-        let result = extract_pdf_text(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("Hello World"));
-                assert!(
-                    fc.raw_output
-                        .contains("[PDF extraction warning: EofPremature]"),
-                    "diagnostic line must be appended, got: {}",
-                    fc.raw_output
-                );
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_pdf_markdown_appends_warning_diagnostics() {
-        let pdf_bytes = make_eof_truncated_pdf(&["Hello World"]);
-        let result = extract_pdf_markdown(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(fc.raw_output.contains("Hello World"));
-                assert!(
-                    fc.raw_output
-                        .contains("[PDF extraction warning: EofPremature]"),
-                    "diagnostic line must be appended, got: {}",
-                    fc.raw_output
-                );
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn append_extraction_warnings_formats_page_scoped_warnings() {
-        // Page-scoped warnings (no real-world trigger reaches the
-        // document-level sink today) are injected via pdf_oxide's public
-        // diagnostic API to pin the `on page N` format.
-        let pdf_bytes = make_test_pdf(&["Hello"]);
-        let doc = pdf_oxide::PdfDocument::from_bytes(pdf_bytes).unwrap();
-        doc.push_structured_warning(pdf_oxide::extractors::Warning {
-            category: pdf_oxide::extractors::WarningCategory::ToUnicodeMissing,
-            page: Some(2),
-            message: "type0 font has no ToUnicode entry".to_string(),
-            spec_section: Some("9.10.2"),
-        });
-        let mut text = String::new();
-        append_extraction_warnings(&mut text, &doc);
-        assert_eq!(
-            text,
-            "[PDF extraction warning: ToUnicodeMissing on page 3]\n"
-        );
-    }
-
-    // ── geometric span separators ─────────────────────────────────────────
-
-    #[test]
-    fn span_separator_same_line_gap_rules() {
-        // Tight same-line spans (gap ≤ 0.5) must not get a separator.
-        assert_eq!(span_separator(72.0, 700.0, 20.0, 92.3, 700.0, 12.0), None);
-        // The 0.5 pt threshold itself is exclusive: exactly 0.5 stays tight.
-        assert_eq!(span_separator(72.0, 700.0, 20.0, 92.5, 700.0, 12.0), None);
-        // Anything beyond the word threshold gets a space.
-        assert_eq!(
-            span_separator(72.0, 700.0, 20.0, 92.51, 700.0, 12.0),
-            Some(' ')
-        );
-        // A tiny same-line y jitter stays on the line (no newline).
-        assert_eq!(
-            span_separator(72.0, 700.0, 20.0, 300.0, 701.0, 12.0),
-            Some(' ')
-        );
-    }
-
-    #[test]
-    fn span_separator_line_break_rules() {
-        // Vertical jump beyond 0.6 × max font size breaks the line.
-        assert_eq!(
-            span_separator(72.0, 700.0, 20.0, 72.0, 680.0, 12.0),
-            Some('\n')
-        );
-        // Within the 0.6 × max_font_size band (dy 7.0 < 7.2) the span stays
-        // on the line; the band is sized to absorb same-line baseline jitter.
-        assert_eq!(span_separator(72.0, 700.0, 20.0, 72.0, 693.0, 12.0), None);
-        // Just past the threshold (dy 7.5 > 7.2) breaks.
-        assert_eq!(
-            span_separator(72.0, 700.0, 20.0, 72.0, 692.5, 12.0),
-            Some('\n')
-        );
-        // Y wins over X: on a line break the X can regress to a negative gap,
-        // which must not suppress the newline.
-        assert_eq!(
-            span_separator(360.0, 700.0, 54.0, 72.0, 680.0, 12.0),
-            Some('\n')
-        );
-    }
-
-    #[test]
-    fn extract_pdf_text_joins_same_line_spans_with_space() {
-        // Two text blocks on the same baseline separated by a large x gap
-        // stay separate spans (pdf_oxide only merges gaps ≲ word width), so
-        // the geometric rule must insert a space between them.
-        let pdf_bytes = make_single_page_pdf(
-            "BT /F1 12 Tf 72 700 Td (Left One) Tj ET\n\
-             BT /F1 12 Tf 360 700 Td (Right One) Tj ET",
-        );
-        let result = extract_pdf_text(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(
-                    fc.raw_output.contains("Left One Right One"),
-                    "same-line spans with a gap must join with a space, got: {}",
-                    fc.raw_output
-                );
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_pdf_text_separates_lines_with_newline() {
-        // Two text blocks on different baselines must be joined with a
-        // newline, not glued together.
-        let pdf_bytes = make_single_page_pdf(
-            "BT /F1 12 Tf 72 700 Td (First Line) Tj ET\n\
-             BT /F1 12 Tf 72 680 Td (Second Line) Tj ET",
-        );
-        let result = extract_pdf_text(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(
-                    fc.raw_output.contains("First Line\nSecond Line"),
-                    "cross-line spans must be joined with a newline, got: {}",
-                    fc.raw_output
-                );
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_pdf_text_two_column_geometry() {
-        // Two rows × two columns: row-major reading order with a space
-        // between the columns and a newline between the rows. This also
-        // pins the Y-before-X rule (the column wrap regresses X).
-        let pdf_bytes = make_single_page_pdf(
-            "BT /F1 12 Tf 72 700 Td (Left One) Tj ET\n\
-             BT /F1 12 Tf 72 680 Td (Left Two) Tj ET\n\
-             BT /F1 12 Tf 360 700 Td (Right One) Tj ET\n\
-             BT /F1 12 Tf 360 680 Td (Right Two) Tj ET",
-        );
-        let result = extract_pdf_text(pdf_bytes, None).unwrap();
-        match result {
-            ReadFileOutput::FileContent(fc) => {
-                assert!(
-                    fc.raw_output
-                        .contains("Left One Right One\nLeft Two Right Two"),
-                    "expected row-major joins, got: {}",
-                    fc.raw_output
-                );
-            }
-            other => panic!("Expected FileContent, got {other:?}"),
-        }
+        let image = extract_pdf_inner(make_mixed_pdf(), Some("2"), true).unwrap();
+        assert!(image.markdown.is_empty());
+        assert_eq!(image.visual_pages, vec![1]);
+        assert_eq!(image.images.len(), 1);
     }
 }

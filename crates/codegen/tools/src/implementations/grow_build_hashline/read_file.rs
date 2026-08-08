@@ -87,7 +87,9 @@ Usage:
 - The ${{ params.read.target_file }} parameter accepts either a relative path in the workspace or an absolute path
 - By default reads up to {max_lines_read} lines from the beginning
 - Optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} for large files
-- Can read images (PNG, JPG, etc.) and PDF files (each page rendered as an image; use ${{ params.read.pages }} for PDFs with more than 10 pages, max 20 per call)
+- Can read images (PNG, JPG, etc.)
+- Office, OpenDocument, RTF, EPUB, CSV, and PDF content is returned as ordinary line-numbered Markdown because converted binary documents have no editable source-line anchors
+- PDF raster images are extracted without page rendering and sent through the image-description/OCR or multimodal pipeline
 - You can call multiple tools in a single response
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents."#;
 
@@ -203,10 +205,30 @@ impl tool_runtime::Tool for HashlineReadTool {
                     return Ok(ReadFileOutput::FileContent(fc));
                 }
 
+                // Hash anchors are meaningful only for editable source bytes.
+                // anydoc/PDF output is generated Markdown, so retain the
+                // ordinary numbered projection produced by run_read_file.
+                let fs = {
+                    let res = resources.lock().await;
+                    res.require::<FileSystem>()?.0.clone()
+                };
+                let is_converted_document = match fs.read_file(&fc.absolute_path).await {
+                    Ok(bytes) => crate::implementations::read_file::document::detect_format(
+                        &bytes,
+                        &fc.absolute_path,
+                    )
+                    .is_some(),
+                    Err(_) => false,
+                };
+                if is_converted_document {
+                    fc.content_concise = None;
+                    return Ok(ReadFileOutput::FileContent(fc));
+                }
+
                 // Read the full file for anchor generation. Anchors depend
                 // on full-file context (chunk fingerprints span multiple
                 // lines), so we need complete content even for windowed reads.
-                let (full_content, scheme, max_lines) = {
+                let (fs, scheme, max_lines) = {
                     let res = resources.lock().await;
                     let params = res
                         .get::<Params<HashlineSchemeParams>>()
@@ -217,15 +239,15 @@ impl tool_runtime::Tool for HashlineReadTool {
                         .build_scheme()
                         .map_err(tool_runtime::ToolError::invalid_arguments)?;
                     let fs = res.require::<FileSystem>()?.0.clone();
-                    let content = match fs.read_file(&fc.absolute_path).await {
-                        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                        Err(_) => fc.raw_output.clone(),
-                    };
                     let ml = res
                         .get::<TruncationCfg>()
                         .map(|t| t.0.max_lines_read())
                         .unwrap_or_else(|| TruncationConfig::default().max_lines_read());
-                    (content, s, ml)
+                    (fs, s, ml)
+                };
+                let full_content = match fs.read_file(&fc.absolute_path).await {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Err(_) => fc.raw_output.clone(),
                 };
 
                 let effective_limit = Some(fc.limit.unwrap_or(usize::MAX).min(max_lines));
@@ -524,6 +546,35 @@ mod tests {
             ReadFileOutput::FileContent(fc) => assert!(fc.extracted_images.is_empty()),
             other => panic!("Expected FileContent, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn converted_document_keeps_plain_line_numbers() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("note.rtf"),
+            br"{\rtf1\ansi Hello \b world\b0}",
+        )
+        .unwrap();
+        let result = tool_runtime::Tool::run(
+            &HashlineReadTool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            ReadFileInput {
+                path: "note.rtf".to_string(),
+                offset: None,
+                limit: None,
+                pages: None,
+                format: None,
+            },
+        )
+        .await
+        .unwrap();
+        let ReadFileOutput::FileContent(content) = result else {
+            panic!("expected converted FileContent, got {result:?}");
+        };
+        assert!(content.content.starts_with("1→"));
+        assert!(!content.content.starts_with("1:"));
+        assert!(content.content.contains("**world**"));
     }
 
     #[tokio::test]

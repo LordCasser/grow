@@ -1,7 +1,7 @@
 use super::support::*;
 use super::*;
 use tools::types::output::{
-    ImageContent as ToolImageContent, PdfPageImage, PdfPageImages, ReadFileOutput, ToolOutput,
+    FileContent, ImageContent as ToolImageContent, ReadFileOutput, ToolOutput,
 };
 
 fn image_tool_result() -> ToolRunResult {
@@ -86,7 +86,7 @@ async fn configured_image_description_never_silently_falls_back_to_main_model() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn configured_image_description_owns_rendered_pdf_pages() {
+async fn configured_image_description_owns_images_extracted_from_file_content() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -97,16 +97,20 @@ async fn configured_image_description_owns_rendered_pdf_pages() {
             actor.image_description_model = Some("missing-vision-model".to_owned());
             let image = test_image_content();
             let result = ToolRunResult {
-                output: ToolOutput::ReadFile(ReadFileOutput::PdfPageImages(PdfPageImages {
-                    pages: vec![PdfPageImage {
+                output: ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
+                    content: "1→PDF text".to_owned(),
+                    content_concise: None,
+                    absolute_path: "/workspace/mixed.pdf".into(),
+                    offset: None,
+                    limit: None,
+                    raw_output: "PDF text".to_owned(),
+                    total_lines: 1,
+                    extracted_images: vec![tools::util::base64_images::ExtractedImage {
                         data: image.data,
                         mime_type: image.mime_type,
-                        page_number: 3,
                     }],
-                    total_pages: 8,
-                    file_size: 1024,
                 })),
-                prompt_text: "[pdf pages inline]".to_owned(),
+                prompt_text: "1→PDF text".to_owned(),
                 effective_tool_name: None,
             };
 
@@ -119,7 +123,7 @@ async fn configured_image_description_owns_rendered_pdf_pages() {
                     result,
                     0,
                     "test-model",
-                    &serde_json::json!({"target_file": "/workspace/scan.pdf"}),
+                    &serde_json::json!({"target_file": "/workspace/mixed.pdf"}),
                 )
                 .await
                 .unwrap();
@@ -129,10 +133,11 @@ async fn configured_image_description_owns_rendered_pdf_pages() {
                 panic!("expected tool result");
             };
             assert!(result.images.is_empty());
+            assert!(result.content.contains("1→PDF text"));
             assert!(
                 result
                     .content
-                    .contains("Configured image description failed for PDF")
+                    .contains("Configured image description failed")
             );
         })
         .await;

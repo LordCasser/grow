@@ -1596,11 +1596,6 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                         block.image_ref =
                             crate::prompt_images::ScrollbackImageRef::from_path(&path);
                     }
-                    ReadFileOutput::PdfPageImages(pdf) => {
-                        block.media_kind = Some(ReadMediaKind::Pdf {
-                            pages: pdf.total_pages,
-                        });
-                    }
                 }
             } else if !success {
                 let text = content_text(tc);

@@ -1,14 +1,13 @@
 //! ReadFile — new-architecture implementation.
 //!
-//! Reuses the core logic (`extract_file_content_lines`, `bytes_to_metadata`,
-//! constants) from the old `implementations::read_file` module.
+//! Reuses document/image helpers from `implementations::read_file` and keeps
+//! every textual source on one line-windowing and truncation path.
 //! State:
 //! - Notifications emitted via `NotificationHandle` from Resources.
 //!
 //! Reminders are NOT implemented here (Phase 5).
-use crate::implementations::read_file::{
-    handle_pdf, is_pdf_file, raw_text_to_file_content, run_document_extraction,
-};
+use crate::implementations::read_file::document::{convert_to_markdown, detect_format};
+use crate::implementations::read_file::pdf::extract_pdf;
 use crate::types::context::TruncationConfig;
 use crate::types::output::{FileContent, ReadFileOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -73,31 +72,6 @@ static READ_FILE_CAPABILITIES: LazyLock<tool_protocol::ToolCapabilities> =
         }),
         ..Default::default()
     });
-const MAX_PPTX_BYTES: usize = 50 * 1024 * 1024;
-const PPTX_PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-async fn handle_pptx(
-    file_bytes: Vec<u8>,
-    path: &std::path::Path,
-) -> Result<ReadFileOutput, tool_runtime::ToolError> {
-    run_document_extraction(
-        file_bytes,
-        path,
-        "PPTX",
-        MAX_PPTX_BYTES,
-        PPTX_PROCESS_TIMEOUT,
-        extract_pptx_text,
-    )
-    .await
-}
-/// Extract text from a PPTX file (zip + DrawingML text runs).
-///
-/// Returns line-numbered text via the shared `raw_text_to_file_content`
-/// helper.
-fn extract_pptx_text(file_bytes: Vec<u8>) -> Result<ReadFileOutput, String> {
-    let text = crate::implementations::read_file::pptx::extract_pptx_text_from_bytes(&file_bytes)
-        .map_err(|e| format!("Failed to extract text from PPTX: {e}"))?;
-    Ok(raw_text_to_file_content(text))
-}
 /// Description for default toolset (full/non-concise)
 pub(crate) const DESCRIPTION_FULL: &str = r#"Read a file.
 
@@ -105,7 +79,10 @@ Usage:
 - The ${{ params.read.target_file }} parameter can be a relative path in the workspace or an absolute path
 - By default, it reads up to {max_lines_read} lines starting from the beginning of the file
 - Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line
-- This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc).
+- Office documents, OpenDocument files, RTF, EPUB, CSV, and text-based PDFs are converted to GitHub-Flavored Markdown before line ranges are applied
+- PDF text is extracted as Markdown; raster images from scanned or mixed pages are extracted without rendering and sent through the configured image-description/OCR model or the active multimodal model
+- For PDFs, ${{ params.read.pages }} selects pages and ${{ params.read.format }}="image" requests image extraction only
+- This tool also reads Jupyter notebooks (.ipynb files) and image files (e.g. PNG, JPG, etc).
 - When reading an image file the contents are presented visually as this tool uses multimodal LLMs."#;
 /// Schema-only advertised default (runtime still treats omit as line 1 via unwrap_or).
 fn schema_default_offset() -> Option<i64> {
@@ -137,12 +114,12 @@ pub struct ReadFileInput {
     pub limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "Page range for PDF files (e.g. '1-5', '3', '10-'). Required for PDFs with more than 10 pages. Max 20 pages per call. Ignored for non-PDF files."
+        description = "Page range for PDF files to read (e.g. '1-5', '3', '10-'). Text is extracted from the selected pages and images are extracted from pages that need visual analysis. Max 20 pages per call. Invalid for non-PDF files."
     )]
     pub pages: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "Output format for PDF files. When omitted, the format is chosen automatically: PDFs with a native text layer on every requested page are extracted as Markdown text, scanned or image-based PDFs are rendered as page images. 'image' forces page-image rendering (the historical default). 'text' extracts plain text in reading order. 'markdown' extracts Markdown-style text. Ignored for non-PDF files."
+        description = "Output format for PDF files. The only accepted value is 'image', which skips text extraction and extracts raster images from the selected pages without rendering. Invalid for non-PDF files."
     )]
     pub format: Option<String>,
 }
@@ -413,53 +390,103 @@ pub(crate) async fn run_read_file(
             });
         }
     };
-    if let Ok(metadata) = bytes_to_metadata(&file_bytes)
-        && metadata.is_image()
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if input
+        .format
+        .as_deref()
+        .is_some_and(|format| format != "image")
     {
+        return Ok(ReadFileOutput::FileReadError(
+            "Invalid `format`: the only accepted value is \"image\" for PDF files.".to_string(),
+        ));
+    }
+    let image_metadata = bytes_to_metadata(&file_bytes)
+        .ok()
+        .filter(FileMetadata::is_image);
+    if let Some(metadata) = image_metadata {
+        if input.pages.is_some() || input.format.is_some() {
+            return Ok(ReadFileOutput::FileReadError(
+                "The `pages` and `format` parameters are only valid for PDF files.".to_string(),
+            ));
+        }
         return Ok(crate::implementations::read_file::image::image_read_output(
             file_bytes,
             metadata.mime_type,
         )
         .await);
     }
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if is_pdf_file(&file_bytes, &extension) {
-        let mut output =
-            handle_pdf(file_bytes, &path, input.pages, input.format.as_deref()).await?;
-        if let ReadFileOutput::FileContent(ref mut fc) = output {
-            crate::implementations::cursor_rules_on_read::append_cursor_rules_for_read(
-                cursor_rules_on_read_enabled(&resources).await,
-                resources.clone(),
-                &cwd,
-                &path,
-                &mut fc.content,
-                &mut fc.content_concise,
+    let detected_format = detect_format(&file_bytes, &path);
+    let is_pdf = detected_format == Some(anydoc::Format::Pdf);
+    if !is_pdf && (input.pages.is_some() || input.format.is_some()) {
+        return Ok(ReadFileOutput::FileReadError(
+            "The `pages` and `format` parameters are only valid for PDF files.".to_string(),
+        ));
+    }
+    let mut document_images = Vec::new();
+    let file_content = if is_pdf {
+        let pdf = match extract_pdf(
+            file_bytes,
+            &path,
+            input.pages.clone(),
+            input.format.as_deref() == Some("image"),
+        )
+        .await
+        {
+            Ok(pdf) => pdf,
+            Err(error) => return Ok(ReadFileOutput::FileReadError(error)),
+        };
+        document_images = pdf.images;
+        let pages = pdf
+            .visual_pages
+            .iter()
+            .map(|page| (page + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let visual_note = if pdf.visual_pages.is_empty() {
+            String::new()
+        } else if document_images.is_empty() {
+            format!(
+                "[PDF pages {pages} require visual analysis, but contain no extractable raster images.]"
             )
-            .await;
+        } else {
+            format!(
+                "[Raster images extracted from PDF pages {pages} are provided separately for visual analysis.]"
+            )
+        };
+        match (pdf.markdown.trim().is_empty(), visual_note.is_empty()) {
+            (false, false) => format!("{}\n\n{visual_note}", pdf.markdown),
+            (false, true) => pdf.markdown,
+            (true, false) => visual_note,
+            (true, true) => format!(
+                "[PDF contains {} pages and no extractable content.]",
+                pdf.page_count
+            ),
         }
-        return Ok(output);
-    }
-    if extension == "pptx" {
-        return handle_pptx(file_bytes, &path).await;
-    }
-    if crate::util::binary::is_binary(&extension, &file_bytes) {
-        tracing::info!(
-            path = %path.display(),
-            extension = %extension,
-            detected_by = if crate::util::binary::BINARY_EXTENSIONS
-                .binary_search(&extension.as_str()).is_ok() { "extension" } else { "content_inspection" },
-            "binary file rejected by read_file"
-        );
-        return Ok(ReadFileOutput::FileReadError(format!(
-            "Cannot read binary file: {}",
-            path.display()
-        )));
-    }
-    let file_content = String::from_utf8_lossy(&file_bytes).into_owned();
+    } else if let Some(format) = detected_format {
+        match convert_to_markdown(file_bytes, &path, format).await {
+            Ok(markdown) => markdown,
+            Err(error) => return Ok(ReadFileOutput::FileReadError(error)),
+        }
+    } else {
+        if crate::util::binary::is_binary(&extension, &file_bytes) {
+            tracing::info!(
+                path = %path.display(),
+                extension = %extension,
+                detected_by = if crate::util::binary::BINARY_EXTENSIONS
+                    .binary_search(&extension.as_str()).is_ok() { "extension" } else { "content_inspection" },
+                "binary file rejected by read_file"
+            );
+            return Ok(ReadFileOutput::FileReadError(format!(
+                "Cannot read binary file: {}",
+                path.display()
+            )));
+        }
+        String::from_utf8_lossy(&file_bytes).into_owned()
+    };
     if file_content.is_empty() {
         let stored_offset = stored_read_offset(input.offset);
         return Ok(ReadFileOutput::FileContent(FileContent {
@@ -470,7 +497,7 @@ pub(crate) async fn run_read_file(
             limit: input.limit,
             raw_output: String::new(),
             total_lines: 0,
-            extracted_images: Vec::new(),
+            extracted_images: document_images,
         }));
     }
     let total_lines = file_content.matches('\n').count() + 1;
@@ -488,12 +515,13 @@ pub(crate) async fn run_read_file(
             Some(input.limit.unwrap_or(usize::MAX).min(max_lines)),
         )
     };
-    let extracted = extract_file_content_lines(
+    let mut extracted = extract_file_content_lines(
         &file_content,
         effective_offset,
         effective_limit,
         total_lines,
     );
+    extracted.extracted_images.extend(document_images);
     let token_count = crate::util::truncate::estimate_tokens(&extracted.content);
     if !is_skill_markdown && token_count > MAX_NUM_TOKENS {
         let (grep_name, execute_name);
@@ -717,8 +745,8 @@ impl ReadFileTool {
 mod tests {
     use super::*;
     use crate::computer::local::LocalFs;
-    use crate::implementations::read_file::MAX_PDF_BYTES;
     use crate::implementations::read_file::compress_image_for_conversation;
+    use crate::implementations::read_file::document::MAX_DOCUMENT_BYTES;
     use crate::notification::types::ToolNotificationHandle;
     #[allow(unused_imports)]
     use crate::types::resources::{NotificationHandle, Resources};
@@ -1210,7 +1238,6 @@ mod tests {
         ];
         for mime_type in image_mime_types {
             let metadata = FileMetadata {
-                size: 1024,
                 mime_type: mime_type.to_string(),
             };
             assert!(
@@ -1233,7 +1260,6 @@ mod tests {
         ];
         for mime_type in non_image_mime_types {
             let metadata = FileMetadata {
-                size: 1024,
                 mime_type: mime_type.to_string(),
             };
             assert!(
@@ -1246,7 +1272,6 @@ mod tests {
     #[test]
     fn test_is_image_with_empty_mime_type() {
         let metadata = FileMetadata {
-            size: 0,
             mime_type: "".to_string(),
         };
         assert!(!metadata.is_image());
@@ -1959,6 +1984,50 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             .unwrap()
     }
     #[tokio::test]
+    async fn read_file_rtf_converts_to_markdown_before_line_projection() {
+        let result =
+            run_read_file_on("note.rtf", br"{\rtf1\ansi Heading\par Hello \b world\b0}").await;
+        let ReadFileOutput::FileContent(content) = result else {
+            panic!("expected converted FileContent, got {result:?}");
+        };
+        assert!(content.raw_output.contains("Heading"));
+        assert!(content.raw_output.contains("**world**"));
+        assert!(content.content.starts_with("1→"));
+        assert_eq!(
+            content.total_lines,
+            content.raw_output.matches('\n').count() + 1
+        );
+    }
+    #[tokio::test]
+    async fn read_file_csv_uses_extension_driven_anydoc_conversion() {
+        let result = run_read_file_on("data.csv", b"name,value\nalpha,1\n").await;
+        let ReadFileOutput::FileContent(content) = result else {
+            panic!("expected converted FileContent, got {result:?}");
+        };
+        assert!(content.raw_output.contains("| name | value |"));
+        assert!(content.raw_output.contains("| alpha | 1 |"));
+    }
+    #[tokio::test]
+    async fn read_file_rejects_pdf_parameters_for_text() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+        let resources = test_resources(tmp.path());
+        let input = ReadFileInput {
+            path: "note.txt".to_string(),
+            offset: None,
+            limit: None,
+            pages: Some("1".to_string()),
+            format: None,
+        };
+        let result =
+            tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
+        assert!(
+            matches!(result, ReadFileOutput::FileReadError(message) if message.contains("only valid for PDF"))
+        );
+    }
+    #[tokio::test]
     async fn read_file_binary_rejected() {
         let result = run_read_file_on("archive.zip", b"PK\x03\x04fake zip content").await;
         match result {
@@ -2015,7 +2084,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     #[tokio::test]
     async fn pdf_size_gate_rejects_oversized() {
         let mut data = b"%PDF-1.4".to_vec();
-        data.resize(MAX_PDF_BYTES + 1, 0);
+        data.resize(MAX_DOCUMENT_BYTES + 1, 0);
         let result = run_read_file_on("huge.pdf", &data).await;
         match result {
             ReadFileOutput::FileReadError(msg) => {
@@ -2130,10 +2199,9 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         );
         assert!(matches!(terminal, ReadFileOutput::FileContent(_)));
     }
-    /// PDF `format="text"` returns `FileContent` yet must NOT stream (returns
-    /// before the text path; PPTX shares the same early-return shape).
+    /// Removed text/markdown format aliases are rejected explicitly.
     #[tokio::test]
-    async fn read_file_pdf_text_path_is_terminal_only() {
+    async fn read_file_pdf_text_format_is_rejected() {
         let tmp = TempDir::new().unwrap();
         let pdf_bytes = crate::implementations::read_file::pdf::make_test_pdf(&["Hello World"]);
         std::fs::write(tmp.path().join("doc.pdf"), &pdf_bytes).unwrap();
@@ -2148,20 +2216,18 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         let (deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
         assert!(
             deltas.is_empty(),
-            "PDF text extraction must be terminal-only, got {} deltas",
+            "parameter errors must be terminal-only, got {} deltas",
             deltas.len()
         );
         assert!(
-            matches!(terminal, ReadFileOutput::FileContent(_)),
-            "PDF format=text yields FileContent, got {terminal:?}"
+            matches!(terminal, ReadFileOutput::FileReadError(_)),
+            "PDF format=text must be rejected, got {terminal:?}"
         );
     }
-    /// PDF read with `format="image"` renders to `PdfPageImages` — a
-    /// single non-incremental result, so it must not stream. (The default
-    /// no-format route now extracts text-layer PDFs to `FileContent`; this
-    /// test pins the explicit image path.)
+    /// PDF image-only extraction still uses the shared FileContent streaming
+    /// projection, even when a selected text page has no raster XObject.
     #[tokio::test]
-    async fn read_file_pdf_image_path_is_terminal_only() {
+    async fn read_file_pdf_image_path_uses_file_content() {
         let tmp = TempDir::new().unwrap();
         let pdf_bytes = crate::implementations::read_file::pdf::make_test_pdf(&["Some Text"]);
         std::fs::write(tmp.path().join("img.pdf"), &pdf_bytes).unwrap();
@@ -2174,18 +2240,13 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         };
         let resources = test_resources(tmp.path());
         let (deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
-        assert!(
-            deltas.is_empty(),
-            "PDF image rendering must be terminal-only, got {} deltas",
-            deltas.len()
-        );
-        assert!(
-            matches!(terminal, ReadFileOutput::PdfPageImages(_)),
-            "PDF format=image renders images, got {terminal:?}"
-        );
+        let ReadFileOutput::FileContent(content) = terminal else {
+            panic!("PDF format=image must use FileContent, got {terminal:?}");
+        };
+        assert_eq!(deltas.concat(), content.content);
+        assert!(content.content.contains("no extractable raster images"));
     }
-    /// Regression: a concurrent text read must not make a PDF-text read on
-    /// the same `Resources` stream (streamability is call-local).
+    /// Regression: concurrent text and converted-PDF reads stream independently.
     #[tokio::test]
     async fn read_file_concurrent_text_and_pdf_text_do_not_cross_talk() {
         let tmp = TempDir::new().unwrap();
@@ -2206,7 +2267,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             offset: None,
             limit: None,
             pages: None,
-            format: Some("text".to_string()),
+            format: None,
         };
         for _ in 0..10 {
             let (text, pdf) = tokio::join!(
@@ -2215,12 +2276,10 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             );
             let (text_deltas, text_terminal) = text;
             let (pdf_deltas, pdf_terminal) = pdf;
-            assert!(
-                pdf_deltas.is_empty(),
-                "concurrent PDF-text read must stay terminal-only, got {} deltas",
-                pdf_deltas.len()
-            );
-            assert!(matches!(pdf_terminal, ReadFileOutput::FileContent(_)));
+            let ReadFileOutput::FileContent(pdf_content) = pdf_terminal else {
+                panic!("expected FileContent for PDF read")
+            };
+            assert_eq!(pdf_deltas.concat(), pdf_content.content);
             assert!(!text_deltas.is_empty(), "the text read should still stream");
             match text_terminal {
                 ReadFileOutput::FileContent(fc) => {

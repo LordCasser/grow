@@ -155,11 +155,10 @@ pub struct FileContent {
     /// offset-past-end vs genuinely-empty files.
     #[serde(default)]
     pub total_lines: usize,
-    /// Base64 images captured before per-line truncation. The session
-    /// layer turns these into multimodal `ContentPart::Image` follow-ups
-    /// (same pipeline as MCP image extraction); pre-truncation capture
-    /// prevents `truncate_line` from cutting a long single-line URI
-    /// mid-payload. Hidden from the model's JSON schema.
+    /// Base64 images captured from textual data URIs or extracted from PDF
+    /// pages. The session sends them through the configured image-description
+    /// model or as multimodal follow-ups for the active model. Hidden from the
+    /// model's JSON schema.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(skip)]
     pub extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
@@ -183,26 +182,6 @@ pub struct ImageContent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
 }
-/// A single rendered PDF page.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PdfPageImage {
-    /// Base64-encoded JPEG data
-    pub data: String,
-    /// MIME type (always "image/jpeg")
-    pub mime_type: String,
-    /// 1-based page number
-    pub page_number: usize,
-}
-/// Multiple rendered PDF page images.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PdfPageImages {
-    /// Rendered page images, one per requested page
-    pub pages: Vec<PdfPageImage>,
-    /// Total pages in the PDF document
-    pub total_pages: usize,
-    /// File size in bytes
-    pub file_size: usize,
-}
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ReadFileOutput {
     FileContent(FileContent),
@@ -218,7 +197,6 @@ pub enum ReadFileOutput {
     FileReadError(String),
     ImageContent(ImageContent),
     ImageSizeError(String),
-    PdfPageImages(PdfPageImages),
 }
 /// Represents successful edits applied by SearchReplace
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -545,9 +523,7 @@ impl ToolOutput {
             ToolOutput::ListDir(ListDirOutput::Content(_)) => false,
             ToolOutput::ListDir(_) => true,
             ToolOutput::ReadFile(
-                ReadFileOutput::FileContent(_)
-                | ReadFileOutput::ImageContent(_)
-                | ReadFileOutput::PdfPageImages(_),
+                ReadFileOutput::FileContent(_) | ReadFileOutput::ImageContent(_),
             ) => false,
             ToolOutput::ReadFile(_) => true,
             ToolOutput::TaskOutput(TaskOutputOutput::TaskNotFound(_)) => true,
@@ -595,20 +571,6 @@ impl ToolOutput {
                 | ReadFileOutput::FileTooLarge(error_msg)
                 | ReadFileOutput::FileReadError(error_msg)
                 | ReadFileOutput::ImageSizeError(error_msg) => error_msg.to_owned(),
-                ReadFileOutput::PdfPageImages(pdf) => {
-                    let page_list: Vec<String> = pdf
-                        .pages
-                        .iter()
-                        .map(|p| p.page_number.to_string())
-                        .collect();
-                    format!(
-                        "[Read PDF: {} pages rendered (pages {}). Total document: {} pages, {:.1} KB]",
-                        pdf.pages.len(),
-                        page_list.join(", "),
-                        pdf.total_pages,
-                        pdf.file_size as f64 / 1024.0,
-                    )
-                }
             },
             ToolOutput::ListDir(list_dir_output) => match list_dir_output {
                 ListDirOutput::Content(content) => content.content.clone(),
@@ -1645,61 +1607,6 @@ mod tests {
             json.get("persona_hint").is_none(),
             "persona_hint should be absent when None"
         );
-    }
-    fn make_pdf_page_images(
-        page_numbers: &[usize],
-        total_pages: usize,
-        file_size: usize,
-    ) -> PdfPageImages {
-        PdfPageImages {
-            pages: page_numbers
-                .iter()
-                .map(|&n| PdfPageImage {
-                    data: format!("base64data_page{n}"),
-                    mime_type: "image/jpeg".to_string(),
-                    page_number: n,
-                })
-                .collect(),
-            total_pages,
-            file_size,
-        }
-    }
-    #[test]
-    fn pdf_page_images_to_prompt_format() {
-        let pdf = make_pdf_page_images(&[1, 2, 3], 25, 102400);
-        let output = ToolOutput::ReadFile(ReadFileOutput::PdfPageImages(pdf));
-        let text = output.to_prompt_format();
-        assert!(text.contains("3 pages rendered"), "got: {text}");
-        assert!(text.contains("pages 1, 2, 3"), "got: {text}");
-        assert!(text.contains("25 pages"), "got: {text}");
-        assert!(text.contains("100.0 KB"), "got: {text}");
-    }
-    #[test]
-    fn pdf_page_images_to_prompt_format_single_page() {
-        let pdf = make_pdf_page_images(&[5], 10, 51200);
-        let output = ToolOutput::ReadFile(ReadFileOutput::PdfPageImages(pdf));
-        let text = output.to_prompt_format();
-        assert!(text.contains("1 pages rendered"), "got: {text}");
-        assert!(text.contains("pages 5"), "got: {text}");
-        assert!(text.contains("10 pages"), "got: {text}");
-        assert!(text.contains("50.0 KB"), "got: {text}");
-    }
-    #[test]
-    fn pdf_page_images_json_round_trip() {
-        let pdf = make_pdf_page_images(&[1, 3], 20, 8192);
-        let output = ToolOutput::ReadFile(ReadFileOutput::PdfPageImages(pdf));
-        let json = to_json(output);
-        assert_eq!(json["type"], "ReadFile");
-        assert!(
-            json.get("PdfPageImages").is_some(),
-            "missing PdfPageImages key: {json}"
-        );
-        let inner = &json["PdfPageImages"];
-        assert_eq!(inner["total_pages"], 20);
-        assert_eq!(inner["file_size"], 8192);
-        assert_eq!(inner["pages"].as_array().unwrap().len(), 2);
-        assert_eq!(inner["pages"][0]["page_number"], 1);
-        assert_eq!(inner["pages"][1]["page_number"], 3);
     }
     fn sample_bash(exit_code: i32, output: &[u8], timed_out: bool) -> BashOutput {
         BashOutput {

@@ -1,53 +1,58 @@
-# Image reading
+# Image and document reading
 
-`read_file` image handling is selected solely by the resolved
-`models.image_description` configuration.
+`read_file` has one textual projection (`FileContent`) and one direct image-file
+projection (`ImageContent`). Converted document text and images extracted from
+PDFs coexist in `FileContent`: text remains Markdown while
+`FileContent.extracted_images` carries raster payloads to the session layer.
 
-## Invariants
+## Document pipeline
 
-- `image_description = None` means no auxiliary image route. Image files and
-  rendered PDF pages — i.e. pages of scanned or mixed PDFs, which the default
-  route sends to rendering — remain multimodal `tool_result` content for the
-  active model. Any active-model vision failure follows the normal sampling
-  failure path.
-- `image_description = Some(model)` means that configured model owns image
-  interpretation. The session describes `ReadFileOutput::ImageContent` and
-  `ReadFileOutput::PdfPageImages` before adding the tool result to model
-  context, then stores only the textual description in that result.
+- Office, OpenDocument, RTF, EPUB, and CSV content is converted to
+  GitHub-Flavored Markdown by `anydoc`. PDF text uses the same
+  `pdf-inspector` extraction engine that backs anydoc's PDF converter, because
+  the routing layer also needs its per-page OCR decisions.
+- Content signatures take precedence over the filename; the extension is a
+  fallback for formats such as CSV that have no reliable magic bytes.
+- Converted Markdown uses the same line windowing, token limit, cursor rules,
+  concise projection, and streaming path as ordinary text files.
+- `hashline_read` keeps ordinary line numbers for converted binary documents.
+  Generated Markdown has no stable relationship to editable source bytes, so
+  hash anchors would be misleading.
+
+## PDF routing
+
+PDFs do not use page rendering:
+
+1. `pdf-inspector` performs full-page classification and Markdown extraction.
+2. Text remains in `FileContent`.
+3. Pages reported as needing OCR are passed to `pdf-rs`; raster image XObjects
+   are extracted from page resources and nested Form XObjects.
+4. Extracted images are normalized by the existing conversation image path and
+   stored in `FileContent.extracted_images` in page/resource order.
+
+This supports mixed PDFs without discarding their text layer. A scanned page
+whose content is not represented by an extractable raster XObject is reported
+explicitly; `read_file` does not silently reintroduce a renderer.
+
+`pages` selects up to 20 PDF pages. `format="image"` skips PDF text extraction
+and extracts raster images only; when `pages` is omitted it is limited to the
+first automatic request of at most 10 pages. Both parameters are invalid for
+non-PDF inputs. No `text` or `markdown` format aliases exist.
+
+## Image-model ownership
+
+- With no `models.image_description`, direct image files and PDF-extracted
+  images remain multimodal content for the active model.
+- With `models.image_description = Some(model)`, that configured model owns
+  interpretation of both `ImageContent` and `FileContent.extracted_images`.
+  Its textual description is appended to the tool result; raw images are not
+  also sent to the active model.
 - An explicitly configured auxiliary model is never silently replaced by the
   active model. Resolution, transport, or empty-response failures become a
-  visible text failure in the tool result and contain no inline image.
-- Image-description requests inherit sampling parameters from the configured
-  model; the image layer must not hard-code temperature or other provider-
-  constrained sampling values.
-- PDF `format="text"` and `format="markdown"` remain ordinary `FileContent`;
-  only rendered-page output enters the image route.
-- User message attachments are independent of this setting. They are persisted
-  for workspace reuse and remain structural image content for the active model.
+  visible textual failure.
+- Image-description requests inherit the configured model's sampling
+  parameters. User message attachments remain independent of this setting.
 
-## Default smart routing
-
-With no `format` parameter, `read_file` classifies each requested page
-(`pdf_oxide::PdfDocument::classify_page`):
-
-- every requested page has a usable native text layer (or is blank) → the PDF
-  is extracted to `FileContent` (Markdown via the markdown converter);
-- the first page classified `Scanned`/`ImageText`/`Mixed` stops the scan and
-  the whole PDF is rendered to `PdfPageImages` (the historical default);
-- any classification error (including encrypted/unauthenticated documents)
-  conservatively falls back to rendering, preserving the previous default
-  behaviour and error semantics.
-
-Routing is binary: no per-page mixing. Explicit `format="image"` always
-renders; `format="text"` extracts reading-ordered plain text;
-`format="markdown"` forces the markdown path.
-
-## Ownership
-
-- Configuration preserves `Option<String>` through `Config`, subagent context,
-  session spawn, and `SessionActor`; no earlier layer may collapse `None` to the
-  active model name.
-- `image_describe` owns prompt construction, bounded conversation context,
-  auxiliary sampling, output sanitization, and session-local description cache.
-- Tool-result routing remains in `handle_bridge_tool_success`, where the typed
-  `ReadFileOutput` variant is available.
+`image_describe` owns prompt construction, bounded context, auxiliary sampling,
+output sanitization, and its session-local cache. Typed tool-result routing
+remains in `handle_bridge_tool_success`.
