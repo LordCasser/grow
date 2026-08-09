@@ -11,7 +11,7 @@ Grow 自己的边界。
 Grow 不是 xAI 官方产品，也不会内置 Grok 模型、推理端点或产品凭据。所有模型都由用户通过
 BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
-当前源码版本为 `1.1.4`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
+当前源码版本为 `1.1.5`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
 [Grow User Guide](crates/codegen/pager/docs/user-guide/README.md)。
 
 ## Fork 之后改了什么
@@ -29,17 +29,17 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 | 数据与网络 | 删除遥测上传、计费订阅、远程会话同步、托管搜索、远程公告和媒体生成等产品服务链。模型请求只访问当前 Provider。 |
 | 分发 | GitHub Release 是唯一官方二进制渠道；覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64、Linux riscv64 和 OHOS arm64。除 OHOS 外，产物内嵌固定版本 `rg`。 |
 
-### 1.1.4 重点
+### 1.1.5 重点
 
-- Goal 验证、规划与总结改为后台 stage 执行：验证期间界面与输入完全可用，不再需要 clear 恢复；
-  turn 终结收敛为单一权威，恢复链 watchdog 自动探测并恢复卡死的终结状态。
-- verifier 判断 Goal 完成期间，所有发送入口（普通消息、send-now、队列行发送、编辑保存、
-  队列 drain）统一拦截并提示，消息保持排队，验证结束后自然发送；队列行显示 `⏳ verifying`
-  标记。
-- 修复 Goal 启动后反复生成 plan writer 的无限循环（校验宽容化、spawn 准入时机、planner
-  单飞互斥、latch 泄漏清理）；计划产物异常时暂停 Goal 并说明原因。
+- Behavior 与 Goal 控制面统一：Behavior 在 turn 采纳时捕获并随 Plan、Goal、Deep Research
+  控制状态原子化持久化；`BehaviorId` 成为唯一身份，`BehaviorCoordinator` 收敛为纯决策器。
+- Goal 从整文档变更改为带修订版本的 Markdown board：planner 拥有任务结构，主 Agent 用
+  类型化 `update_goal_progress` / `request_goal_replan` 更新；详情视图新增任务摘要与
+  完整 board 查看器，生命周期以 session events 渲染。
+- `read_file` PDF 智能路由：文本层 PDF 默认直接提取本地 Markdown，扫描/混合 PDF 保持
+  渲染到视觉模型；新增 `format="markdown"`，`format="text"` 升级为阅读顺序提取。
 
-版本级变更见 [1.1.4 release notes](crates/codegen/shell/changelogs/1.1.4.md)。
+版本级变更见 [1.1.5 release notes](crates/codegen/shell/changelogs/1.1.5.md)。
 
 ## 安装
 
@@ -50,21 +50,21 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
 | 平台 | Release 资产 |
 | --- | --- |
-| macOS Apple Silicon | `grow-1.1.4-macos-aarch64.tar.gz` |
-| macOS Intel | `grow-1.1.4-macos-x86_64.tar.gz` |
-| Linux x86_64 | `grow-1.1.4-linux-x86_64.tar.gz` |
-| Linux arm64 | `grow-1.1.4-linux-aarch64.tar.gz` |
-| Linux riscv64 | `grow-1.1.4-linux-riscv64.tar.gz` |
-| Linux x86_64（musl） | `grow-1.1.4-linux-x86_64-musl.tar.gz` |
-| Linux arm64（musl） | `grow-1.1.4-linux-aarch64-musl.tar.gz` |
-| Windows x86_64 | `grow-1.1.4-windows-x86_64.tar.gz` |
-| Windows arm64 | `grow-1.1.4-windows-aarch64.tar.gz` |
-| OpenHarmony arm64 | `grow-1.1.4-ohos-aarch64.tar.gz` |
+| macOS Apple Silicon | `grow-1.1.5-macos-aarch64.tar.gz` |
+| macOS Intel | `grow-1.1.5-macos-x86_64.tar.gz` |
+| Linux x86_64 | `grow-1.1.5-linux-x86_64.tar.gz` |
+| Linux arm64 | `grow-1.1.5-linux-aarch64.tar.gz` |
+| Linux riscv64 | `grow-1.1.5-linux-riscv64.tar.gz` |
+| Linux x86_64（musl） | `grow-1.1.5-linux-x86_64-musl.tar.gz` |
+| Linux arm64（musl） | `grow-1.1.5-linux-aarch64-musl.tar.gz` |
+| Windows x86_64 | `grow-1.1.5-windows-x86_64.tar.gz` |
+| Windows arm64 | `grow-1.1.5-windows-aarch64.tar.gz` |
+| OpenHarmony arm64 | `grow-1.1.5-ohos-aarch64.tar.gz` |
 
 选择对应资产后安装：
 
 ```sh
-GROW_VERSION=1.1.4
+GROW_VERSION=1.1.5
 GROW_ASSET="grow-${GROW_VERSION}-macos-aarch64.tar.gz" # 按上表替换
 
 curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/${GROW_ASSET}"
@@ -77,7 +77,7 @@ grow --version
 Windows PowerShell：
 
 ```powershell
-$GrowVersion = "1.1.4"
+$GrowVersion = "1.1.5"
 $GrowAsset = "grow-$GrowVersion-windows-x86_64.tar.gz" # arm64 时替换资产名
 
 Invoke-WebRequest `
@@ -356,7 +356,7 @@ cargo build --locked --release -p cli --bin grow --target <target>
 Release workflow 另外构建 `riscv64gc-unknown-linux-gnu`。GNU 资产以 glibc 2.28 为最低基线，
 musl 与 riscv64 通过 `cross` 构建；Windows 使用静态 CRT。
 
-## 1.1.4 发布准备
+## 1.1.5 发布准备
 
 Grow 的可发布应用 crate 继承根 workspace 版本；部分内部 leaf crate 仍保持自己的 `0.1.0`
 版本。tag 必须与 `cli` / workspace 版本一致。
@@ -374,18 +374,18 @@ cargo test --locked -p shell --lib -- --test-threads=4
 cargo test --locked -p pager --lib
 cargo test --locked -p shell --test test_mcp_permission_persistence
 
-GROW_VERSION=1.1.4 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
+GROW_VERSION=1.1.5 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
   cargo build --locked --profile release-dist -p cli --bin grow
 ./target/release-dist/grow --version
 ```
 
 release commit 完成且工作区干净后，可以用 `scripts/act-release.sh validate` 在本地校验 tag/version
-契约；脚本会在缺少 `v1.1.4` 时只创建本地 tag，不会推送。
+契约；脚本会在缺少 `v1.1.5` 时只创建本地 tag，不会推送。
 
 正式发布流程：
 
 1. 提交版本、lockfile、release notes 和文档。
-2. 创建并推送 annotated tag `v1.1.4`，不要提前创建公开 Release。
+2. 创建并推送 annotated tag `v1.1.5`，不要提前创建公开 Release。
 3. [release workflow](.github/workflows/release.yml) 通过 matrix 构建 10 个目标；除 OHOS 外均嵌入
    固定版本 `rg`。
 4. workflow 先创建隐藏 draft Release，验证 10 个 updater 约定资产均已上传后再一次性公开。

@@ -1,5 +1,31 @@
 # Changelog
 
+# 1.1.5 — 2026-08-09
+
+## Behavior Changes
+
+- Behavior 在 turn 采纳时捕获进 `TurnContext`:该 turn 的 prompt、工具面与限制随后保持
+  不变;切换 Behavior 不重标队列、不改变已运行的 turn。
+- `BehaviorId` 成为 Shell、Tools 与 Pager 的唯一 Behavior 身份;Behavior、Plan、Goal、
+  Deep Research 控制状态原子化持久化,`BehaviorCoordinator` 收敛为纯决策器。
+- Goal 从整文档变更改为带修订版本的 Markdown board:planner 拥有任务结构,主 Agent 用
+  `update_goal_progress` / `request_goal_replan` 类型化更新,不再整体替换 board。
+- Goal 详情视图新增任务摘要与完整 board 查看器;Goal 生命周期以结构化 session events
+  渲染,不再由 pager 猜测阶段。
+- `read_file` 默认路由智能分类 PDF:文本层直接提取本地 Markdown,扫描/混合 PDF 保持
+  渲染到视觉模型;新增 `format="markdown"`,`format="text"` 升级为阅读顺序提取,
+  提取警告作为诊断行输出。
+
+## Fixes
+
+- 修复 plan 修订后 verifier 仍基于过期计划继续验证的问题(修订时自动取消 verifier)。
+- 修复并发 turn 下的排队消息渲染与 turn 状态行不一致问题。
+- `read_file` 移除全局 PDF 缓存,改用 anydoc 文档管线统一 pdf/pptx 处理。
+- pager 动效与生命周期时钟解耦,完成事件驱动动效管线,spinner/wave 不再依赖 watchdog
+  或 tick 分支推进。
+
+完整发布说明见 [changelogs/1.1.5.md](changelogs/1.1.5.md)。
+
 # 1.1.4 — 2026-08-05
 
 ## Behavior Changes
