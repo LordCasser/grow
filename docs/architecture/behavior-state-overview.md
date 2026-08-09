@@ -116,7 +116,7 @@ Pager 不再使用 `skip_next_user_echo`、文本 trim 匹配或 running-adoptio
 
 Goal Planning/Verifying 只更新 Goal chip，不把 Pager session 伪装成 Running，用户仍可提交或 steer 真正的 regular turn。
 
-Goal detail 中的 blackboard 是 `GoalPlan.markdown` 的只读 Markdown 投影；运行时的 Agent-only 指令不通过 `GoalUpdated` 发送，也不在看板上展示。Markdown parse/wrap 缓存属于 Pager view state，session reload 后可重建，不能反向修改 Goal。
+Goal detail 中的 blackboard 是 `GoalPlan.markdown` 的只读 Markdown 投影；运行时的 Agent-only 指令不通过 `GoalUpdated` 发送，也不在看板上展示。默认视图只从 Markdown task-list 派生 checkbox 进度和任务行，完整文档通过二级可滚动视图查看。Markdown parse/wrap、checkbox 计数、投影选择和滚动位置都属于 Pager view state，session reload 后可重建，不能反向修改 Goal。
 
 ## 6. 动画与忙状态
 

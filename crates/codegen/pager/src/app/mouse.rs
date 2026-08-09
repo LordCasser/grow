@@ -72,10 +72,10 @@ impl AgentView {
                         self.show_workflows = !self.show_workflows;
                         if self.show_workflows {
                             self.workflows_view.reset();
-                            self.show_goal_detail = false;
+                            self.set_goal_detail_visible(false);
                         }
                     } else if self.goal_state.is_some() {
-                        self.show_goal_detail = !self.show_goal_detail;
+                        self.toggle_goal_detail();
                     }
                     return InputOutcome::Changed;
                 }

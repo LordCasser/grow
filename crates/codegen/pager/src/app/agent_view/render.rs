@@ -4142,24 +4142,21 @@ impl AgentView {
                 .filter(|s| !s.finished && s.workflow_run_id.is_none())
                 .filter_map(|s| s.tokens_used)
                 .sum();
-            let plan_width = crate::views::goal_detail::goal_board_width(area);
-            let plan_lines = self
-                .goal_board_renderer
-                .lines(&goal.plan_markdown, plan_width);
-            let overlay_rect =
-                crate::views::goal_detail::goal_detail_area(area, goal, plan_lines.len());
-            let close_rect = crate::views::goal_detail::render_goal_detail(
+            if let Some(output) = crate::views::goal_detail::render_goal_detail(
                 buf,
-                overlay_rect,
+                area,
                 goal,
-                plan_lines,
+                &mut self.goal_board_renderer,
                 frame_stamp,
                 self.context_state.as_ref().map(|c| c.used),
                 active_subagent_tokens,
                 self.hit_goal_close.hovered,
-            );
-            self.hit_goal_close.rect = close_rect;
-            self.frame_occluder_rects.push(overlay_rect);
+                self.hit_goal_projection_toggle.hovered,
+            ) {
+                self.hit_goal_close.rect = output.close;
+                self.hit_goal_projection_toggle.rect = output.projection_toggle;
+                self.frame_occluder_rects.push(output.area);
+            }
         }
         if self.show_workflows {
             let runs = self.workflow_runs_newest_first();

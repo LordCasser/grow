@@ -1,8 +1,12 @@
-//! Expanded goal detail overlay — full-screen popup showing goal progress
-//! with token budget bar, todo list, and event history.
+//! Goal detail overlay with two projections of the durable Markdown board.
+//!
+//! The default summary shows progress and task-list items only. The full-board
+//! view is a scrollable Markdown document. Both are derived from the same
+//! `GoalDisplayState::plan_markdown`; this module never creates a second task
+//! state or writes back into the Goal runtime.
 //!
 //! Rendered as a centered overlay when `AgentView::show_goal_detail` is true
-//! and `goal_state` is `Some`. Dismissed by `Esc` or `g`.
+//! and `goal_state` is `Some`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -17,8 +21,8 @@ use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 use crate::views::agent_status::{active_phase_label, format_tokens_compact};
 use crate::views::progress_bar::progress_bar_spans;
 
-/// Maximum Markdown blackboard rows displayed before truncation.
-const MAX_PLAN_DISPLAY: usize = 15;
+/// Maximum rendered task rows displayed in the compact summary.
+const MAX_TASK_DISPLAY_ROWS: usize = 10;
 
 /// Non-persistent Markdown projection for the Goal overlay. Goal updates carry
 /// the source document; parsing, syntax highlighting, and width-dependent
@@ -26,47 +30,180 @@ const MAX_PLAN_DISPLAY: usize = 15;
 /// frames and Goal persistence.
 pub(crate) struct GoalBoardRenderer {
     source: String,
-    content: Option<MarkdownContent>,
+    full_content: Option<MarkdownContent>,
+    task_content: Option<MarkdownContent>,
     width: u16,
     theme: Option<ThemeKind>,
-    lines: Vec<BlockLine>,
+    full_lines: Vec<BlockLine>,
+    task_lines: Vec<BlockLine>,
+    task_count: usize,
+    completed_task_count: usize,
+    full_board: bool,
+    scroll: u16,
 }
 
 impl Default for GoalBoardRenderer {
     fn default() -> Self {
         Self {
             source: String::new(),
-            content: None,
+            full_content: None,
+            task_content: None,
             width: 0,
             theme: None,
-            lines: Vec::new(),
+            full_lines: Vec::new(),
+            task_lines: Vec::new(),
+            task_count: 0,
+            completed_task_count: 0,
+            full_board: false,
+            scroll: 0,
         }
     }
 }
 
 impl GoalBoardRenderer {
-    pub(crate) fn lines(&mut self, markdown: &str, width: u16) -> &[BlockLine] {
+    fn refresh(&mut self, markdown: &str, width: u16) {
         if self.source != markdown {
             self.source.clear();
             self.source.push_str(markdown);
-            self.content = (!markdown.trim().is_empty()).then(|| MarkdownContent::new(markdown));
+            self.full_content =
+                (!markdown.trim().is_empty()).then(|| MarkdownContent::new(markdown));
+
+            let tasks = markdown.lines().filter_map(parse_markdown_task);
+            let mut task_markdown = String::new();
+            self.task_count = 0;
+            self.completed_task_count = 0;
+            for task in tasks {
+                if !task_markdown.is_empty() {
+                    task_markdown.push('\n');
+                }
+                task_markdown.push_str(if task.complete { "- [x] " } else { "- [ ] " });
+                task_markdown.push_str(&strip_control_chars(task.label, false));
+                self.task_count += 1;
+                self.completed_task_count += usize::from(task.complete);
+            }
+            self.task_content =
+                (!task_markdown.is_empty()).then(|| MarkdownContent::new(task_markdown.as_str()));
             self.width = 0;
             self.theme = None;
-            self.lines.clear();
+            self.full_lines.clear();
+            self.task_lines.clear();
+            // A plan revision can replace the document completely. Keep the
+            // selected projection, but never leave the reader halfway through
+            // unrelated content.
+            self.scroll = 0;
         }
 
         let theme = theme_cache::current_kind();
         if self.width != width || self.theme != Some(theme) {
-            self.lines = self
-                .content
+            self.full_lines = self
+                .full_content
+                .as_ref()
+                .map(|content| content.output(width as usize).lines)
+                .unwrap_or_default();
+            self.task_lines = self
+                .task_content
                 .as_ref()
                 .map(|content| content.output(width as usize).lines)
                 .unwrap_or_default();
             self.width = width;
             self.theme = Some(theme);
         }
-        &self.lines
     }
+
+    pub(crate) fn reset_navigation(&mut self) {
+        self.full_board = false;
+        self.scroll = 0;
+    }
+
+    pub(crate) fn is_full_board(&self) -> bool {
+        self.full_board
+    }
+
+    pub(crate) fn show_full_board(&mut self) {
+        self.full_board = true;
+        self.scroll = 0;
+    }
+
+    pub(crate) fn show_task_summary(&mut self) {
+        self.full_board = false;
+        self.scroll = 0;
+    }
+
+    pub(crate) fn toggle_projection(&mut self) {
+        if self.full_board {
+            self.show_task_summary();
+        } else {
+            self.show_full_board();
+        }
+    }
+
+    pub(crate) fn apply_scroll_key(&mut self, code: crossterm::event::KeyCode) -> bool {
+        self.full_board && crate::views::modal::apply_doc_scroll(code, &mut self.scroll)
+    }
+
+    pub(crate) fn apply_mouse_scroll(&mut self, kind: crossterm::event::MouseEventKind) -> bool {
+        self.full_board && crate::views::modal::apply_doc_mouse_scroll(kind, &mut self.scroll)
+    }
+
+    pub(crate) fn apply_scroll_delta(&mut self, lines: i32) -> bool {
+        if !self.full_board || lines == 0 {
+            return false;
+        }
+        crate::views::modal::apply_doc_scroll_delta(&mut self.scroll, lines);
+        true
+    }
+}
+
+struct MarkdownTask<'a> {
+    complete: bool,
+    label: &'a str,
+}
+
+/// Extract a GitHub-flavoured task-list item without interpreting arbitrary
+/// prose. Both unordered and ordered Markdown list markers are accepted, as
+/// are nested blockquotes. The source remains the only canonical task state;
+/// this parser is a lossy, read-only projection for the compact UI.
+fn parse_markdown_task(line: &str) -> Option<MarkdownTask<'_>> {
+    let mut rest = line.trim_start();
+    while let Some(after) = rest.strip_prefix('>') {
+        rest = after.strip_prefix(' ').unwrap_or(after).trim_start();
+    }
+
+    rest = if let Some(after) = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "))
+    {
+        after
+    } else {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        let after_digits = &rest[digits..];
+        after_digits
+            .strip_prefix(". ")
+            .or_else(|| after_digits.strip_prefix(") "))?
+    };
+    rest = rest.trim_start();
+
+    let (complete, after_box) = if let Some(after) = rest.strip_prefix("[ ]") {
+        (false, after)
+    } else if let Some(after) = rest
+        .strip_prefix("[x]")
+        .or_else(|| rest.strip_prefix("[X]"))
+    {
+        (true, after)
+    } else {
+        return None;
+    };
+    if !after_box.is_empty() && !after_box.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(MarkdownTask {
+        complete,
+        label: after_box.trim(),
+    })
 }
 
 /// Maximum per-model token rows displayed before a "+N more" summary row.
@@ -367,15 +504,7 @@ fn goal_detail_width(screen: Rect) -> u16 {
         .min(screen.width.saturating_sub(4))
 }
 
-pub(crate) fn goal_board_width(screen: Rect) -> u16 {
-    goal_detail_width(screen).saturating_sub(4).max(1)
-}
-
-pub fn goal_detail_area(
-    screen: Rect,
-    goal: &GoalDisplayState,
-    rendered_plan_line_count: usize,
-) -> Rect {
+fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, board: &mut GoalBoardRenderer) -> Rect {
     let w = goal_detail_width(screen);
 
     // Inner content width matches the render path:
@@ -385,6 +514,14 @@ pub fn goal_detail_area(
     // Mirror that here so pause-message wrapping computes the same row
     // count the renderer will produce.
     let inner_w = w.saturating_sub(4);
+    board.refresh(&goal.plan_markdown, inner_w.max(1));
+
+    if board.full_board {
+        let h = screen.height.saturating_sub(4).max(6);
+        let x = screen.x + (screen.width.saturating_sub(w)) / 2;
+        let y = screen.y + (screen.height.saturating_sub(h)) / 2;
+        return Rect::new(x, y, w, h.min(screen.height));
+    }
 
     // Compute content height based on what will actually be rendered. Each
     // optional section OWNS its leading blank separator (rendered only when
@@ -397,8 +534,9 @@ pub fn goal_detail_area(
     //   1  budget/tokens line
     //   1  progress bar (only if budget set)
     //   1  blank separator (unconditional, before the progress section)
-    //   1  blackboard header
-    //   N  Markdown rows (+ optional "+N more")
+    //   1  task progress header
+    //   1  task progress bar (when tasks exist)
+    //   N  rendered task-list rows (+ optional "+N more")
     //   1  verifier feedback (when present)
     //   2-3 subagent block (if active): blank + role line + optional detail line
     //   N  per-model token rows (only with an active subagent + ≥2 models,
@@ -426,11 +564,11 @@ pub fn goal_detail_area(
     } else {
         0
     };
-    let plan_lines = if rendered_plan_line_count == 0 {
-        2u16 // header + "Planning…"
+    let task_lines = if board.task_count == 0 {
+        2u16 // header + planning/no-checklist message
     } else {
-        1 + rendered_plan_line_count.min(MAX_PLAN_DISPLAY) as u16
-            + u16::from(rendered_plan_line_count > MAX_PLAN_DISPLAY)
+        2 + board.task_lines.len().min(MAX_TASK_DISPLAY_ROWS) as u16
+            + u16::from(board.task_lines.len() > MAX_TASK_DISPLAY_ROWS)
     };
     let verifier_feedback_lines = u16::from(goal.verifier_feedback.is_some());
     let subagent_lines = if goal.current_subagent_role.is_some() {
@@ -465,7 +603,7 @@ pub fn goal_detail_area(
         + 1
         + budget_bar
         + 1
-        + plan_lines
+        + task_lines
         + verifier_feedback_lines
         + subagent_lines
         + per_model_lines
@@ -479,6 +617,71 @@ pub fn goal_detail_area(
     Rect::new(x, y, w, h)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GoalDetailRenderOutput {
+    pub(crate) area: Rect,
+    pub(crate) close: Option<Rect>,
+    pub(crate) projection_toggle: Option<Rect>,
+}
+
+fn render_board_line(buf: &mut Buffer, line: &BlockLine, x: u16, y: u16, width: u16) {
+    if let Some(background) = line.background {
+        let start = x.saturating_add(line.bg_start_col.min(width));
+        for cell_x in start..x.saturating_add(width) {
+            if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cell_x, y)) {
+                cell.set_bg(background);
+            }
+        }
+    }
+    buf.set_line_safe(x, y, &line.content, width);
+}
+
+fn render_projection_footer(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    full_board: bool,
+    hovered: bool,
+    theme: &Theme,
+) -> Option<Rect> {
+    let button = if full_board {
+        "[Task summary]"
+    } else {
+        "[Full board]"
+    };
+    let button_width = unicode_width::UnicodeWidthStr::width(button) as u16;
+    if button_width > width {
+        return None;
+    }
+    let button_x = x + width - button_width;
+    let hint = if full_board {
+        "↑/↓ PgUp/PgDn scroll  Esc: summary  g/q: close"
+    } else {
+        "Enter/Space: full board  Esc/g/q: close  /goal edit"
+    };
+    let hint_width = button_x.saturating_sub(x + 1);
+    buf.set_span_safe(
+        x,
+        y,
+        &Span::styled(hint, Style::default().fg(theme.gray_dim)),
+        hint_width,
+    );
+    let style = Style::default()
+        .fg(if hovered {
+            theme.text_primary
+        } else {
+            theme.accent_plan
+        })
+        .add_modifier(if hovered {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+    buf.set_span_safe(button_x, y, &Span::styled(button, style), button_width);
+    Some(Rect::new(button_x, y, button_width, 1))
+}
+
 /// Render the goal detail overlay into the buffer.
 ///
 /// Draws a bordered popup with:
@@ -490,16 +693,18 @@ pub fn goal_detail_area(
 /// - Recent event history
 /// - Available commands hint
 #[allow(clippy::too_many_arguments)]
-pub fn render_goal_detail(
+pub(crate) fn render_goal_detail(
     buf: &mut Buffer,
-    area: Rect,
+    screen: Rect,
     goal: &GoalDisplayState,
-    plan_lines: &[BlockLine],
+    board: &mut GoalBoardRenderer,
     frame_stamp: crate::motion::FrameStamp,
     context_used: Option<u64>,
     active_subagent_tokens: u64,
     close_hovered: bool,
-) -> Option<Rect> {
+    projection_toggle_hovered: bool,
+) -> Option<GoalDetailRenderOutput> {
+    let area = goal_detail_area(screen, goal, board);
     let theme = Theme::current();
     if area.width < 20 || area.height < 6 {
         return None;
@@ -587,10 +792,67 @@ pub fn render_goal_detail(
         close_w,
     );
     let close_rect = Rect::new(close_x, area.y, close_w, 1);
+    let partial_output = || GoalDetailRenderOutput {
+        area,
+        close: Some(close_rect),
+        projection_toggle: None,
+    };
 
     let mut y = inner.y;
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
+
+    if board.full_board {
+        let header = format!(
+            "Blackboard r{} (objective r{}) — full document",
+            goal.plan_revision, goal.objective_revision
+        );
+        buf.set_line_safe(
+            x,
+            y,
+            &Line::from(Span::styled(
+                header,
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            w,
+        );
+        y += 1;
+
+        let footer_y = inner.y + inner.height.saturating_sub(1);
+        let viewport_height = footer_y.saturating_sub(y) as usize;
+        let max_scroll = board.full_lines.len().saturating_sub(viewport_height);
+        board.scroll = (board.scroll as usize).min(max_scroll) as u16;
+        if board.full_lines.is_empty() && y < footer_y {
+            buf.set_line_safe(
+                x,
+                y,
+                &Line::from(Span::styled(
+                    "Planning in background…",
+                    Style::default().fg(theme.gray),
+                )),
+                w,
+            );
+        } else {
+            for (row, line) in board
+                .full_lines
+                .iter()
+                .skip(board.scroll as usize)
+                .take(viewport_height)
+                .enumerate()
+            {
+                render_board_line(buf, line, x, y + row as u16, w);
+            }
+        }
+        let projection_toggle =
+            render_projection_footer(buf, x, footer_y, w, true, projection_toggle_hovered, &theme);
+        return Some(GoalDetailRenderOutput {
+            area,
+            close: Some(close_rect),
+            projection_toggle,
+        });
+    }
 
     // ── Status line ──
     let (status_text, status_color, phase_text) = status_label(goal);
@@ -614,7 +876,7 @@ pub fn render_goal_detail(
     y += 1;
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return Some(partial_output());
     }
 
     if goal.status.is_paused() {
@@ -637,7 +899,7 @@ pub fn render_goal_detail(
         let formatted = format_pause_reason(msg);
         for line in wrap_pause_message_lines(&formatted, w) {
             if y >= inner.y + inner.height {
-                return Some(close_rect);
+                return Some(partial_output());
             }
             buf.set_line_safe(
                 x,
@@ -681,7 +943,7 @@ pub fn render_goal_detail(
     y += 1;
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return Some(partial_output());
     }
 
     // Progress bar — only when a budget is set.
@@ -703,25 +965,40 @@ pub fn render_goal_detail(
     }
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return Some(partial_output());
     }
 
     // ── Blank separator ──
     y += 1;
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return Some(partial_output());
     }
 
-    // ── Durable Markdown blackboard ──
+    // ── Task-list projection of the durable Markdown blackboard ──
+    let task_pct = if board.task_count == 0 {
+        0.0
+    } else {
+        board.completed_task_count as f32 / board.task_count as f32
+    };
+    let task_header = if board.task_count == 0 {
+        format!(
+            "Tasks — blackboard r{} (objective r{})",
+            goal.plan_revision, goal.objective_revision
+        )
+    } else {
+        format!(
+            "Tasks: {}/{} complete ({:.0}%)",
+            board.completed_task_count,
+            board.task_count,
+            task_pct * 100.0
+        )
+    };
     buf.set_line_safe(
         x,
         y,
         &Line::from(Span::styled(
-            format!(
-                "Blackboard r{} (objective r{}):",
-                goal.plan_revision, goal.objective_revision
-            ),
+            task_header,
             Style::default()
                 .fg(theme.text_primary)
                 .add_modifier(Modifier::BOLD),
@@ -729,40 +1006,43 @@ pub fn render_goal_detail(
         w,
     );
     y += 1;
-    if plan_lines.is_empty() {
+    if board.task_count == 0 {
+        let message = if goal.plan_markdown.trim().is_empty() {
+            "Planning in background…"
+        } else {
+            "No task-list items in the current board. Open the full board to inspect it."
+        };
         buf.set_line_safe(
             x,
             y,
-            &Line::from(Span::styled(
-                "  Planning in background…",
-                Style::default().fg(theme.gray),
-            )),
+            &Line::from(Span::styled(message, Style::default().fg(theme.gray))),
             w,
         );
         y += 1;
     } else {
-        for line in plan_lines.iter().take(MAX_PLAN_DISPLAY) {
+        let bar_w = w.min(30);
+        let bar_spans =
+            progress_bar_spans(bar_w, task_pct, theme.accent_success, theme.scrollbar_bg);
+        let mut line_spans = vec![Span::styled("[", Style::default().fg(theme.gray))];
+        line_spans.extend(bar_spans);
+        line_spans.push(Span::styled("]", Style::default().fg(theme.gray)));
+        buf.set_line_safe(x, y, &Line::from(line_spans), w);
+        y += 1;
+
+        for line in board.task_lines.iter().take(MAX_TASK_DISPLAY_ROWS) {
             if y >= inner.y + inner.height.saturating_sub(1) {
                 break;
             }
-            if let Some(background) = line.background {
-                let start = x.saturating_add(line.bg_start_col.min(w));
-                for cell_x in start..x.saturating_add(w) {
-                    if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cell_x, y)) {
-                        cell.set_bg(background);
-                    }
-                }
-            }
-            buf.set_line_safe(x, y, &line.content, w);
+            render_board_line(buf, line, x, y, w);
             y += 1;
         }
-        if plan_lines.len() > MAX_PLAN_DISPLAY {
-            let remaining = plan_lines.len() - MAX_PLAN_DISPLAY;
+        if board.task_lines.len() > MAX_TASK_DISPLAY_ROWS {
+            let remaining = board.task_lines.len() - MAX_TASK_DISPLAY_ROWS;
             buf.set_line_safe(
                 x,
                 y,
                 &Line::from(Span::styled(
-                    format!("  +{remaining} more"),
+                    format!("  +{remaining} more task rows"),
                     Style::default().fg(theme.gray),
                 )),
                 w,
@@ -785,7 +1065,7 @@ pub fn render_goal_detail(
     }
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return Some(partial_output());
     }
 
     // ── Active subagent metrics (with a leading blank separator) ──
@@ -793,7 +1073,7 @@ pub fn render_goal_detail(
         // Leading blank — budgeted in `subagent_lines` (renders only with the block).
         y += 1;
         if y >= inner.y + inner.height {
-            return Some(close_rect);
+            return Some(partial_output());
         }
         let mut subagent_spans = vec![
             Span::styled("Active Subagent: ", Style::default().fg(theme.gray)),
@@ -850,7 +1130,7 @@ pub fn render_goal_detail(
             use unicode_width::UnicodeWidthStr;
             for (model_id, tokens) in goal.live_tokens_by_model.iter().take(MAX_MODEL_DISPLAY) {
                 if y >= inner.y + inner.height {
-                    return Some(close_rect);
+                    return Some(partial_output());
                 }
                 let tokens_str = format_tokens_compact((*tokens).min(i64::MAX as u64) as i64);
                 // Budget the model id to the columns left after the "  "
@@ -888,11 +1168,7 @@ pub fn render_goal_detail(
     }
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
-    }
-
-    if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return Some(partial_output());
     }
 
     // ── Recent history (with a leading blank separator) ──
@@ -900,7 +1176,7 @@ pub fn render_goal_detail(
         // Leading blank — budgeted in `history_lines` (renders only with the block).
         y += 1;
         if y >= inner.y + inner.height {
-            return Some(close_rect);
+            return Some(partial_output());
         }
         buf.set_line_safe(
             x,
@@ -942,13 +1218,14 @@ pub fn render_goal_detail(
     }
 
     // ── Commands hint ──
-    if y < inner.y + inner.height {
-        let hint_style = Style::default().fg(theme.gray_dim);
-        let hint = "Esc: close  /goal edit | status | pause | resume | clear";
-        buf.set_line_safe(x, y, &Line::from(Span::styled(hint, hint_style)), w);
-    }
+    let projection_toggle = (y < inner.y + inner.height)
+        .then(|| render_projection_footer(buf, x, y, w, false, projection_toggle_hovered, &theme));
 
-    Some(close_rect)
+    Some(GoalDetailRenderOutput {
+        area,
+        close: Some(close_rect),
+        projection_toggle: projection_toggle.flatten(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -973,57 +1250,84 @@ mod tests {
     }
 
     #[test]
-    fn detail_renders_the_persisted_blackboard_and_revision() {
+    fn compact_detail_renders_only_task_progress_from_the_blackboard() {
         let mut goal = GoalDisplayState::test_stub();
         goal.objective_revision = 2;
         goal.plan_revision = 4;
-        goal.plan_markdown = "- [x] implementation\n- [ ] verification".into();
+        goal.plan_markdown =
+            "# Private-looking prose\nThis belongs only in the full board.\n\n- [x] implementation\n- [ ] verification"
+                .into();
         goal.verifier_feedback = Some("missing restart evidence".into());
         goal.phase = GoalDisplayPhase::Verifying;
         let screen = Rect::new(0, 0, 100, 32);
         let mut board = GoalBoardRenderer::default();
-        let plan_lines = board
-            .lines(&goal.plan_markdown, goal_board_width(screen))
-            .to_vec();
-        let area = goal_detail_area(screen, &goal, plan_lines.len());
         let mut buf = Buffer::empty(screen);
         render_goal_detail(
             &mut buf,
-            area,
+            screen,
             &goal,
-            &plan_lines,
+            &mut board,
             crate::motion::FrameStamp::default(),
             None,
             0,
             false,
+            false,
         );
         let text = buffer_text(&buf);
-        assert!(text.contains("Blackboard r4 (objective r2):"));
+        assert!(text.contains("Tasks: 1/2 complete (50%)"));
+        assert!(text.contains("[x] implementation"));
+        assert!(text.contains("[ ] verification"));
         assert!(text.contains("implementation"));
         assert!(text.contains("verification"));
+        assert!(!text.contains("Private-looking prose"));
+        assert!(!text.contains("This belongs only in the full board"));
         assert!(text.contains("Verifier: missing restart evidence"));
         assert!(text.contains("Verifying"));
+        assert!(text.contains("[Full board]"));
     }
 
     #[test]
-    fn detail_renders_markdown_instead_of_showing_source_markers() {
+    fn compact_detail_does_not_fall_back_to_full_prose_without_tasks() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.plan_markdown = "# Status\n\nEvidence exists, but no task list was supplied.".into();
+        let screen = Rect::new(0, 0, 100, 24);
+        let mut board = GoalBoardRenderer::default();
+        let mut buf = Buffer::empty(screen);
+        render_goal_detail(
+            &mut buf,
+            screen,
+            &goal,
+            &mut board,
+            crate::motion::FrameStamp::default(),
+            None,
+            0,
+            false,
+            false,
+        );
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("No task-list items"));
+        assert!(!text.contains("Evidence exists"));
+        assert!(text.contains("[Full board]"));
+    }
+
+    #[test]
+    fn full_board_renders_markdown_instead_of_showing_source_markers() {
         let mut goal = GoalDisplayState::test_stub();
         goal.plan_markdown = "# Current status\n\n**Ready** for verification".into();
         let screen = Rect::new(0, 0, 100, 30);
         let mut board = GoalBoardRenderer::default();
-        let plan_lines = board
-            .lines(&goal.plan_markdown, goal_board_width(screen))
-            .to_vec();
-        let area = goal_detail_area(screen, &goal, plan_lines.len());
+        board.show_full_board();
         let mut buf = Buffer::empty(screen);
         render_goal_detail(
             &mut buf,
-            area,
+            screen,
             &goal,
-            &plan_lines,
+            &mut board,
             crate::motion::FrameStamp::default(),
             None,
             0,
+            false,
             false,
         );
         let text = buffer_text(&buf);
@@ -1031,5 +1335,80 @@ mod tests {
         assert!(text.contains("Ready for verification"));
         assert!(!text.contains("# Current status"));
         assert!(!text.contains("**Ready**"));
+        assert!(text.contains("[Task summary]"));
+    }
+
+    #[test]
+    fn full_board_scrolls_through_the_complete_document() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.plan_markdown = (0..30)
+            .map(|index| format!("paragraph {index}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let screen = Rect::new(0, 0, 100, 14);
+        let mut board = GoalBoardRenderer::default();
+        board.show_full_board();
+
+        let mut first = Buffer::empty(screen);
+        render_goal_detail(
+            &mut first,
+            screen,
+            &goal,
+            &mut board,
+            crate::motion::FrameStamp::default(),
+            None,
+            0,
+            false,
+            false,
+        );
+        let first_text = buffer_text(&first);
+        assert!(first_text.contains("paragraph 0"));
+        assert!(!first_text.contains("paragraph 29"));
+
+        assert!(board.apply_scroll_key(crossterm::event::KeyCode::End));
+        let mut last = Buffer::empty(screen);
+        render_goal_detail(
+            &mut last,
+            screen,
+            &goal,
+            &mut board,
+            crate::motion::FrameStamp::default(),
+            None,
+            0,
+            false,
+            false,
+        );
+        let last_text = buffer_text(&last);
+        assert!(!last_text.contains("paragraph 0"));
+        assert!(last_text.contains("paragraph 29"));
+    }
+
+    #[test]
+    fn task_projection_accepts_nested_unordered_and_ordered_markdown_lists() {
+        let source = concat!(
+            "- [x] done\n",
+            "  * [ ] nested\n",
+            "> 2. [X] quoted order\n",
+            "+ [ ] next\n",
+            "- [maybe] prose\n",
+            "plain [x] text\n"
+        );
+        let tasks: Vec<_> = source.lines().filter_map(parse_markdown_task).collect();
+        assert_eq!(tasks.len(), 4);
+        assert_eq!(tasks.iter().filter(|task| task.complete).count(), 2);
+        assert_eq!(tasks[1].label, "nested");
+        assert_eq!(tasks[2].label, "quoted order");
+    }
+
+    #[test]
+    fn replacing_the_board_resets_full_document_scroll() {
+        let mut board = GoalBoardRenderer::default();
+        board.show_full_board();
+        board.refresh("- [ ] old", 80);
+        board.scroll = 42;
+        board.refresh("- [ ] new", 80);
+        assert!(board.is_full_board());
+        assert_eq!(board.scroll, 0);
+        assert_eq!(board.task_count, 1);
     }
 }

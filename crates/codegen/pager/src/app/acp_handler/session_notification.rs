@@ -843,7 +843,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 if let Some(g) = agent.goal_state.take() {
                     agent.last_cleared_goal_id = Some(g.goal_id);
                 }
-                agent.show_goal_detail = false;
+                agent.set_goal_detail_visible(false);
                 true
             } else if agent.last_cleared_goal_id.as_deref() == Some(goal_id.as_str()) {
                 false

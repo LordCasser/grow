@@ -68,7 +68,7 @@ Goal is an exclusive visible Behavior but not an exclusive foreground owner.
 
 Goal continuation is an internal regular turn started by the idle hook, not a queue item or hidden control prompt. See [goal-continuation.md](./goal-continuation.md).
 
-The persisted Markdown blackboard contains only shared human/Agent task state. Agent-only execution and tool policy is assembled in private runtime prompts; Pager renders the shared document through the normal Markdown renderer and never persists its display cache.
+The persisted Markdown blackboard contains only shared human/Agent task state. Agent-only execution and tool policy is assembled in private runtime prompts. Goal detail opens on a compact checkbox/progress projection; `Enter`/`Space` opens the scrollable full Markdown board, `Esc` first returns to the summary and then closes the overlay. Pager never persists either display cache or navigation state.
 
 Turn failure ownership follows the same structured-origin rule. A provider or
 tool-definition error in a user turn remains that user's terminal and cannot

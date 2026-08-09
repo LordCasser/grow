@@ -29,7 +29,11 @@ struct StageLease {
 
 ## 2. 单一黑板
 
-`GoalPlan.markdown` 是计划的唯一真相源，也是用户与 Agent 共享的任务看板。它只保存双方都需要的 objective 摘要、当前状态、任务 checklist、验收条件、验证证据和未解决缺口；Agent 私有推理、工具用法、调度策略与生命周期指令只在 Behavior/runtime prompt 层组装，不进入持久状态或 `GoalUpdated` wire。Pager 使用统一 Markdown renderer 展示看板，并按 source/width/theme 缓存只读投影，不维护第二份业务状态。
+`GoalPlan.markdown` 是计划的唯一真相源，也是用户与 Agent 共享的任务看板。它只保存双方都需要的 objective 摘要、当前状态、任务 checklist、验收条件、验证证据和未解决缺口；具体任务统一使用 `- [ ]` / `- [x]` Markdown task-list 语法。Agent 私有推理、工具用法、调度策略与生命周期指令只在 Behavior/runtime prompt 层组装，不进入持久状态或 `GoalUpdated` wire。
+
+Pager 对同一份 Markdown 提供两层只读投影：Goal detail 默认只展示 task-list 完成比例、进度条和任务行；用户可进入可滚动的完整 Markdown 文档。checkbox 计数、Markdown parse/wrap、当前投影视图和滚动位置都属于非持久 view state，按 source/width/theme 重建，不能反向修改 Goal，也不能成为第二份任务真相。黑板修订会把全文阅读位置复位到顶部；关闭再打开 Goal detail 则回到任务摘要。
+
+Goal 创建与后续 `status` / `phase` 切换仍以 `GoalUpdated` 为唯一状态源。Pager 在通知摄取边界比较同一 Goal 的前后投影，并把真实生命周期切换记录为 typed session event；相同 phase 的进度 tick 不重复写入。Shell 不再用 `AgentMessageChunk` 展示面向运行时的 Goal 提醒，planner、implementer 和 verifier 指令始终只存在于私有 prompt。
 
 写入端是唯一规范化边界：完整包裹文档的 `markdown`/`md` transport fence 会被移除，内部代码块保持原样。这样持久化、模型工具、verifier 和 Pager 看到的是同一份 Markdown 文档，不需要各自猜测或清洗。
 

@@ -12,7 +12,7 @@ use tools::implementations::grow_build::task::types::{
 /// Agent/UI boundary, so it contains shared task state only. Runtime policy,
 /// tool instructions, and orchestration mechanics belong in private prompts
 /// and must never be copied into this document.
-const SHARED_GOAL_BOARD_CONTRACT: &str = "The blackboard is shared with the user. Include only task state both the user and Agent need: a concise objective summary, current status, concrete checklist, acceptance criteria, verification evidence, and unresolved gaps. Do not include instructions addressed to the Agent, tool-usage directions, orchestration policy, lifecycle rules, or commentary about maintaining the blackboard.";
+const SHARED_GOAL_BOARD_CONTRACT: &str = "The blackboard is shared with the user. Include only task state both the user and Agent need: a concise objective summary, current status, concrete checklist, acceptance criteria, verification evidence, and unresolved gaps. Write every concrete task as a Markdown task-list item using `- [ ]` or `- [x]` so progress remains machine-projectable. Do not include instructions addressed to the Agent, tool-usage directions, orchestration policy, lifecycle rules, or commentary about maintaining the blackboard.";
 
 /// Private implementer policy. It is assembled next to the shared board at
 /// runtime and is deliberately absent from Goal persistence and Pager wire
@@ -711,6 +711,7 @@ mod prompt_contract_tests {
         let prompt = planner_prompt("ship safely");
         assert!(prompt.contains("shared with the user"));
         assert!(prompt.contains("verification evidence"));
+        assert!(prompt.contains("`- [ ]` or `- [x]`"));
         assert!(prompt.contains("without an outer code fence"));
         assert!(prompt.contains("Do not include instructions addressed to the Agent"));
         assert!(!prompt.contains("candidate_complete"));

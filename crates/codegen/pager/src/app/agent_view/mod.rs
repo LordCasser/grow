@@ -1020,6 +1020,8 @@ pub struct AgentView {
     pub hit_bg_status: HitArea,
     pub hit_goal_status: HitArea,
     pub hit_goal_close: HitArea,
+    /// Compact/full-board projection toggle in the Goal detail footer.
+    pub hit_goal_projection_toggle: HitArea,
     pub hit_bg_button: HitArea,
     #[allow(dead_code)]
     pub(crate) last_bg_click: Option<Instant>,

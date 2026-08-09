@@ -74,7 +74,7 @@ impl AgentView {
         self.workflows_view.selected_run_id = Some(run_id.to_string());
         self.workflows_view.detail_run_id = Some(run_id.to_string());
         self.show_workflows = true;
-        self.show_goal_detail = false;
+        self.set_goal_detail_visible(false);
     }
 
     pub(super) fn handle_workflows_overlay_input(&mut self, ev: &Event) -> Option<InputOutcome> {
