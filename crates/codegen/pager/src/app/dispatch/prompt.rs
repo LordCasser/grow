@@ -754,34 +754,6 @@ pub(super) fn dispatch_send_prompt_inner(
             agent.prompt.set_text("");
         }
         return dispatch(Action::Quit, app);
-    } else if agent.behavior_mode_pending.unwrap_or(agent.behavior_mode)
-        == tools::types::SessionMode::Goal
-        && agent.goal_state.is_none()
-        && agent.prompt.images.is_empty()
-        && let Some(session_id) = agent.session.session_id.clone()
-    {
-        // Goal Behavior has no objective yet: its first ordinary text is the
-        // definition command, not an implementer message. Route it through
-        // the same hidden control turn as an explicit `/goal set` so it gets
-        // one response log, never a user bubble, and cannot race planning in
-        // the actor mailbox.
-        if consume_input {
-            agent.prompt.set_text("");
-            let history_key = text.trim().to_string();
-            agent
-                .session
-                .prompt_history
-                .retain(|item| item.trim() != history_key);
-            agent.session.prompt_history.insert(0, text.clone());
-            if agent.session.prompt_history.len() > 200 {
-                agent.session.prompt_history.truncate(200);
-            }
-        }
-        return vec![Effect::ExecuteSlashCommand {
-            agent_id: id,
-            session_id,
-            command: format!("/goal set {}", text.trim()),
-        }];
     } else {
         // ── Server-authoritative immediate send (plain prompt only) ──
         // A plain prompt typed while a turn is RUNNING is sent to the agent

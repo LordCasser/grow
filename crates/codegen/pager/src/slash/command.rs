@@ -117,8 +117,8 @@ pub struct AppCtx<'a> {
     pub behavior_mode: tools::types::SessionMode,
     pub deep_research_available: bool,
     pub goal_available: bool,
-    /// Current Goal objective, regardless of Goal status. Used to offer an
-    /// editable `/goal set` value without coupling commands to AgentView.
+    /// Objective of the unfinished Goal, if any. Used to expose `/goal edit`
+    /// with a pre-filled value without coupling slash commands to AgentView.
     pub current_goal_objective: Option<&'a str>,
     pub auto_permission_available: bool,
     pub current_permission: &'a str,

@@ -37,7 +37,9 @@ pub struct UpdateGoalInput {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateGoalPlanInput {
-    #[schemars(description = "The complete replacement Markdown plan/blackboard.")]
+    #[schemars(
+        description = "The complete replacement user-visible Markdown blackboard. Include only shared task status, checklist, acceptance criteria, verification evidence, and unresolved gaps; exclude Agent-only instructions, tool directions, and orchestration policy."
+    )]
     pub markdown: String,
     #[serde(default)]
     pub reason: Option<String>,
@@ -189,7 +191,7 @@ pub struct UpdateGoalPlanTool;
 
 goal_metadata!(
     UpdateGoalPlanTool,
-    "Replace the active Goal's complete Markdown plan/blackboard."
+    "Replace the active Goal's shared, user-visible Markdown blackboard. Keep Agent-only instructions out of it."
 );
 
 impl tool_runtime::Tool for UpdateGoalPlanTool {

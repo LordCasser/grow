@@ -93,6 +93,9 @@ Goal 的详细状态机见 [goal-continuation.md](./goal-continuation.md)。
 | Active Goal | Goal interrupt panel 的 Pause | 取消 foreground、使 stage lease 失效并进入 Paused；Behavior 仍为 Goal |
 | Active/Paused/Blocked Goal | 切换到其他 Behavior | 拒绝；只有 verified completion 或 `/goal clear` 能离开 Goal |
 | Active/Paused/Blocked Goal | `/goal edit` | 推进 objective revision、清除旧验证证据、回到 Active/Planning；普通补充消息不做这些事 |
+| 非 Goal Behavior、无未完成 Goal | `/goal set <objective>` | 切换到 Goal 并创建 objective；这是 `set` 唯一有效的用户入口 |
+| Goal Behavior、尚无 objective | 普通用户消息 | Shell 直接捕获为 objective；Pager 不生成 hidden `/goal set` |
+| Goal Behavior、已有未完成 Goal | `/goal set` | 拒绝并提示使用 `/goal edit`；补全列表隐藏 `set`、预填 `edit` 的当前 objective |
 | Active Goal / Verifying | `update_goal_plan` 成功 | 推进 plan revision、终止匹配 verifier、清除旧候选并回到 Executing；Goal Behavior 不变 |
 | Plan 或运行中的 Deep Research | 第一次切换 | 进入 8 秒确认窗，不改变状态 |
 | Plan 或运行中的 Deep Research | 确认窗内再次选择同一目标 | 取消该 Behavior 拥有的工作，再应用目标 Behavior |
@@ -112,6 +115,8 @@ Pager 不再使用 `skip_next_user_echo`、文本 trim 匹配或 running-adoptio
 - session reload 通过 `grow/foreground = { promptId, origin, turnKind, turnStartMs }` 恢复 regular foreground；缺字段即视为没有可接管的 foreground，不再接受只含 prompt id 的旧协议。
 
 Goal Planning/Verifying 只更新 Goal chip，不把 Pager session 伪装成 Running，用户仍可提交或 steer 真正的 regular turn。
+
+Goal detail 中的 blackboard 是 `GoalPlan.markdown` 的只读 Markdown 投影；运行时的 Agent-only 指令不通过 `GoalUpdated` 发送，也不在看板上展示。Markdown parse/wrap 缓存属于 Pager view state，session reload 后可重建，不能反向修改 Goal。
 
 ## 6. 动画与忙状态
 

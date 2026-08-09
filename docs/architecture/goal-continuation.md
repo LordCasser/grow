@@ -1,4 +1,4 @@
-# Goal Runtime v3
+# Goal Runtime v4
 
 Goal 是跨多个有限 regular turn 的持久自治任务，不是一个长时间占住输入的 turn，也不是 BehaviorController 内的第二套通用状态机。Shell actor 只在 foreground idle 且用户 FIFO 为空时驱动 Goal。
 
@@ -25,11 +25,13 @@ struct StageLease {
 
 `GoalOrchestration` 持久化 objective、status、phase、预算、Markdown plan、验证反馈、历史和已结算 token。`in_flight_stage` 及实时统计是 transient；重载时清空，随后由 idle hook 按持久 phase 恢复。
 
-`architecture_version` 当前为 3。旧版本不迁移：记录诊断、删除 `goal/state.json`，并在 session replay 后发出一次 `cleared` projection，避免 Pager 被旧 `GoalUpdated` 重新点亮。
+`architecture_version` 当前为 4。v4 固定了“Markdown 只保存共享任务状态、Agent 私有规则只存在于 runtime prompt”的数据语义。旧版本不迁移：记录诊断、删除 `goal/state.json`，并在 session replay 后发出一次 `cleared` projection，避免 Pager 被旧 `GoalUpdated` 重新点亮或继续展示旧黑板中混入的私有指令。
 
 ## 2. 单一黑板
 
-`GoalPlan.markdown` 是计划的唯一真相源。Pager 的 Plan 展示和审计信息都从这份 Markdown 派生，不再同时维护 `GoalPlanScope`、TodoState、`plan.md` 等可分叉副本。
+`GoalPlan.markdown` 是计划的唯一真相源，也是用户与 Agent 共享的任务看板。它只保存双方都需要的 objective 摘要、当前状态、任务 checklist、验收条件、验证证据和未解决缺口；Agent 私有推理、工具用法、调度策略与生命周期指令只在 Behavior/runtime prompt 层组装，不进入持久状态或 `GoalUpdated` wire。Pager 使用统一 Markdown renderer 展示看板，并按 source/width/theme 缓存只读投影，不维护第二份业务状态。
+
+写入端是唯一规范化边界：完整包裹文档的 `markdown`/`md` transport fence 会被移除，内部代码块保持原样。这样持久化、模型工具、verifier 和 Pager 看到的是同一份 Markdown 文档，不需要各自猜测或清洗。
 
 - `/goal edit` 修改 objective，推进 `objective_revision`，清除旧 plan/候选/验证证据，并回到 Active/Planning；
 - 普通用户消息或 steer 只是补充上下文，不推进 revision；
@@ -86,6 +88,8 @@ idle hook 启动一个 `PromptOrigin::GoalFinalization` regular turn，由主 ag
 ## 4. 控制面
 
 `/goal` 与 Behavior picker 共用同步 control-plane handler。控制面不采样模型、不排 hidden prompt、不等待 actor 自己的 mailbox。
+
+用户命令面按状态投影：Normal 等非 Goal Behavior 且没有未完成 Goal 时暴露 `/goal set`，它负责切换到 Goal 并创建目标；进入 Goal Behavior 但尚无目标时，下一条普通消息由 Shell 直接捕获为 objective，不再由 Pager 改写成 hidden `/goal set`；存在未完成 Goal 时隐藏并拒绝 `set`，暴露 `/goal edit`，补全时预填当前 objective。Goal detail footer 同样显示 `edit`。
 
 - create/edit：进入 Active/Planning；
 - pause：保持 Goal Behavior，取消 transient stage；

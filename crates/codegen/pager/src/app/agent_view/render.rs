@@ -4136,17 +4136,23 @@ impl AgentView {
         if self.show_goal_detail
             && let Some(ref goal) = self.goal_state
         {
-            let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal);
             let active_subagent_tokens: u64 = self
                 .subagent_sessions
                 .values()
                 .filter(|s| !s.finished && s.workflow_run_id.is_none())
                 .filter_map(|s| s.tokens_used)
                 .sum();
+            let plan_width = crate::views::goal_detail::goal_board_width(area);
+            let plan_lines = self
+                .goal_board_renderer
+                .lines(&goal.plan_markdown, plan_width);
+            let overlay_rect =
+                crate::views::goal_detail::goal_detail_area(area, goal, plan_lines.len());
             let close_rect = crate::views::goal_detail::render_goal_detail(
                 buf,
                 overlay_rect,
                 goal,
+                plan_lines,
                 frame_stamp,
                 self.context_state.as_ref().map(|c| c.used),
                 active_subagent_tokens,

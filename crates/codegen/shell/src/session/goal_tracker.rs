@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-pub const GOAL_ARCHITECTURE_VERSION: u8 = 3;
+pub const GOAL_ARCHITECTURE_VERSION: u8 = 4;
 pub const IDENTICAL_GAP_BLOCK_THRESHOLD: u32 = 3;
 pub const INFRA_FAILURE_PAUSE_THRESHOLD: u8 = 3;
 
@@ -80,6 +80,27 @@ impl GoalPlan {
             updated_by: GoalPlanAuthor::Planner,
         }
     }
+}
+
+/// Canonicalize the shared, user-visible Goal blackboard at its single write
+/// boundary. Models sometimes wrap an otherwise valid Markdown document in a
+/// `markdown`/`md` code fence despite being asked for the document itself.
+/// Keeping that transport wrapper would make every consumer either display a
+/// code block or invent its own cleanup rule, so unwrap exactly that one
+/// whole-document shape here. Inner fences remain untouched.
+fn normalize_goal_board_markdown(markdown: String) -> String {
+    let trimmed = markdown.trim();
+    let Some((opening, rest)) = trimmed.split_once('\n') else {
+        return trimmed.to_string();
+    };
+    let opening = opening.trim();
+    if !opening.eq_ignore_ascii_case("```markdown") && !opening.eq_ignore_ascii_case("```md") {
+        return trimmed.to_string();
+    }
+    let Some(body) = rest.strip_suffix("```") else {
+        return trimmed.to_string();
+    };
+    body.trim().to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -380,6 +401,7 @@ impl GoalTracker {
         updated_by: GoalPlanAuthor,
         reason: Option<String>,
     ) -> bool {
+        let markdown = normalize_goal_board_markdown(markdown);
         let Some(goal) = self.orchestration.as_mut() else {
             return false;
         };
@@ -736,6 +758,30 @@ mod tests {
     }
 
     #[test]
+    fn plan_write_unwraps_only_a_whole_document_markdown_fence() {
+        let mut tracker = tracker();
+        assert!(tracker.replace_plan(
+            "\n```Markdown\n# Status\n\n- [ ] implement\n```\n".into(),
+            GoalPlanAuthor::Planner,
+            None,
+        ));
+        assert_eq!(
+            tracker.snapshot().unwrap().plan.markdown,
+            "# Status\n\n- [ ] implement"
+        );
+
+        assert!(tracker.replace_plan(
+            "# Status\n\n```rust\nfn main() {}\n```".into(),
+            GoalPlanAuthor::Agent,
+            None,
+        ));
+        assert_eq!(
+            tracker.snapshot().unwrap().plan.markdown,
+            "# Status\n\n```rust\nfn main() {}\n```"
+        );
+    }
+
+    #[test]
     fn plan_update_invalidates_in_flight_verifier() {
         let mut tracker = tracker();
         tracker.replace_plan("- [ ] implement".into(), GoalPlanAuthor::Planner, None);
@@ -929,10 +975,10 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_snapshot_is_dropped() {
+    fn pre_shared_blackboard_snapshot_is_dropped() {
         let tracker = tracker();
         let mut snapshot = tracker.snapshot().unwrap().clone();
-        snapshot.architecture_version = 1;
+        snapshot.architecture_version = 3;
         assert!(GoalTracker::from_snapshot(snapshot).is_none());
     }
 }

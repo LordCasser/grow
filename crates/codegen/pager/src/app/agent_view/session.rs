@@ -115,6 +115,7 @@ impl AgentView {
             modal_hovered_key: None,
             context_state: None,
             goal_state: None,
+            goal_board_renderer: crate::views::goal_detail::GoalBoardRenderer::default(),
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
             workflow_run_revisions: std::collections::HashMap::new(),

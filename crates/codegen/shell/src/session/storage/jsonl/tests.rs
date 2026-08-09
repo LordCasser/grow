@@ -3556,6 +3556,11 @@ async fn goal_state_roundtrips_through_light_session_load() {
         "now".into(),
         None,
     );
+    assert!(tracker.replace_plan(
+        "```markdown\n# Status\n\n- [ ] verify persistence\n```".into(),
+        crate::session::goal_tracker::GoalPlanAuthor::Planner,
+        None,
+    ));
     adapter
         .write_goal_mode_state(&info, tracker.snapshot().unwrap())
         .await
@@ -3565,6 +3570,7 @@ async fn goal_state_roundtrips_through_light_session_load() {
     let goal = loaded.goal_mode_state.expect("Goal state should load");
     assert!(!loaded.goal_mode_state_rejected);
     assert_eq!(goal.goal_id, "goal-1");
+    assert_eq!(goal.plan.markdown, "# Status\n\n- [ ] verify persistence");
     assert_eq!(
         goal.architecture_version,
         crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION,

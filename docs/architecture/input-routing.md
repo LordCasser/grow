@@ -59,12 +59,16 @@ Goal is an exclusive visible Behavior but not an exclusive foreground owner.
 - Active Planning/Verifying keeps the Goal chip active while the session may be idle or run a user turn;
 - ordinary messages add context without changing objective/plan revision;
 - `/goal edit` revises the objective and returns the Goal to Planning;
+- outside Goal Behavior, `/goal set` switches to Goal and creates the objective; inside Goal it is hidden and rejected;
+- after selecting Goal with no objective, the next ordinary message is captured directly as the objective without a Pager-generated hidden command;
 - an accepted `update_goal_plan` during Verifying cancels that lease's verifier and returns to Executing; a rejected update leaves the verifier untouched;
 - pause keeps Goal Behavior but stops autonomous admission;
 - complete or clear returns to Normal;
 - an unfinished Goal rejects switching to another Behavior.
 
 Goal continuation is an internal regular turn started by the idle hook, not a queue item or hidden control prompt. See [goal-continuation.md](./goal-continuation.md).
+
+The persisted Markdown blackboard contains only shared human/Agent task state. Agent-only execution and tool policy is assembled in private runtime prompts; Pager renders the shared document through the normal Markdown renderer and never persists its display cache.
 
 Turn failure ownership follows the same structured-origin rule. A provider or
 tool-definition error in a user turn remains that user's terminal and cannot

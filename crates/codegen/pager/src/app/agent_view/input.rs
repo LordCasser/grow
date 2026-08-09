@@ -1365,7 +1365,10 @@ impl AgentView {
             behavior,
             deep_research,
             goal,
-            self.goal_state.as_ref().map(|goal| goal.objective.clone()),
+            self.goal_state
+                .as_ref()
+                .filter(|goal| goal.status != crate::app::agent::GoalDisplayStatus::Complete)
+                .map(|goal| goal.objective.clone()),
             auto_permission,
             permission,
         );

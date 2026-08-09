@@ -886,7 +886,7 @@ fn goal_command_uses_control_plane_while_idle_without_user_echo() {
 }
 
 #[test]
-fn first_prompt_after_selecting_goal_is_goal_set_control() {
+fn first_prompt_after_selecting_goal_stays_an_ordinary_prompt() {
     let mut app = test_app();
     app.bootstrap_acp_commands = vec![acp::AvailableCommand::new(
         "goal".to_string(),
@@ -914,10 +914,10 @@ fn first_prompt_after_selecting_goal_is_goal_set_control() {
 
     assert!(matches!(
         effects.as_slice(),
-        [Effect::ExecuteSlashCommand { command, .. }]
-            if command == "/goal set finish the release safely"
+        [Effect::SendPrompt { text, .. }]
+            if text == "finish the release safely"
     ));
-    assert_eq!(app.agents[&id].scrollback.len(), before);
+    assert_eq!(app.agents[&id].scrollback.len(), before + 1);
     assert_eq!(app.agents[&id].session.queue_len(), 0);
     assert_eq!(
         app.agents[&id].behavior_mode,

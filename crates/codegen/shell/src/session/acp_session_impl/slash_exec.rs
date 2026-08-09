@@ -974,6 +974,20 @@ impl SessionActor {
             } => {
                 use crate::session::behavior::BehaviorChangeOutcome;
                 use crate::session::goal_tracker::GoalStatus;
+                if self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal) {
+                    let message = if self
+                        .goal_tracker
+                        .lock()
+                        .status()
+                        .is_some_and(|status| status != GoalStatus::Complete)
+                    {
+                        "Goal is already active. Use /goal edit <objective> to revise it."
+                    } else {
+                        "Goal behavior is ready. Send the objective as an ordinary message."
+                    };
+                    self.send_host_turn_slash_command_output(message).await;
+                    return ok_end_turn(0, None);
+                }
                 if self
                     .goal_tracker
                     .lock()
@@ -1052,7 +1066,7 @@ impl SessionActor {
                             "Goal behavior selected. Use /goal status, /goal resume, or send additional context."
                                 .to_string()
                         } else {
-                            "Goal behavior selected. Use /goal set <objective> to start."
+                            "Goal behavior selected. Send the objective as your next message."
                                 .to_string()
                         }
                     }
@@ -1262,6 +1276,16 @@ mod out_of_band_goal_control_tests {
             ),
             None,
             "a rejected edit must not cancel unrelated work"
+        );
+        assert_eq!(
+            completed_goal_control_cancel_trigger(
+                Some("goal_set"),
+                goal("g", 2, GoalStatus::Active),
+                goal("g", 2, GoalStatus::Active),
+                false,
+            ),
+            None,
+            "set rejected inside Goal Behavior must not cancel its user turn"
         );
         assert_eq!(
             completed_goal_control_cancel_trigger(

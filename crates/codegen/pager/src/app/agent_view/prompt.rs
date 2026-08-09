@@ -1161,7 +1161,7 @@ mod configuration_shortcut_tests {
     }
 
     #[test]
-    fn goal_set_tab_fills_the_current_objective() {
+    fn goal_edit_tab_fills_the_current_objective() {
         let mut agent = super::test_fixtures::make_agent();
         agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
         agent.goal_state.as_mut().unwrap().objective = "修复登录流程".into();
@@ -1173,8 +1173,8 @@ mod configuration_shortcut_tests {
             .prompt
             .sync_acp_commands(&commands, None, &agent.session.models);
         agent.sync_command_selection_context();
-        agent.prompt.set_text("/goal set");
-        agent.prompt.set_cursor("/goal set".len());
+        agent.prompt.set_text("/goal edit");
+        agent.prompt.set_cursor("/goal edit".len());
         agent.prompt.refresh_slash(&agent.session.models);
         assert!(agent.prompt.slash_open());
 
@@ -1182,7 +1182,7 @@ mod configuration_shortcut_tests {
             agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
         assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(agent.prompt.text(), "/goal set 修复登录流程");
+        assert_eq!(agent.prompt.text(), "/goal edit 修复登录流程");
     }
 }
 

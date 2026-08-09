@@ -11,12 +11,63 @@ use ratatui::text::{Line, Span};
 
 use crate::app::agent::{GoalDisplayState, GoalDisplayStatus};
 use crate::render::SafeBuf;
-use crate::theme::Theme;
+use crate::scrollback::blocks::markdown_content::MarkdownContent;
+use crate::scrollback::types::BlockLine;
+use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 use crate::views::agent_status::{active_phase_label, format_tokens_compact};
 use crate::views::progress_bar::progress_bar_spans;
 
 /// Maximum Markdown blackboard rows displayed before truncation.
 const MAX_PLAN_DISPLAY: usize = 15;
+
+/// Non-persistent Markdown projection for the Goal overlay. Goal updates carry
+/// the source document; parsing, syntax highlighting, and width-dependent
+/// wrapping belong to the view and are cached independently of animation
+/// frames and Goal persistence.
+pub(crate) struct GoalBoardRenderer {
+    source: String,
+    content: Option<MarkdownContent>,
+    width: u16,
+    theme: Option<ThemeKind>,
+    lines: Vec<BlockLine>,
+}
+
+impl Default for GoalBoardRenderer {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            content: None,
+            width: 0,
+            theme: None,
+            lines: Vec::new(),
+        }
+    }
+}
+
+impl GoalBoardRenderer {
+    pub(crate) fn lines(&mut self, markdown: &str, width: u16) -> &[BlockLine] {
+        if self.source != markdown {
+            self.source.clear();
+            self.source.push_str(markdown);
+            self.content = (!markdown.trim().is_empty()).then(|| MarkdownContent::new(markdown));
+            self.width = 0;
+            self.theme = None;
+            self.lines.clear();
+        }
+
+        let theme = theme_cache::current_kind();
+        if self.width != width || self.theme != Some(theme) {
+            self.lines = self
+                .content
+                .as_ref()
+                .map(|content| content.output(width as usize).lines)
+                .unwrap_or_default();
+            self.width = width;
+            self.theme = Some(theme);
+        }
+        &self.lines
+    }
+}
 
 /// Maximum per-model token rows displayed before a "+N more" summary row.
 const MAX_MODEL_DISPLAY: usize = 6;
@@ -308,12 +359,24 @@ fn humanize_event_timestamp(ts: &str, wall_now: std::time::SystemTime) -> String
 }
 
 /// Compute the overlay area (centered, sized to content, clamped to screen).
-pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState) -> Rect {
+fn goal_detail_width(screen: Rect) -> u16 {
     let width_pct = 0.90f32;
     let preferred_w = (screen.width as f32 * width_pct) as u16;
-    let w = preferred_w
+    preferred_w
         .clamp(60, 140)
-        .min(screen.width.saturating_sub(4));
+        .min(screen.width.saturating_sub(4))
+}
+
+pub(crate) fn goal_board_width(screen: Rect) -> u16 {
+    goal_detail_width(screen).saturating_sub(4).max(1)
+}
+
+pub fn goal_detail_area(
+    screen: Rect,
+    goal: &GoalDisplayState,
+    rendered_plan_line_count: usize,
+) -> Rect {
+    let w = goal_detail_width(screen);
 
     // Inner content width matches the render path:
     //   `inner` = block.inner(area) gives `w - 2` (the rounded border).
@@ -363,16 +426,11 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState) -> Rect {
     } else {
         0
     };
-    let plan_line_count = goal
-        .plan_markdown
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count();
-    let plan_lines = if plan_line_count == 0 {
+    let plan_lines = if rendered_plan_line_count == 0 {
         2u16 // header + "Planning…"
     } else {
-        1 + plan_line_count.min(MAX_PLAN_DISPLAY) as u16
-            + u16::from(plan_line_count > MAX_PLAN_DISPLAY)
+        1 + rendered_plan_line_count.min(MAX_PLAN_DISPLAY) as u16
+            + u16::from(rendered_plan_line_count > MAX_PLAN_DISPLAY)
     };
     let verifier_feedback_lines = u16::from(goal.verifier_feedback.is_some());
     let subagent_lines = if goal.current_subagent_role.is_some() {
@@ -436,6 +494,7 @@ pub fn render_goal_detail(
     buf: &mut Buffer,
     area: Rect,
     goal: &GoalDisplayState,
+    plan_lines: &[BlockLine],
     frame_stamp: crate::motion::FrameStamp,
     context_used: Option<u64>,
     active_subagent_tokens: u64,
@@ -660,7 +719,7 @@ pub fn render_goal_detail(
         y,
         &Line::from(Span::styled(
             format!(
-                "Plan r{} (objective r{}):",
+                "Blackboard r{} (objective r{}):",
                 goal.plan_revision, goal.objective_revision
             ),
             Style::default()
@@ -670,11 +729,6 @@ pub fn render_goal_detail(
         w,
     );
     y += 1;
-    let plan_lines: Vec<&str> = goal
-        .plan_markdown
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
     if plan_lines.is_empty() {
         buf.set_line_safe(
             x,
@@ -691,16 +745,15 @@ pub fn render_goal_detail(
             if y >= inner.y + inner.height.saturating_sub(1) {
                 break;
             }
-            let display = truncate_to_width(&strip_control_chars(line, false), w as usize);
-            buf.set_line_safe(
-                x,
-                y,
-                &Line::from(Span::styled(
-                    display,
-                    Style::default().fg(theme.text_primary),
-                )),
-                w,
-            );
+            if let Some(background) = line.background {
+                let start = x.saturating_add(line.bg_start_col.min(w));
+                for cell_x in start..x.saturating_add(w) {
+                    if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(cell_x, y)) {
+                        cell.set_bg(background);
+                    }
+                }
+            }
+            buf.set_line_safe(x, y, &line.content, w);
             y += 1;
         }
         if plan_lines.len() > MAX_PLAN_DISPLAY {
@@ -891,7 +944,7 @@ pub fn render_goal_detail(
     // ── Commands hint ──
     if y < inner.y + inner.height {
         let hint_style = Style::default().fg(theme.gray_dim);
-        let hint = "Esc: close  /goal resume | pause | status | clear";
+        let hint = "Esc: close  /goal edit | status | pause | resume | clear";
         buf.set_line_safe(x, y, &Line::from(Span::styled(hint, hint_style)), w);
     }
 
@@ -928,21 +981,55 @@ mod tests {
         goal.verifier_feedback = Some("missing restart evidence".into());
         goal.phase = GoalDisplayPhase::Verifying;
         let screen = Rect::new(0, 0, 100, 32);
-        let area = goal_detail_area(screen, &goal);
+        let mut board = GoalBoardRenderer::default();
+        let plan_lines = board
+            .lines(&goal.plan_markdown, goal_board_width(screen))
+            .to_vec();
+        let area = goal_detail_area(screen, &goal, plan_lines.len());
         let mut buf = Buffer::empty(screen);
         render_goal_detail(
             &mut buf,
             area,
             &goal,
+            &plan_lines,
             crate::motion::FrameStamp::default(),
             None,
             0,
             false,
         );
         let text = buffer_text(&buf);
-        assert!(text.contains("Plan r4 (objective r2):"));
-        assert!(text.contains("- [x] implementation"));
+        assert!(text.contains("Blackboard r4 (objective r2):"));
+        assert!(text.contains("implementation"));
+        assert!(text.contains("verification"));
         assert!(text.contains("Verifier: missing restart evidence"));
         assert!(text.contains("Verifying"));
+    }
+
+    #[test]
+    fn detail_renders_markdown_instead_of_showing_source_markers() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.plan_markdown = "# Current status\n\n**Ready** for verification".into();
+        let screen = Rect::new(0, 0, 100, 30);
+        let mut board = GoalBoardRenderer::default();
+        let plan_lines = board
+            .lines(&goal.plan_markdown, goal_board_width(screen))
+            .to_vec();
+        let area = goal_detail_area(screen, &goal, plan_lines.len());
+        let mut buf = Buffer::empty(screen);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &plan_lines,
+            crate::motion::FrameStamp::default(),
+            None,
+            0,
+            false,
+        );
+        let text = buffer_text(&buf);
+        assert!(text.contains("Current status"));
+        assert!(text.contains("Ready for verification"));
+        assert!(!text.contains("# Current status"));
+        assert!(!text.contains("**Ready**"));
     }
 }

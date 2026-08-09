@@ -66,18 +66,19 @@ impl SlashCommand for AcpSlashCommand {
     /// Subcommand completion for the shell's `/goal` builtin.
     ///
     /// Non-goal commands return `None` (identical to the trait default).
-    /// `set` and `budget` carry a trailing space in `insert_text` so the
+    /// `set`, `edit`, and `budget` carry a trailing space in `insert_text` so the
     /// prompt keeps accepting input (the objective / budget value); the
-    /// other subcommands are leaf words. At the start of `set`, an existing
-    /// objective is offered once for editing; after the user types objective
-    /// text, the args are free text and suggestions are suppressed.
+    /// other subcommands are leaf words. `set` is offered only outside Goal
+    /// Behavior when no unfinished Goal exists. An active Goal exposes `edit`
+    /// instead, and accepting it pre-fills the current objective once; after
+    /// the user types objective text, args are free text and suggestions stop.
     fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
         if !self.name.eq_ignore_ascii_case("goal") {
             return None;
         }
         let t = args_query.trim_start();
-        if t == "set" || t.starts_with("set ") {
-            let typed_objective = t.strip_prefix("set").unwrap_or_default().trim_start();
+        if t == "edit" || t.starts_with("edit ") {
+            let typed_objective = t.strip_prefix("edit").unwrap_or_default().trim_start();
             if typed_objective.is_empty()
                 && let Some(objective) = ctx
                     .current_goal_objective
@@ -85,51 +86,66 @@ impl SlashCommand for AcpSlashCommand {
             {
                 return Some(vec![ArgItem {
                     display: objective.to_string(),
-                    match_text: format!("set {objective}"),
-                    insert_text: format!("set {objective}"),
+                    match_text: format!("edit {objective}"),
+                    insert_text: format!("edit {objective}"),
                     description: "Edit the current goal objective".into(),
                 }]);
             }
             return None; // objective entry: free text after the initial fill
         }
-        Some(vec![
-            ArgItem {
+        if t == "set" || t.starts_with("set ") {
+            return None; // new objective entry is always free text
+        }
+
+        let has_unfinished_goal = ctx.current_goal_objective.is_some();
+        let mut items = Vec::new();
+        if ctx.behavior_mode != tools::types::SessionMode::Goal && !has_unfinished_goal {
+            items.push(ArgItem {
                 display: "set".into(),
                 match_text: "set".into(),
                 insert_text: "set ".into(),
-                description: "Set the goal objective".into(),
-            },
-            ArgItem {
+                description: "Switch to Goal and set its objective".into(),
+            });
+        }
+        if has_unfinished_goal {
+            items.push(ArgItem {
+                display: "edit".into(),
+                match_text: "edit".into(),
+                insert_text: "edit ".into(),
+                description: "Revise the current objective and replan".into(),
+            });
+            items.push(ArgItem {
                 display: "budget".into(),
                 match_text: "budget".into(),
                 insert_text: "budget ".into(),
                 description: "Adjust the goal token budget".into(),
-            },
-            ArgItem {
+            });
+            items.push(ArgItem {
                 display: "status".into(),
                 match_text: "status".into(),
                 insert_text: "status".into(),
                 description: "Show goal status".into(),
-            },
-            ArgItem {
+            });
+            items.push(ArgItem {
                 display: "pause".into(),
                 match_text: "pause".into(),
                 insert_text: "pause".into(),
                 description: "Pause the goal".into(),
-            },
-            ArgItem {
+            });
+            items.push(ArgItem {
                 display: "resume".into(),
                 match_text: "resume".into(),
                 insert_text: "resume".into(),
                 description: "Resume the goal".into(),
-            },
-            ArgItem {
+            });
+            items.push(ArgItem {
                 display: "clear".into(),
                 match_text: "clear".into(),
                 insert_text: "clear".into(),
                 description: "Clear the goal".into(),
-            },
-        ])
+            });
+        }
+        Some(items)
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -632,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_suggests_subcommands_with_trailing_space_rule() {
+    fn goal_outside_behavior_suggests_only_set() {
         let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
         let ctx = make_ctx();
         let items = cmd
@@ -640,17 +656,9 @@ mod tests {
             .expect("goal must suggest subcommands");
 
         let display: Vec<&str> = items.iter().map(|i| i.display.as_str()).collect();
-        assert_eq!(
-            display,
-            ["set", "budget", "status", "pause", "resume", "clear"]
-        );
-        // `set` / `budget` take a value, so their insert keeps the dropdown
-        // accepting input; the leaf subcommands insert without a space.
+        assert_eq!(display, ["set"]);
         let insert: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
-        assert_eq!(
-            insert,
-            ["set ", "budget ", "status", "pause", "resume", "clear"]
-        );
+        assert_eq!(insert, ["set "]);
         for item in &items {
             assert_eq!(
                 item.display, item.match_text,
@@ -678,24 +686,49 @@ mod tests {
     }
 
     #[test]
-    fn goal_set_tab_offer_fills_current_objective_for_editing() {
+    fn goal_edit_tab_offer_fills_current_objective_for_editing() {
         let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
         let mut ctx = make_ctx();
+        ctx.behavior_mode = tools::types::SessionMode::Goal;
         ctx.current_goal_objective = Some("修复登录流程");
 
-        for query in ["set", "set "] {
+        for query in ["edit", "edit "] {
             let items = cmd
                 .suggest_args(&ctx, query)
                 .expect("current objective should be offered");
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].display, "修复登录流程");
-            assert_eq!(items[0].match_text, "set 修复登录流程");
-            assert_eq!(items[0].insert_text, "set 修复登录流程");
+            assert_eq!(items[0].match_text, "edit 修复登录流程");
+            assert_eq!(items[0].insert_text, "edit 修复登录流程");
         }
         assert!(
-            cmd.suggest_args(&ctx, "set 新目标").is_none(),
+            cmd.suggest_args(&ctx, "edit 新目标").is_none(),
             "typed edits are free text and must not be overwritten"
         );
+    }
+
+    #[test]
+    fn unfinished_goal_hides_set_and_exposes_management_commands() {
+        let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
+        let mut ctx = make_ctx();
+        ctx.behavior_mode = tools::types::SessionMode::Goal;
+        ctx.current_goal_objective = Some("ship safely");
+        let items = cmd.suggest_args(&ctx, "").unwrap();
+        let display: Vec<&str> = items.iter().map(|item| item.display.as_str()).collect();
+        assert_eq!(
+            display,
+            ["edit", "budget", "status", "pause", "resume", "clear"]
+        );
+        assert!(!display.contains(&"set"));
+    }
+
+    #[test]
+    fn goal_behavior_without_objective_uses_plain_input_not_set() {
+        let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
+        let mut ctx = make_ctx();
+        ctx.behavior_mode = tools::types::SessionMode::Goal;
+        let items = cmd.suggest_args(&ctx, "").unwrap();
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -704,11 +737,11 @@ mod tests {
         // fuzzy filtering by `match_text` is the framework's job.
         let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
         let ctx = make_ctx();
-        for query in ["s", "b", "st"] {
+        for query in ["s", "se"] {
             let items = cmd
                 .suggest_args(&ctx, query)
                 .expect("partial subcommand input must still suggest");
-            assert_eq!(items.len(), 6, "full candidate set for {query:?}");
+            assert_eq!(items.len(), 1, "state-valid candidate set for {query:?}");
         }
     }
 
