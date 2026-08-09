@@ -51,6 +51,67 @@ pub(super) fn confirm_context_used(view: &mut AgentView, used: u64) {
     refresh_context_used(view, used);
     view.session.note_context_used(used);
 }
+
+/// Project a real Goal lifecycle transition into scrollback. `GoalUpdated`
+/// also carries live counters, so comparing only the structured state keeps
+/// recurring progress ticks from producing duplicate messages.
+fn goal_transition_event(
+    previous: Option<&GoalDisplayState>,
+    goal_id: &str,
+    objective_revision: u64,
+    status: GoalDisplayStatus,
+    phase: GoalDisplayPhase,
+    elapsed_ms: u64,
+) -> Option<SessionEvent> {
+    let previous = previous.filter(|goal| goal.goal_id == goal_id);
+    let Some(previous) = previous else {
+        return match (status, phase) {
+            (GoalDisplayStatus::Active, GoalDisplayPhase::Planning) => {
+                Some(SessionEvent::GoalAccepted)
+            }
+            (GoalDisplayStatus::Complete, _) => Some(SessionEvent::GoalCompleted {
+                elapsed: std::time::Duration::from_millis(elapsed_ms),
+            }),
+            _ => None,
+        };
+    };
+
+    if status == GoalDisplayStatus::Complete && previous.status != GoalDisplayStatus::Complete {
+        return Some(SessionEvent::GoalCompleted {
+            elapsed: std::time::Duration::from_millis(elapsed_ms),
+        });
+    }
+    if objective_revision != previous.objective_revision {
+        return Some(SessionEvent::GoalPlanningRestarted);
+    }
+    if status != previous.status {
+        return match status {
+            GoalDisplayStatus::Active => Some(SessionEvent::GoalResumed),
+            GoalDisplayStatus::Paused => Some(SessionEvent::GoalPaused),
+            GoalDisplayStatus::Blocked => Some(SessionEvent::GoalBlocked),
+            GoalDisplayStatus::BudgetLimited => Some(SessionEvent::GoalBudgetLimited),
+            GoalDisplayStatus::Complete => None,
+        };
+    }
+    if phase == previous.phase {
+        return None;
+    }
+
+    match (previous.phase, phase) {
+        (GoalDisplayPhase::Planning, GoalDisplayPhase::Executing) => {
+            Some(SessionEvent::GoalExecutionStarted)
+        }
+        (GoalDisplayPhase::Executing, GoalDisplayPhase::Verifying) => {
+            Some(SessionEvent::GoalVerificationStarted)
+        }
+        (GoalDisplayPhase::Verifying, GoalDisplayPhase::Executing) => {
+            Some(SessionEvent::GoalExecutionResumed)
+        }
+        (_, GoalDisplayPhase::Summarizing) => Some(SessionEvent::GoalFinalizationStarted),
+        (_, GoalDisplayPhase::Planning) => Some(SessionEvent::GoalPlanningRestarted),
+        _ => None,
+    }
+}
 /// Replay gate shared by the ACP and Grow session-update paths. Returns `true`
 /// when the update must be dropped.
 ///
@@ -842,6 +903,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             if status == "cleared" {
                 if let Some(g) = agent.goal_state.take() {
                     agent.last_cleared_goal_id = Some(g.goal_id);
+                    agent
+                        .scrollback
+                        .push_block(RenderBlock::session_event(SessionEvent::GoalCleared));
                 }
                 agent.set_goal_detail_visible(false);
                 true
@@ -855,11 +919,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     tracing::warn!(status, phase, "ignored malformed GoalUpdated state");
                     return false;
                 };
-                let just_completed = new_status == GoalDisplayStatus::Complete
-                    && agent
-                        .goal_state
-                        .as_ref()
-                        .is_none_or(|g| g.status != GoalDisplayStatus::Complete);
                 let elapsed_floor_ms = agent
                     .goal_state
                     .as_ref()
@@ -867,12 +926,17 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     .map(|g| g.live_elapsed_ms())
                     .unwrap_or(0)
                     .max(elapsed_ms);
-                if just_completed {
-                    agent.scrollback.push_block(RenderBlock::session_event(
-                        SessionEvent::GoalCompleted {
-                            elapsed: std::time::Duration::from_millis(elapsed_floor_ms),
-                        },
-                    ));
+                if let Some(event) = goal_transition_event(
+                    agent.goal_state.as_ref(),
+                    &goal_id,
+                    objective_revision,
+                    new_status,
+                    new_phase,
+                    elapsed_floor_ms,
+                ) {
+                    agent
+                        .scrollback
+                        .push_block(RenderBlock::session_event(event));
                 }
                 agent.goal_state = Some(GoalDisplayState {
                     goal_id,

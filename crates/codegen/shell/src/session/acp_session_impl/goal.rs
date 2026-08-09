@@ -60,25 +60,6 @@ impl SessionActor {
         self.idle_arbiter.notify_one();
     }
 
-    pub(super) async fn setup_goal(
-        self: &std::sync::Arc<Self>,
-        objective: &str,
-        token_budget: Option<i64>,
-    ) -> String {
-        self.initialize_goal_runtime(objective, token_budget).await;
-        self.render_goal_start_reminder().await
-    }
-
-    pub(super) async fn render_goal_start_reminder(&self) -> String {
-        let Some(goal) = self.goal_tracker.lock().snapshot().cloned() else {
-            return "No Goal is active.".to_string();
-        };
-        format!(
-            "Goal accepted. Planning runs in the background and does not block user turns.\nObjective: {}\nUse get_goal to read the current Markdown plan.",
-            goal.objective
-        )
-    }
-
     pub(super) async fn resume_goal(self: &std::sync::Arc<Self>) -> String {
         let outcome = {
             let mut tracker = self.goal_tracker.lock();

@@ -2,13 +2,22 @@
 use super::*;
 
 fn send_goal_update(app: &mut AppView, status: &str, phase: &str) -> bool {
+    send_goal_update_at_revision(app, status, phase, 2)
+}
+
+fn send_goal_update_at_revision(
+    app: &mut AppView,
+    status: &str,
+    phase: &str,
+    objective_revision: u64,
+) -> bool {
     let payload = serde_json::json!({
         "sessionId": "sess-A",
         "update": {
             "sessionUpdate": "goal_updated",
             "goal_id": "g1",
             "objective": "ship it",
-            "objective_revision": 2,
+            "objective_revision": objective_revision,
             "status": status,
             "phase": phase,
             "plan_revision": 4,
@@ -50,5 +59,58 @@ fn goal_update_maps_v2_blackboard_and_background_phase() {
 fn obsolete_goal_wire_state_is_rejected() {
     let mut app = make_app_with_agent("sess-A");
     assert!(!send_goal_update(&mut app, "user_paused", "idle"));
+    assert!(app.agents[&AgentId(0)].goal_state.is_none());
+}
+
+#[test]
+fn goal_phase_transitions_append_deduplicated_session_events() {
+    let mut app = make_app_with_agent("sess-A");
+
+    assert!(send_goal_update(&mut app, "active", "planning"));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalAccepted)));
+    let accepted_len = app.agents[&AgentId(0)].scrollback.len();
+
+    assert!(send_goal_update(&mut app, "active", "planning"));
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), accepted_len, "a live progress tick in the same state must not append another event");
+
+    assert!(send_goal_update(&mut app, "active", "executing"));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalExecutionStarted)));
+
+    assert!(send_goal_update(&mut app, "active", "verifying"));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalVerificationStarted)));
+
+    assert!(send_goal_update(&mut app, "active", "executing"));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalExecutionResumed)));
+
+    assert!(send_goal_update(&mut app, "active", "verifying"));
+    assert!(send_goal_update(&mut app, "active", "summarizing"));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalFinalizationStarted)));
+
+    assert!(send_goal_update(&mut app, "complete", "summarizing"));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalCompleted { .. })));
+}
+
+#[test]
+fn goal_status_and_revision_transitions_append_session_events() {
+    let mut app = make_app_with_agent("sess-A");
+    assert!(send_goal_update(&mut app, "active", "planning"));
+
+    assert!(send_goal_update_at_revision(&mut app, "active", "planning", 3));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalPlanningRestarted)));
+
+    assert!(send_goal_update_at_revision(&mut app, "paused", "planning", 3));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalPaused)));
+
+    assert!(send_goal_update_at_revision(&mut app, "active", "planning", 3));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalResumed)));
+
+    assert!(send_goal_update_at_revision(&mut app, "blocked", "planning", 3));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalBlocked)));
+
+    assert!(send_goal_update_at_revision(&mut app, "budget_limited", "planning", 3));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalBudgetLimited)));
+
+    assert!(send_goal_update_at_revision(&mut app, "cleared", "planning", 3));
+    assert!(matches!(last_session_event(&app.agents[&AgentId(0)].scrollback), Some(SessionEvent::GoalCleared)));
     assert!(app.agents[&AgentId(0)].goal_state.is_none());
 }

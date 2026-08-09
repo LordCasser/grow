@@ -362,8 +362,8 @@ impl SessionActor {
         );
         if implicit_goal_set {
             self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-            let message = self.setup_goal(original_prompt_text.trim(), None).await;
-            self.send_host_turn_slash_command_output(&message).await;
+            self.initialize_goal_runtime(original_prompt_text.trim(), None)
+                .await;
             return ok_end_turn(0, None);
         }
         if self.behavior.lock().behavior() == Some(tool_types::BehaviorId::DeepResearch)

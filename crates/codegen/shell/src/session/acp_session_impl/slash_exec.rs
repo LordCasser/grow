@@ -1005,8 +1005,7 @@ impl SessionActor {
                     .await
                 {
                     BehaviorChangeOutcome::Applied => {
-                        let message = self.setup_goal(&objective, token_budget).await;
-                        self.send_host_turn_slash_command_output(&message).await;
+                        self.initialize_goal_runtime(&objective, token_budget).await;
                     }
                     BehaviorChangeOutcome::ConfirmationRequired { message, .. }
                     | BehaviorChangeOutcome::Rejected { message } => {
