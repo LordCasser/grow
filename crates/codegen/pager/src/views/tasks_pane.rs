@@ -540,6 +540,7 @@ impl TaskEntry {
         current_cron: Option<&str>,
         is_queued: bool,
         linked: Option<(String, bool)>,
+        frame: crate::motion::FrameStamp,
     ) -> Self {
         let linked_running = linked.as_ref().is_some_and(|(_, running)| *running);
         let theme = Theme::current();
@@ -551,7 +552,7 @@ impl TaskEntry {
         let countdown = |schedule: &str, created: std::time::Instant| -> String {
             if let Some(secs) = crate::util::parse_schedule_interval_secs(schedule) {
                 let approx = created + std::time::Duration::from_secs(secs);
-                let now = std::time::Instant::now();
+                let now = frame.now();
                 if approx > now {
                     format!(" (next in {})", format_duration(approx.duration_since(now)))
                 } else {
@@ -571,7 +572,7 @@ impl TaskEntry {
         } else if let Some(n) = &info.next_fire_at {
             if let Ok(dt) = DateTime::<chrono::FixedOffset>::parse_from_rfc3339(n) {
                 let dt = dt.with_timezone(&Utc);
-                let now = Utc::now();
+                let now = DateTime::<Utc>::from(frame.wall_now());
                 if dt > now {
                     let dur = (dt - now).to_std().unwrap_or_default();
                     format!(" (next in {})", format_duration(dur))
@@ -897,6 +898,7 @@ impl TasksPane {
 
     // -- Data sync -----------------------------------------------------------
 
+    #[cfg(test)]
     pub fn sync(
         &mut self,
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
@@ -905,6 +907,28 @@ impl TasksPane {
         current_cron_task_id: Option<&str>,
         queued_cron_ids: &std::collections::HashSet<&str>,
         workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+    ) {
+        self.sync_at(
+            bg_tasks,
+            subagents,
+            scheduled,
+            current_cron_task_id,
+            queued_cron_ids,
+            workflow_runs,
+            crate::motion::FrameStamp::default(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync_at(
+        &mut self,
+        bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
+        subagents: &HashMap<String, SubagentInfo>,
+        scheduled: &HashMap<String, ScheduledTaskInfo>,
+        current_cron_task_id: Option<&str>,
+        queued_cron_ids: &std::collections::HashSet<&str>,
+        workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+        frame: crate::motion::FrameStamp,
     ) {
         // Detect theme switch and refresh caches.
         let current_theme = Theme::current_kind();
@@ -949,6 +973,7 @@ impl TasksPane {
                 current_cron_task_id,
                 queued_cron_ids.contains(info.task_id.as_str()),
                 linked,
+                frame,
             ));
         }
 
@@ -956,7 +981,7 @@ impl TasksPane {
         for run in workflow_runs {
             if self.show_done || !run.is_terminal() {
                 self.items
-                    .push(TaskEntry::from_workflow_run(run, Instant::now()));
+                    .push(TaskEntry::from_workflow_run(run, frame.now()));
             }
         }
 
@@ -1576,7 +1601,7 @@ impl TasksPane {
             match task.status {
                 BgTaskStatus::Running => {
                     let frames = crate::glyphs::dot_spinner_frames();
-                    let elapsed = format_duration(task.elapsed());
+                    let elapsed = format_duration(task.elapsed_at(frame.wall_now()));
                     (
                         crate::motion::spinner_glyph(frame, frames),
                         Style::default().fg(theme.accent_running),
@@ -1585,7 +1610,7 @@ impl TasksPane {
                     )
                 }
                 BgTaskStatus::Done => {
-                    let elapsed = format_duration(task.elapsed());
+                    let elapsed = format_duration(task.elapsed_at(frame.wall_now()));
                     (
                         crate::glyphs::check_mark(),
                         Style::default().fg(theme.accent_success),
@@ -1594,7 +1619,7 @@ impl TasksPane {
                     )
                 }
                 BgTaskStatus::Failed => {
-                    let elapsed = format_duration(task.elapsed());
+                    let elapsed = format_duration(task.elapsed_at(frame.wall_now()));
                     (
                         crate::glyphs::ballot_x(),
                         Style::default().fg(theme.accent_error),
@@ -1721,7 +1746,7 @@ impl TasksPane {
             )
         } else if info.is_running() {
             let frames = crate::glyphs::dot_spinner_frames();
-            let elapsed = format_duration(info.display_elapsed());
+            let elapsed = format_duration(info.display_elapsed_at(frame.now()));
             (
                 crate::motion::spinner_glyph(frame, frames),
                 Style::default().fg(theme.accent_running),
@@ -1729,7 +1754,7 @@ impl TasksPane {
                 Style::default().fg(theme.gray),
             )
         } else if info.status.as_deref() == Some("completed") {
-            let elapsed = format_duration(info.display_elapsed());
+            let elapsed = format_duration(info.display_elapsed_at(frame.now()));
             (
                 crate::glyphs::check_mark(),
                 Style::default().fg(theme.accent_success),
@@ -1737,7 +1762,7 @@ impl TasksPane {
                 Style::default().fg(theme.gray),
             )
         } else {
-            let elapsed = format_duration(info.display_elapsed());
+            let elapsed = format_duration(info.display_elapsed_at(frame.now()));
             (
                 crate::glyphs::ballot_x(),
                 Style::default().fg(theme.accent_error),

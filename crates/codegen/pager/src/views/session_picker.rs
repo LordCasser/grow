@@ -571,6 +571,22 @@ pub(crate) fn build_session_entry_data(
     state: &PickerState,
     content_width: u16,
 ) -> Vec<SessionEntryData> {
+    build_session_entry_data_at(
+        entries_data,
+        filtered_indices,
+        state,
+        content_width,
+        chrono::Utc::now(),
+    )
+}
+
+pub(crate) fn build_session_entry_data_at(
+    entries_data: &[SessionPickerEntry],
+    filtered_indices: &[usize],
+    state: &PickerState,
+    content_width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<SessionEntryData> {
     use crate::render::line_utils::truncate_str;
 
     filtered_indices
@@ -585,7 +601,8 @@ pub(crate) fn build_session_entry_data(
             };
             // Prefer last_active_at; fall back to updated_at (not created_at)
             // so pre-migration sessions don't jump to their creation date.
-            let right_text = format_time_ago(entry.last_active_at.unwrap_or(entry.updated_at));
+            let right_text =
+                format_time_ago_at(entry.last_active_at.unwrap_or(entry.updated_at), now);
             let is_selected = !state.selection_hidden && fi == state.selected;
             let is_expanded = state.expanded.contains(&orig_idx);
 
@@ -701,16 +718,14 @@ pub(crate) fn build_grouped_picker_entries<'a>(
 // Content search helpers
 // ---------------------------------------------------------------------------
 
-/// Build owned rendering data for content search (deep search) result rows.
-///
-/// Deduplicates hits that already appear in the fuzzy results. The returned
-/// entries should be appended after the fuzzy section (and its header row).
-pub(crate) fn build_content_entry_data(
+/// Build owned content-search rows using the draw's wall-clock sample.
+pub(crate) fn build_content_entry_data_at(
     hits: &[shell::extensions::session_search::SearchSessionHit],
     entries_data: &[SessionPickerEntry],
     filtered_indices: &[usize],
     state: &PickerState,
     content_start: usize,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<SessionEntryData> {
     let fuzzy_ids: HashSet<&str> = entries_data
         .iter()
@@ -735,7 +750,7 @@ pub(crate) fn build_content_entry_data(
                 h.summary.clone()
             };
             let right_text = if let Ok(dt) = h.updated_at.parse::<chrono::DateTime<chrono::Utc>>() {
-                format_time_ago(dt)
+                format_time_ago_at(dt, now)
             } else {
                 String::new()
             };
@@ -800,9 +815,10 @@ pub(crate) fn build_content_header_label(
 // Utilities
 // ---------------------------------------------------------------------------
 
-/// Format a timestamp as a human-readable relative time.
-pub(crate) fn format_time_ago(dt: chrono::DateTime<chrono::Utc>) -> String {
-    let now = chrono::Utc::now();
+fn format_time_ago_at(
+    dt: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     let duration = now.signed_duration_since(dt);
 
     let raw = if duration.num_minutes() < 1 {

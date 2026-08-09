@@ -30,7 +30,7 @@ use crate::theme::Theme;
 #[derive(Debug, Clone, Default)]
 pub struct ScrollbackPane {
     /// Time-derived animation sample supplied by the owning frame.
-    pub motion_tick: u64,
+    pub frame: crate::motion::FrameStamp,
     pub is_active: bool,
     pub mouse_pos: Option<(u16, u16)>,
     pub dim_from_entry: Option<usize>,
@@ -58,7 +58,7 @@ impl ScrollbackPane {
     /// Create a new scrollback pane.
     pub fn new() -> Self {
         Self {
-            motion_tick: 0,
+            frame: crate::motion::FrameStamp::default(),
             is_active: false,
             mouse_pos: None,
             dim_from_entry: None,
@@ -74,8 +74,8 @@ impl ScrollbackPane {
         self
     }
 
-    pub fn with_motion_tick(mut self, tick: u64) -> Self {
-        self.motion_tick = tick;
+    pub fn with_frame(mut self, frame: crate::motion::FrameStamp) -> Self {
+        self.frame = frame;
         self
     }
 
@@ -960,7 +960,7 @@ impl ScrollbackPane {
             theme,
             state.appearance(),
             entry_layouts_cache,
-            self.motion_tick,
+            self.frame,
             self.mouse_pos,
             relative_dim_from,
             self.search_highlight.as_ref(),

@@ -1070,6 +1070,15 @@ pub struct AgentView {
     /// Protocol-prepared image bytes keyed by file path. Used for dimension
     /// decoding and iTerm2 re-sends. Kitty transmits once and re-places.
     pub(crate) inline_media_cache: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
+    /// Paths being decoded off-thread plus their completion mailbox. These are
+    /// render-runtime resources and are never persisted with the session.
+    pub(crate) inline_media_pending: HashSet<std::path::PathBuf>,
+    pub(crate) inline_media_failed: HashSet<std::path::PathBuf>,
+    pub(crate) inline_media_completions:
+        std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<Vec<u8>>)>>>,
+    /// Set from this frame's placements; drives spinner demand only while a
+    /// pending image is actually visible.
+    pub(crate) inline_media_loading_visible: bool,
     /// Kitty GPU image IDs per media path. Each path gets a unique ID (2+)
     /// so switching between images is a cheap re-place (~80 bytes) instead
     /// of a full re-transmit. ID 1 is reserved for modal overlays.

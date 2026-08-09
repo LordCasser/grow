@@ -232,6 +232,10 @@
         let tool_call_id = "call-A-1";
         {
             let agent_a = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent_a.session.current_prompt_id = Some("foreground-A".into());
+            agent_a.last_prompt_event_at = Some(
+                std::time::Instant::now() - std::time::Duration::from_secs(30),
+            );
             agent_a.session.bg_tasks.insert(
                 task_id.into(),
                 BgTaskState {
@@ -273,6 +277,51 @@
             "stdout-from-A",
             "Bash stdout must land in A's bg_tasks even when B is active"
         );
+        assert!(
+            agent_a
+                .last_prompt_event_at
+                .unwrap()
+                .elapsed()
+                >= std::time::Duration::from_secs(29),
+            "background stdout must not re-arm the foreground prompt watchdog"
+        );
+    }
+
+    #[test]
+    fn plan_activity_rearms_only_the_matching_foreground_prompt() {
+        let mut app = make_app_with_agent("sess-A");
+        let stale_anchor = std::time::Instant::now() - std::time::Duration::from_secs(30);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.current_prompt_id = Some("foreground".into());
+            agent.last_prompt_event_at = Some(stale_anchor);
+        }
+
+        let _ = handle(make_plan_message("sess-A", &["unstamped plan"]), &mut app);
+        assert_eq!(
+            app.agents[&AgentId(0)].last_prompt_event_at,
+            Some(stale_anchor),
+            "an unstamped plan cannot prove foreground liveness"
+        );
+
+        let _ = handle(
+            make_plan_message_with_prompt("sess-A", &["stale plan"], Some("old-prompt")),
+            &mut app,
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].last_prompt_event_at,
+            Some(stale_anchor),
+            "a stale plan may update its plan projection but cannot renew foreground liveness"
+        );
+
+        let _ = handle(
+            make_plan_message_with_prompt("sess-A", &["current plan"], Some("foreground")),
+            &mut app,
+        );
+        assert!(
+            app.agents[&AgentId(0)].last_prompt_event_at.unwrap() > stale_anchor,
+            "matching prompt activity must renew foreground liveness"
+        );
     }
 
     #[test]
@@ -296,4 +345,3 @@
             "B only",
         );
     }
-

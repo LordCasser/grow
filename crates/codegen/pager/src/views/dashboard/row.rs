@@ -45,8 +45,8 @@ pub struct DashboardRow {
     /// timestamps can predate this process — even the machine's boot — which
     /// an `Instant` cannot represent (its floor is system boot, so an older
     /// moment underflows and collapses back to "just now"). Local rows project
-    /// their live `Instant` anchors onto the wall clock via
-    /// [`crate::util::system_time_from_instant`].
+    /// their live `Instant` anchors onto the wall clock using the frame's
+    /// captured monotonic/wall-clock pair.
     pub last_change_at: SystemTime,
     /// True when this row is pinned (always floats above non-pinned).
     pub pinned: bool,
@@ -123,7 +123,9 @@ pub fn build_rows(
     filter: &Filter,
     home: Option<&str>,
 ) -> Vec<DashboardRow> {
-    let mut rows = build_local_rows(agents, pinned, active, home, true);
+    let now = Instant::now();
+    let wall_now = SystemTime::now();
+    let mut rows = build_local_rows(agents, pinned, active, home, true, now, wall_now);
     apply_filter(&mut rows, filter, home);
     sort_rows(&mut rows, grouping, reorder);
     rows
@@ -152,8 +154,31 @@ pub fn build_rows_with_roster(
     home: Option<&str>,
     roster: &[RosterEntry],
 ) -> Vec<DashboardRow> {
-    let mut rows = build_local_rows(agents, pinned, active, home, false);
-    append_roster_rows(&mut rows, roster, agents, pinned, home);
+    let now = Instant::now();
+    let wall_now = SystemTime::now();
+    build_rows_with_roster_at(
+        agents, pinned, reorder, active, grouping, filter, home, roster, now, wall_now,
+    )
+}
+
+/// Build live dashboard rows from one captured clock pair. Rendering and its
+/// deadline projection must call this form so a local `Instant` can never be
+/// projected a few microseconds beyond the frame's wall clock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_rows_with_roster_at(
+    agents: &IndexMap<AgentId, AgentView>,
+    pinned: &std::collections::BTreeSet<DashboardRowId>,
+    reorder: &[DashboardRowId],
+    active: Option<AgentId>,
+    grouping: super::state::Grouping,
+    filter: &Filter,
+    home: Option<&str>,
+    roster: &[RosterEntry],
+    now: Instant,
+    wall_now: SystemTime,
+) -> Vec<DashboardRow> {
+    let mut rows = build_local_rows(agents, pinned, active, home, false, now, wall_now);
+    append_roster_rows(&mut rows, roster, agents, pinned, home, wall_now);
     apply_filter(&mut rows, filter, home);
     sort_rows(&mut rows, grouping, reorder);
     rows
@@ -172,6 +197,8 @@ fn build_local_rows(
     active: Option<AgentId>,
     home: Option<&str>,
     include_subagents: bool,
+    now: Instant,
+    wall_now: SystemTime,
 ) -> Vec<DashboardRow> {
     let mut rows = Vec::new();
     for (id, agent) in agents.iter() {
@@ -191,6 +218,8 @@ fn build_local_rows(
             pinned.contains(&top_id),
             active == Some(*id),
             home,
+            now,
+            wall_now,
         );
         rows.push(row);
         if !include_subagents {
@@ -222,6 +251,8 @@ fn build_local_rows(
                     child_session_id: info.child_session_id.to_string(),
                 }),
                 home,
+                now,
+                wall_now,
             ));
         }
         if total > keep {
@@ -238,7 +269,7 @@ fn build_local_rows(
                 secondary_line: None,
                 cwd_display: String::new(),
                 cwd: agent.session.cwd.clone(),
-                last_change_at: SystemTime::now(),
+                last_change_at: wall_now,
                 pinned: false,
                 is_active: false,
                 badges: Vec::new(),
@@ -274,6 +305,7 @@ fn append_roster_rows(
     agents: &IndexMap<AgentId, AgentView>,
     pinned: &std::collections::BTreeSet<DashboardRowId>,
     home: Option<&str>,
+    wall_now: SystemTime,
 ) {
     if roster.is_empty() {
         return;
@@ -344,7 +376,11 @@ fn append_roster_rows(
                 .map(sanitize),
             cwd_display,
             cwd,
-            last_change_at: crate::util::system_time_from_unix_ms(entry.last_change_unix_ms),
+            last_change_at: if entry.last_change_unix_ms <= 0 {
+                wall_now
+            } else {
+                crate::util::system_time_from_unix_ms(entry.last_change_unix_ms)
+            },
             pinned: is_pinned,
             is_active: false,
             badges,
@@ -501,6 +537,8 @@ fn top_level_row(
     pinned: bool,
     is_active: bool,
     home: Option<&str>,
+    now: Instant,
+    wall_now: SystemTime,
 ) -> DashboardRow {
     let state = classify_top_level(agent);
     let label = top_level_label(agent);
@@ -519,7 +557,7 @@ fn top_level_row(
         | RowState::Failed
         | RowState::Blocked => agent.last_active_at.unwrap_or_else(fallback_epoch),
     };
-    let last_change_at = crate::util::system_time_from_instant(anchor);
+    let last_change_at = crate::util::system_time_from_instant_at(anchor, now, wall_now);
     let mut badges = Vec::new();
     if agent.is_worktree {
         badges.push(RowBadge::Worktree);
@@ -565,6 +603,8 @@ fn subagent_row(
     info: &SubagentInfo,
     pinned: bool,
     home: Option<&str>,
+    now: Instant,
+    wall_now: SystemTime,
 ) -> DashboardRow {
     let state = classify_subagent(info);
     let (label_raw, desc_raw) = format_subagent_label(info);
@@ -584,7 +624,8 @@ fn subagent_row(
         .map(PathBuf::from)
         .unwrap_or_else(|| parent_view.session.cwd.clone());
     let cwd_display = super::state::compact_cwd(&cwd, home);
-    let last_change_at = crate::util::system_time_from_instant(info.last_progress_at);
+    let last_change_at =
+        crate::util::system_time_from_instant_at(info.last_progress_at, now, wall_now);
     let mut badges = Vec::new();
     if info.worktree_path.is_some() {
         badges.push(RowBadge::Worktree);
@@ -1520,6 +1561,7 @@ mod tests {
             &IndexMap::new(),
             &std::collections::BTreeSet::new(),
             None,
+            SystemTime::now(),
         );
         assert_eq!(rows.len(), 1);
         rows[0].last_change_at.elapsed().unwrap_or_default()
@@ -1555,6 +1597,7 @@ mod tests {
             &agents,
             &pinned,
             None,
+            SystemTime::now(),
         );
         sort_rows(&mut rows, super::super::state::Grouping::State, &[]);
         assert_eq!(
@@ -1588,7 +1631,14 @@ mod tests {
         pinned: &std::collections::BTreeSet<DashboardRowId>,
     ) -> Vec<DashboardRow> {
         let mut rows = Vec::new();
-        append_roster_rows(&mut rows, entries, &IndexMap::new(), pinned, None);
+        append_roster_rows(
+            &mut rows,
+            entries,
+            &IndexMap::new(),
+            pinned,
+            None,
+            SystemTime::now(),
+        );
         rows
     }
     /// An untitled, inactive roster session is the "New session" noise the
@@ -1743,7 +1793,15 @@ mod tests {
     fn idle_local_agent_without_message_has_blank_secondary() {
         let agent = make_idle_agent_with_model(Some("grow-4.5"));
         assert_eq!(classify_top_level(&agent), RowState::Idle);
-        let row = top_level_row(AgentId(0), &agent, false, false, None);
+        let row = top_level_row(
+            AgentId(0),
+            &agent,
+            false,
+            false,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        );
         assert_eq!(
             row.secondary_line, None,
             "the model must not appear on the list row anymore",
@@ -1754,7 +1812,15 @@ mod tests {
     #[test]
     fn idle_local_agent_without_message_or_model_has_no_secondary() {
         let agent = make_idle_agent_with_model(None);
-        let row = top_level_row(AgentId(0), &agent, false, false, None);
+        let row = top_level_row(
+            AgentId(0),
+            &agent,
+            false,
+            false,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        );
         assert_eq!(row.secondary_line, None);
     }
     /// A worktree agent's subtitle shows the branch + the worktree's
@@ -1841,7 +1907,15 @@ mod tests {
                 .session
                 .bg_tasks
                 .insert("t1".into(), make_task(status));
-            let row = top_level_row(AgentId(0), &agent, false, false, None);
+            let row = top_level_row(
+                AgentId(0),
+                &agent,
+                false,
+                false,
+                None,
+                Instant::now(),
+                SystemTime::now(),
+            );
             assert_eq!(
                 row.badges.contains(&RowBadge::BgTask),
                 expect_badge,
@@ -1917,7 +1991,15 @@ mod tests {
             .bg_tasks
             .insert("m1".into(), running_bg_task("m1", true));
         assert_eq!(classify_top_level(&agent), RowState::Working);
-        let row = top_level_row(AgentId(0), &agent, false, false, None);
+        let row = top_level_row(
+            AgentId(0),
+            &agent,
+            false,
+            false,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        );
         assert_eq!(row.activity.as_deref(), Some("1 monitor still running"));
     }
     /// An active scheduled `/loop` keeps the agent `Working` even with a
@@ -1930,7 +2012,15 @@ mod tests {
             .scheduled_tasks
             .insert("l1".into(), scheduled_loop("l1"));
         assert_eq!(classify_top_level(&agent), RowState::Working);
-        let row = top_level_row(AgentId(0), &agent, false, false, None);
+        let row = top_level_row(
+            AgentId(0),
+            &agent,
+            false,
+            false,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        );
         assert_eq!(row.activity.as_deref(), Some("1 loop still running"));
     }
     /// The background-work label lists every non-zero kind (monitors,
@@ -1955,7 +2045,15 @@ mod tests {
             .scheduled_tasks
             .insert("l1".into(), scheduled_loop("l1"));
         assert_eq!(classify_top_level(&agent), RowState::Working);
-        let row = top_level_row(AgentId(0), &agent, false, false, None);
+        let row = top_level_row(
+            AgentId(0),
+            &agent,
+            false,
+            false,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        );
         assert_eq!(
             row.activity.as_deref(),
             Some("1 monitor · 1 loop · 2 tasks still running"),
@@ -1973,7 +2071,15 @@ mod tests {
             .bg_tasks
             .insert("m1".into(), running_bg_task("m1", true));
         assert_eq!(classify_top_level(&agent), RowState::Working);
-        let row = top_level_row(AgentId(0), &agent, false, false, None);
+        let row = top_level_row(
+            AgentId(0),
+            &agent,
+            false,
+            false,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        );
         assert_eq!(
             row.activity.as_deref(),
             Some("Loading…"),

@@ -3,7 +3,7 @@
 //! This is the core engine for @-completion. It manages:
 //! - A background [`FuzzyFileMatcherDaemon`] that walks the directory tree
 //! - The current [`AtContext`] (parsed from prompt text + cursor)
-//! - Cached fuzzy match results (polled on tick)
+//! - Cached fuzzy match results (applied after a worker completion edge)
 //! - Dropdown selection state (selected index, scroll offset)
 //! - Text replacement logic when a result is accepted
 
@@ -125,8 +125,11 @@ impl FileSearchState {
     /// the daemon spawns the nucleo matcher pool and the directory walker.
     fn ensure_daemon(&mut self) -> &mut FuzzyFileMatcherDaemon {
         if self.daemon.is_none() {
-            let daemon =
-                FuzzyFileMatcherDaemon::new(FuzzyFileMatcher::new(&self.root), MATCHER_TOP_K);
+            let daemon = FuzzyFileMatcherDaemon::new(
+                FuzzyFileMatcher::new(&self.root),
+                MATCHER_TOP_K,
+                Some(Arc::new(crate::async_view::wake)),
+            );
             self.daemon = Some(daemon);
             #[cfg(test)]
             {

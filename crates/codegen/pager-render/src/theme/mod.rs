@@ -23,7 +23,7 @@ mod terminal_default;
 pub mod tokyonight;
 
 pub use color_support::quantize;
-pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
+pub use tokyonight::Theme;
 
 /// Available theme variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

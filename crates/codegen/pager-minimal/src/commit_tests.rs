@@ -512,7 +512,7 @@ fn assert_committed_fits_entry(label: &str, entry: &ScrollbackEntry, width: u16)
     let theme = Theme::current();
     let appearance = committed_appearance(&AppearanceConfig::default());
 
-    let renderer = minimal_renderer(entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let renderer = minimal_renderer(entry, &theme, appearance, test_cwd(), committed_frame());
     let h = renderer.desired_height(width);
     assert!(h > 0, "{label}@{width}: desired_height was 0");
     // The accent bar and background fill intentionally stretch to the given
@@ -547,7 +547,7 @@ fn committed_block_uses_owning_session_cwd_for_tool_paths() {
     entry.set_display_mode(DisplayMode::Expanded);
     let theme = Theme::current();
     let appearance = committed_appearance(&AppearanceConfig::default());
-    let renderer = minimal_renderer(&entry, &theme, appearance, cwd, COMMITTED_TICK);
+    let renderer = minimal_renderer(&entry, &theme, appearance, cwd, committed_frame());
     let width = 80;
     let height = renderer.desired_height(width);
     let area = Rect::new(0, 0, width, height);
@@ -678,7 +678,7 @@ fn terminal_native_lock_paints_only_native_colors() {
         let theme = Theme::current();
         let appearance = committed_appearance(&AppearanceConfig::default());
         entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
-        let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+        let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), committed_frame());
 
         let width = 100u16;
         let h = renderer.desired_height(width).max(1);
@@ -721,7 +721,7 @@ fn large_commit_is_capped_with_footer() {
     entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
 
     let width = 80u16;
-    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), committed_frame());
     let full_h = renderer.desired_height(width);
     assert!(full_h > 12, "expected a tall block, got {full_h}");
 
@@ -757,7 +757,7 @@ fn small_commit_is_not_capped() {
     entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
 
     let width = 80u16;
-    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), committed_frame());
     let full_h = renderer.desired_height(width);
 
     // Buffer is exactly the block's height → no footer (uncapped path).
@@ -815,7 +815,7 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     let theme = Theme::current();
     let appearance = committed_appearance(&AppearanceConfig::default());
     entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
-    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), committed_frame());
 
     let width = 80u16;
     let h = renderer.desired_height(width);
@@ -859,7 +859,7 @@ fn only_thinking_spends_the_accent_column() {
             &theme,
             appearance.clone(),
             test_cwd(),
-            COMMITTED_TICK,
+            committed_frame(),
         )
         .chrome_width()
     };
@@ -910,7 +910,7 @@ fn only_thinking_spends_the_accent_column() {
             &theme,
             appearance.clone(),
             test_cwd(),
-            COMMITTED_TICK,
+            committed_frame(),
         );
         let reserved = renderer.chrome_width();
         let h = renderer.desired_height(60);
@@ -962,7 +962,7 @@ fn committed_thinking_paints_a_dim_rail_in_column_zero() {
         &theme,
         appearance.clone(),
         test_cwd(),
-        COMMITTED_TICK,
+        committed_frame(),
     );
     let h = renderer.desired_height(width);
     assert!(h > 1, "expected a multi-row reasoning block, got {h}");
@@ -982,7 +982,7 @@ fn committed_thinking_paints_a_dim_rail_in_column_zero() {
     }
 
     let answer = ScrollbackEntry::new(RenderBlock::agent_message("the answer"));
-    let renderer = minimal_renderer(&answer, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let renderer = minimal_renderer(&answer, &theme, appearance, test_cwd(), committed_frame());
     let area = Rect::new(0, 0, width, renderer.desired_height(width).max(1));
     let mut buf = Buffer::empty(area);
     renderer.render(area, &mut buf);
@@ -1114,7 +1114,7 @@ fn collapsed_thinking_commit_is_one_advertised_row() {
             &theme,
             appearance.clone(),
             test_cwd(),
-            COMMITTED_TICK,
+            committed_frame(),
         );
         let h = renderer.desired_height(width);
         assert_eq!(h, 1, "collapsed reasoning is one row @{width}");
@@ -1133,7 +1133,7 @@ fn collapsed_thinking_commit_is_one_advertised_row() {
     }
 
     // Too narrow for the hint: the header still wins, still one row.
-    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), committed_frame());
     assert_eq!(renderer.desired_height(16), 1);
 }
 

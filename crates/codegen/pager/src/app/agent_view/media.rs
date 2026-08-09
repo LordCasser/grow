@@ -12,6 +12,114 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 impl AgentView {
+    pub(crate) fn has_visible_inline_media_load(&self) -> bool {
+        self.inline_media_loading_visible
+    }
+
+    /// Invalidate inline-media state at a session/replay boundary. In-flight
+    /// workers keep their old mailbox and may finish safely, but neither their
+    /// bytes nor path-derived caches can enter the new session projection.
+    ///
+    /// GPU image ids deliberately survive until the next draw: the placement
+    /// reconciler needs them to emit the corresponding Kitty delete escapes.
+    /// With the CPU cache cleared, a replayed path cannot re-place an old GPU
+    /// image; it must load fresh bytes and transmit again after that cleanup.
+    pub(crate) fn reset_inline_media_loader(&mut self) {
+        self.inline_media_cache.clear();
+        self.inline_media_pending.clear();
+        self.inline_media_failed.clear();
+        self.inline_media_completions = Default::default();
+        self.inline_media_loading_visible = false;
+        self.media_link_paths.clear();
+        self.media_link_paths_gen = None;
+    }
+
+    pub(crate) fn apply_inline_media_completions(&mut self) -> bool {
+        let completed = {
+            let mut mailbox = self.inline_media_completions.lock().unwrap();
+            std::mem::take(&mut *mailbox)
+        };
+        if completed.is_empty() {
+            return false;
+        }
+        for (path, result) in completed {
+            self.inline_media_pending.remove(&path);
+            if let Some(bytes) = result {
+                if self.insert_inline_media_cache(path.clone(), bytes) {
+                    self.inline_media_failed.remove(&path);
+                } else {
+                    self.inline_media_failed.insert(path);
+                }
+            } else {
+                self.inline_media_failed.insert(path);
+            }
+        }
+        true
+    }
+
+    fn insert_inline_media_cache(&mut self, path: std::path::PathBuf, bytes: Vec<u8>) -> bool {
+        const MAX_BYTES: usize = 64 * 1024 * 1024;
+        let incoming = bytes.len();
+        if incoming > MAX_BYTES {
+            return false;
+        }
+        let mut total = self
+            .inline_media_cache
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            + incoming;
+        while total > MAX_BYTES {
+            let Some(victim) = self.inline_media_cache.keys().next().cloned() else {
+                break;
+            };
+            if let Some(evicted) = self.inline_media_cache.remove(&victim) {
+                total -= evicted.len();
+            }
+        }
+        self.inline_media_cache.insert(path, bytes);
+        true
+    }
+
+    pub(super) fn request_inline_media_load(&mut self, path: &std::path::Path) {
+        if self.inline_media_cache.contains_key(path)
+            || self.inline_media_pending.contains(path)
+            || self.inline_media_failed.contains(path)
+        {
+            return;
+        }
+        let path = path.to_path_buf();
+        self.inline_media_pending.insert(path.clone());
+        let mailbox = self.inline_media_completions.clone();
+        let worker_path = path.clone();
+        let protocol = crate::terminal::image::detect_graphics_protocol();
+        let spawn = std::thread::Builder::new()
+            .name("inline-media-load".into())
+            .spawn(move || {
+                let mut result = None;
+                // Tool output can announce a path just before its final rename.
+                // Retry off-thread for a bounded window instead of using frame
+                // ticks as a file-existence poller.
+                for _ in 0..40 {
+                    result = std::fs::read(&worker_path).ok().and_then(|raw| {
+                        crate::terminal::image::prepare_overlay_image_bytes_for_protocol(
+                            &raw, protocol,
+                        )
+                    });
+                    if result.is_some() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                mailbox.lock().unwrap().push((worker_path, result));
+                crate::async_view::wake();
+            });
+        if spawn.is_err() {
+            self.inline_media_pending.remove(&path);
+            self.inline_media_failed.insert(path);
+        }
+    }
+
     // -- Image viewer input --------------------------------------------------
 
     /// Handle a key event in the image viewer modal.
@@ -62,35 +170,10 @@ impl AgentView {
         let mut transmit_esc = String::new();
 
         if needs_transmit {
-            // Load bytes from disk (or use cached bytes if available).
+            // Cache misses are fulfilled by the event-driven loader. Never do
+            // filesystem I/O or decoding in the render path.
             if !self.inline_media_cache.contains_key(path) {
-                let raw = std::fs::read(path).ok()?;
-                let bytes = crate::terminal::image::prepare_overlay_image_bytes(&raw)?;
-                // Bound the cache: a long image-heavy session must not pin
-                // every encoded image for its lifetime. Evicting drops only
-                // CPU-side bytes — Kitty placements already transmitted stay
-                // valid on the GPU (`inline_media_ids` is kept); an evicted
-                // path re-reads from disk if it needs a re-transmit.
-                const INLINE_MEDIA_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
-                let incoming = bytes.len();
-                if incoming < INLINE_MEDIA_CACHE_MAX_BYTES {
-                    let mut total: usize = self
-                        .inline_media_cache
-                        .values()
-                        .map(Vec::len)
-                        .sum::<usize>()
-                        + incoming;
-                    while total > INLINE_MEDIA_CACHE_MAX_BYTES {
-                        // HashMap iteration order is arbitrary — treat as random eviction.
-                        let Some(victim) = self.inline_media_cache.keys().next().cloned() else {
-                            break;
-                        };
-                        if let Some(evicted) = self.inline_media_cache.remove(&victim) {
-                            total -= evicted.len();
-                        }
-                    }
-                }
-                self.inline_media_cache.insert(path.clone(), bytes);
+                return None;
             }
             let image_id = self.get_or_alloc_media_id(path);
             let bytes = self.inline_media_cache.get(path)?;
@@ -510,5 +593,74 @@ mod tests {
             before + 1,
             "closing the image viewer must purge after the image drops"
         );
+    }
+
+    #[test]
+    fn inline_media_waits_off_thread_and_completes_by_snapshot() {
+        let _protocol = crate::terminal::image::set_protocol_for_test(
+            crate::terminal::image::GraphicsProtocol::ITerm2,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("late.png");
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+
+        let mut agent = make_agent();
+        agent.request_inline_media_load(&path);
+        assert!(agent.inline_media_pending.contains(&path));
+        // The path did not exist when the request was queued; publishing it
+        // now exercises the worker's bounded rename race without depending on
+        // another test thread being scheduled promptly under the full suite.
+        std::fs::write(&path, encoded.into_inner()).unwrap();
+
+        let mut applied = false;
+        for _ in 0..100 {
+            if agent.apply_inline_media_completions() {
+                applied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(applied, "loader must publish a completion snapshot");
+        assert!(agent.inline_media_cache.contains_key(&path));
+        assert!(!agent.inline_media_pending.contains(&path));
+    }
+
+    #[test]
+    fn session_boundary_detaches_late_inline_media_completion() {
+        let mut agent = make_agent();
+        let old_mailbox = agent.inline_media_completions.clone();
+        let path = std::path::PathBuf::from("/tmp/old-session.png");
+        agent
+            .inline_media_cache
+            .insert(path.clone(), vec![0x89, b'P', b'N', b'G']);
+        agent.inline_media_ids.insert(path.clone(), 7);
+        agent.last_placed_ids.insert(7);
+        agent.inline_media_pending.insert(path.clone());
+        agent.media_link_paths.push(path.clone());
+        agent.media_link_paths_gen = Some(agent.scrollback.generation());
+        agent.reset_inline_media_loader();
+        old_mailbox
+            .lock()
+            .unwrap()
+            .push((path.clone(), Some(vec![1])));
+
+        assert!(!agent.apply_inline_media_completions());
+        assert!(!agent.inline_media_cache.contains_key(&path));
+        assert!(!agent.inline_media_pending.contains(&path));
+        assert!(agent.media_link_paths.is_empty());
+        assert!(agent.media_link_paths_gen.is_none());
+        assert_eq!(
+            agent.inline_media_ids.get(&path),
+            Some(&7),
+            "the next draw still needs the id to clear the old GPU placement"
+        );
+        assert!(agent.last_placed_ids.contains(&7));
     }
 }

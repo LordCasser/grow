@@ -123,6 +123,9 @@ Pager 使用只读 `AgentActivityProjection` 统一投影 foreground turn、Acti
 - animation、UI expiry、prompt watchdog、scroll 与真正模拟器的 simulation clock 相互独立；watchdog 不再借动画 frame 获得运行机会；
 - ACP token firehose 每次只 drain 有界 batch，并在每个 batch 前领取到期 deadline，因此动画最多再等一个 batch；
 - 隐藏页面和静态 idle 页面不请求 frame，恢复可见时按当前时间直接追上相位。
+- 搜索、inline media、edit 高亮与 Mermaid 完成走独立 async-view completion edge，Tracing
+  使用自己的 channel arm；它们都不占用 animation 或 UI expiry clock。Goal/session reload
+  不持久化 worker、mailbox 或 frame state。
 
 具体契约见 [pager-motion.md](./pager-motion.md)。
 

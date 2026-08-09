@@ -237,6 +237,13 @@ impl BgTaskState {
         end.duration_since(self.start_time)
             .unwrap_or(Duration::ZERO)
     }
+
+    pub fn elapsed_at(&self, now: SystemTime) -> Duration {
+        self.end_time
+            .unwrap_or(now)
+            .duration_since(self.start_time)
+            .unwrap_or(Duration::ZERO)
+    }
     /// Replace `stdout` with `new_stdout`.
     ///
     /// If `new_stdout` exceeds `BG_TASK_MAX_STDOUT`, keeps the head (snapped

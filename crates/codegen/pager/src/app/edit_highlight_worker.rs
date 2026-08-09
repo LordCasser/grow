@@ -1,9 +1,9 @@
 //! Off-draw-thread full-file syntax highlight for edit diffs.
 //!
 //! Mirrors [`super::mermaid_worker`]: one `std::thread` + mpsc, coalesced by
-//! `entry_id` (latest job wins), polled each tick via `try_recv`. First paint
-//! stays hunk-only on the UI thread; this worker upgrades to file-scoped styles
-//! when the post-edit file is readable and under
+//! `entry_id` (latest job wins). Results publish the shared async-view
+//! completion edge; first paint stays hunk-only on the UI thread and the
+//! completion reducer upgrades to file-scoped styles when the post-edit file is readable and under
 //! [`crate::scrollback::blocks::tool::EDIT_HL_MAX_BYTES`] /
 //! [`crate::scrollback::blocks::tool::EDIT_HL_MAX_LINES`].
 //!
@@ -75,7 +75,7 @@ pub struct EditHlResult {
 pub struct EditHlRuntime {
     tx: Sender<EditHlJob>,
     rx: Receiver<EditHlResult>,
-    /// Outstanding `(job_id, entry_id)` for `needs_tick`.
+    /// Outstanding `(job_id, entry_id)` pairs.
     pending: Vec<(u64, EntryId)>,
     next_job_id: u64,
 }
@@ -119,6 +119,7 @@ pub fn spawn_worker() -> (Sender<EditHlJob>, Receiver<EditHlResult>) {
                     if result_tx.send(result).is_err() {
                         return;
                     }
+                    crate::async_view::wake();
                 }
             }
         })
@@ -202,16 +203,36 @@ fn resolve_edit_target_path(path: &str, session_cwd: Option<&std::path::Path>) -
 }
 
 impl AgentView {
-    /// Keep ticking while an edit-HL job is outstanding (mpsc has no waker).
-    pub fn edit_hl_needs_tick(&self) -> bool {
+    /// Whether an edit-HL result is still outstanding.
+    pub fn edit_hl_pending(&self) -> bool {
         self.edit_hl
             .as_ref()
             .is_some_and(|rt| !rt.pending.is_empty())
     }
 
-    /// Poll worker results and attach FileScoped styles. Returns true if redraw.
-    pub fn edit_hl_tick(&mut self) -> bool {
+    /// Apply signaled worker results and attach FileScoped styles.
+    pub fn apply_edit_hl_completions(&mut self) -> bool {
         self.poll_edit_hl_results()
+    }
+
+    /// Detach every edit-highlight job owned by the current session.
+    ///
+    /// A replay may replace the scrollback while an off-thread file read is
+    /// still running. Revert the visible blocks before dropping the receiver so
+    /// a restored transcript never retains a `Pending` marker with no runtime,
+    /// and a late result can never mutate the replacement session.
+    pub(crate) fn reset_edit_hl_runtime(&mut self) {
+        let Some(rt) = self.edit_hl.take() else {
+            return;
+        };
+        for (_, entry_id) in rt.pending {
+            if let Some(entry) = self.scrollback.get_by_id_mut(entry_id)
+                && let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &mut entry.block
+                && matches!(edit.highlight, EditHighlightPhase::Pending { .. })
+            {
+                edit.highlight = EditHighlightPhase::HunkOnly;
+            }
+        }
     }
 
     fn ensure_edit_hl_runtime(&mut self) -> &mut EditHlRuntime {
@@ -353,7 +374,7 @@ impl AgentView {
     /// one) and revert every in-flight entry to `HunkOnly`, which paints
     /// identically to `Pending`, so no redraw or cache invalidate is needed.
     fn abandon_edit_hl_worker(&mut self, context: &'static str) {
-        let Some(rt) = self.edit_hl.take() else {
+        let Some(rt) = self.edit_hl.as_ref() else {
             return;
         };
         tracing::warn!(
@@ -362,14 +383,7 @@ impl AgentView {
             pending = rt.pending.len(),
             "edit HL worker gone; reverting pending jobs to hunk-only"
         );
-        for (_, entry_id) in rt.pending {
-            if let Some(entry) = self.scrollback.get_by_id_mut(entry_id)
-                && let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &mut entry.block
-                && matches!(edit.highlight, EditHighlightPhase::Pending { .. })
-            {
-                edit.highlight = EditHighlightPhase::HunkOnly;
-            }
-        }
+        self.reset_edit_hl_runtime();
     }
 }
 
@@ -557,7 +571,7 @@ mod tests {
             })
             .unwrap();
 
-        let redraw = agent.edit_hl_tick();
+        let redraw = agent.apply_edit_hl_completions();
         assert!(!redraw, "stale job must not apply");
         let entry = agent.scrollback.get_by_id(entry_id).expect("entry");
         let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
@@ -598,11 +612,11 @@ mod tests {
             next_job_id: 8,
         });
 
-        assert!(agent.edit_hl_needs_tick(), "pending must demand ticks");
-        let redraw = agent.edit_hl_tick();
+        assert!(agent.edit_hl_pending(), "result must still be pending");
+        let redraw = agent.apply_edit_hl_completions();
         assert!(!redraw, "revert paints identically to Pending");
         assert!(
-            !agent.edit_hl_needs_tick(),
+            !agent.edit_hl_pending(),
             "dead worker must not pin fast ticks"
         );
         assert!(agent.edit_hl.is_none(), "runtime dropped for lazy respawn");
@@ -613,6 +627,49 @@ mod tests {
         assert!(
             matches!(edit.highlight, EditHighlightPhase::HunkOnly),
             "stranded Pending must revert to HunkOnly"
+        );
+    }
+
+    #[test]
+    fn session_reload_detaches_worker_and_normalizes_stashed_edit() {
+        use crate::scrollback::blocks::tool::EditToolCallBlock;
+
+        let mut agent = crate::app::agent_view::test_agent_view(
+            Some("edit-hl-reload"),
+            PathBuf::from("/tmp/edit-hl-test"),
+        );
+        let block = EditToolCallBlock::new("probe.py", sample_hunks());
+        let entry_id = agent
+            .scrollback
+            .push_block(RenderBlock::ToolCall(ToolCallBlock::Edit(block)));
+        if let Some(entry) = agent.scrollback.get_by_id_mut(entry_id)
+            && let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &mut entry.block
+        {
+            edit.highlight = EditHighlightPhase::Pending { job_id: 7 };
+        }
+
+        let (job_tx, _job_rx) = mpsc::channel::<EditHlJob>();
+        let (_res_tx, res_rx) = mpsc::channel::<EditHlResult>();
+        agent.edit_hl = Some(EditHlRuntime {
+            tx: job_tx,
+            rx: res_rx,
+            pending: vec![(7, entry_id)],
+            next_job_id: 8,
+        });
+
+        agent.begin_session_reload(1);
+        assert!(agent.edit_hl.is_none(), "old receiver must be detached");
+        assert!(agent.finish_session_reload(1, false));
+        let entry = agent
+            .scrollback
+            .get_by_id(entry_id)
+            .expect("restored entry");
+        let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
+            panic!("edit block missing");
+        };
+        assert!(
+            matches!(edit.highlight, EditHighlightPhase::HunkOnly),
+            "restored transcript cannot retain an ownerless Pending marker"
         );
     }
 
@@ -643,17 +700,17 @@ mod tests {
             assert_eq!(rt.pending[0].1, entry_id);
         }
 
-        // Pump until settle (worker has no waker).
+        // Apply snapshots until the worker settles; production is edge-driven.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while agent.edit_hl_needs_tick() {
-            agent.edit_hl_tick();
+        while agent.edit_hl_pending() {
+            agent.apply_edit_hl_completions();
             if std::time::Instant::now() > deadline {
                 panic!("edit HL did not settle");
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(
-            !agent.edit_hl_needs_tick(),
+            !agent.edit_hl_pending(),
             "pending must be empty after latest result"
         );
     }

@@ -1,8 +1,8 @@
 //! Off-draw-thread Mermaid render worker, per-session disk cache, and the
 //! [`AgentView`] lazy render-on-click glue (both `[Open]` and `[Copy path]`).
 //!
-//! Uses a dedicated `std::thread` plus `std::sync::mpsc`, polled each tick via
-//! `try_recv`, rather than tokio. A
+//! Uses a dedicated `std::thread` plus `std::sync::mpsc`; completed renders
+//! publish the pager's shared async-view edge. A
 //! single worker thread renders a requested diagram (in a short-lived child
 //! process — see below), writes the PNG to the session's `mermaid/` dir, and
 //! reports back only the on-disk path. Diagrams are never displayed inline; the
@@ -12,8 +12,8 @@
 //! `[Copy path]`, which renders the diagram at the *live* theme/width (so it
 //! always matches the current theme, including auto day/night) and then runs the
 //! requested action. A small lock-free [`PendingMermaidAction`] list records what
-//! the user asked for so the tick can complete it when the matching render result
-//! arrives.
+//! the user asked for so the UI completion reducer can finish it when the
+//! matching render result arrives.
 //!
 //! # Crash isolation under `panic = "abort"` — out of process
 //!
@@ -266,6 +266,7 @@ pub fn spawn_worker() -> (Sender<MermaidJob>, Receiver<MermaidResult>) {
                     if result_tx.send(result).is_err() {
                         return; // Receiver dropped — the view is gone.
                     }
+                    crate::async_view::wake();
                 }
             }
         })
@@ -879,7 +880,7 @@ pub fn sweep_session_cache(dir: &Path, max_bytes: u64) {
 pub struct MermaidRuntime {
     tx: Sender<MermaidJob>,
     rx: Receiver<MermaidResult>,
-    /// On-click renders whose result hasn't arrived yet. The tick runs each
+    /// On-click renders whose result hasn't arrived yet. The completion reducer runs each
     /// action when its key lands; the painter consults these keys for the
     /// transient `rendering…` hint. A short `Vec` (clicks are human-paced) keeps
     /// the worker lock-free — no map or mutex needed.
@@ -973,11 +974,8 @@ thread_local! {
 }
 
 impl AgentView {
-    /// Cheap predicate for the event loop: keep ticking only while an on-click
-    /// render is outstanding, so the worker's result (plain mpsc, no waker) is
-    /// polled promptly. Lazy rendering does no background scanning, so there is
-    /// nothing else to drive.
-    pub fn mermaid_needs_tick(&self) -> bool {
+    /// Whether an on-click render still paints live progress chrome.
+    pub fn mermaid_has_live_motion(&self) -> bool {
         self.mermaid
             .as_ref()
             .is_some_and(|rt| !rt.pending.is_empty())
@@ -988,11 +986,19 @@ impl AgentView {
         representative_content_cols(self.last_terminal_size.0)
     }
 
-    /// Drive the lazy mermaid lifecycle for one tick: poll the worker for
-    /// finished on-click renders and run each requesting action. Returns `true`
-    /// when a redraw is warranted. A no-op until a click is in flight.
-    pub fn mermaid_tick(&mut self) -> bool {
+    /// Apply signaled render results and run each requesting action.
+    pub fn apply_mermaid_completions(&mut self) -> bool {
         self.poll_mermaid_results()
+    }
+
+    /// Detach render actions owned by the current session.
+    ///
+    /// The worker may finish writing its cache file after this call, but
+    /// dropping the receiver and pending-action list makes that completion
+    /// inert: it cannot open a file, copy a path, or show a toast in the next
+    /// session.
+    pub(crate) fn reset_mermaid_runtime(&mut self) {
+        self.mermaid = None;
     }
 
     /// Lazily create the render runtime (and spawn the worker) on first need.
@@ -1322,6 +1328,38 @@ mod tests {
     }
 
     #[test]
+    fn replay_detaches_pending_actions_and_late_results() {
+        let mut agent = crate::app::agent_view::test_agent_view(
+            Some("mermaid-replay"),
+            PathBuf::from("/tmp/mermaid-replay"),
+        );
+        let (job_tx, _job_rx) = std::sync::mpsc::channel::<MermaidJob>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<MermaidResult>();
+        let pending_key = key("old session");
+        agent.mermaid = Some(MermaidRuntime {
+            tx: job_tx,
+            rx: result_rx,
+            pending: vec![PendingMermaidAction {
+                key: pending_key.clone(),
+                action: MermaidClickAction::Open,
+            }],
+            swept: true,
+        });
+
+        agent.begin_replay_window();
+        assert!(agent.mermaid.is_none());
+        assert!(
+            result_tx
+                .send(MermaidResult {
+                    key: pending_key,
+                    outcome: MermaidOutcome::Failed,
+                })
+                .is_err(),
+            "late old-session completion must have no live receiver or action"
+        );
+    }
+
+    #[test]
     fn target_width_px_is_clamped() {
         assert_eq!(target_width_px(1), MIN_TARGET_WIDTH_PX);
         assert_eq!(target_width_px(10_000), MAX_TARGET_WIDTH_PX);
@@ -1419,8 +1457,7 @@ mod tests {
 
     /// Liveness: the worker thread renders autonomously —
     /// a `Ready` result arrives on the channel with **no external event** after
-    /// the single `send` (the view side only has to keep polling, which
-    /// `mermaid_needs_tick` ensures while an on-click action is pending).
+    /// the single `send`; production also publishes the shared completion edge.
     #[test]
     fn worker_autonomously_produces_ready() {
         let dir = tempfile::tempdir().unwrap();
@@ -2124,12 +2161,12 @@ mod tests {
         agent
     }
 
-    /// Drive `mermaid_tick` until `done` (the autonomous worker has no waker, so
-    /// the view must keep polling) or a deadline, without a fixed sleep up front.
+    /// Apply completions until `done`, or a deadline, without a fixed sleep up
+    /// front. Production calls the same reducer from the worker wake edge.
     fn pump_until(agent: &mut AgentView, mut done: impl FnMut(&AgentView) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            agent.mermaid_tick();
+            agent.apply_mermaid_completions();
             if done(agent) {
                 return;
             }
@@ -2152,7 +2189,7 @@ mod tests {
     /// Cache miss: the click dispatches a render keyed by the LIVE theme/width,
     /// records a pending action (so the view keeps ticking), and — once the
     /// worker lands the result — runs the action and drains `pending` so
-    /// `mermaid_needs_tick()` flips back to false (the settle invariant).
+    /// `mermaid_has_live_motion()` flips back to false (the settle invariant).
     #[test]
     fn mermaid_view_miss_dispatches_then_settles() {
         let mut agent = agent_with_session("miss");
@@ -2160,7 +2197,7 @@ mod tests {
 
         agent.request_mermaid_render(src.clone(), MermaidClickAction::CopyPath);
         assert!(
-            agent.mermaid_needs_tick(),
+            agent.mermaid_has_live_motion(),
             "a miss records a pending action"
         );
         assert!(
@@ -2187,9 +2224,9 @@ mod tests {
 
         // The worker renders autonomously; ticking drains the result, runs the
         // CopyPath action, and clears `pending` (settle).
-        pump_until(&mut agent, |a| !a.mermaid_needs_tick());
+        pump_until(&mut agent, |a| !a.mermaid_has_live_motion());
         assert!(
-            !agent.mermaid_needs_tick(),
+            !agent.mermaid_has_live_motion(),
             "pending is drained once the render lands",
         );
         assert!(
@@ -2225,7 +2262,7 @@ mod tests {
             "a disk hit runs the copy action immediately, got {toast:?}",
         );
         assert!(
-            !agent.mermaid_needs_tick(),
+            !agent.mermaid_has_live_motion(),
             "a disk hit dispatches no render"
         );
         assert!(
@@ -2283,10 +2320,10 @@ mod tests {
 
         agent.request_mermaid_render(huge, MermaidClickAction::CopyPath);
         assert!(
-            agent.mermaid_needs_tick(),
+            agent.mermaid_has_live_motion(),
             "even a doomed render is dispatched + pending first",
         );
-        pump_until(&mut agent, |a| !a.mermaid_needs_tick());
+        pump_until(&mut agent, |a| !a.mermaid_has_live_motion());
         assert_eq!(
             toast_of(&agent),
             "Could not render diagram",

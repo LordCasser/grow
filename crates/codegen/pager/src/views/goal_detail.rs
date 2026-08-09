@@ -288,14 +288,14 @@ fn humanize_goal_event(event: &str, detail: Option<&str>) -> String {
 /// Render a wire RFC3339 event timestamp as a coarse relative time
 /// ("2m ago"). Empty stays empty; an unparseable value (legacy / non-RFC3339)
 /// is returned verbatim (control-stripped, since it's a raw passthrough).
-fn humanize_event_timestamp(ts: &str) -> String {
+fn humanize_event_timestamp(ts: &str, wall_now: std::time::SystemTime) -> String {
     if ts.is_empty() {
         return String::new();
     }
     let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else {
         return strip_control_chars(ts, false);
     };
-    let secs = chrono::Utc::now()
+    let secs = chrono::DateTime::<chrono::Utc>::from(wall_now)
         .signed_duration_since(dt.with_timezone(&chrono::Utc))
         .num_seconds()
         .max(0) as u64;
@@ -870,8 +870,10 @@ pub fn render_goal_detail(
             // raw wire vocabulary. The timestamp renders first (left gutter),
             // then the humanized label — matching the span order below.
             let label = humanize_goal_event(event, goal.last_event_detail.as_deref());
-            let ts_display =
-                humanize_event_timestamp(goal.last_event_timestamp.as_deref().unwrap_or(""));
+            let ts_display = humanize_event_timestamp(
+                goal.last_event_timestamp.as_deref().unwrap_or(""),
+                frame_stamp.wall_now(),
+            );
             let prefix = if ts_display.is_empty() {
                 "  ".to_owned()
             } else {

@@ -246,7 +246,15 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // re-render). Not a mutation, so no redraw.
                         false
                     } else if let acp::SessionUpdate::Plan(plan) = notif.request.update {
-                        if !meta.is_replay {
+                        // A Plan update may still be useful to the transcript
+                        // after its turn stopped being foreground, but only
+                        // activity stamped with the active prompt identity may
+                        // re-arm the foreground watchdog.
+                        if !meta.is_replay
+                            && meta.prompt_id.as_ref().is_some_and(|prompt_id| {
+                                agent.session.current_prompt_id.as_ref() == Some(prompt_id)
+                            })
+                        {
                             agent.last_prompt_event_at = Some(observed_at);
                         }
                         let items: Vec<_> = plan
@@ -261,11 +269,11 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     } else if let acp::SessionUpdate::ToolCallUpdate(ref tcu) = notif.request.update
                         && route_bg_task_stdout(tcu, &mut agent.session)
                     {
-                        if !meta.is_replay {
-                            agent.last_prompt_event_at = Some(observed_at);
-                        }
                         // Stdout chunk for a bg task — routed to central store,
-                        // not to the scrollback tracker.
+                        // not to the scrollback tracker. A background task has
+                        // its own lifecycle and must never keep the foreground
+                        // prompt's watchdog alive, even when it inherited the
+                        // same prompt id before being backgrounded.
                         advance_reconnect_cursor(agent, &mut meta);
                         !meta.is_replay && !agent.session.loading_replay
                     } else if !meta.is_replay

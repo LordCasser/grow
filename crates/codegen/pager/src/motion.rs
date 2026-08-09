@@ -4,25 +4,32 @@
 //! phase from that sample.  Motion never owns lifecycle state and event rates
 //! (ACP chunks, task completions, input) never advance an animation.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The shared monotonic time sample for one rendered frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameStamp {
     now: Instant,
+    wall_now: SystemTime,
     elapsed: Duration,
 }
 
 impl FrameStamp {
     /// Capture a frame relative to the application's stable motion origin.
     pub fn capture(origin: Instant) -> Self {
-        Self::at(origin, Instant::now())
+        let now = Instant::now();
+        Self {
+            now,
+            wall_now: SystemTime::now(),
+            elapsed: now.saturating_duration_since(origin),
+        }
     }
 
     /// Construct a deterministic frame sample.
     pub fn at(origin: Instant, now: Instant) -> Self {
         Self {
             now,
+            wall_now: UNIX_EPOCH + now.saturating_duration_since(origin),
             elapsed: now.saturating_duration_since(origin),
         }
     }
@@ -33,6 +40,10 @@ impl FrameStamp {
 
     pub fn elapsed(self) -> Duration {
         self.elapsed
+    }
+
+    pub fn wall_now(self) -> SystemTime {
+        self.wall_now
     }
 
     /// Quantize monotonic time into fixed-duration samples.
@@ -46,23 +57,22 @@ impl FrameStamp {
 impl Default for FrameStamp {
     fn default() -> Self {
         let now = Instant::now();
-        Self::at(now, now)
+        Self {
+            now,
+            wall_now: SystemTime::now(),
+            elapsed: Duration::ZERO,
+        }
     }
 }
 
 /// Stable semantic cadences.  The configured FPS only controls how often
 /// these phases are sampled; changing FPS must not change their speed.
-pub const BASE_SAMPLE: Duration = Duration::from_millis(33);
 pub const SPINNER_FRAME: Duration = Duration::from_millis(132);
 pub const TITLE_SPINNER_FRAME: Duration = Duration::from_millis(264);
 pub const AMBIENT_PULSE_FRAME: Duration = Duration::from_millis(264);
 pub const USER_WAITING_PULSE_PERIOD: Duration = Duration::from_millis(1_309);
 pub const ACTION_REQUIRED_HALF_CYCLE: Duration = Duration::from_millis(500);
 pub const SLOW_FRAME_INTERVAL: Duration = Duration::from_millis(83);
-
-pub fn base_tick(frame: FrameStamp) -> u64 {
-    frame.sample(BASE_SAMPLE)
-}
 
 pub fn spinner_index(frame: FrameStamp, len: usize) -> usize {
     phase_index(frame, SPINNER_FRAME, len)
@@ -99,6 +109,20 @@ pub fn pulse01(frame: FrameStamp, period: Duration) -> f32 {
     debug_assert!(!period.is_zero());
     let phase = frame.elapsed().as_secs_f64() / period.as_secs_f64();
     (std::f64::consts::PI * phase).sin().powi(2) as f32
+}
+
+/// A traveling sin² wave whose temporal speed is independent from redraw FPS.
+pub fn spatial_wave01(frame: FrameStamp, row: u16, rows_per_cycle: u16, period: Duration) -> f32 {
+    debug_assert!(!period.is_zero());
+    let spatial_phase = row as f64 / rows_per_cycle.max(1) as f64 * std::f64::consts::TAU;
+    // sin² completes one visual cycle over PI radians.
+    let temporal_phase =
+        frame.elapsed().as_secs_f64() / period.as_secs_f64() * std::f64::consts::PI;
+    (temporal_phase + spatial_phase).sin().powi(2) as f32
+}
+
+pub fn half_cycle_visible(frame: FrameStamp, half_cycle: Duration) -> bool {
+    frame.sample(half_cycle).is_multiple_of(2)
 }
 
 pub fn phase_index(frame: FrameStamp, period: Duration, len: usize) -> usize {
@@ -180,6 +204,14 @@ mod tests {
             "spinner_frames[",
             "advance_animation_tick",
             "TickDemand",
+            "base_tick",
+            "motion_tick",
+            ".with_tick(",
+            "wave_brightness",
+            "pulse_brightness",
+            "mermaid_tick",
+            "edit_hl_tick",
+            "edit_hl_needs_tick",
         ];
 
         fn visit(dir: &std::path::Path, forbidden: &[&str]) {
@@ -195,9 +227,13 @@ mod tests {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("read Rust source");
+                // Glyph modules legitimately index their own tables in unit
+                // tests.  The architectural constraint applies to production
+                // renderers, not assertions below their test boundary.
+                let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
                 for needle in forbidden {
                     assert!(
-                        !source.contains(needle),
+                        !production.contains(needle),
                         "{} bypasses the shared motion API with {needle:?}",
                         path.display()
                     );
@@ -208,5 +244,6 @@ mod tests {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         visit(&manifest.join("src"), &forbidden);
         visit(&manifest.join("../pager-minimal/src"), &forbidden);
+        visit(&manifest.join("../pager-render/src"), &forbidden);
     }
 }

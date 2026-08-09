@@ -316,7 +316,21 @@ fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
 
 /// Prepare encoded image bytes for the currently detected overlay protocol.
 pub fn prepare_overlay_image_bytes(image_data: &[u8]) -> Option<Vec<u8>> {
-    match detect_graphics_protocol() {
+    prepare_overlay_image_bytes_for_protocol(image_data, detect_graphics_protocol())
+}
+
+/// Prepare encoded image bytes for an explicitly captured overlay protocol.
+///
+/// Background workers must receive this value from the UI thread instead of
+/// re-detecting ambient terminal state. Besides making the worker deterministic,
+/// this preserves thread-local test overrides and fixes ownership: terminal
+/// capability belongs to the requesting view, not whichever thread decodes the
+/// file.
+pub fn prepare_overlay_image_bytes_for_protocol(
+    image_data: &[u8],
+    protocol: GraphicsProtocol,
+) -> Option<Vec<u8>> {
+    match protocol {
         GraphicsProtocol::Kitty => prepare_kitty_overlay_image_bytes(image_data),
         GraphicsProtocol::ITerm2 => Some(image_data.to_vec()),
         GraphicsProtocol::None => None,

@@ -237,7 +237,7 @@ impl AgentView {
         })
     }
     /// Enqueue `query` for the background scan. Results (and the reveal) arrive
-    /// later via [`poll_scrollback_search`](Self::poll_scrollback_search); the
+    /// later through the async-view completion reducer; the
     /// highlight updates immediately because it reads the UI-side matcher.
     fn set_scrollback_search_query(&mut self, query: &str) {
         if let Some(search) = self.scrollback_search.as_mut() {

@@ -5,7 +5,8 @@
 //! - The UI thread sends queries via a channel (`set_query`) — never blocks.
 //! - The background thread scores items, computes indices, writes results
 //!   to `Arc<Mutex<…>>`.
-//! - The UI thread polls results on each tick via `poll()`.
+//! - The worker publishes a snapshot and wakes the pager; the UI reducer then
+//!   applies it via `poll()` exactly when completion is signaled.
 
 use std::sync::{
     Arc, Mutex,
@@ -142,6 +143,7 @@ impl Daemon {
                     }
                     Msg::Stop => break,
                 }
+                crate::async_view::wake();
             }
         };
         let handle = thread::Builder::new()
@@ -281,8 +283,8 @@ impl Drop for Daemon {
 /// UI-side state for the history search overlay.
 ///
 /// The UI thread never runs nucleo. All matching happens on the daemon
-/// thread. The UI sends queries via `update_query()` and polls results
-/// via `poll()`, exactly like `FuzzyFileMatcherDaemon`.
+/// thread. The UI sends queries via `update_query()` and applies signaled
+/// snapshots via `poll()`, exactly like `FuzzyFileMatcherDaemon`.
 pub struct HistorySearchState {
     active: bool,
     saved_text: String,
@@ -413,8 +415,7 @@ impl HistorySearchState {
         let _ = self.daemon.tx.send(Msg::SetQuery(query.to_string()));
     }
 
-    /// Poll for new results from the daemon. Returns `true` if changed.
-    /// Call on every tick while the overlay is active.
+    /// Apply a signaled result snapshot. Returns `true` if changed.
     pub fn poll(&mut self) -> bool {
         if !self.active {
             return false;

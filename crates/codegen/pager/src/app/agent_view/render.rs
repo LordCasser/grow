@@ -467,7 +467,7 @@ impl AgentView {
         let raw_description = info.map(|s| s.description.as_ref()).unwrap_or("subagent");
         let is_running = info.is_some_and(|s| s.is_running());
         let elapsed = info
-            .map(|s| crate::util::format_duration(s.display_elapsed()))
+            .map(|s| crate::util::format_duration(s.display_elapsed_at(frame_stamp.now())))
             .unwrap_or_default();
         let (type_label, description): (String, String) = match info {
             Some(s) => format_subagent_label(s),
@@ -715,8 +715,8 @@ impl AgentView {
             esc_owned_before_agent,
             frame: frame_stamp,
         } = app_params;
-        let motion_tick = crate::motion::base_tick(frame_stamp);
         self.scrollback.begin_frame();
+        self.inline_media_loading_visible = false;
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
@@ -801,12 +801,11 @@ impl AgentView {
             .unwrap_or_else(|| "unknown".to_string());
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         let effective_behavior = self.behavior_mode_pending.unwrap_or(self.behavior_mode);
+        // Expiration is reduced by AppView's UI deadline clock. Rendering is
+        // read-only with respect to lifecycle and transient input state.
         let leader_active = self
-            .leader_key_started_at
-            .is_some_and(|started| started.elapsed() <= super::input::LEADER_KEY_TIMEOUT);
-        if self.leader_key_started_at.is_some() && !leader_active {
-            self.leader_key_started_at = None;
-        }
+            .leader_key_deadline()
+            .is_some_and(|deadline| frame_stamp.now() < deadline);
         let casual_commenting = self.is_casual_commenting();
         let prompt_focused = if self.plan_approval_view.is_some() {
             self.plan_approval_view
@@ -1100,13 +1099,14 @@ impl AgentView {
             .filter(|p| p.kind == crate::app::agent::QueueEntryKind::Cron)
             .filter_map(|p| p.task_id.as_deref())
             .collect();
-        self.tasks.sync(
+        self.tasks.sync_at(
             &self.session.bg_tasks,
             &self.subagent_sessions,
             &self.session.scheduled_tasks,
             self.cron_task_id.as_deref(),
             &queued_cron_ids,
             &self.workflow_runs,
+            frame_stamp,
         );
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
             self.active_pane = ActivePane::Scrollback;
@@ -1555,7 +1555,7 @@ impl AgentView {
             self.ensure_media_link_paths();
             let sb_rendered = crate::scrollback::ScrollbackPane::new()
                 .active(sb_focused)
-                .with_motion_tick(motion_tick)
+                .with_frame(frame_stamp)
                 .with_mouse_pos(self.last_mouse_pos)
                 .with_dim_from(rewind_dim_from)
                 .with_hovered_entry(self.hovered_entry)
@@ -3984,8 +3984,11 @@ impl AgentView {
                 if !crate::terminal::image::scrollback_inline_overlay_active() {
                     continue;
                 }
-                if !self.inline_media_cache.contains_key(path) && placement.screen_rect.height >= 1
-                {
+                if !self.inline_media_cache.contains_key(path) {
+                    self.request_inline_media_load(path);
+                }
+                if self.inline_media_pending.contains(path) && placement.screen_rect.height >= 1 {
+                    self.inline_media_loading_visible = true;
                     let rect = placement.screen_rect;
                     let center_x = |len: usize| rect.x + rect.width.saturating_sub(len as u16) / 2;
                     let spinner_frames = crate::glyphs::braille_spinner_frames();
@@ -3998,6 +4001,14 @@ impl AgentView {
                         &label,
                         Style::default().fg(theme.gray_dim),
                     );
+                } else if self.inline_media_failed.contains(path)
+                    && placement.screen_rect.height >= 1
+                {
+                    let label = "Preview unavailable";
+                    let rect = placement.screen_rect;
+                    let x = rect.x + rect.width.saturating_sub(label.len() as u16) / 2;
+                    let y = rect.y + rect.height / 2;
+                    buf.set_string_safe(x, y, label, Style::default().fg(theme.gray_dim));
                 }
                 if let Some(esc) = self.build_inline_media_escapes(placement) {
                     all_escapes.push_str(&esc);
@@ -4158,7 +4169,9 @@ impl AgentView {
                         crate::views::workflows::WorkflowAgentLiveStatus {
                             activity: info.activity_label.clone(),
                             tokens_used: info.tokens_used,
-                            elapsed_ms: Some(info.display_elapsed().as_millis() as u64),
+                            elapsed_ms: Some(
+                                info.display_elapsed_at(frame_stamp.now()).as_millis() as u64,
+                            ),
                         },
                     )
                 })

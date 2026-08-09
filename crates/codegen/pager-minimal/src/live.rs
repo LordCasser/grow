@@ -178,7 +178,6 @@ pub fn draw_live(
                 .min(area.height.saturating_sub(status_h))
                 .max(1);
             let tail_h = area.height.saturating_sub(status_h + modal_h);
-            let tick = pager::motion::base_tick(frame_stamp);
             if tail_h > 0 {
                 let turn_running = agent.session.state.is_turn_running();
                 draw_tail(
@@ -194,7 +193,7 @@ pub fn draw_live(
                     &theme,
                     &commit_app,
                     &agent.session.cwd,
-                    tick,
+                    frame_stamp,
                 );
             }
             render_minimal_status(
@@ -266,7 +265,6 @@ pub fn draw_live(
         let todos_h = (todo_lines.len() as u16).min(after_btw);
         let btw_h = btw_desired;
         let tail_h = rest.saturating_sub(todos_h + btw_h);
-        let tick = pager::motion::base_tick(frame_stamp);
         if tail_h > 0 {
             let tail_area = Rect {
                 x: area.x,
@@ -283,7 +281,7 @@ pub fn draw_live(
                 &theme,
                 &commit_app,
                 &agent.session.cwd,
-                tick,
+                frame_stamp,
             );
         }
         if todos_h > 0 {
@@ -399,9 +397,9 @@ fn live_tail_renderer<'a>(
     theme: &'a Theme,
     appearance: &pager::appearance::AppearanceConfig,
     cwd: &'a std::path::Path,
-    tick: u64,
+    frame: pager::motion::FrameStamp,
 ) -> EntryRenderer<'a> {
-    super::commit::minimal_renderer(entry, theme, appearance.clone(), cwd, tick)
+    super::commit::minimal_renderer(entry, theme, appearance.clone(), cwd, frame)
 }
 /// Render the uncommitted tail (entries past the commit frontier), bottom-anchored
 /// so the most recent output is always visible; the topmost visible entry is
@@ -419,13 +417,13 @@ fn draw_tail(
     theme: &Theme,
     appearance: &pager::appearance::AppearanceConfig,
     cwd: &std::path::Path,
-    tick: u64,
+    frame: pager::motion::FrameStamp,
 ) {
     if area.height == 0 {
         return;
     }
     let width = area.width;
-    let renderer = |e| live_tail_renderer(e, theme, appearance, cwd, tick);
+    let renderer = |e| live_tail_renderer(e, theme, appearance, cwd, frame);
     let mut entries = Vec::new();
     let mut i = super::commit::scan_frontier(sb, turn_running).tail_start;
     while let Some(e) = sb.get(i) {
@@ -733,8 +731,14 @@ pub(super) fn tail_height(
     let mut i = super::commit::scan_frontier(sb, turn_running).tail_start;
     let mut total = 0u16;
     while let Some(e) = sb.get(i) {
-        let h =
-            live_tail_renderer(e, &theme, appearance, &agent.session.cwd, 0).desired_height(width);
+        let h = live_tail_renderer(
+            e,
+            &theme,
+            appearance,
+            &agent.session.cwd,
+            pager::motion::FrameStamp::default(),
+        )
+        .desired_height(width);
         total = total.saturating_add(h).saturating_add(gap);
         i += 1;
     }
@@ -783,12 +787,18 @@ mod tests {
         let entry = agent.scrollback.get(0).unwrap();
         let (width, painted_height, visible_accent_height) = (10..=40)
             .find_map(|width| {
-                let painted =
-                    live_tail_renderer(entry, &theme, &appearance, &cwd, 0).desired_height(width);
+                let painted = live_tail_renderer(
+                    entry,
+                    &theme,
+                    &appearance,
+                    &cwd,
+                    pager::motion::FrameStamp::default(),
+                )
+                .desired_height(width);
                 let visible_accent = EntryRenderer::new(entry, &theme)
                     .with_appearance(appearance.clone())
                     .with_cwd(Some(&cwd))
-                    .with_tick(0)
+                    .with_frame(pager::motion::FrameStamp::default())
                     .with_flat_background(true)
                     .desired_height(width);
                 (painted != visible_accent).then_some((width, painted, visible_accent))
@@ -821,14 +831,23 @@ mod tests {
         ] {
             let entry = ScrollbackEntry::new(block);
             for width in [20u16, 40, 80, 120] {
-                let live =
-                    live_tail_renderer(&entry, &theme, &appearance, &cwd, 7).desired_height(width);
+                let live = live_tail_renderer(
+                    &entry,
+                    &theme,
+                    &appearance,
+                    &cwd,
+                    pager::motion::FrameStamp::at(
+                        std::time::Instant::now(),
+                        std::time::Instant::now() + std::time::Duration::from_millis(231),
+                    ),
+                )
+                .desired_height(width);
                 let committed = live_tail_renderer(
                     &entry,
                     &theme,
                     &appearance,
                     &cwd,
-                    super::super::commit::COMMITTED_TICK,
+                    super::super::commit::committed_frame(),
                 )
                 .desired_height(width);
                 assert_eq!(

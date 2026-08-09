@@ -157,6 +157,30 @@ async fn spinner_reappears_after_wait_resumes() {
         harness.screen_contents()
     );
 
+    // Sample terminal cells rather than trusting the elapsed timer: the
+    // regression advanced time while the actual spinner glyph stayed frozen.
+    // The paced continuation leaves several seconds for at least two 132ms
+    // motion phases to become visible through the real presenter/writer path.
+    let spinner_frames = [
+        '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}',
+        '\u{2827}',
+    ];
+    let mut observed = std::collections::HashSet::new();
+    for _ in 0..12 {
+        harness.update(Duration::from_millis(90));
+        observed.extend(
+            harness
+                .screen_contents()
+                .chars()
+                .filter(|ch| spinner_frames.contains(ch)),
+        );
+    }
+    assert!(
+        observed.len() >= 2,
+        "running spinner must change glyph while the same turn streams; observed={observed:?}\nscreen:\n{}",
+        harness.screen_contents()
+    );
+
     // No new "❯ " block appeared: the resume continues the SAME turn.
     assert!(
         !harness.contains_text("\u{276F} RESUMED_STREAM"),

@@ -5,10 +5,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
+use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 use super::layout::{MIN_DASHBOARD_WIDTH, compute_layout};
-use super::row::{DashboardRow, RowBadge, build_rows_with_roster};
+use super::row::{DashboardRow, RowBadge, build_rows_with_roster_at};
 use super::state::{
     DashboardRowId, DashboardState, Filter, Focusable, Grouping, LocationPickerState, RenameDraft,
     RowState, SectionKey,
@@ -19,9 +20,8 @@ use crate::render::line_utils::{truncate_line, truncate_str};
 use crate::theme::Theme;
 use crate::util::format_time_ago;
 
-/// How many ticks each phase of the `NeedsInput` bullet blink lasts. At the
-/// ~30 Hz dashboard tick this toggles roughly every 0.33 s (≈1.5 Hz blink).
-const NEEDS_INPUT_BLINK_DIVISOR: u64 = 10;
+/// The `NeedsInput` bullet's wall-clock half cycle.
+const NEEDS_INPUT_BLINK_HALF_CYCLE: Duration = Duration::from_millis(330);
 
 // Row markers use the filled (◆) / hollow (◇) diamonds from `crate::glyphs`
 // (with CP437 fallbacks on legacy consoles). The dashboard uses
@@ -136,7 +136,7 @@ pub fn render_dashboard(
     // comparators that want to know what view the user came from (None
     // in fresh dashboard renders).
     let active: Option<AgentId> = None;
-    let rows = build_rows_with_roster(
+    let rows = build_rows_with_roster_at(
         agents,
         &state.pinned,
         &state.reorder,
@@ -145,6 +145,8 @@ pub fn render_dashboard(
         &state.filter,
         home,
         roster,
+        state.motion_frame.now(),
+        state.motion_frame.wall_now(),
     );
     state.reanchor_selection(&rows);
 
@@ -1297,6 +1299,26 @@ fn build_dashboard_lines<'a>(
     idle_show_all: bool,
     search_active: bool,
 ) -> Vec<DashboardLine<'a>> {
+    build_dashboard_lines_at(
+        rows,
+        grouping,
+        filter,
+        collapsed,
+        idle_show_all,
+        search_active,
+        std::time::SystemTime::now(),
+    )
+}
+
+fn build_dashboard_lines_at<'a>(
+    rows: &'a [DashboardRow],
+    grouping: Grouping,
+    filter: &Filter,
+    collapsed: &std::collections::HashSet<SectionKey>,
+    idle_show_all: bool,
+    search_active: bool,
+    now: std::time::SystemTime,
+) -> Vec<DashboardLine<'a>> {
     let groups_on = matches!(grouping, Grouping::State);
     let emit_state_headers = groups_on && !matches!(filter, Filter::State(_));
 
@@ -1365,7 +1387,6 @@ fn build_dashboard_lines<'a>(
     // the filter to `None` (the live query rebuilds it per keystroke), so
     // an empty search query would otherwise leave old idle agents folded.
     let idle_cap_active = matches!(filter, Filter::None) && !search_active;
-    let now = std::time::SystemTime::now();
     let mut idle_limit: Option<usize> = None;
     let mut idle_top_seen = 0usize;
     let mut idle_capping = false;
@@ -1452,7 +1473,7 @@ pub const MAX_VISIBLE_IDLE: usize = 8;
 /// Idle agents last active within this window are never folded, even
 /// beyond [`MAX_VISIBLE_IDLE`] — a burst of fresh sessions stays visible
 /// (the count cap only hides genuinely *old* idle agents).
-const IDLE_FRESHNESS: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+pub(crate) const IDLE_FRESHNESS: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// Don't fold fewer than this many rows: a "1 older" overflow row costs
 /// the same vertical space as the single row it would hide.
@@ -1465,6 +1486,52 @@ fn idle_row_is_recent(row: &DashboardRow, now: std::time::SystemTime) -> bool {
     now.duration_since(row.last_change_at)
         .map(|age| age < IDLE_FRESHNESS)
         .unwrap_or(true)
+}
+
+/// Earliest transition for a row the dashboard actually paints. Collapsed and
+/// overflow-hidden rows do not wake the UI clock; reopening them recomputes the
+/// deadline from current wall time.
+pub(crate) fn next_wall_clock_deadline(
+    state: &DashboardState,
+    agents: &indexmap::IndexMap<AgentId, AgentView>,
+    roster: &[crate::app::roster::RosterEntry],
+    now: std::time::Instant,
+    wall_now: std::time::SystemTime,
+) -> Option<std::time::Instant> {
+    let rows = build_rows_with_roster_at(
+        agents,
+        &state.pinned,
+        &state.reorder,
+        None,
+        state.grouping,
+        &state.filter,
+        cached_home(),
+        roster,
+        now,
+        wall_now,
+    );
+    build_dashboard_lines_at(
+        &rows,
+        state.grouping,
+        &state.filter,
+        &state.collapsed_sections,
+        state.idle_show_all,
+        state.search_mode,
+        wall_now,
+    )
+    .into_iter()
+    .filter_map(|line| {
+        let DashboardLine::Row(row) = line else {
+            return None;
+        };
+        let age = wall_now.duration_since(row.last_change_at).ok()?;
+        let mut remaining = crate::util::time_until_time_ago_change(age);
+        if row.state == RowState::Idle && age < IDLE_FRESHNESS {
+            remaining = remaining.min(IDLE_FRESHNESS - age);
+        }
+        Some(now + remaining.max(std::time::Duration::from_millis(1)))
+    })
+    .min()
 }
 
 /// Ordered, display-order list of keyboard cursor targets — section
@@ -1552,13 +1619,14 @@ fn render_rows(
     // rows can't peek out at the top / bottom of the list. The
     // clamp helper still operates in "1 unit = 1 cell" — we just
     // pass cell offsets instead of line indices.
-    let lines = build_dashboard_lines(
+    let lines = build_dashboard_lines_at(
         rows,
         state.grouping,
         &state.filter,
         &state.collapsed_sections,
         state.idle_show_all,
         state.search_mode,
+        state.motion_frame.wall_now(),
     );
     let heights: Vec<u16> = lines
         .iter()
@@ -2184,7 +2252,7 @@ fn render_row(
     // `NeedsInput` bullets blink yellow ↔ dim yellow; every other state uses
     // its steady state colour.
     let icon_color = if row.state == RowState::NeedsInput {
-        needs_input_bullet_color(crate::motion::base_tick(state.motion_frame), theme)
+        needs_input_bullet_color(state.motion_frame, theme)
     } else {
         state_color(row.state, theme)
     };
@@ -2288,14 +2356,20 @@ fn render_row(
         Style::default().bg(bg).fg(icon_color),
     );
 
-    let armed_delete = state.armed_delete_row_ref();
+    let armed_delete = state.armed_delete_row_ref_at(state.motion_frame.now());
     let show_delete = !row.is_more_placeholder
         && !row.id.is_subagent()
         && row.state.allows_delete()
         && (state.hovered_row.as_ref() == Some(&row.id) || armed_delete == Some(&row.id));
     let delete_label = crate::glyphs::ballot_x_button();
     let delete_w = UnicodeWidthStr::width(delete_label) as u16;
-    let age = format_time_ago(row.last_change_at.elapsed().unwrap_or_default());
+    let age = format_time_ago(
+        state
+            .motion_frame
+            .wall_now()
+            .duration_since(row.last_change_at)
+            .unwrap_or_default(),
+    );
     let age_str = format!("{age:>6}");
     let age_w = UnicodeWidthStr::width(age_str.as_str()) as u16;
     let right_w = if show_delete { delete_w } else { age_w };
@@ -2495,13 +2569,14 @@ fn render_narrow_rows(
     // form would push too many rows off-screen on a 40-col terminal).
     // We still emit group headers and the selection marker so the
     // visual vocabulary stays consistent.
-    let lines = build_dashboard_lines(
+    let lines = build_dashboard_lines_at(
         rows,
         state.grouping,
         &state.filter,
         &state.collapsed_sections,
         state.idle_show_all,
         state.search_mode,
+        state.motion_frame.wall_now(),
     );
     let viewport_h = area.height as usize;
     // The clamp follows whichever cursor is active — a row OR a section
@@ -2646,7 +2721,8 @@ fn render_narrow_rows(
             let indent_w = UnicodeWidthStr::width(indent.as_str()) as u16;
             let gap_after_marker = 1u16;
             let chrome = marker_w + gap_after_marker + indent_w + icon_w + 1;
-            let armed_here = state.armed_delete_row_ref() == Some(&row.id);
+            let armed_here =
+                state.armed_delete_row_ref_at(state.motion_frame.now()) == Some(&row.id);
             let show_delete = !row.is_more_placeholder
                 && !row.id.is_subagent()
                 && row.state.allows_delete()
@@ -3384,7 +3460,10 @@ fn render_footer(
     // A live delete-confirm owns the footer: `y`/`n` when the list is
     // focused, else the second-`Ctrl+X` "press again" hint. An expired arm
     // falls through to the normal hints.
-    if state.armed_delete_row_ref().is_some() {
+    if state
+        .armed_delete_row_ref_at(state.motion_frame.now())
+        .is_some()
+    {
         if state.list_focused {
             let hints = vec![
                 HintItem::new(key!('y'), "confirm delete"),
@@ -3763,8 +3842,8 @@ fn state_color(state: RowState, theme: &Theme) -> Color {
 /// (`warning`) and a dimmed yellow so an agent awaiting input draws the eye.
 /// On non-truecolor terminals the dim blend falls back to the full colour
 /// (the blink is invisible but the bullet stays yellow).
-fn needs_input_bullet_color(tick: u64, theme: &Theme) -> Color {
-    let bright = (tick / NEEDS_INPUT_BLINK_DIVISOR).is_multiple_of(2);
+fn needs_input_bullet_color(frame: crate::motion::FrameStamp, theme: &Theme) -> Color {
+    let bright = crate::motion::half_cycle_visible(frame, NEEDS_INPUT_BLINK_HALF_CYCLE);
     if bright {
         theme.warning
     } else {
@@ -4336,31 +4415,28 @@ mod tests {
     use crate::views::dashboard::DashboardRowId;
     use crate::views::dashboard::state::DashboardState;
 
-    fn frame_at_tick(tick: u64) -> crate::motion::FrameStamp {
+    fn frame_after(elapsed: Duration) -> crate::motion::FrameStamp {
         let origin = std::time::Instant::now();
-        crate::motion::FrameStamp::at(
-            origin,
-            origin + crate::motion::BASE_SAMPLE * u32::try_from(tick).unwrap(),
-        )
+        crate::motion::FrameStamp::at(origin, origin + elapsed)
     }
 
     /// Spinner glyph stays stable for four base samples
     /// successive ticks before advancing.
     #[test]
     fn state_icon_spinner_advances_every_n_ticks() {
-        let g0 = state_icon(RowState::Working, frame_at_tick(0));
-        // Same glyph for divisor-1 more ticks.
-        for t in 1..4 {
-            assert_eq!(state_icon(RowState::Working, frame_at_tick(t)), g0);
-        }
-        let g1 = state_icon(RowState::Working, frame_at_tick(4));
-        assert_ne!(g1, g0, "spinner must advance after four samples");
+        let g0 = state_icon(RowState::Working, frame_after(Duration::ZERO));
+        assert_eq!(
+            state_icon(RowState::Working, frame_after(Duration::from_millis(131))),
+            g0
+        );
+        let g1 = state_icon(RowState::Working, frame_after(Duration::from_millis(132)));
+        assert_ne!(g1, g0, "spinner must advance at its semantic cadence");
     }
 
     /// Every `RowState` variant resolves to a glyph.
     #[test]
     fn state_icon_one_per_variant() {
-        let frame = frame_at_tick(0);
+        let frame = frame_after(Duration::ZERO);
         assert!(!state_icon(RowState::Working, frame).is_empty());
         assert!(!state_icon(RowState::NeedsInput, frame).is_empty());
         assert!(!state_icon(RowState::Idle, frame).is_empty());
@@ -4538,7 +4614,7 @@ mod tests {
         use std::time::SystemTime;
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 32));
         let mut state = DashboardState::new();
-        state.motion_frame = frame_at_tick(8);
+        state.motion_frame = frame_after(Duration::from_millis(264));
         let theme = Theme::current();
         let now = SystemTime::now();
         let rows = vec![
@@ -6749,7 +6825,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.motion_frame = frame_at_tick(8);
+        state.motion_frame = frame_after(Duration::from_millis(264));
         let row = DashboardRow {
             id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
             label: "who are you?".to_string(),
@@ -6919,10 +6995,10 @@ mod tests {
             is_more_placeholder: false,
             more_count: 0,
         };
-        let render = |tick: u64| {
+        let render = |elapsed: Duration| {
             let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
             let mut state = DashboardState::new();
-            state.motion_frame = frame_at_tick(tick);
+            state.motion_frame = frame_after(elapsed);
             render_row(
                 &mut buf,
                 Rect::new(0, 0, 100, 2),
@@ -6934,7 +7010,7 @@ mod tests {
         };
 
         // Bright phase (tick 0): the bullet is full yellow.
-        let bright = render(0);
+        let bright = render(Duration::ZERO);
         assert_eq!(
             bright[(2, 0)].symbol(),
             crate::glyphs::diamond_filled(),
@@ -6972,7 +7048,7 @@ mod tests {
         // The dim blink phase fades the bullet (only assertable when the
         // theme supports blending; non-truecolor falls back to full yellow).
         if crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5).is_some() {
-            let dim = render(NEEDS_INPUT_BLINK_DIVISOR);
+            let dim = render(NEEDS_INPUT_BLINK_HALF_CYCLE);
             assert_ne!(
                 dim[(2, 0)].fg,
                 theme.warning,

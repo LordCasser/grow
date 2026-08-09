@@ -1942,7 +1942,7 @@ impl AgentView {
                 use crate::app::app_view::filter_session_entries;
                 use crate::views::picker::PickerField;
                 use crate::views::session_picker::{
-                    build_content_entry_data, build_content_header_label,
+                    build_content_entry_data_at, build_content_header_label,
                 };
                 // While a delete confirmation is armed, the footer swaps to a
                 // "y confirm / n cancel" prompt. Otherwise show the normal
@@ -2048,11 +2048,13 @@ impl AgentView {
                     );
                     let entries_data = entries.as_deref().unwrap_or(&[]);
                     let filtered_indices = filter_session_entries(entries.as_deref(), filter_query);
-                    let built = crate::views::session_picker::build_session_entry_data(
+                    let picker_now = chrono::DateTime::<chrono::Utc>::from(frame_stamp.wall_now());
+                    let built = crate::views::session_picker::build_session_entry_data_at(
                         entries_data,
                         &filtered_indices,
                         state,
                         content_area.width,
+                        picker_now,
                     );
                     let fields_vecs: Vec<Vec<PickerField>> = built
                         .iter()
@@ -2081,12 +2083,13 @@ impl AgentView {
                     let content_entry_data = if let Some(hits) = content_results.as_deref()
                         && !filter_query.is_empty()
                     {
-                        build_content_entry_data(
+                        build_content_entry_data_at(
                             hits,
                             entries_data,
                             &filtered_indices,
                             state,
                             content_start,
+                            picker_now,
                         )
                     } else {
                         Vec::new()

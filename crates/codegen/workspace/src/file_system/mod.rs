@@ -187,7 +187,7 @@ impl FuzzySearchContext {
         target_client_id: TargetClientId,
     ) -> Self {
         let matcher = FuzzyFileMatcher::new(root);
-        let daemon = FuzzyFileMatcherDaemon::new(matcher, DEFAULT_TOP_K);
+        let daemon = FuzzyFileMatcherDaemon::new(matcher, DEFAULT_TOP_K, None);
         daemon.restart_walk(hidden);
 
         Self {

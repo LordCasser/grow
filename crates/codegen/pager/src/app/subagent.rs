@@ -97,6 +97,16 @@ impl SubagentInfo {
             self.elapsed()
         }
     }
+
+    pub fn display_elapsed_at(&self, now: Instant) -> std::time::Duration {
+        if self.finished {
+            self.duration_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or_else(|| now.saturating_duration_since(self.started_at))
+        } else {
+            now.saturating_duration_since(self.started_at)
+        }
+    }
 }
 /// Minimal pager-side view of the shell's on-disk `SubagentMeta`.
 #[derive(Debug, Deserialize)]

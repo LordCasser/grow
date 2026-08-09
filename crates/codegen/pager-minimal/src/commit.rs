@@ -270,10 +270,12 @@ pub(crate) fn committed_appearance(base: &AppearanceConfig) -> AppearanceConfig 
     a
 }
 
-pub(crate) const COMMITTED_TICK: u64 = 0;
+pub(crate) fn committed_frame() -> pager::motion::FrameStamp {
+    pager::motion::FrameStamp::default()
+}
 
 /// The renderer for one minimal-mode entry, on **either** side of the commit
-/// frontier — `tick` is the only difference. Chrome here decides a block's
+/// frontier — `frame` is the only difference. Chrome here decides a block's
 /// wrapped height, so both sides must agree or the prompt jumps on commit (K5);
 /// keeping it one constructor is what makes that unbreakable.
 ///
@@ -284,7 +286,7 @@ pub(crate) fn minimal_renderer<'a>(
     theme: &'a Theme,
     appearance: AppearanceConfig,
     cwd: &'a std::path::Path,
-    tick: u64,
+    frame: pager::motion::FrameStamp,
 ) -> EntryRenderer<'a> {
     // Reserved only where it is actually painted: `ThinkingBlock::accent`
     // returns `None` when collapsed, and reserving a column nothing paints
@@ -297,7 +299,7 @@ pub(crate) fn minimal_renderer<'a>(
     EntryRenderer::new(entry, theme)
         .with_appearance(appearance)
         .with_cwd(Some(cwd))
-        .with_tick(tick)
+        .with_frame(frame)
         .with_flat_background(true)
         .with_hide_accent(hide_accent)
         // The accent resolves to `Color::Reset` under the terminal-native
@@ -471,7 +473,7 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
             // place later (`get_by_id_mut` + edit, the `/recap` fill pattern)
             // will NOT reach the screen — append a fresh block instead (see
             // the `SessionRecap` handler in `acp_handler.rs`).
-            let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, COMMITTED_TICK);
+            let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, committed_frame());
             if insert_committed(terminal, renderer, width, max_rows, footer_style).is_err() {
                 return false;
             }
@@ -565,7 +567,8 @@ pub fn expand_pending(app: &mut AppView, terminal: &mut PagerTerminal) {
                 e.set_display_mode(DisplayMode::Expanded);
             }
             if let Some(e) = sb.get(idx) {
-                let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, COMMITTED_TICK);
+                let renderer =
+                    minimal_renderer(e, &theme, appearance.clone(), cwd, committed_frame());
                 if insert_committed(terminal, renderer, width, 0, footer_style).is_err() {
                     // Terminal write failed: keep this id and the rest queued
                     // so the request retries next frame instead of vanishing.

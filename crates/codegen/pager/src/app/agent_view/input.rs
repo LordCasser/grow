@@ -22,6 +22,25 @@ use crossterm::event::{
 use std::time::Instant;
 pub(super) const LEADER_KEY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+impl AgentView {
+    pub(crate) fn leader_key_deadline(&self) -> Option<Instant> {
+        self.leader_key_started_at
+            .map(|started| started + LEADER_KEY_TIMEOUT)
+    }
+
+    pub(crate) fn maintain_leader_key(&mut self, now: Instant) -> bool {
+        if self
+            .leader_key_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.leader_key_started_at = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn leader_continuation_matches(key: &crossterm::event::KeyEvent, expected: char) -> bool {
     matches!(key.code, KeyCode::Char(actual) if actual.eq_ignore_ascii_case(&expected))
         && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)

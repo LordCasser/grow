@@ -16,11 +16,10 @@ use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::entry::ScrollbackEntry;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::scrollback::types::{AccentStyle, BlockBackground, DisplayMode, Selectable};
-use crate::theme::{self, Theme};
+use crate::theme::Theme;
 
-/// Animation speed for running blocks (radians per tick).
-/// ~0.15 gives a nice smooth wave that travels the block in ~40 ticks.
-const WAVE_SPEED: f32 = 0.15;
+/// Preserve the former ~0.69s visual wave period without coupling it to FPS.
+const WAVE_PERIOD: std::time::Duration = std::time::Duration::from_millis(691);
 
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
@@ -29,7 +28,7 @@ pub struct EntryRenderer<'a> {
     /// reads `Theme::current()` and quantizes every color, and profiling a
     /// resize showed it running once per entry only to be overwritten.
     appearance: OnceCell<Cow<'a, AppearanceConfig>>,
-    tick: u64,
+    frame: crate::motion::FrameStamp,
     /// Number of rows to skip from the top of the entry.
     ///
     /// When non-zero, the renderer acts as if the entry starts `skip_rows`
@@ -88,7 +87,7 @@ impl<'a> EntryRenderer<'a> {
             entry,
             theme,
             appearance: OnceCell::new(),
-            tick: 0,
+            frame: crate::motion::FrameStamp::default(),
             skip_rows: 0,
             groupable: false,
             is_selected: false,
@@ -169,8 +168,8 @@ impl<'a> EntryRenderer<'a> {
             .get_or_init(|| Cow::Owned(AppearanceConfig::default()))
     }
 
-    pub fn with_tick(mut self, tick: u64) -> Self {
-        self.tick = tick;
+    pub fn with_frame(mut self, frame: crate::motion::FrameStamp) -> Self {
+        self.frame = frame;
         self
     }
 
@@ -269,11 +268,11 @@ impl<'a> EntryRenderer<'a> {
                 );
                 self.theme.accent_error
             } else if vg.running {
-                let brightness = theme::wave_brightness(
-                    self.tick,
+                let brightness = crate::motion::spatial_wave01(
+                    self.frame,
                     self.skip_rows,
                     self.appearance().animation.wave_rows,
-                    WAVE_SPEED,
+                    WAVE_PERIOD,
                 );
                 let color = blend_color(bg, self.theme.accent_tool, brightness)
                     .unwrap_or(self.theme.accent_tool);
@@ -766,7 +765,8 @@ impl Renderable for EntryRenderer<'_> {
         // Check if this entry recently finished and should flash its accent.
         let recently_finished = !self.entry.is_running
             && self.entry.finished_at.is_some_and(|t| {
-                t.elapsed().as_millis() < crate::scrollback::state::FINISH_FLASH_DURATION_MS as u128
+                self.frame.now().saturating_duration_since(t).as_millis()
+                    < crate::scrollback::state::FINISH_FLASH_DURATION_MS as u128
             })
             && matches!(
                 self.entry.block,
@@ -826,8 +826,12 @@ impl Renderable for EntryRenderer<'_> {
                 for row in 0..accent_area.height {
                     let y = accent_area.y + row;
                     let logical_row = skip_rows + row;
-                    let brightness =
-                        theme::wave_brightness(self.tick, logical_row, wave_rows, WAVE_SPEED);
+                    let brightness = crate::motion::spatial_wave01(
+                        self.frame,
+                        logical_row,
+                        wave_rows,
+                        WAVE_PERIOD,
+                    );
                     let animated_color = blend_color(bg, color, brightness).unwrap_or(color);
                     let style = self.accent_paint_style(animated_color);
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
@@ -995,7 +999,8 @@ impl Renderable for EntryRenderer<'_> {
                     // Animated bullet: wave effect synced with accent
                     let bg = bg_color.unwrap_or(self.fallback_bg());
                     let wave_rows = self.appearance().animation.wave_rows;
-                    let brightness = theme::wave_brightness(self.tick, 0, wave_rows, WAVE_SPEED);
+                    let brightness =
+                        crate::motion::spatial_wave01(self.frame, 0, wave_rows, WAVE_PERIOD);
                     let animated_color =
                         blend_color(bg, style.color, brightness).unwrap_or(style.color);
                     if let Some(cell) = buf.cell_mut((content_area.x, bullet_y)) {
@@ -1120,9 +1125,14 @@ mod tests {
 
         let area = Rect::new(0, 0, 60, 3);
         let mut first_fg: Option<ratatui::style::Color> = None;
-        for tick in [0u64, 13, 27, 41, 55] {
+        let origin = std::time::Instant::now();
+        for elapsed_ms in [0u64, 429, 891, 1_353, 1_815] {
             let mut buf = Buffer::empty(area);
-            let renderer = EntryRenderer::new(&entry, &theme).with_tick(tick);
+            let frame = crate::motion::FrameStamp::at(
+                origin,
+                origin + std::time::Duration::from_millis(elapsed_ms),
+            );
+            let renderer = EntryRenderer::new(&entry, &theme).with_frame(frame);
             renderer.render(area, &mut buf);
             // Default layout: accent(1) + left_pad(2) + content starts at 3.
             // Tool call header has no vpad, so bullet sits on row 0.
@@ -1130,13 +1140,13 @@ mod tests {
             assert_eq!(
                 cell.symbol(),
                 "◆",
-                "pending tool must keep the Diamond bullet at tick {tick}"
+                "pending tool must keep the Diamond bullet at {elapsed_ms}ms"
             );
             match first_fg {
                 None => first_fg = Some(cell.fg),
                 Some(prev) => assert_eq!(
                     cell.fg, prev,
-                    "pending bullet color must be static across ticks (tick {tick})"
+                    "pending bullet color must be static at {elapsed_ms}ms"
                 ),
             }
         }
@@ -1157,7 +1167,8 @@ mod tests {
 
         let area = Rect::new(0, 0, 60, 3);
         let mut buf = Buffer::empty(area);
-        let renderer = EntryRenderer::new(&entry, &theme).with_tick(7);
+        let renderer =
+            EntryRenderer::new(&entry, &theme).with_frame(crate::motion::FrameStamp::default());
         renderer.render(area, &mut buf);
 
         assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "◆");

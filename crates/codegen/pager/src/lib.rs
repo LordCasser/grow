@@ -5,6 +5,7 @@
 pub mod acp;
 pub mod actions;
 pub mod app;
+pub(crate) mod async_view;
 pub mod client_identity;
 pub mod completions_cmd;
 mod config_toml_edit;

@@ -742,6 +742,22 @@ pub fn build_session_entry_data(
     )
 }
 
+pub fn build_session_entry_data_at(
+    entries_data: &[SessionPickerEntry],
+    filtered_indices: &[usize],
+    state: &PickerState,
+    content_width: u16,
+    frame: crate::motion::FrameStamp,
+) -> Vec<SessionEntryData> {
+    crate::views::session_picker::build_session_entry_data_at(
+        entries_data,
+        filtered_indices,
+        state,
+        content_width,
+        chrono::DateTime::<chrono::Utc>::from(frame.wall_now()),
+    )
+}
+
 /// [`crate::views::session_picker::build_grouped_picker_entries`].
 pub fn build_grouped_picker_entries<'a>(
     entries_data: &'a [SessionPickerEntry],

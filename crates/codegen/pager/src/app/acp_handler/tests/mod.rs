@@ -768,6 +768,13 @@ pub(super) fn agent_message_text(view: &AgentView) -> String {
 }
 /// Build a `Plan` notification with one entry per `entries` string.
 pub(super) fn make_plan_message(session_id: &str, entries: &[&str]) -> AcpClientMessage {
+    make_plan_message_with_prompt(session_id, entries, None)
+}
+pub(super) fn make_plan_message_with_prompt(
+    session_id: &str,
+    entries: &[&str],
+    prompt_id: Option<&str>,
+) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
     let plan_entries = entries
         .iter()
@@ -777,10 +784,17 @@ pub(super) fn make_plan_message(session_id: &str, entries: &[&str]) -> AcpClient
             acp::PlanEntryStatus::Pending,
         ))
         .collect();
-    let request = acp::SessionNotification::new(
+    let mut request = acp::SessionNotification::new(
         acp::SessionId::new(session_id),
         acp::SessionUpdate::Plan(acp::Plan::new(plan_entries)),
     );
+    if let Some(prompt_id) = prompt_id {
+        request = request.meta(
+            serde_json::json!({ "promptId": prompt_id })
+                .as_object()
+                .cloned(),
+        );
+    }
     AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
         request,
         response_tx: tx,

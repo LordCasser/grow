@@ -90,7 +90,7 @@ impl NotificationService {
     /// Fire a one-shot terminal notification (bell/OSC popup).
     ///
     /// These escape sequences intentionally bypass the frame pipeline and
-    /// write directly to stderr.  Unlike per-tick title/progress updates,
+    /// write directly to stderr. Unlike per-frame title/progress updates,
     /// notifications are rare, one-shot events (turn complete, agent error)
     /// that must reach the terminal immediately — deferring them to the
     /// next draw frame would add up to 16ms latency for no user-visible
@@ -213,7 +213,7 @@ impl NotificationService {
     }
 
     #[cfg(test)]
-    fn on_tick(&mut self, state: &title::TitleState<'_>) -> Option<String> {
+    fn on_test_frame(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         self.on_frame(state, crate::motion::FrameStamp::default())
     }
 
@@ -582,7 +582,7 @@ mod tests {
             ..Default::default()
         });
         assert!(!svc.is_progress_active());
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         assert!(svc.is_progress_active());
     }
 
@@ -592,10 +592,10 @@ mod tests {
             progress_bar: true,
             ..Default::default()
         });
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         assert!(svc.is_progress_active());
 
-        svc.on_tick(&make_title_state(false));
+        svc.on_test_frame(&make_title_state(false));
         assert!(!svc.is_progress_active());
     }
 
@@ -606,9 +606,9 @@ mod tests {
             ..Default::default()
         });
         // Multiple busy ticks should not change the flag after the first.
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         assert!(svc.is_progress_active());
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         assert!(svc.is_progress_active());
     }
 
@@ -619,9 +619,9 @@ mod tests {
             ..Default::default()
         });
         // Multiple idle ticks: progress_active stays false.
-        svc.on_tick(&make_title_state(false));
+        svc.on_test_frame(&make_title_state(false));
         assert!(!svc.is_progress_active());
-        svc.on_tick(&make_title_state(false));
+        svc.on_test_frame(&make_title_state(false));
         assert!(!svc.is_progress_active());
     }
 
@@ -633,7 +633,7 @@ mod tests {
         });
 
         // Activate the progress bar.
-        let _result = svc.on_tick(&make_title_state(true));
+        let _result = svc.on_test_frame(&make_title_state(true));
         assert!(svc.is_progress_active());
         // First tick should produce output (the indeterminate sequence).
         // (build_progress_escape returns None for unsupported brands, but
@@ -642,13 +642,13 @@ mod tests {
         assert!(first_sent.is_some());
 
         // Immediately following ticks should NOT refresh (interval not elapsed).
-        let _result = svc.on_tick(&make_title_state(true));
+        let _result = svc.on_test_frame(&make_title_state(true));
         assert_eq!(svc.progress_last_sent, first_sent);
 
         // Simulate the keep-alive interval elapsing.
         svc.progress_last_sent =
             Some(Instant::now() - PROGRESS_KEEPALIVE - std::time::Duration::from_millis(1));
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         // After the interval, progress_last_sent should have been refreshed.
         assert!(svc.progress_last_sent.unwrap() > first_sent.unwrap());
     }
@@ -659,10 +659,10 @@ mod tests {
             progress_bar: true,
             ..Default::default()
         });
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         assert!(svc.progress_last_sent.is_some());
 
-        svc.on_tick(&make_title_state(false));
+        svc.on_test_frame(&make_title_state(false));
         assert!(!svc.is_progress_active());
         assert!(svc.progress_last_sent.is_none());
     }
@@ -673,7 +673,7 @@ mod tests {
             progress_bar: false,
             ..Default::default()
         });
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         assert!(!svc.is_progress_active());
     }
 
@@ -683,7 +683,7 @@ mod tests {
             progress_bar: true,
             ..Default::default()
         });
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         assert!(svc.is_progress_active());
 
         svc.shutdown();
@@ -698,7 +698,7 @@ mod tests {
         });
 
         // Activate progress bar.
-        svc.on_tick(&make_title_state(true));
+        svc.on_test_frame(&make_title_state(true));
         assert!(svc.is_progress_active());
         assert!(svc.progress_last_sent.is_some());
 

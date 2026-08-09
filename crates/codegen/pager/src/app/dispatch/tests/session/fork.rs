@@ -976,6 +976,11 @@ fn fork_session_ready_emits_load_session_with_new_id() {
         "new-sid-123"
     );
     assert!(app.agents[&AgentId(1)].session.loading_replay);
+    assert_eq!(
+        app.agents[&AgentId(1)].prompt.file_search.root(),
+        std::path::Path::new("/tmp/forked"),
+        "the fork's UI-derived file index must follow the adopted session cwd"
+    );
 }
 
 #[test]

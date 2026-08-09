@@ -542,6 +542,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         agent.scrollback.begin_batch();
         agent.begin_replay_window();
         agent.session.cwd = cwd.clone();
+        agent.prompt.file_search.retarget(&cwd);
         return vec![Effect::LoadSession {
             agent_id,
             session_id: session_id_str,

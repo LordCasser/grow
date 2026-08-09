@@ -1791,6 +1791,20 @@ impl Default for ExtensionsModalState {
 }
 
 impl ExtensionsModalState {
+    /// Whether the visible modal currently contains time-varying pixels.
+    pub fn has_live_motion(&self) -> bool {
+        let loading = match self.active_tab {
+            ExtensionsTab::Hooks => matches!(self.hooks_data, TabDataState::Loading),
+            ExtensionsTab::Plugins => matches!(self.plugins_data, TabDataState::Loading),
+            ExtensionsTab::Marketplace => {
+                matches!(self.marketplace_data, TabDataState::Loading)
+            }
+            ExtensionsTab::Skills => matches!(self.skills_data, TabDataState::Loading),
+            ExtensionsTab::McpServers => matches!(self.mcps_data, TabDataState::Loading),
+        };
+        loading || self.pending_action.is_some()
+    }
+
     /// Create a new modal state with the given initial tab.
     pub fn new(tab: ExtensionsTab) -> Self {
         Self {

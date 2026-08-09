@@ -1,9 +1,10 @@
 # Pager Motion 与 Deadline 架构
 
 Pager 的动画是纯展示，不是 session 生命周期的时钟。一次 draw 在入口捕获一个
-`FrameStamp { now, elapsed }`，Agent、Dashboard、Tasks、Goal、terminal title 与
+`FrameStamp { now, wall_now, elapsed }`，Agent、Dashboard、Tasks、Goal、terminal title 与
 minimal surface 都消费同一份时间样本。spinner、wave、pulse 的相位由 elapsed 和
-固定 `Duration` 纯计算；配置 FPS 只限制最大重绘频率，不改变动画速度。
+固定 `Duration` 纯计算；`wall_now` 只服务于来自持久 wall-clock 时间戳的年龄显示。
+配置 FPS 只限制最大重绘频率，不改变动画速度。
 
 ```mermaid
 flowchart LR
@@ -24,9 +25,10 @@ flowchart LR
 ## 相互独立的调度时钟
 
 - `animation_deadline` 只把 Presenter 标记为 dirty，不修改业务状态。
-- `ui_state_deadline` 处理绝对过期时间和仍待事件化的轻量 UI reducer。toast、Todo
+- `ui_state_deadline` 只处理绝对过期时间。toast、Todo
   badge、finish flash、Behavior banner 与延迟通知都有明确 deadline；静态展示只在
-  到期时重绘一次。Behavior banner 仅在最后的淡出窗口请求动画帧。
+  到期时重绘一次。Dashboard 相对年龄、Idle freshness、删除确认和 leader-key 也各自
+  声明下一次真实变化的 deadline。Behavior banner 仅在最后的淡出窗口请求动画帧。
 - `lifecycle_deadline` 只负责 prompt status watchdog。它可以产生查询 effect，但不能
   吞掉同时到期的 animation repaint。
 - `scroll_deadline` 只推进滚轮/触控板输入状态。
@@ -53,10 +55,16 @@ Running status 的时间戳只在 ACP/session reducer 中更新；服务端 `tur
 ## 可见 demand 与完成事件
 
 只有当前可见、且像素会随时间变化的内容返回 `visible_frame_interval()`。隐藏 child、
-静态 idle 页和纯倒计时状态不产生 frame wakeup；再次可见时直接根据当前时间得到正确
-相位，不补播历史帧。文件搜索等尚需 reducer 轮询的状态只使用 UI clock；image viewer
-加载已通过 Effect/TaskResult 完成通道回送，并用 overlay owner id 丢弃关闭或替换后的
-迟到结果。
+静态 idle 页和有明确 deadline 的倒计时状态不产生 frame wakeup；再次可见时直接根据
+当前时间得到正确相位，不补播历史帧。扩展页 loading/pending、inline media loading、
+Goal stage 与 subagent wait 都是显式 demand，不依赖 foreground Running 猜测。
+
+文件、history、scrollback 搜索、inline media 读取/解码、edit 全文件高亮与 Mermaid 渲染
+都由后台 worker 发布 snapshot 后触发单一 async-view wake edge；event loop 在 UI 线程
+一次性领取所有已完成 snapshot。Tracing 已有独立 channel arm，同样不借任何 clock。
+这个 edge 会合并 burst，但不充当 frame clock，也不经过 `ui_state_deadline`。modal image
+viewer 继续通过 Effect/TaskResult 回送，并用 overlay owner id 丢弃关闭或替换后的迟到
+结果。
 
 ## 持久化边界
 
@@ -64,6 +72,13 @@ Running status 的时间戳只在 ACP/session reducer 中更新；服务端 `tur
 session/Goal reload 只恢复业务状态；motion origin、可见 demand 与 deadline 从当前
 单调时钟重建。因此系统休眠、隐藏页面或 session 重载都不会产生补帧、旧 spinner
 counter 或跨会话 watchdog 污染。
+
+后台完成通道同样是 session-coupled transient state。进入 replay 时必须切断 inline
+media、edit highlight、Mermaid action 与 scrollback search 的旧 runtime，并清空旧
+transcript 派生的 media byte/path cache；fork 采用新 cwd 时同时重建 file-search root。
+edit block 在旧 transcript 被暂存前先从 `Pending` 归一化为 `HunkOnly`。worker 可以在后台
+自然退出或写完纯缓存，但它的晚到结果不得修改新 scrollback，也不得执行旧会话的打开、
+复制或 toast 动作。
 
 ## 不变量
 
@@ -73,3 +88,4 @@ counter 或跨会话 watchdog 污染。
 4. hidden/static view 不制造 animation deadline。
 5. animation、UI state、lifecycle、scroll 与 simulation 同时到期时分别结算，互不短路。
 6. FPS 变化只改变采样上限，不改变语义动画周期。
+7. 后台资源完成只能通过 completion edge/effect 唤醒，禁止借 animation 或 UI expiry 轮询。

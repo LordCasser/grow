@@ -1616,7 +1616,7 @@ pub(super) mod paste_key_tests {
             "copy-source emits a clipboard toast, got {toast:?}",
         );
         assert!(
-            !agent.mermaid_needs_tick(),
+            !agent.mermaid_has_live_motion(),
             "copy source dispatches no render"
         );
         agent.toast = None;

@@ -10,7 +10,8 @@
 //! background [`SearchDaemon`] without re-cloning the strings. The daemon runs
 //! the regex scan off the input thread: query mutations only enqueue the latest
 //! corpus and query (O(1) on the UI thread), and
-//! [`ScrollbackSearchState::poll`] picks up results once the scan completes.
+//! the async-view completion edge asks [`ScrollbackSearchState::poll`] to apply
+//! results once the scan completes.
 //! This keeps per-keystroke typing responsive on long sessions where a
 //! synchronous scan would stall the input thread.
 //!
@@ -278,6 +279,7 @@ impl SearchDaemon {
                     request_generation,
                     query: query.clone(),
                 };
+                crate::async_view::wake();
             }
         });
 
@@ -302,7 +304,7 @@ impl Drop for SearchDaemon {
 ///
 /// Matching runs off-thread. [`update_query`](Self::update_query) only enqueues
 /// the corpus and query for the daemon (it never scans); results arrive later
-/// via [`poll`](Self::poll). `n` / `N` navigation ([`next`](Self::next) /
+/// through the async-view completion reducer via [`poll`](Self::poll). `n` / `N` navigation ([`next`](Self::next) /
 /// [`prev`](Self::prev)) stays synchronous since the match list is already in
 /// hand by then.
 ///

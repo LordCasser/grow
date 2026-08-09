@@ -473,7 +473,7 @@ pub struct DashboardState {
     /// is rebuilt whenever the selection cursor lands on a row. The
     /// draft is cleared when the peeked row changes or the panel
     /// closes (see [`Self::set_peek`]). `@` file completion is live
-    /// (polled each tick, rooted at the peeked agent's cwd — see
+    /// (applied from the async completion edge, rooted at the peeked agent's cwd — see
     /// [`Self::peek_reply_cwd`]); slash completion stays inert because
     /// the dashboard never refreshes its snapshot for this widget.
     pub peek_reply: PromptWidget,
@@ -1522,10 +1522,32 @@ impl DashboardState {
     /// Read-only counterpart of [`Self::armed_delete_row`] for the
     /// renderer (does not clear an expired arm).
     pub fn armed_delete_row_ref(&self) -> Option<&DashboardRowId> {
+        self.armed_delete_row_ref_at(Instant::now())
+    }
+
+    pub fn armed_delete_row_ref_at(&self, now: Instant) -> Option<&DashboardRowId> {
         self.delete_confirm
             .as_ref()
-            .filter(|(_, at)| at.elapsed() < CONFIRM_WINDOW)
+            .filter(|(_, at)| now < *at + CONFIRM_WINDOW)
             .map(|(id, _)| id)
+    }
+
+    pub fn delete_confirm_deadline(&self) -> Option<Instant> {
+        self.delete_confirm
+            .as_ref()
+            .map(|(_, armed_at)| *armed_at + CONFIRM_WINDOW)
+    }
+
+    pub fn maintain_delete_confirm(&mut self, now: Instant) -> bool {
+        if self
+            .delete_confirm_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.delete_confirm = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn arm_delete(&mut self, id: DashboardRowId) {

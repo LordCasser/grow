@@ -211,6 +211,10 @@ impl AgentView {
             image_viewer: None,
             gboom: None,
             inline_media_cache: std::collections::HashMap::new(),
+            inline_media_pending: HashSet::new(),
+            inline_media_failed: HashSet::new(),
+            inline_media_completions: Default::default(),
+            inline_media_loading_visible: false,
             inline_media_ids: std::collections::HashMap::new(),
             inline_media_iterm_emitted: std::collections::HashMap::new(),
             next_inline_media_id: 2,
@@ -374,6 +378,10 @@ impl AgentView {
     /// reconnect/fork reuse paths.
     pub(crate) fn begin_replay_window(&mut self) {
         self.clear_minimal_btw_lifecycle();
+        self.reset_inline_media_loader();
+        self.reset_edit_hl_runtime();
+        self.reset_mermaid_runtime();
+        self.scrollback_search = None;
         self.session.loading_replay = true;
         self.replayed_terminal_prompts.clear();
         self.unexpected_replay_drops = 0;
@@ -423,6 +431,11 @@ impl AgentView {
         if let Some(rid) = self.pending_recap_entry.take() {
             self.scrollback.remove_entry(rid);
         }
+        // Normalize edit blocks before stashing the old transcript. The
+        // generic replay reset below runs after `scrollback` is replaced, which
+        // would otherwise leave a restored block marked Pending without its
+        // discarded worker runtime.
+        self.reset_edit_hl_runtime();
         self.session.model_switch_pending = false;
         self.agent_switch_pending = None;
         let fresh = self.scrollback.fresh_continuation();
@@ -1585,6 +1598,16 @@ mod status_window_tests {
         agent.prompt_status_query_for = Some("pid-lost".into());
         agent.begin_replay_window();
         assert!(agent.prompt_status_query_for.is_none());
+    }
+    #[test]
+    fn begin_replay_window_closes_transcript_search() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.scrollback_search = Some(crate::scrollback::search::ScrollbackSearchState::open());
+        agent.begin_replay_window();
+        assert!(
+            agent.scrollback_search.is_none(),
+            "a daemon indexed against the old transcript must not cross replay"
+        );
     }
     #[test]
     fn session_rebind_and_replay_invalidate_minimal_btw() {

@@ -30,7 +30,6 @@ pub struct TitleManager {
     items: Vec<TitleItem>,
     last_title: String,
     composed: String,
-    motion_origin: std::time::Instant,
 }
 
 impl TitleManager {
@@ -39,7 +38,6 @@ impl TitleManager {
             items: config.items.clone(),
             last_title: String::new(),
             composed: String::new(),
-            motion_origin: std::time::Instant::now(),
         }
     }
 
@@ -49,8 +47,7 @@ impl TitleManager {
     /// composed title differs from the last one emitted. Returns `None` when
     /// the title is unchanged (dedup).
     pub fn update(&mut self, state: &TitleState<'_>) -> Option<String> {
-        let frame = crate::motion::FrameStamp::capture(self.motion_origin);
-        self.update_at(state, frame)
+        self.update_at(state, crate::motion::FrameStamp::default())
     }
 
     /// Compose the title using the application's single frame sample.

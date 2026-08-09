@@ -6,7 +6,7 @@ use std::{
         mpsc::{RecvTimeoutError, SyncSender, sync_channel},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ignore::{DirEntry, WalkBuilder, WalkState, overrides::OverrideBuilder};
@@ -569,7 +569,11 @@ pub struct FuzzyFileMatcherDaemon {
 }
 
 impl FuzzyFileMatcherDaemon {
-    pub fn new(mut matcher: FuzzyFileMatcher, topk: usize) -> Self {
+    pub fn new(
+        mut matcher: FuzzyFileMatcher,
+        topk: usize,
+        on_update: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
         let results = Arc::new(Mutex::new(FuzzyMatcherDaemonResults::default()));
         let (tx, rx) = sync_channel(1024);
 
@@ -581,6 +585,7 @@ impl FuzzyFileMatcherDaemon {
                 let results = res;
                 let mut done = false;
                 let mut generation = 0;
+                let mut last_update_wake = Instant::now();
                 loop {
                     let msg = if !done {
                         rx.recv_timeout(Duration::from_micros(250))
@@ -600,6 +605,10 @@ impl FuzzyFileMatcherDaemon {
                             }
                             generation += 1;
                             *results.lock().unwrap() = FuzzyMatcherDaemonResults::default();
+                            if let Some(on_update) = on_update.as_ref() {
+                                on_update();
+                                last_update_wake = Instant::now();
+                            }
                             done = false;
                         }
                         Ok(FuzzyMatcherDaemonMessage::SetQuery { query, dirs }) => {
@@ -623,6 +632,15 @@ impl FuzzyFileMatcherDaemon {
                                     status,
                                     generation,
                                 };
+                                if status.done
+                                    || (status.changed
+                                        && last_update_wake.elapsed() >= Duration::from_millis(16))
+                                {
+                                    if let Some(on_update) = on_update.as_ref() {
+                                        on_update();
+                                    }
+                                    last_update_wake = Instant::now();
+                                }
                                 generation += 1;
                             }
                         }
@@ -843,7 +861,7 @@ mod thread_exhaustion_tests {
         // The daemon degrades too: its worker thread fails to spawn under the
         // cap, so set_query/get must return empty without panicking. Fail (not
         // skip) if it somehow returns matches.
-        let daemon = FuzzyFileMatcherDaemon::new(FuzzyFileMatcher::new(dir.path()), 10);
+        let daemon = FuzzyFileMatcherDaemon::new(FuzzyFileMatcher::new(dir.path()), 10, None);
         daemon.set_query("alpha", false);
         if !daemon.get().topk.is_empty() {
             eprintln!("disabled daemon returned matches despite the cap");

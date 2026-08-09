@@ -132,6 +132,32 @@ pub fn format_time_ago(d: Duration) -> String {
     format!("{years}y")
 }
 
+/// Remaining wall-clock duration until [`format_time_ago`] changes bucket.
+pub fn time_until_time_ago_change(age: Duration) -> Duration {
+    let secs = age.as_secs();
+    let unit_secs = if secs < 60 {
+        60
+    } else if secs < 3_600 {
+        60
+    } else if secs < 86_400 {
+        3_600
+    } else if secs < 30 * 86_400 {
+        86_400
+    } else if secs < 365 * 86_400 {
+        30 * 86_400
+    } else {
+        365 * 86_400
+    };
+    let next_secs = if secs < 60 {
+        60
+    } else {
+        (secs / unit_secs)
+            .saturating_add(1)
+            .saturating_mul(unit_secs)
+    };
+    Duration::from_secs(next_secs).saturating_sub(age)
+}
+
 /// Convert unix-epoch millis into a wall-clock [`SystemTime`].
 ///
 /// Used for dashboard recency that originates as a wall-clock timestamp (the
@@ -158,9 +184,22 @@ pub fn system_time_from_unix_ms(unix_ms: i64) -> SystemTime {
 /// advances, and the sub-millisecond skew between the two `now()` samples is
 /// invisible to the minute-granularity [`format_time_ago`] buckets.
 pub fn system_time_from_instant(instant: Instant) -> SystemTime {
-    SystemTime::now()
-        .checked_sub(instant.elapsed())
-        .unwrap_or_else(SystemTime::now)
+    let now = Instant::now();
+    let wall_now = SystemTime::now();
+    system_time_from_instant_at(instant, now, wall_now)
+}
+
+/// Project `instant` using an already captured monotonic/wall-clock pair.
+/// Render projections use this form so every age in one frame shares exactly
+/// the same clock sample.
+pub fn system_time_from_instant_at(
+    instant: Instant,
+    now: Instant,
+    wall_now: SystemTime,
+) -> SystemTime {
+    wall_now
+        .checked_sub(now.saturating_duration_since(instant))
+        .unwrap_or(wall_now)
 }
 
 /// Decode common HTML entities (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;`)
@@ -229,6 +268,41 @@ mod tests {
         assert_eq!(group_thousands(999), "999");
         assert_eq!(group_thousands(1_000), "1,000");
         assert_eq!(group_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn time_ago_deadline_tracks_the_next_visible_bucket() {
+        assert_eq!(
+            time_until_time_ago_change(Duration::from_millis(59_500)),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            time_until_time_ago_change(Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            time_until_time_ago_change(Duration::from_secs(3_599)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            time_until_time_ago_change(Duration::from_secs(3_600)),
+            Duration::from_secs(3_600)
+        );
+    }
+
+    #[test]
+    fn instant_projection_uses_the_supplied_clock_pair() {
+        let now = Instant::now();
+        let wall_now = UNIX_EPOCH + Duration::from_secs(10_000);
+        assert_eq!(
+            system_time_from_instant_at(now - Duration::from_secs(75), now, wall_now),
+            wall_now - Duration::from_secs(75)
+        );
+        assert_eq!(
+            system_time_from_instant_at(now + Duration::from_secs(1), now, wall_now),
+            wall_now,
+            "future monotonic anchors clamp to the captured wall time"
+        );
     }
 
     #[test]

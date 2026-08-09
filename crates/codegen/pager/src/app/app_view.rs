@@ -3502,7 +3502,7 @@ impl AppView {
         }
     }
 
-    /// Advance transient UI state and poll legacy completion receivers.
+    /// Advance transient UI state at explicit deadlines.
     /// Motion is render-only and is deliberately absent from this reducer.
     pub fn maintain_ui(&mut self, now: Instant) -> bool {
         let mut needs_redraw = false;
@@ -3524,8 +3524,7 @@ impl AppView {
         if matches!(self.active_view, ActiveView::AgentDashboard)
             && let Some(d) = self.dashboard.as_mut()
         {
-            d.dispatch.poll_file_search();
-            d.peek_reply.poll_file_search();
+            needs_redraw |= d.maintain_delete_confirm(now);
         }
         if let Some(pending) = &self.pending_action
             && pending.expired()
@@ -3535,28 +3534,22 @@ impl AppView {
         }
         let mut bootstrap_commands_update: Option<Vec<agent_client_protocol::AvailableCommand>> =
             None;
-        for agent in self.agents.values_mut() {
-            needs_redraw |= agent.edit_hl_tick();
-            for child in agent.subagent_views.values_mut() {
-                needs_redraw |= child.edit_hl_tick();
-            }
-        }
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
+            needs_redraw |= agent.maintain_leader_key(now);
             needs_redraw |= agent.scrollback.maintain(now);
             needs_redraw |= agent.todo.list_state.maintain(now);
             needs_redraw |= agent.tasks.list_state.maintain(now);
             needs_redraw |= agent.todo.maintain_badge(now);
             for (child_id, child_view) in &mut agent.subagent_views {
+                needs_redraw |= child_view.maintain_leader_key(now);
                 needs_redraw |= child_view.scrollback.maintain(now);
                 needs_redraw |= child_view.maintain_toast(now);
                 needs_redraw |= child_view.maintain_mode_banner(now);
                 needs_redraw |= child_view.tick_selection_highlight();
                 needs_redraw |= child_view.tick_drag_autoscroll();
                 needs_redraw |= child_view.poll_link_modifier();
-                needs_redraw |= child_view.poll_scrollback_search();
-                needs_redraw |= child_view.mermaid_tick();
                 if let Some(effect) =
                     Self::prepare_agent_image_load(child_view, id, Some(child_id.clone()))
                 {
@@ -3582,9 +3575,6 @@ impl AppView {
                 bootstrap_commands_update = Some(agent.session.available_commands.clone());
                 needs_redraw = true;
             }
-            needs_redraw |= agent.prompt.poll_file_search();
-            needs_redraw |= agent.prompt.history_search.poll();
-            needs_redraw |= agent.poll_scrollback_search();
             needs_redraw |= agent.maintain_toast(now);
             needs_redraw |= agent.maintain_extensions_result_notice(now);
             needs_redraw |= agent.maintain_mode_banner(now);
@@ -3595,7 +3585,6 @@ impl AppView {
                 completion_effects.push(effect);
             }
             needs_redraw |= Self::tick_agent_block_viewer(agent);
-            needs_redraw |= agent.mermaid_tick();
         }
         if let Some(commands) = bootstrap_commands_update {
             if let Some(d) = self.dashboard.as_mut() {
@@ -3615,8 +3604,36 @@ impl AppView {
         needs_redraw
     }
 
-    /// Earliest deadline for transient UI mutation or legacy async receiver
-    /// polling. This clock is independent from both motion and lifecycle.
+    /// Apply snapshots published by background UI workers after their wake edge.
+    /// This reducer is the only production caller of the search `poll` methods;
+    /// animation and deadline clocks never poll asynchronous work.
+    pub(crate) fn apply_async_view_updates(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(dashboard) = self.dashboard.as_mut() {
+            changed |= dashboard.dispatch.poll_file_search();
+            changed |= dashboard.peek_reply.poll_file_search();
+        }
+        for agent in self.agents.values_mut() {
+            changed |= agent.apply_inline_media_completions();
+            changed |= agent.apply_edit_hl_completions();
+            changed |= agent.apply_mermaid_completions();
+            changed |= agent.prompt.poll_file_search();
+            changed |= agent.prompt.history_search.poll();
+            changed |= agent.poll_scrollback_search();
+            for child in agent.subagent_views.values_mut() {
+                changed |= child.apply_inline_media_completions();
+                changed |= child.apply_edit_hl_completions();
+                changed |= child.apply_mermaid_completions();
+                changed |= child.prompt.poll_file_search();
+                changed |= child.prompt.history_search.poll();
+                changed |= child.poll_scrollback_search();
+            }
+        }
+        changed
+    }
+
+    /// Earliest deadline for transient UI mutation. This clock is independent
+    /// from motion, lifecycle, and background completion events.
     pub fn next_ui_deadline(
         &mut self,
         now: Instant,
@@ -3635,9 +3652,27 @@ impl AppView {
         include(self.welcome_toast.as_ref().map(|(_, at)| *at));
         include(self.deferred_notification.as_ref().map(|(_, at)| *at));
 
+        if matches!(self.active_view, ActiveView::AgentDashboard) {
+            include(
+                self.dashboard
+                    .as_ref()
+                    .and_then(|dashboard| dashboard.delete_confirm_deadline()),
+            );
+            include(self.dashboard.as_ref().and_then(|dashboard| {
+                crate::views::dashboard::render::next_wall_clock_deadline(
+                    dashboard,
+                    &self.agents,
+                    &self.leader_roster,
+                    now,
+                    std::time::SystemTime::now(),
+                )
+            }));
+        }
+
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get(&id)
         {
+            include(agent.leader_key_deadline());
             include(agent.scrollback.next_ui_deadline());
             include(agent.todo.badge_deadline());
             include(agent.todo.list_state.copy_toast_deadline());
@@ -3654,6 +3689,7 @@ impl AppView {
             if let Some(child_id) = agent.active_subagent.as_deref()
                 && let Some(child) = agent.subagent_views.get(child_id)
             {
+                include(child.leader_key_deadline());
                 include(child.scrollback.next_ui_deadline());
                 include(child.toast.as_ref().map(|(_, at)| *at));
                 include(child.mode_banner_ui_deadline(now));
@@ -3678,26 +3714,11 @@ impl AppView {
         if self.minimal_state.transcript.is_some() {
             return true;
         }
-        if self.agents.values().any(|agent| {
-            agent.edit_hl_needs_tick()
-                || agent
-                    .subagent_views
-                    .values()
-                    .any(|child| child.edit_hl_needs_tick())
-        }) {
-            return true;
-        }
         match self.active_view {
             ActiveView::Welcome => false,
-            ActiveView::AgentDashboard => self.dashboard.as_ref().is_some_and(|dashboard| {
-                dashboard.dispatch.file_search.context().is_some()
-                    || dashboard.peek_reply.file_search.context().is_some()
-            }),
+            ActiveView::AgentDashboard => false,
             ActiveView::Agent(id) => self.agents.get(&id).is_some_and(|agent| {
                 agent.acp_synced_generation != agent.session.available_commands_generation
-                    || agent.prompt.file_search.context().is_some()
-                    || agent.prompt.history_search.is_active()
-                    || agent.scrollback_search.is_some()
                     || agent.has_drag_autoscroll()
                     || agent.selection_created_at.is_some()
                     || agent.block_viewer.is_some()
@@ -3705,17 +3726,14 @@ impl AppView {
                         .image_viewer
                         .as_ref()
                         .is_some_and(|viewer| viewer.has_deferred_source())
-                    || agent.mermaid_needs_tick()
                     || agent.subagent_views.values().any(|child| {
                         child.has_drag_autoscroll()
                             || child.selection_created_at.is_some()
-                            || child.scrollback_search.is_some()
                             || child.block_viewer.is_some()
                             || child
                                 .image_viewer
                                 .as_ref()
                                 .is_some_and(|viewer| viewer.has_deferred_source())
-                            || child.mermaid_needs_tick()
                     })
             }),
         }
@@ -3845,6 +3863,7 @@ impl AppView {
         needs_redraw
     }
     /// Check if the visible surface needs another motion frame.
+    #[cfg(test)]
     pub fn needs_animation(&self) -> bool {
         self.visible_frame_interval(Duration::from_millis(33))
             .is_some()
@@ -3878,7 +3897,6 @@ impl AppView {
                     return None;
                 };
                 let surface_fast = Self::agent_surface_animating(agent)
-                    || agent.edit_hl_needs_tick()
                     || agent.mode_banner_animating(now)
                     || agent.scrollback.needs_animation()
                     || agent.tasks.has_live_motion()
@@ -3888,13 +3906,18 @@ impl AppView {
                         .as_ref()
                         .is_some_and(McpInitProgress::is_visible)
                     || agent.plugin_cta.phase.is_spinner()
+                    || agent.has_visible_inline_media_load()
+                    || agent
+                        .extensions_modal
+                        .as_ref()
+                        .is_some_and(|modal| modal.has_live_motion())
                     || matches!(
                         agent.btw_state,
                         Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
                     )
                     || agent.drain_blocked()
                     || agent.image_viewer.as_ref().is_some_and(|v| v.loading)
-                    || agent.mermaid_needs_tick()
+                    || agent.mermaid_has_live_motion()
                     || !agent.permission_queue.is_empty()
                     || matches!(
                         agent.active_modal.as_ref(),
@@ -3909,11 +3932,16 @@ impl AppView {
                     )
                     || agent.active_subagent.as_deref().is_some_and(|sid| {
                         agent.subagent_views.get(sid).is_some_and(|child| {
-                            child.edit_hl_needs_tick()
+                            Self::agent_surface_animating(child)
                                 || child.mode_banner_animating(now)
+                                || child.has_visible_inline_media_load()
+                                || child
+                                    .extensions_modal
+                                    .as_ref()
+                                    .is_some_and(|modal| modal.has_live_motion())
                                 || child.scrollback.needs_animation()
                                 || child.image_viewer.as_ref().is_some_and(|v| v.loading)
-                                || child.mermaid_needs_tick()
+                                || child.mermaid_has_live_motion()
                         })
                     });
                 if surface_fast {
@@ -3966,11 +3994,7 @@ impl AppView {
                             | crate::app::roster::RosterActivity::NeedsInput
                     )
                 });
-                let dash_search = self.dashboard.as_ref().is_some_and(|d| {
-                    d.dispatch.file_search.context().is_some()
-                        || d.peek_reply.file_search.context().is_some()
-                });
-                if agents_need || dash_search || roster_need {
+                if agents_need || roster_need {
                     fast_interval()
                 } else {
                     None
@@ -4021,7 +4045,7 @@ impl AppView {
                 // the "still working" chrome matches the status-bar goal chip
                 // (same Active predicate as `agent_surface_animating`).
                 let is_busy =
-                    crate::app::activity::AgentActivityProjection::from_agent(agent).working();
+                    crate::app::activity::AgentActivityProjection::from_agent(agent).animates();
                 (name, model, activity, has_perms, elapsed, is_busy)
             } else {
                 (None, None, None, false, None, false)
@@ -4724,7 +4748,7 @@ pub(crate) mod tests {
         })
     }
     #[test]
-    fn ui_maintenance_delivers_prompt_history_without_motion_demand() {
+    fn async_event_delivers_prompt_history_without_clock_demand() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         idle_agent_with_content(&mut app, id);
@@ -4740,16 +4764,18 @@ pub(crate) mod tests {
         }
         assert!(
             !app.needs_animation(),
-            "polling search results must not create a motion demand"
+            "background search results must not create a motion demand"
         );
         assert!(
             app.next_ui_deadline(Instant::now(), TEST_FRAME_INTERVAL)
-                .is_some(),
-            "the independent UI clock must poll the active search"
+                .is_none(),
+            "search completion is event-driven, not a UI-clock poll"
         );
         let mut delivered = false;
         for _ in 0..1000 {
-            if app.tick() && app.agents[&id].prompt.history_search.result_count() == 2 {
+            if app.apply_async_view_updates()
+                && app.agents[&id].prompt.history_search.result_count() == 2
+            {
                 delivered = true;
                 break;
             }
@@ -4757,7 +4783,7 @@ pub(crate) mod tests {
         }
         assert!(
             delivered,
-            "tick() must poll the history daemon and deliver results"
+            "the completion reducer must apply the history snapshot"
         );
         app.agents
             .get_mut(&id)
@@ -4771,7 +4797,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn ui_maintenance_delivers_scrollback_search_without_motion_demand() {
+    fn async_event_delivers_scrollback_search_without_clock_demand() {
         use crate::scrollback::ScrollbackSearchState;
         use crate::scrollback::block::RenderBlock;
         let mut app = test_app_with_agent();
@@ -4803,16 +4829,16 @@ pub(crate) mod tests {
         }
         assert!(
             !app.needs_animation(),
-            "polling search results must not create a motion demand"
+            "background search results must not create a motion demand"
         );
         assert!(
             app.next_ui_deadline(Instant::now(), TEST_FRAME_INTERVAL)
-                .is_some(),
-            "the independent UI clock must poll the active search"
+                .is_none(),
+            "search completion is event-driven, not a UI-clock poll"
         );
         let mut delivered = false;
         for _ in 0..1000 {
-            app.tick();
+            app.apply_async_view_updates();
             if app.agents[&id]
                 .scrollback_search
                 .as_ref()
@@ -4825,7 +4851,10 @@ pub(crate) mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert!(delivered, "tick() must poll the daemon and deliver results");
+        assert!(
+            delivered,
+            "the completion reducer must apply the scrollback snapshot"
+        );
         assert_eq!(
             app.agents[&id]
                 .scrollback_search
@@ -4948,6 +4977,71 @@ pub(crate) mod tests {
             app.visible_frame_interval(TEST_FRAME_INTERVAL),
             None,
             "settled picker must not keep demanding ticks"
+        );
+    }
+
+    #[test]
+    fn visible_frame_interval_is_fast_while_extensions_tab_loads() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
+        app.agents.get_mut(&id).unwrap().extensions_modal =
+            Some(crate::views::extensions_modal::ExtensionsModalState::new(
+                crate::views::extensions_modal::ExtensionsTab::Plugins,
+            ));
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL),
+            "the visible extensions loading spinner must own frame demand"
+        );
+    }
+
+    #[test]
+    fn leader_key_expires_on_ui_deadline_without_rendering() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        let started = Instant::now();
+        app.agents.get_mut(&id).unwrap().leader_key_started_at = Some(started);
+        let deadline = app.agents[&id].leader_key_deadline().unwrap();
+        assert_eq!(
+            app.next_ui_deadline(started, TEST_FRAME_INTERVAL),
+            Some(deadline)
+        );
+        assert!(app.maintain_ui(deadline));
+        assert!(app.agents[&id].leader_key_started_at.is_none());
+    }
+
+    #[test]
+    fn dashboard_wall_clock_and_delete_confirmation_have_deadlines() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        app.agents.get_mut(&id).unwrap().display_name = Some("visible session".into());
+        app.active_view = ActiveView::AgentDashboard;
+        let mut dashboard = crate::views::dashboard::DashboardState::new();
+        dashboard.arm_delete(crate::views::dashboard::DashboardRowId::TopLevel(id));
+        let delete_deadline = dashboard.delete_confirm_deadline().unwrap();
+        app.dashboard = Some(dashboard);
+
+        let now = Instant::now();
+        let deadline = app
+            .next_ui_deadline(now, TEST_FRAME_INTERVAL)
+            .expect("dashboard age and confirmation deadline");
+        assert!(deadline <= delete_deadline);
+        assert!(app.maintain_ui(delete_deadline));
+        assert!(
+            app.dashboard
+                .as_ref()
+                .unwrap()
+                .armed_delete_row_ref()
+                .is_none()
+        );
+        assert!(
+            app.next_ui_deadline(delete_deadline, TEST_FRAME_INTERVAL)
+                .is_some(),
+            "relative row ages retain an exact wall-clock deadline"
         );
     }
     /// An idle agent view demands no ticks at all; the macOS Cmd link-hover
@@ -5286,7 +5380,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn needs_animation_gates_dashboard_file_search() {
+    fn dashboard_file_search_does_not_own_a_clock() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         assert!(app.agents[&id].session.state.is_idle());
@@ -5313,10 +5407,9 @@ pub(crate) mod tests {
             "fixture: dispatch @-context must be armed"
         );
         assert!(
-            app.needs_animation(),
-            "dispatch file_search.context() on AgentDashboard must request ticks"
+            !app.needs_animation(),
+            "dispatch search waits on its worker completion edge, not frames"
         );
-        let _ = app.tick();
         assert!(
             app.dashboard
                 .as_ref()
@@ -5325,9 +5418,9 @@ pub(crate) mod tests {
                 .file_search
                 .context()
                 .is_some(),
-            "tick() must not clear dispatch @-context"
+            "arming no clock must not clear dispatch @-context"
         );
-        assert!(app.needs_animation());
+        assert!(!app.needs_animation());
         app.dashboard
             .as_mut()
             .unwrap()
@@ -5345,10 +5438,9 @@ pub(crate) mod tests {
             .file_search
             .update_context("@b", 2);
         assert!(
-            app.needs_animation(),
-            "peek_reply file_search.context() on AgentDashboard must request ticks"
+            !app.needs_animation(),
+            "peek reply search also waits on the shared completion edge"
         );
-        let _ = app.tick();
         app.dashboard
             .as_mut()
             .unwrap()
@@ -5527,6 +5619,31 @@ pub(crate) mod tests {
         assert!(
             !app.needs_animation(),
             "a cleared child image viewer must stop requesting ticks"
+        );
+    }
+    #[test]
+    fn visible_subagent_projects_its_own_foreground_motion() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        idle_agent_with_content(&mut app, id);
+        let child_sid = "child-foreground-motion";
+        let mut child = idle_child_view(&app, 1, child_sid);
+        child.session.state = AgentState::TurnRunning;
+        {
+            let parent = app.agents.get_mut(&id).unwrap();
+            parent.subagent_views.insert(child_sid.to_string(), child);
+        }
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            None,
+            "a hidden child must not request visible frames"
+        );
+
+        app.agents.get_mut(&id).unwrap().active_subagent = Some(child_sid.to_string());
+        assert_eq!(
+            app.visible_frame_interval(TEST_FRAME_INTERVAL),
+            Some(TEST_FRAME_INTERVAL),
+            "visible child foreground must animate even if the parent index already settled"
         );
     }
     #[test]

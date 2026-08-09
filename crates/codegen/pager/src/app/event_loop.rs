@@ -1606,6 +1606,10 @@ pub(crate) async fn run(
             }
         };
 
+        // Background workers publish immutable snapshots and wake this edge.
+        // The edge is independent from both animation sampling and UI expiry.
+        let async_view_update = crate::async_view::notifier().notified();
+
         // Dedicated scroll clock, derived fresh each iteration — a pure
         // function of scroll state, so no arm can forget to reschedule it.
         // Armed only while a wheel/trackpad stream is active, at the state
@@ -1699,6 +1703,12 @@ pub(crate) async fn run(
                 presenter.acknowledge(sequence);
             }
 
+            _ = async_view_update => {
+                if app.apply_async_view_updates() {
+                    presenter.request(false);
+                }
+            }
+
             // Biased order: cancellation/quit, writer acks/failures, ACP,
             // task/progress results, updates, input, and render/poll timers all
 
@@ -1721,9 +1731,11 @@ pub(crate) async fn run(
                 }
                 let now = Instant::now();
                 if take_due_deadline(&mut ui_state_deadline, now) {
-                    if app.maintain_ui(now.into_std()) {
-                        presenter.request(false);
-                    }
+                    // Repaint even when the reducer has no stored mutation:
+                    // derived wall-clock pixels (Dashboard age/freshness) can
+                    // change exactly at this deadline.
+                    app.maintain_ui(now.into_std());
+                    presenter.request(false);
                     schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
                 }
                 if take_due_deadline(&mut simulation_deadline, now) {
@@ -1911,9 +1923,8 @@ pub(crate) async fn run(
 
             _ = ui_state_maintenance => {
                 ui_state_deadline = None;
-                if app.maintain_ui(Instant::now().into_std()) {
-                    presenter.request(false);
-                }
+                app.maintain_ui(Instant::now().into_std());
+                presenter.request(false);
                 if !app.pending_effects.is_empty() {
                     let effects = std::mem::take(&mut app.pending_effects);
                     if process_effects(effects, &mut tasks, &mut app) {

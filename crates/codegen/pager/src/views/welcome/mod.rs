@@ -658,7 +658,7 @@ pub(crate) fn render_session_picker(
 ) -> crate::views::picker::PickerHitAreas {
     use crate::views::picker::{self, PickerConfig, PickerEntry, PickerField, PickerRow};
     use crate::views::session_picker::{
-        SessionEntryData, build_grouped_picker_entries, build_session_entry_data,
+        SessionEntryData, build_grouped_picker_entries, build_session_entry_data_at,
     };
 
     let entries_data = match ctx.sessions {
@@ -675,7 +675,14 @@ pub(crate) fn render_session_picker(
     let filtered_indices = crate::app::app_view::filter_session_entries(ctx.sessions, filter_query);
 
     let content_width = area.width; // approximate for truncation
-    let built = build_session_entry_data(entries_data, &filtered_indices, ctx.state, content_width);
+    let picker_now = chrono::DateTime::<chrono::Utc>::from(ctx.frame.wall_now());
+    let built = build_session_entry_data_at(
+        entries_data,
+        &filtered_indices,
+        ctx.state,
+        content_width,
+        picker_now,
+    );
 
     // Build PickerEntry refs that borrow from `built`.
     let fields_vecs: Vec<Vec<PickerField>> = built
@@ -726,18 +733,19 @@ pub(crate) fn render_session_picker(
     };
 
     // Append content search result rows (shared helper handles dedup).
-    use crate::views::session_picker::{build_content_entry_data, build_content_header_label};
+    use crate::views::session_picker::{build_content_entry_data_at, build_content_header_label};
     // Content rows will start after fuzzy rows + 1 header row.
     let content_start = picker_entries.len() + 1;
     let content_entry_data: Vec<SessionEntryData> = if let Some(hits) = ctx.content_results
         && !filter_query.is_empty()
     {
-        build_content_entry_data(
+        build_content_entry_data_at(
             hits,
             entries_data,
             &filtered_indices,
             ctx.state,
             content_start,
+            picker_now,
         )
     } else {
         Vec::new()

@@ -395,16 +395,14 @@ pub struct TracingHandle {
 /// - ANSI colors enabled (`with_ansi(true)`)
 /// - `RUST_LOG` env filter (defaults to `info` if unset)
 ///
-/// Returns a [`TracingHandle`] whose `rx` field should be polled each tick.
+/// Returns a [`TracingHandle`] whose `rx` field is a dedicated event-loop arm.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let handle = init_tracing();
 /// // In event loop:
-/// while let Ok(line) = handle.rx.try_recv() {
-///     model.push(&line);
-/// }
+/// if let Some(line) = handle.rx.recv().await { model.push(&line); }
 /// ```
 pub fn init_tracing() -> TracingHandle {
     use diagnostics::debug_log::RMCP_SSE_NOISE_TARGET;

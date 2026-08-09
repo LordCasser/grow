@@ -210,12 +210,9 @@ impl ListPaneState {
         }
     }
 
-    /// Whether the "Copied!" toast should be displayed.
-    ///
-    /// Returns `true` for ~800ms after a successful copy.
+    /// Whether the deadline reducer still owns a visible "Copied!" toast.
     pub fn copy_toast_active(&self) -> bool {
-        self.copy_toast_until
-            .is_some_and(|t| std::time::Instant::now() < t)
+        self.copy_toast_until.is_some()
     }
 
     pub fn copy_toast_deadline(&self) -> Option<std::time::Instant> {
