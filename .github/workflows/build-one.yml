@@ -232,6 +232,12 @@ jobs:
 
       # OpenHarmony build: runs scripts/build-ohos.sh inside the Harmonybrew
       # ci-runner container (arm64 OHOS userland with ohos-sdk + brew rust).
+      # CI_RUNNER pins the current swr.cn-north-4.myhuaweicloud.com/harmonybrew/
+      # ci-runner:latest digest (2026-08-07 rebuild, e8ce70a6…). When the
+      # Harmonybrew project re-pushes the image, refresh this pin from
+      # `docker manifest inspect …/harmonybrew/ci-runner:latest`; the SWR
+      # registry garbage-collects superseded digests, so an outdated pin
+      # fails with "manifest unknown".
       # The script bootstraps the toolchain and installs the rsproxy cargo
       # mirror (crates.io/USTC TLS is flaky), then builds with jemalloc off
       # (its configure does not know the ohos triplet) and WITHOUT a bundled
@@ -245,7 +251,7 @@ jobs:
         shell: bash
         env:
           GROW_VERSION: ${{ inputs.grow_version }}
-          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:0ef61139a01b93f7ca08c31ab1da030e9137f956a68505d284a4e37b70e5c691
+          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:e8ce70a693933902efa7c699cdba6d68750306db3284a76e9235ed281d63d525
         run: |
           set -euo pipefail
           docker run --rm \
