@@ -185,7 +185,7 @@ fn extract_page_images(
     bytes: Vec<u8>,
     page_indices: &[usize],
 ) -> Result<Vec<ExtractedImage>, String> {
-    let file = FileOptions::cached()
+    let file = FileOptions::uncached()
         .load(bytes)
         .map_err(|error| format!("Failed to open PDF images: {error}"))?;
     let resolver = file.resolver();
