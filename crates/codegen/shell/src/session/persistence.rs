@@ -104,8 +104,12 @@ pub enum PersistenceMsg {
         reasoning_effort: Option<Option<ReasoningEffort>>,
     },
     PlanState(TodoState),
-    /// Primary Behavior and Plan-phase lifecycle state to persist.
-    BehaviorState(crate::session::behavior::BehaviorSnapshot),
+    /// Atomic Behavior/Goal control-plane snapshot.
+    SessionControl(crate::session::control::SessionControlSnapshot),
+    SessionControlAndAck {
+        state: crate::session::control::SessionControlSnapshot,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
     /// A rewind point to persist
     RewindPoint(RewindPoint),
     /// Truncate rewind points from a specific prompt index (inclusive).
@@ -123,11 +127,6 @@ pub enum PersistenceMsg {
     Signals(SessionSignals),
     /// Persist announcement tracking state (MCP + skill announcement dedup).
     AnnouncementState(crate::session::announcement_state::AnnouncementState),
-    /// Persist goal mode orchestration state.
-    GoalModeState(crate::session::goal_tracker::GoalOrchestration),
-    DeleteGoalModeState {
-        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
-    },
     WorkflowRunState(crate::session::workflow::store::WorkflowRunManifest),
     WorkflowRunStateAndAck {
         manifest: crate::session::workflow::store::WorkflowRunManifest,
@@ -1403,11 +1402,9 @@ impl SessionPersistence {
         update: SessionUpdate,
     ) -> Result<(), crate::session::storage::AppendUpdateError> {
         self.drain_pending().await?;
-        let result = self
-            .storage
+        self.storage
             .append_update_durable_commit_aware(&self.info, &update)
-            .await;
-        result
+            .await
     }
 
     /// Flush any pending merged ACP notification to disk.
@@ -1530,20 +1527,15 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to write plan state");
                     }
                 }
-                PersistenceMsg::BehaviorState(state) => {
-                    if let Err(e) = self.storage.write_behavior_state(&self.info, &state).await {
-                        tracing::warn!(?e, "failed to write behavior state");
+                PersistenceMsg::SessionControl(state) => {
+                    if let Err(e) = self.storage.write_session_control(&self.info, &state).await {
+                        tracing::warn!(?e, "failed to write session control state");
                     }
                 }
-                PersistenceMsg::GoalModeState(state) => {
-                    if let Err(e) = self.storage.write_goal_mode_state(&self.info, &state).await {
-                        tracing::warn!(?e, "failed to write goal mode state");
-                    }
-                }
-                PersistenceMsg::DeleteGoalModeState { respond_to } => {
-                    let result = self.storage.delete_goal_mode_state(&self.info).await;
+                PersistenceMsg::SessionControlAndAck { state, respond_to } => {
+                    let result = self.storage.write_session_control(&self.info, &state).await;
                     if let Err(e) = &result {
-                        tracing::warn!(?e, "failed to delete goal mode state");
+                        tracing::warn!(?e, "failed to durably write session control state");
                     }
                     let _ = respond_to.send(result);
                 }
@@ -1917,6 +1909,8 @@ pub struct PersistedInfo {
     /// All session updates (ACP updates and Grow extension updates) in chronological order
     pub updates: Vec<SessionUpdate>,
     pub plan_state: Option<TodoState>,
+    pub session_control: Option<crate::session::control::SessionControlSnapshot>,
+    pub session_control_rejected: bool,
     pub rewind_points: Vec<RewindPoint>,
     /// Persisted session signals (None for old sessions without signals file)
     pub signals: Option<SessionSignals>,
@@ -1928,7 +1922,7 @@ pub struct PersistedInfoLight {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
-    pub behavior_state: Option<crate::session::behavior::BehaviorSnapshot>,
+    pub session_control: Option<crate::session::control::SessionControlSnapshot>,
     /// Path to updates file for streaming reads
     pub updates_file_path: Option<std::path::PathBuf>,
     /// Adapter-owned path to `rewind_points.jsonl` for the session's
@@ -1939,9 +1933,7 @@ pub struct PersistedInfoLight {
     pub signals: Option<SessionSignals>,
     /// Persisted announcement tracking state (None for sessions before this feature)
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
-    /// Persisted goal mode orchestration state (None for sessions without goal mode)
-    pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
-    pub goal_mode_state_rejected: bool,
+    pub session_control_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
@@ -1965,6 +1957,8 @@ pub(crate) async fn load(
         chat_history: persisted.chat_history,
         updates: persisted.updates,
         plan_state: persisted.plan_state,
+        session_control: persisted.session_control,
+        session_control_rejected: persisted.session_control_rejected,
         rewind_points: persisted.rewind_points,
         signals: persisted.signals,
         workflow_runs: persisted.workflow_runs,
@@ -2025,13 +2019,12 @@ pub(crate) async fn load_light(
         summary: persisted.summary,
         chat_history: persisted.chat_history,
         plan_state: persisted.plan_state,
-        behavior_state: persisted.behavior_state,
+        session_control: persisted.session_control,
         updates_file_path,
         rewind_points_file_path,
         signals: persisted.signals,
         announcement_state: persisted.announcement_state,
-        goal_mode_state: persisted.goal_mode_state,
-        goal_mode_state_rejected: persisted.goal_mode_state_rejected,
+        session_control_rejected: persisted.session_control_rejected,
         workflow_runs: persisted.workflow_runs,
     };
 

@@ -292,6 +292,9 @@ pub struct AcpUpdateTracker {
     /// `handle_update`) so a partial replay can't silently regress the
     /// registry to the unknown-toolset state.
     pending_acp_tools: Option<Vec<String>>,
+    /// Latest Shell-authored Behavior control projection. Unlike the command
+    /// and tool drains this remains readable until a newer projection arrives.
+    behavior_availability: Option<tools::types::BehaviorAvailability>,
     /// Live Edit completions awaiting full-file HL (drained via [`Self::take_pending_edit_hl`]).
     pending_edit_hl: Vec<EntryId>,
 }
@@ -546,6 +549,9 @@ impl AcpUpdateTracker {
     pub fn take_pending_acp_tools(&mut self) -> Option<Vec<String>> {
         self.pending_acp_tools.take()
     }
+    pub fn behavior_availability(&self) -> Option<&tools::types::BehaviorAvailability> {
+        self.behavior_availability.as_ref()
+    }
     /// Drain Edit entry ids that need a background full-file HL job.
     pub fn take_pending_edit_hl(&mut self) -> Vec<EntryId> {
         std::mem::take(&mut self.pending_edit_hl)
@@ -771,7 +777,7 @@ impl AcpUpdateTracker {
             }
             self.last_stream_start_ms = Some(new_start);
         }
-        let changed = match update {
+        match update {
             acp::SessionUpdate::AgentMessageChunk(chunk) => {
                 self.blocking_waits.clear();
                 self.handle_agent_chunk(chunk, meta, scrollback)
@@ -793,13 +799,15 @@ impl AcpUpdateTracker {
                 if let Some(t) = parse_tools_meta(update.meta.as_ref()) {
                     self.pending_acp_tools = Some(t);
                 }
+                if let Some(availability) = parse_behavior_availability_meta(update.meta.as_ref()) {
+                    self.behavior_availability = Some(availability);
+                }
                 self.pending_acp_commands = Some(update.available_commands);
                 true
             }
             acp::SessionUpdate::Plan(_) | acp::SessionUpdate::CurrentModeUpdate(_) => false,
             _ => false,
-        };
-        changed
+        }
     }
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
@@ -1229,13 +1237,12 @@ impl AcpUpdateTracker {
                 .and_then(|m| m.get(user_message_chunk_meta::PROMPT_INDEX))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
-            if let Some(pi) = prompt_index {
-                if let Some(entry) = scrollback.get_by_id_mut(existing_id)
-                    && let RenderBlock::UserPrompt(ref mut block) = entry.block
-                    && block.prompt_index.is_none()
-                {
-                    block.prompt_index = Some(pi);
-                }
+            if let Some(pi) = prompt_index
+                && let Some(entry) = scrollback.get_by_id_mut(existing_id)
+                && let RenderBlock::UserPrompt(ref mut block) = entry.block
+                && block.prompt_index.is_none()
+            {
+                block.prompt_index = Some(pi);
             }
             return false;
         }
@@ -2199,6 +2206,12 @@ fn parse_tools_meta(meta: Option<&acp::Meta>) -> Option<Vec<String>> {
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
     )
+}
+
+fn parse_behavior_availability_meta(
+    meta: Option<&acp::Meta>,
+) -> Option<tools::types::BehaviorAvailability> {
+    serde_json::from_value(meta?.get("grow/behaviorAvailability")?.clone()).ok()
 }
 /// Compact one-line description of a `SessionUpdate` for the always-on
 /// `acp_update` log target.
@@ -5200,6 +5213,41 @@ mod tests {
             .expect("tools list should be present");
         assert_eq!(tools, vec!["scheduler_create", "read_file"]);
         assert!(tracker.take_pending_acp_tools().is_none());
+    }
+    #[test]
+    fn tracker_retains_shell_behavior_availability_projection() {
+        let mut tracker = AcpUpdateTracker::new();
+        let mut sb = ScrollbackState::new();
+        let update = acp::SessionUpdate::AvailableCommandsUpdate(
+            acp::AvailableCommandsUpdate::new(vec![]).meta(
+                serde_json::json!({
+                    "grow/behaviorAvailability": {
+                        "current": "goal",
+                        "choices": [{
+                            "behavior": "normal",
+                            "supported": true,
+                            "disposition": "unavailable",
+                            "reason": "Goal is exclusive"
+                        }]
+                    }
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        tracker.handle_update(update, &meta(), &mut sb);
+        let availability = tracker
+            .behavior_availability()
+            .expect("valid Shell projection should be retained");
+        assert_eq!(availability.current, tools::types::BehaviorId::Goal);
+        let normal = availability
+            .choice(tools::types::BehaviorId::Normal)
+            .expect("normal choice");
+        assert_eq!(
+            normal.disposition,
+            tools::types::BehaviorAvailabilityDisposition::Unavailable
+        );
+        assert_eq!(normal.reason.as_deref(), Some("Goal is exclusive"));
     }
     #[test]
     fn tracker_tools_meta_absent_when_meta_missing() {

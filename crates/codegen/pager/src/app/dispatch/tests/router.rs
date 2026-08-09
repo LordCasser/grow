@@ -897,7 +897,7 @@ fn first_prompt_after_selecting_goal_stays_an_ordinary_prompt() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.session_id = Some("sess-1".into());
-        agent.behavior_mode = tools::types::SessionMode::Goal;
+        agent.behavior_mode = tools::types::BehaviorId::Goal;
         agent.goal_state = None;
         agent.prompt.sync_acp_commands(
             &agent.session.available_commands,
@@ -921,7 +921,7 @@ fn first_prompt_after_selecting_goal_stays_an_ordinary_prompt() {
     assert_eq!(app.agents[&id].session.queue_len(), 0);
     assert_eq!(
         app.agents[&id].behavior_mode,
-        tools::types::SessionMode::Goal
+        tools::types::BehaviorId::Goal
     );
 }
 

@@ -168,6 +168,8 @@ fn native_toolset_presets() -> Vec<(&'static str, ToolServerConfig)> {
         ("grow-build", default_grow_build_toolset()),
         ("grow-build-concise", grow_build_concise_toolset()),
         ("explore", explore_toolset()),
+        ("goal-planner", goal_planner_toolset()),
+        ("goal-verifier", goal_verifier_toolset()),
         ("grow-computer", grow_computer_toolset()),
     ]
 }
@@ -224,7 +226,8 @@ fn default_grow_build_toolset() -> ToolServerConfig {
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
             (&grow_build::GetGoalTool).into(),
-            (&grow_build::UpdateGoalPlanTool).into(),
+            (&grow_build::UpdateGoalProgressTool).into(),
+            (&grow_build::RequestGoalReplanTool).into(),
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
         ],
@@ -247,7 +250,8 @@ fn grow_build_concise_toolset() -> ToolServerConfig {
             (&grow_build::SchedulerListTool).into(),
             (&grow_build::MonitorTool).into(),
             (&grow_build::GetGoalTool).into(),
-            (&grow_build::UpdateGoalPlanTool).into(),
+            (&grow_build::UpdateGoalProgressTool).into(),
+            (&grow_build::RequestGoalReplanTool).into(),
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
         ],
@@ -278,7 +282,8 @@ pub fn grow_build_hashline_toolset(
         (&search_tool::SearchTool).into(),
         (&use_tool::UseTool).into(),
         (&grow_build::GetGoalTool).into(),
-        (&grow_build::UpdateGoalPlanTool).into(),
+        (&grow_build::UpdateGoalProgressTool).into(),
+        (&grow_build::RequestGoalReplanTool).into(),
         (&grow_build::UpdateGoalTool).into(),
         (&grow_build::WorkflowTool).into(),
     ]);
@@ -300,6 +305,31 @@ fn explore_toolset() -> ToolServerConfig {
             (&grow_build::ReadFileTool).into(),
             (&grow_build::ListDirTool).into(),
             (&grow_build::GrepTool).into(),
+        ],
+        behavior_preset: None,
+    }
+}
+
+/// Exact host-only toolset for the Goal planner. The planner receives the
+/// immutable Goal snapshot in its prompt and may re-read it, but has no shell,
+/// mutation, workflow, or delegation surface.
+fn goal_planner_toolset() -> ToolServerConfig {
+    let mut config = explore_toolset();
+    config.tools.push((&grow_build::GetGoalTool).into());
+    config
+}
+
+/// Exact host-only toolset for the Goal verifier. Its workspace is an
+/// isolated worktree; execution is available for evidence collection while
+/// every persistent or object-level mutation tool is absent by construction.
+fn goal_verifier_toolset() -> ToolServerConfig {
+    ToolServerConfig {
+        tools: vec![
+            bash_tool_config(),
+            (&grow_build::ReadFileTool).into(),
+            (&grow_build::ListDirTool).into(),
+            (&grow_build::GrepTool).into(),
+            (&grow_build::GetGoalTool).into(),
         ],
         behavior_preset: None,
     }
@@ -1014,9 +1044,17 @@ pub(crate) fn short_tool_name(id: &str) -> &str {
 pub(crate) fn tool_id_eq(entry: &str, id: &str) -> bool {
     entry == id || entry == short_tool_name(id)
 }
-/// Whether any `list` entry refers to tool `id`.
-pub(crate) fn tool_id_matches(list: &[String], id: &str) -> bool {
-    list.iter().any(|e| tool_id_eq(e, id))
+/// Whether an allow/deny entry refers to a configured tool by either its
+/// canonical registry id or the name exposed to the model.
+pub(crate) fn tool_config_eq(entry: &str, tool: &ToolConfig) -> bool {
+    tool_id_eq(entry, &tool.id)
+        || tool
+            .name_override
+            .as_deref()
+            .is_some_and(|name| entry == name)
+}
+pub(crate) fn tool_config_matches(list: &[String], tool: &ToolConfig) -> bool {
+    list.iter().any(|entry| tool_config_eq(entry, tool))
 }
 impl AgentDefinition {
     /// Resolve the explicit `subagents.allow/deny` policy. Ordinary tool
@@ -1201,8 +1239,8 @@ impl AgentDefinition {
     }
 
     /// Apply the Agent-authored portion of the tool assembly order for static
-    /// eligibility checks. Unknown allowlist entries fail open, matching the
-    /// runtime builder's behavior.
+    /// eligibility checks. Unknown allowlist entries grant no capability,
+    /// matching the runtime builder's fail-closed behavior.
     fn effective_authored_tool_kinds(&self) -> Vec<tools::types::tool::ToolKind> {
         use tools::implementations::grow_build::task::types::SubagentCapabilityModeExt;
         let mut tools = self.tool_config.tools.clone();
@@ -1216,14 +1254,13 @@ impl AgentDefinition {
         {
             tools.push((&grow_build::WriteTool).into());
         }
-        tools.retain(|tool| !tool_id_matches(&self.disallowed_tools, &tool.id));
+        tools.retain(|tool| !tool_config_matches(&self.disallowed_tools, tool));
 
         if !self.tools.is_empty() {
             let present_kinds: HashSet<_> = tools.iter().filter_map(|tool| tool.kind).collect();
             let mut allowed_kinds = HashSet::new();
-            let mut unresolved = false;
             for entry in &self.tools {
-                if tools.iter().any(|tool| tool_id_eq(entry, &tool.id)) {
+                if tools.iter().any(|tool| tool_config_eq(entry, tool)) {
                     continue;
                 }
                 match tools::types::kind_for(entry) {
@@ -1231,27 +1268,25 @@ impl AgentDefinition {
                         allowed_kinds.insert(kind);
                     }
                     Some(_) => {}
-                    None => unresolved = true,
+                    None => {}
                 }
             }
-            if !unresolved {
-                tools.retain(|tool| {
-                    tool_id_matches(&self.tools, &tool.id)
-                        || tool.kind.is_some_and(|kind| allowed_kinds.contains(&kind))
-                        || matches!(
-                            tool.kind,
-                            Some(
-                                tools::types::tool::ToolKind::SearchTool
-                                    | tools::types::tool::ToolKind::UseTool
-                            )
+            tools.retain(|tool| {
+                tool_config_matches(&self.tools, tool)
+                    || tool.kind.is_some_and(|kind| allowed_kinds.contains(&kind))
+                    || matches!(
+                        tool.kind,
+                        Some(
+                            tools::types::tool::ToolKind::SearchTool
+                                | tools::types::tool::ToolKind::UseTool
                         )
-                });
-            }
+                    )
+            });
         }
 
         if let Some(mode) = self.capability_mode {
             let allowed = mode.allowed_tool_kinds();
-            tools.retain(|tool| tool.kind.is_none_or(|kind| allowed.contains(&kind)));
+            tools.retain(|tool| tool.kind.is_some_and(|kind| allowed.contains(&kind)));
         }
 
         tools.into_iter().filter_map(|tool| tool.kind).collect()
@@ -1259,17 +1294,17 @@ impl AgentDefinition {
 
     /// Whether `id` passes the session-operator clamp: denylist wins, then an
     /// unset allowlist allows all.
-    pub(crate) fn session_tools_allowed(&self, id: &str) -> bool {
+    pub(crate) fn session_tools_allowed(&self, tool: &ToolConfig) -> bool {
         if self
             .session_tools_denylist
             .as_deref()
-            .is_some_and(|d| tool_id_matches(d, id))
+            .is_some_and(|deny| tool_config_matches(deny, tool))
         {
             return false;
         }
         self.session_tools_allowlist
             .as_deref()
-            .is_none_or(|a| tool_id_matches(a, id))
+            .is_none_or(|allow| tool_config_matches(allow, tool))
     }
     /// Replace the file-operation tools (read/edit/search) in the tool config
     /// with the given set. Used by the shell layer to swap from standard to
@@ -1389,6 +1424,16 @@ impl AgentDefinition {
             .expect("embedded explore Agent definition must be valid");
         definition.scope = AgentScope::BuiltIn;
         definition
+    }
+    /// Host-only Goal planning stage. This profile is intentionally not a
+    /// `BuiltinAgentName`, so discovery and the general Task catalog cannot
+    /// expose or resolve it.
+    pub fn goal_planner() -> Self {
+        Self::embedded_builtin(include_str!("../prompts/agents/goal-planner.md"))
+    }
+    /// Host-only Goal verification stage; see [`Self::goal_planner`].
+    pub fn goal_verifier() -> Self {
+        Self::embedded_builtin(include_str!("../prompts/agents/goal-verifier.md"))
     }
     /// Browser Use agent definition.
     pub fn browser_use() -> Self {

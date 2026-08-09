@@ -18,6 +18,73 @@ fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTa
 }
 
 #[test]
+fn behavior_confirmation_unwinds_submission_and_returns_prompt_to_fifo() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(
+        Action::SetBehaviorThenPrompt {
+            mode: tools::types::BehaviorId::Plan,
+            prompt: Some("add auth to the app".into()),
+        },
+        &mut app,
+    );
+    let (session_id, mode_id, prompt_id, skill_token_ranges) = match effects.as_slice() {
+        [
+            Effect::SetModeThenPrompt {
+                session_id,
+                mode_id,
+                prompt_id,
+                skill_token_ranges,
+                ..
+            },
+        ] => (
+            session_id.clone(),
+            mode_id.clone(),
+            prompt_id.clone(),
+            skill_token_ranges.clone(),
+        ),
+        other => panic!("expected mode+prompt effect, got {other:?}"),
+    };
+    let provisional_entry = app.agents[&id]
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .expect("local submission paints a provisional bubble")
+        .scrollback_entry;
+
+    let result = dispatch(
+        Action::TaskComplete(TaskResult::PromptRequiresBehaviorConfirmation {
+            agent_id: id,
+            session_id,
+            mode_id,
+            text: "add auth to the app".into(),
+            prompt_id,
+            skill_token_ranges,
+            message: "Select Plan again to confirm".into(),
+            remaining_ms: 8_000,
+        }),
+        &mut app,
+    );
+
+    assert!(result.is_empty());
+    let agent = &app.agents[&id];
+    assert!(agent.session.state.is_idle());
+    assert!(agent.session.current_prompt_id.is_none());
+    assert!(agent.session.in_flight_prompt.is_none());
+    assert!(agent.scrollback.get_by_id(provisional_entry).is_none());
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(
+        agent
+            .session
+            .pending_prompts
+            .front()
+            .map(|p| p.text.as_str()),
+        Some("add auth to the app")
+    );
+    assert!(agent.mode_switch_banner.is_some());
+}
+
+#[test]
 fn doctor_planning_promotes_initial_session_binding() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = test_app_with_agent();

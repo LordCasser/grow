@@ -193,6 +193,24 @@ impl WorkflowRunState {
             self.history.drain(..excess);
         }
     }
+
+    /// A persisted Active state has no executor after process restart. Treat
+    /// it as a terminal interruption instead of projecting ghost work or
+    /// allowing it to block special-Behavior admission forever.
+    pub(crate) fn interrupt_after_restore(&mut self) {
+        if self.status != WorkflowRunStatus::Active {
+            return;
+        }
+        let message =
+            "the session restarted while this workflow was active; execution ownership was lost"
+                .to_string();
+        self.status = WorkflowRunStatus::Interrupted;
+        self.pause_message = Some(message.clone());
+        self.result_summary = None;
+        self.token_leases.clear();
+        self.agent_usage_incomplete = true;
+        self.record_event("workflow_interrupted", Some(message));
+    }
 }
 
 fn now_rfc3339() -> String {

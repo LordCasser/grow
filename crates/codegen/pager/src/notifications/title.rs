@@ -41,12 +41,8 @@ impl TitleManager {
         }
     }
 
-    /// Compose the title string from the current state.
-    ///
-    /// Returns the escape sequence bytes to set the terminal title when the
-    /// composed title differs from the last one emitted. Returns `None` when
-    /// the title is unchanged (dedup).
-    pub fn update(&mut self, state: &TitleState<'_>) -> Option<String> {
+    #[cfg(test)]
+    fn update(&mut self, state: &TitleState<'_>) -> Option<String> {
         self.update_at(state, crate::motion::FrameStamp::default())
     }
 

@@ -4,7 +4,6 @@
 //! actor. It was extracted from `acp_session.rs` to keep the actor
 //! implementation focused on behaviour.
 use super::acp_types::*;
-use super::behavior::PromptMode;
 use crate::extensions::notification::SessionNotification;
 use crate::session::signals::TurnDeltaSnapshot;
 use agent_client_protocol as acp;
@@ -39,7 +38,7 @@ pub enum SideQuestionError {
 pub enum PromptCompletionKind {
     Completed,
     /// Silent EndTurn after stationarity/true-noop thrash. Distinct from
-    /// Completed so goal continuation is not re-queued under an active goal.
+    /// Completed so a Goal-owned continuation can pause instead of hot-looping.
     StationarityEnded,
     Cancelled {
         category: Option<crate::session::events::CancellationCategory>,
@@ -147,6 +146,11 @@ pub enum SessionCommand {
     ReplaceSystemPrompt {
         system_prompt: String,
     },
+    /// Install an immutable Goal snapshot before a delegated child turn is
+    /// admitted. The snapshot is read-only and never follows parent revisions.
+    SetGoalContextSnapshot {
+        snapshot: tools::implementations::grow_build::update_goal::GoalContextSnapshot,
+    },
     /// Resume hook: after a session is restored with
     /// `approval_pending == true`, re-issue the `grow/plan_approval`
     /// reverse-request so the client re-shows approval chrome over a real live
@@ -159,8 +163,6 @@ pub enum SessionCommand {
         origin: crate::session::PromptOrigin,
         /// Explicit lifecycle kind for this regular turn.
         turn_kind: crate::session::TurnKind,
-        /// Prompt mode parsed from request `_meta.mode`.
-        prompt_mode: PromptMode,
         /// Optional client identifier from the prompt request meta (overrides session-level one)
         client_identifier: Option<String>,
         /// Optional screen mode from the prompt request meta (`_meta.screenMode`,
@@ -210,7 +212,7 @@ pub enum SessionCommand {
         source: NotificationSource,
         body: String,
     },
-    SessionMode {
+    BehaviorChange {
         session_mode: acp::SessionModeId,
         responds_to: oneshot::Sender<crate::session::behavior::BehaviorChangeOutcome>,
     },
@@ -280,8 +282,8 @@ pub enum SessionCommand {
     GetCurrentModel {
         responds_to: oneshot::Sender<String>,
     },
-    GetCurrentPromptMode {
-        responds_to: oneshot::Sender<PromptMode>,
+    GetCurrentBehavior {
+        responds_to: oneshot::Sender<tool_types::BehaviorId>,
     },
     GetModelMetadata {
         responds_to: oneshot::Sender<chat_state::ModelMetadata>,

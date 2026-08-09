@@ -44,10 +44,10 @@ impl SlashCommand for PlanCommand {
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.is_empty() {
-            return CommandResult::Action(Action::SetBehaviorMode(tools::types::SessionMode::Plan));
+            return CommandResult::Action(Action::SetBehaviorMode(tools::types::BehaviorId::Plan));
         }
         CommandResult::Action(Action::SetBehaviorThenPrompt {
-            mode: tools::types::SessionMode::Plan,
+            mode: tools::types::BehaviorId::Plan,
             prompt: Some(trimmed.to_string()),
         })
     }
@@ -70,7 +70,7 @@ mod tests {
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: PagerLocalSnapshot {
-                behavior_mode: tools::types::SessionMode::Default,
+                behavior_mode: tools::types::BehaviorId::Normal,
                 ..PagerLocalSnapshot::default()
             },
         }
@@ -86,7 +86,7 @@ mod tests {
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: PagerLocalSnapshot {
-                behavior_mode: tools::types::SessionMode::Plan,
+                behavior_mode: tools::types::BehaviorId::Plan,
                 ..PagerLocalSnapshot::default()
             },
         }
@@ -101,7 +101,7 @@ mod tests {
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "") {
             CommandResult::Action(Action::SetBehaviorMode(mode)) => {
-                assert_eq!(mode, tools::types::SessionMode::Plan);
+                assert_eq!(mode, tools::types::BehaviorId::Plan);
             }
             other => panic!("expected Action::SetBehaviorMode(Plan), got {other:?}"),
         }
@@ -116,7 +116,7 @@ mod tests {
         let mut ctx = make_ctx_active_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "") {
             CommandResult::Action(Action::SetBehaviorMode(mode)) => {
-                assert_eq!(mode, tools::types::SessionMode::Plan);
+                assert_eq!(mode, tools::types::BehaviorId::Plan);
             }
             other => panic!("expected Action::SetBehaviorMode(Plan), got {other:?}"),
         }
@@ -131,7 +131,7 @@ mod tests {
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "   ") {
             CommandResult::Action(Action::SetBehaviorMode(mode)) => {
-                assert_eq!(mode, tools::types::SessionMode::Plan);
+                assert_eq!(mode, tools::types::BehaviorId::Plan);
             }
             other => panic!("expected SetBehaviorMode(Plan), got {other:?}"),
         }
@@ -146,7 +146,7 @@ mod tests {
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "Refactor the auth flow") {
             CommandResult::Action(Action::SetBehaviorThenPrompt { mode, prompt }) => {
-                assert_eq!(mode, tools::types::SessionMode::Plan);
+                assert_eq!(mode, tools::types::BehaviorId::Plan);
                 assert_eq!(
                     prompt.as_deref(),
                     Some("Refactor the auth flow"),
@@ -167,7 +167,7 @@ mod tests {
         let mut ctx = make_ctx_active_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "something") {
             CommandResult::Action(Action::SetBehaviorThenPrompt { mode, prompt }) => {
-                assert_eq!(mode, tools::types::SessionMode::Plan);
+                assert_eq!(mode, tools::types::BehaviorId::Plan);
                 assert_eq!(prompt.as_deref(), Some("something"));
             }
             other => panic!("expected SetBehaviorThenPrompt, got {other:?}"),
@@ -183,7 +183,7 @@ mod tests {
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "  hello world  ") {
             CommandResult::Action(Action::SetBehaviorThenPrompt { mode, prompt }) => {
-                assert_eq!(mode, tools::types::SessionMode::Plan);
+                assert_eq!(mode, tools::types::BehaviorId::Plan);
                 assert_eq!(prompt.as_deref(), Some("hello world"));
             }
             other => panic!("expected SetBehaviorThenPrompt, got {other:?}"),

@@ -63,8 +63,8 @@ use subagent_activity::{subagent_activity_label, sync_subagent_activity};
 use workflow_ingest::ingest_workflow_update;
 
 use session_notification::{
-    advance_reconnect_cursor, confirm_context_used, detect_plan_mode_change,
-    drop_unexpected_replay, handle_session_notification,
+    advance_reconnect_cursor, behavior_mode_update_applied, confirm_context_used,
+    detect_plan_mode_change, drop_unexpected_replay, handle_session_notification,
 };
 
 use queue::handle_queue_changed;
@@ -232,6 +232,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                     let mut plan_mode_modal_refresh_needed = false;
                     let mut workflows_modal_refresh = false;
+                    let mut behavior_drain = None;
 
                     // Extract Plan updates before passing to tracker (tracker skips them).
                     let mutated = if dedup_drop {
@@ -305,6 +306,8 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // always has `attached_as_viewer == false`).
                         !agent.session.loading_replay
                     } else {
+                        let release_behavior_fifo =
+                            !meta.is_replay && behavior_mode_update_applied(&notif.request.update);
                         if !meta.is_replay {
                             agent.last_prompt_event_at = Some(observed_at);
                         }
@@ -452,8 +455,17 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                         advance_reconnect_cursor(agent, &mut meta);
 
+                        if release_behavior_fifo {
+                            behavior_drain = Some(crate::app::dispatch::maybe_drain_queue(agent));
+                        }
+
                         !meta.is_replay && !agent.session.loading_replay
                     };
+
+                    if let Some(drain) = behavior_drain {
+                        crate::app::dispatch::note_peek_page_flip(app, id, drain.page_flip_entry);
+                        app.pending_effects.extend(drain.effects);
+                    }
 
                     if plan_mode_modal_refresh_needed {
                         crate::app::dispatch::refresh_open_settings_modals(app);

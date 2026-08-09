@@ -589,7 +589,7 @@ fn make_test_handle(
         code_nav_enabled: false,
         ask_user_question_enabled: true,
         behavior: std::sync::Arc::new(parking_lot::Mutex::new(
-            crate::session::behavior::BehaviorController::new(std::path::PathBuf::from("/tmp")),
+            crate::session::behavior::BehaviorCoordinator::new(std::path::PathBuf::from("/tmp")),
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: workspace::permission::PermissionHandle::allow_all(),
@@ -1862,13 +1862,17 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
             let mut intake_parked_tx = Some(intake_parked_tx);
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    SessionCommand::GetCurrentPromptMode { .. } => {
+                    SessionCommand::GetCurrentModel { responds_to } => {
                         if let Some(tx) = intake_parked_tx.take() {
                             let _ = tx.send(());
                             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         }
+                        let _ = responds_to.send("test-model".to_string());
                     }
-                    SessionCommand::QueuePrompt { .. } => driver_order.borrow_mut().push("prompt"),
+                    SessionCommand::QueuePrompt { respond_to, .. } => {
+                        driver_order.borrow_mut().push("prompt");
+                        let _ = respond_to.send(crate::session::commands::ok_end_turn(0, None));
+                    }
                     SessionCommand::Cancel { .. } => driver_order.borrow_mut().push("cancel"),
                     _ => {}
                 }

@@ -26,6 +26,8 @@ A successful Goal control that invalidates the running context (set/edit/enter/p
 
 Steering includes `expected_turn_id`. The shell accepts it only if the identified regular turn is still foreground, then moves the queued payload into that same turn's input buffer. It never creates a replacement turn or another terminal. Compaction and idle state are not steerable.
 
+The turn terminal is also a steering-scope fence. A residual steer that missed the sampler's final safe-point drain is discarded on completion or cancellation; it can never leak into a later user turn or Goal continuation merely because Goal remains active.
+
 ## Idle admission
 
 All regular work shares one admission sequence:
@@ -61,7 +63,7 @@ Goal is an exclusive visible Behavior but not an exclusive foreground owner.
 - `/goal edit` revises the objective and returns the Goal to Planning;
 - outside Goal Behavior, `/goal set` switches to Goal and creates the objective; inside Goal it is hidden and rejected;
 - after selecting Goal with no objective, the next ordinary message is captured directly as the objective without a Pager-generated hidden command;
-- an accepted `update_goal_plan` during Verifying cancels that lease's verifier and returns to Executing; a rejected update leaves the verifier untouched;
+- an accepted `request_goal_replan` during Verifying advances the plan revision, cancels that lease's verifier, and enters Planning; an accepted `update_goal_progress` cancels it and returns to Executing; rejected/stale updates leave the verifier untouched;
 - pause keeps Goal Behavior but stops autonomous admission;
 - complete or clear returns to Normal;
 - an unfinished Goal rejects switching to another Behavior.
@@ -90,4 +92,4 @@ idle admission. If no queued user/manual work claims the slot, an Active Goal
 is woken immediately; Stop Turn Only cannot leave it dormant until the next
 unrelated user message.
 
-An Active Goal reload keeps its v3 persistent phase/plan/revisions and settled token counters, clears transient stage leases, reconciles Goal Behavior, and is resumed by the idle hook. Incompatible or malformed Goal state is diagnosed, deleted, and followed by a cleared projection after replay rather than migrated through legacy routing rules.
+An Active Goal reload keeps its v5 persistent phase/plan/board revisions and settled token counters, clears transient stage leases, reconciles Goal Behavior, and is resumed by the idle hook. An obsolete control/Goal architecture is diagnosed and discarded without migration. A current architecture with an internally inconsistent Goal identity-preserving snapshot is recovered fail-closed as Paused/Planning so it cannot resume autonomously.

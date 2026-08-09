@@ -2,7 +2,7 @@
 use crate::agent::Agent;
 use crate::compaction::CompactionPolicy;
 use crate::config::{AgentDefinition, BuiltinAgentName, PermissionMode, PromptComposition};
-use crate::config::{short_tool_name, tool_id_eq, tool_id_matches};
+use crate::config::{short_tool_name, tool_config_eq, tool_config_matches, tool_id_eq};
 use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
 use crate::prompt::context::PromptContext;
@@ -744,7 +744,7 @@ impl AgentBuilder {
                 tool_config.tools.iter().map(|tc| tc.id.clone()).collect();
             tool_config
                 .tools
-                .retain(|tc| !tool_id_matches(&definition.disallowed_tools, &tc.id));
+                .retain(|tc| !tool_config_matches(&definition.disallowed_tools, tc));
             let after: std::collections::HashSet<String> =
                 tool_config.tools.iter().map(|tc| tc.id.clone()).collect();
             let removed: std::collections::HashSet<&String> = before.difference(&after).collect();
@@ -767,7 +767,7 @@ impl AgentBuilder {
                 if t.starts_with("mcp__") {
                     continue;
                 }
-                if tool_config.tools.iter().any(|tc| tool_id_eq(t, &tc.id)) {
+                if tool_config.tools.iter().any(|tc| tool_config_eq(t, tc)) {
                     continue;
                 }
                 match claude_tool_kind(t) {
@@ -791,25 +791,24 @@ impl AgentBuilder {
                     "tools allowlist named recognized tools that aren't enabled; ignoring them"
                 );
             }
-            if unresolved.is_empty() {
-                tool_config.tools.retain(|tc| {
-                    tool_id_matches(&definition.tools, &tc.id)
-                        || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
-                        || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
-                });
-                tracing::debug!(agent = %definition.name, allowed = ?definition.tools, "tools allowlist applied");
-            } else {
+            tool_config.tools.retain(|tc| {
+                tool_config_matches(&definition.tools, tc)
+                    || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
+                    || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
+            });
+            tracing::debug!(agent = %definition.name, allowed = ?definition.tools, "tools allowlist applied");
+            if !unresolved.is_empty() {
                 tracing::warn!(
                     agent = %definition.name,
                     unresolved = ?unresolved,
                     allowed = ?definition.tools,
-                    "tools allowlist had unmappable entries; keeping full grow toolset"
+                    "tools allowlist had unmappable entries; those entries grant no tools"
                 );
             }
         }
         tool_config
             .tools
-            .retain(|tc| definition.session_tools_allowed(&tc.id));
+            .retain(|tc| definition.session_tools_allowed(tc));
         let task_deps = ["task", "get_task_output", "kill_task", "wait_tasks"];
         let task_enabled = tool_config
             .tools
@@ -1591,10 +1590,10 @@ mod tests {
             "must not inherit-all: {names:?}"
         );
     }
-    /// An unresolved own-allowlist entry makes step 4 fall back to the full
-    /// toolset; the session clamp (step 4b) must still bind afterward.
+    /// An unresolved own-allowlist entry grants nothing; resolved entries and
+    /// the session clamp still intersect normally.
     #[tokio::test]
-    async fn session_clamp_binds_when_own_allowlist_falls_back() {
+    async fn session_clamp_intersects_partially_unresolved_own_allowlist() {
         let names = session_clamp_tool_names(
             vec!["read_file".into(), "bogus_unresolved_xyz".into()],
             vec!["read_file".into()],
@@ -1609,12 +1608,14 @@ mod tests {
     #[test]
     fn session_tools_allowed_clamp() {
         let mut def = crate::config::AgentDefinition::general_purpose();
-        assert!(def.session_tools_allowed("read_file"));
+        let read = tools::registry::types::ToolConfig::from_id("Grow:read_file");
+        let grep = tools::registry::types::ToolConfig::from_id("Grow:grep");
+        assert!(def.session_tools_allowed(&read));
         def.session_tools_allowlist = Some(vec!["read_file".into()]);
-        assert!(def.session_tools_allowed("Grow:read_file"));
-        assert!(!def.session_tools_allowed("grep"));
+        assert!(def.session_tools_allowed(&read));
+        assert!(!def.session_tools_allowed(&grep));
         def.session_tools_denylist = Some(vec!["read_file".into()]);
-        assert!(!def.session_tools_allowed("read_file"));
+        assert!(!def.session_tools_allowed(&read));
     }
     const AGENT_TOOLS_BASE: &[&str] = &["read_file", "run_terminal_cmd"];
     #[tokio::test]
@@ -1636,6 +1637,14 @@ mod tests {
         use tools::notification::ToolNotificationHandle;
         let mut tools: Vec<String> = AGENT_TOOLS_BASE.iter().map(|s| s.to_string()).collect();
         tools.push("spawn_subagent".into());
+        tools.extend(
+            [
+                "get_command_or_subagent_output",
+                "kill_command_or_subagent",
+                "wait_commands_or_subagents",
+            ]
+            .map(str::to_owned),
+        );
         let mut definition = crate::config::AgentDefinition::default_grow_build();
         definition.tools = tools;
         definition.subagents.allow = vec!["explore".into()];
@@ -1761,10 +1770,10 @@ mod tests {
             assert!(!names.contains(&dropped.to_string()), "got: {names:?}");
         }
     }
-    /// Entries we can't match or map (a typo, a renamed/absent tool) fall back
-    /// to the full toolset rather than crippling the agent.
+    /// Entries we can't match or map (a typo, a renamed/absent tool) grant no
+    /// capability. A malformed restricted Agent must fail closed.
     #[tokio::test]
-    async fn unmappable_allowlist_falls_back_to_full_toolset() {
+    async fn unmappable_allowlist_fails_closed() {
         let tools = vec!["Frobnicate".into(), "Wibble".into()];
         let agent = build_with_tools(tools, vec![]).await;
         let names: Vec<String> = agent
@@ -1773,14 +1782,11 @@ mod tests {
             .iter()
             .map(|d| d.function.name.clone())
             .collect();
-        assert!(names.contains(&"read_file".to_string()), "got: {names:?}");
         assert!(
-            names.contains(&"search_replace".to_string()),
-            "got: {names:?}"
-        );
-        assert!(
-            names.contains(&"run_terminal_command".to_string()),
-            "got: {names:?}"
+            !names.contains(&"read_file".to_string())
+                && !names.contains(&"search_replace".to_string())
+                && !names.contains(&"run_terminal_command".to_string()),
+            "unmappable entries must not widen authority: {names:?}"
         );
     }
     /// End-to-end: an on-disk plugin agent parsed via `from_file_frontmatter_only`

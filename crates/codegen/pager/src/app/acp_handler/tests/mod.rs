@@ -696,6 +696,7 @@ pub(super) fn grow_turn_completed_notif(
             stop_reason: stop_reason.into(),
             agent_result: None,
             usage: None,
+            identity: None,
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };

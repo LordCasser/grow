@@ -146,6 +146,12 @@ async fn test_turn_completed_round_trips_through_storage() {
         session_id: session_id.clone(),
         update: GrowSessionUpdate::TurnCompleted {
             prompt_id: "prompt-1".to_string(),
+            identity: Some(shell::extensions::notification::TurnIdentity {
+                origin: "user".into(),
+                turn_kind: "user".into(),
+                goal_id: None,
+                stage_id: None,
+            }),
             stop_reason: "end_turn".to_string(),
             agent_result: Some("all done".to_string()),
             usage: None,

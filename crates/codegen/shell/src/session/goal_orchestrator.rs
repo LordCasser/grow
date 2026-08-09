@@ -35,25 +35,12 @@ impl GoalNotifySender {
     /// from [`SessionActor::goal_tokens`].
     pub(crate) fn emit_goal_updated(
         &self,
-        tracker: &mut GoalTracker,
+        tracker: &GoalTracker,
         tokens_used: i64,
         finished_subagent_tokens: i64,
     ) {
-        tracker.account_elapsed();
         let Some(o) = tracker.snapshot() else { return };
-        let _ = self
-            .persistence_tx
-            .send(PersistenceMsg::GoalModeState(o.clone()));
         self.send_update(build_goal_updated(o, tokens_used, finished_subagent_tokens));
-    }
-
-    pub(crate) fn persist_goal_state(&self, tracker: &GoalTracker) {
-        let Some(snapshot) = tracker.snapshot() else {
-            return;
-        };
-        let _ = self
-            .persistence_tx
-            .send(PersistenceMsg::GoalModeState(snapshot.clone()));
     }
 
     /// Like [`Self::emit_goal_updated`] but fire-and-forget to the gateway
@@ -67,11 +54,10 @@ impl GoalNotifySender {
     /// gateway-only `scheduled_task_fired` convention.
     pub(crate) fn emit_goal_updated_ephemeral(
         &self,
-        tracker: &mut GoalTracker,
+        tracker: &GoalTracker,
         tokens_used: i64,
         finished_subagent_tokens: i64,
     ) {
-        tracker.account_elapsed();
         let Some(o) = tracker.snapshot() else { return };
         self.dispatch_update(
             build_goal_updated(o, tokens_used, finished_subagent_tokens),
@@ -126,6 +112,8 @@ fn goal_event_as_str(event: &crate::session::goal_tracker::GoalEvent) -> &'stati
         GoalEvent::GoalRevised => "goal_revised",
         GoalEvent::PlanningStarted => "planning_started",
         GoalEvent::PlanningCompleted => "planning_completed",
+        GoalEvent::ReplanRequested => "replan_requested",
+        GoalEvent::ProgressUpdated => "progress_updated",
         GoalEvent::PlanningFailed => "planning_failed",
         GoalEvent::WorkerStarted => "worker_started",
         GoalEvent::WorkerCompleted => "worker_completed",
@@ -173,8 +161,12 @@ pub(crate) fn build_goal_updated(
         objective_revision: o.objective_revision,
         status: status_str.to_owned(),
         phase: phase_str.to_owned(),
-        plan_revision: o.plan.revision,
-        plan_markdown: o.plan.markdown.clone(),
+        plan_revision: o.board.plan_revision,
+        board_revision: o.board.board_revision,
+        tasks: crate::session::goal_board::parse_goal_board(&o.objective, o.board.markdown.clone())
+            .map(|board| board.task_projection())
+            .unwrap_or_default(),
+        plan_markdown: o.board.markdown.clone(),
         verifier_feedback: o.verifier_feedback.clone(),
         token_budget: o.token_budget,
         tokens_used,
@@ -219,6 +211,8 @@ pub(crate) fn build_goal_cleared() -> GrowSessionUpdate {
         status: "cleared".to_owned(),
         phase: "planning".to_owned(),
         plan_revision: 0,
+        board_revision: 0,
+        tasks: Vec::new(),
         plan_markdown: String::new(),
         verifier_feedback: None,
         token_budget: None,
@@ -259,7 +253,7 @@ pub(crate) fn format_elapsed(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::goal_tracker::{GoalPlanAuthor, GoalTracker};
+    use crate::session::goal_tracker::GoalTracker;
 
     fn verifying_goal() -> GoalOrchestration {
         let mut tracker = GoalTracker::new();
@@ -271,12 +265,14 @@ mod tests {
             "now".into(),
             None,
         );
-        assert!(tracker.replace_plan(
-            "- [ ] implement\n- [ ] verify".into(),
-            GoalPlanAuthor::Planner,
-            None,
-        ));
-        assert!(tracker.candidate_complete("candidate".into()));
+        let lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
+        let board = "# Goal\n\n> ship it\n\n## Plan\n\n- [ ] **T1** `in_progress` — Implement\n  - Scope: runtime\n  - Acceptance: tests pass\n- [ ] **T2** `pending` — Verify\n  - Scope: tests\n  - Acceptance: evidence collected\n\n## Goal acceptance\n\n- Tests pass\n\n## Verification evidence\n\n- Pending\n\n## Open gaps\n\n- None";
+        assert!(tracker.apply_planner_result(&lease, board.into()).unwrap());
+        assert!(
+            tracker
+                .candidate_complete(1, 1, "candidate".into())
+                .unwrap()
+        );
         tracker.snapshot().unwrap().clone()
     }
 
@@ -302,7 +298,7 @@ mod tests {
         assert_eq!(status, "active");
         assert_eq!(phase, "verifying");
         assert_eq!(plan_revision, 1);
-        assert_eq!(plan_markdown, "- [ ] implement\n- [ ] verify");
+        assert!(plan_markdown.contains("**T1**"));
         assert_eq!(verifier_feedback, None);
     }
 

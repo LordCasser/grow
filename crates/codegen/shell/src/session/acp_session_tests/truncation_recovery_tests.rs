@@ -322,7 +322,7 @@ async fn run_user_turn(
             vec![acp::ContentBlock::Text(acp::TextContent::new(
                 "write a long answer",
             ))],
-            PromptMode::Agent,
+            tool_types::BehaviorId::Normal,
             None,
             None,
             false,

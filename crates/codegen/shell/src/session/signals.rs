@@ -116,14 +116,15 @@ pub struct TurnDeltaSnapshot {
     pub current: SessionSignals,
     /// Per-turn deltas (difference from last turn-end snapshot)
     pub delta: SessionSignalsDelta,
-    /// Prompt mode captured at the start of this turn.
+    /// Behavior captured when this turn acquired foreground.
     /// Populated by the session actor after taking the snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub start_prompt_mode: Option<String>,
-    /// Effective prompt mode when the turn ended.
+    pub admitted_behavior: Option<String>,
+    /// Effective Behavior when the turn ended (normally identical because a
+    /// running turn's context is immutable).
     /// Populated by the session actor after taking the snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub end_prompt_mode: Option<String>,
+    pub completed_behavior: Option<String>,
     /// Per-turn summed input tokens (all model calls). Stamped from
     /// `TurnSpanTotals` post-snapshot; internal transport, not serialized.
     #[serde(skip)]
@@ -1428,8 +1429,8 @@ impl SessionSignalsActor {
                     let snapshot = TurnDeltaSnapshot {
                         current: self.signals.clone(),
                         delta,
-                        start_prompt_mode: None,
-                        end_prompt_mode: None,
+                        admitted_behavior: None,
+                        completed_behavior: None,
                         // Stamped from `TurnSpanTotals` post-snapshot (see turn.rs).
                         turn_input_tokens: 0,
                         turn_output_tokens: 0,

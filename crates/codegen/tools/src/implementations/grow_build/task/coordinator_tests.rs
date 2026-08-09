@@ -48,7 +48,6 @@ impl ChildRunner for TestRunner {
     type CompletionData = ();
     type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
     type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
-    type DescribeFuture = SendBoxFuture<SubagentDescribeOutcome>;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
         let wait_before_start = self.wait_before_start;
@@ -135,15 +134,6 @@ impl ChildRunner for TestRunner {
         Box::pin(std::future::ready(SubagentValidateTypeOutcome::Ok))
     }
 
-    fn describe_type(
-        &self,
-        _subagent_type: String,
-        _harness_agent_type: Option<String>,
-        _parent_session_id: String,
-    ) -> Self::DescribeFuture {
-        Box::pin(std::future::ready(SubagentDescribeOutcome::Unavailable))
-    }
-
     fn on_completed(&self, completion: ChildCompletion<Self::CompletionData>) {
         let _ = self.completions.send(completion.disposition);
     }
@@ -176,6 +166,7 @@ fn request(id: &str, background: bool) -> SubagentRequest {
         await_to_completion: false,
         fork_context: false,
         owner: SubagentOwner::Task,
+        goal_context: None,
         cancel_token: CancellationToken::new(),
     }
 }

@@ -59,6 +59,42 @@ impl SessionActor {
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let mut defs = bridge.tool_definitions_builtins_only().await;
+        let delegated_goal_context = bridge
+            .read_resource::<tools::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
+            .await
+            .and_then(|resource| resource.0);
+        if let Some(context) = delegated_goal_context.as_ref() {
+            use tools::implementations::grow_build::task::types::GoalSubagentRole;
+            use tools::types::tool::ToolKind;
+            let stage_leaf = matches!(
+                context.role,
+                GoalSubagentRole::Planner | GoalSubagentRole::Verifier
+            );
+            defs.retain(|definition| {
+                let kind = bridge.tool_kind(&definition.function.name);
+                let goal_mutation = matches!(
+                    kind,
+                    Some(
+                        ToolKind::GoalProgressUpdate
+                            | ToolKind::GoalReplanRequest
+                            | ToolKind::GoalLifecycleUpdate
+                    )
+                );
+                let stage_owned_work = stage_leaf
+                    && matches!(
+                        kind,
+                        Some(
+                            ToolKind::Task
+                                | ToolKind::BackgroundTaskAction
+                                | ToolKind::WaitTasksAction
+                                | ToolKind::KillTaskAction
+                                | ToolKind::Monitor
+                                | ToolKind::Workflow
+                        )
+                    );
+                !goal_mutation && !stage_owned_work
+            });
+        }
         // A Behavior picker change may land while a regular turn is still
         // running. Tool snapshots/forks must retain that turn's captured mode;
         // otherwise a Normal turn can suddenly expose Goal tools (or lose Plan
@@ -68,22 +104,50 @@ impl SessionActor {
             .session_turn_active
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            self.turn_prompt_mode.lock().behavior()
+            *self.turn_behavior.lock()
         } else {
             self.behavior.lock().behavior()
         };
-        let goal_behavior = tool_behavior == Some(tool_types::BehaviorId::Goal);
-        if !goal_behavior {
+        let goal_behavior = tool_behavior == tool_types::BehaviorId::Goal;
+        if !goal_behavior && delegated_goal_context.is_none() {
             defs.retain(|definition| {
                 !matches!(
-                    definition.function.name.as_str(),
-                    tools::implementations::grow_build::GET_GOAL_TOOL_NAME
-                        | tools::implementations::grow_build::UPDATE_GOAL_PLAN_TOOL_NAME
-                        | tools::implementations::grow_build::UPDATE_GOAL_TOOL_NAME
+                    bridge.tool_kind(&definition.function.name),
+                    Some(
+                        tools::types::tool::ToolKind::GoalRead
+                            | tools::types::tool::ToolKind::GoalProgressUpdate
+                            | tools::types::tool::ToolKind::GoalReplanRequest
+                            | tools::types::tool::ToolKind::GoalLifecycleUpdate
+                    )
                 )
             });
         }
-        let plan_active = tool_behavior == Some(tool_types::BehaviorId::Plan);
+        if tool_behavior == tool_types::BehaviorId::DeepResearch {
+            // Deep Research foreground turns answer follow-up questions while
+            // its private workflow runs, but they are as read-only as the
+            // workflow workers. Unknown/unclassified tools fail closed.
+            defs.retain(|definition| {
+                bridge.tool_scope(&definition.function.name) == Some(tool_protocol::ToolScope::Read)
+            });
+        }
+        if matches!(
+            tool_behavior,
+            tool_types::BehaviorId::Plan
+                | tool_types::BehaviorId::Goal
+                | tool_types::BehaviorId::DeepResearch
+        ) {
+            defs.retain(|definition| {
+                bridge.tool_kind(&definition.function.name)
+                    != Some(tools::types::tool::ToolKind::Workflow)
+            });
+        }
+        let plan_active = tool_behavior == tool_types::BehaviorId::Plan;
+        if !plan_active {
+            defs.retain(|definition| {
+                bridge.tool_kind(&definition.function.name)
+                    != Some(tools::types::tool::ToolKind::PlanControl)
+            });
+        }
         filter_cursor_tools_by_plan_mode(defs, plan_active)
     }
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {

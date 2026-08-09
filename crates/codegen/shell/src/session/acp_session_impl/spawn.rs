@@ -5,14 +5,14 @@
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 
-fn reconcile_goal_prompt_mode(
+fn reconcile_goal_behavior(
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
-    restored: PromptMode,
-) -> PromptMode {
+    restored: tool_types::BehaviorId,
+) -> tool_types::BehaviorId {
     match goal_status {
-        Some(crate::session::goal_tracker::GoalStatus::Complete) => PromptMode::Agent,
-        Some(_) => PromptMode::Goal,
-        None if restored == PromptMode::Goal => PromptMode::Agent,
+        Some(crate::session::goal_tracker::GoalStatus::Complete) => tool_types::BehaviorId::Normal,
+        Some(_) => tool_types::BehaviorId::Goal,
+        None if restored == tool_types::BehaviorId::Goal => tool_types::BehaviorId::Normal,
         None => restored,
     }
 }
@@ -30,11 +30,52 @@ fn restored_behavior_actions(
     )
 }
 
+fn restored_runtime_conflict_actions(
+    behavior: tool_types::BehaviorId,
+    unfinished_goal: bool,
+    public_workflow_active: bool,
+) -> (bool, bool) {
+    if !public_workflow_active {
+        return (false, false);
+    }
+    match behavior {
+        tool_types::BehaviorId::Goal if unfinished_goal => (true, false),
+        tool_types::BehaviorId::Plan | tool_types::BehaviorId::DeepResearch => (false, true),
+        _ => (false, false),
+    }
+}
+
+fn restored_plan_artifact_is_valid(
+    session_dir: &std::path::Path,
+    snapshot: &crate::session::behavior::BehaviorSnapshot,
+    phase: crate::session::behavior::PlanPhase,
+) -> bool {
+    let has_no_artifact =
+        snapshot.plan_artifact_revision == 0 && snapshot.plan_artifact_hash.is_none();
+    if phase == crate::session::behavior::PlanPhase::Drafting && has_no_artifact {
+        return true;
+    }
+    let path = if phase == crate::session::behavior::PlanPhase::Executing {
+        session_dir.join("approved_plan.md")
+    } else {
+        session_dir.join("plan.md")
+    };
+    std::fs::read_to_string(path).ok().is_some_and(|markdown| {
+        let coordinator = crate::session::behavior::BehaviorCoordinator::from_snapshot(
+            session_dir.to_path_buf(),
+            snapshot.clone(),
+        );
+        coordinator.plan_artifact_is_valid(&markdown)
+    })
+}
+
 #[cfg(test)]
 mod goal_restore_reconciliation_tests {
-    use super::{reconcile_goal_prompt_mode, restored_behavior_actions};
-    use crate::session::behavior::PromptMode;
+    use super::{
+        reconcile_goal_behavior, restored_behavior_actions, restored_runtime_conflict_actions,
+    };
     use crate::session::goal_tracker::GoalStatus;
+    use tool_types::BehaviorId;
 
     #[test]
     fn unfinished_goal_is_authoritative_over_persisted_behavior() {
@@ -45,8 +86,8 @@ mod goal_restore_reconciliation_tests {
             GoalStatus::BudgetLimited,
         ] {
             assert_eq!(
-                reconcile_goal_prompt_mode(Some(status), PromptMode::Agent),
-                PromptMode::Goal,
+                reconcile_goal_behavior(Some(status), BehaviorId::Normal),
+                BehaviorId::Goal,
             );
         }
     }
@@ -54,12 +95,12 @@ mod goal_restore_reconciliation_tests {
     #[test]
     fn missing_or_complete_goal_cannot_restore_goal_behavior() {
         assert_eq!(
-            reconcile_goal_prompt_mode(None, PromptMode::Goal),
-            PromptMode::Agent,
+            reconcile_goal_behavior(None, BehaviorId::Goal),
+            BehaviorId::Normal,
         );
         assert_eq!(
-            reconcile_goal_prompt_mode(Some(GoalStatus::Complete), PromptMode::Goal),
-            PromptMode::Agent,
+            reconcile_goal_behavior(Some(GoalStatus::Complete), BehaviorId::Goal),
+            BehaviorId::Normal,
         );
     }
 
@@ -71,6 +112,80 @@ mod goal_restore_reconciliation_tests {
             !reset_to_normal,
             "repairing Normal -> Goal is not an unavailable-Behavior fallback"
         );
+    }
+
+    #[test]
+    fn restored_public_workflow_conflicts_fail_closed_without_deleting_the_run() {
+        assert_eq!(
+            restored_runtime_conflict_actions(BehaviorId::Goal, true, true),
+            (true, false)
+        );
+        for behavior in [BehaviorId::Plan, BehaviorId::DeepResearch] {
+            assert_eq!(
+                restored_runtime_conflict_actions(behavior, false, true),
+                (false, true)
+            );
+        }
+        assert_eq!(
+            restored_runtime_conflict_actions(BehaviorId::Workflow, false, true),
+            (false, false)
+        );
+    }
+}
+
+#[cfg(test)]
+mod plan_restore_validation_tests {
+    use super::restored_plan_artifact_is_valid;
+    use crate::session::behavior::{BehaviorCoordinator, BehaviorSnapshot, PlanPhase};
+    use tool_types::BehaviorId;
+
+    #[test]
+    fn fresh_drafting_plan_restores_without_an_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = BehaviorSnapshot::selected(BehaviorId::Plan);
+        assert!(restored_plan_artifact_is_valid(
+            dir.path(),
+            &snapshot,
+            PlanPhase::Drafting,
+        ));
+    }
+
+    #[test]
+    fn submitted_and_executing_plans_require_the_matching_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let markdown = "# Plan\n\n- implement the change\n";
+        let mut coordinator = BehaviorCoordinator::from_snapshot(
+            dir.path().to_path_buf(),
+            BehaviorSnapshot::selected(BehaviorId::Plan),
+        );
+        coordinator.record_plan_artifact(markdown);
+        assert!(coordinator.submit_initial_plan());
+        let submitted = coordinator.snapshot();
+        assert!(!restored_plan_artifact_is_valid(
+            dir.path(),
+            &submitted,
+            PlanPhase::AwaitingApproval,
+        ));
+        std::fs::write(dir.path().join("plan.md"), markdown).unwrap();
+        assert!(restored_plan_artifact_is_valid(
+            dir.path(),
+            &submitted,
+            PlanPhase::AwaitingApproval,
+        ));
+
+        assert!(coordinator.approve_submitted_plan());
+        let executing = coordinator.snapshot();
+        assert!(!restored_plan_artifact_is_valid(
+            dir.path(),
+            &executing,
+            PlanPhase::Executing,
+        ));
+        std::fs::write(dir.path().join("approved_plan.md"), markdown).unwrap();
+        assert!(restored_plan_artifact_is_valid(
+            dir.path(),
+            &executing,
+            PlanPhase::Executing,
+        ));
     }
 }
 /// Partition CLI `--allow` rules under the pin: blanket catch-all allows
@@ -313,6 +428,7 @@ pub(crate) async fn spawn_session_actor(
     persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
     persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     persisted_goal_mode_rejected: bool,
+    persisted_control_revision: u64,
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     memory_config: Option<crate::config::MemoryConfig>,
@@ -611,10 +727,36 @@ pub(crate) async fn spawn_session_actor(
         })
     });
     let had_persisted_goal = persisted_goal_mode.is_some() || persisted_goal_mode_rejected;
-    let restored_goal_tracker = goal_enabled
-        .then(|| persisted_goal_mode)
+    let mut restored_goal_tracker = goal_enabled
+        .then_some(persisted_goal_mode)
         .flatten()
         .and_then(crate::session::goal_tracker::GoalTracker::from_snapshot);
+    let goal_finalization_reconciled = restored_goal_tracker.as_mut().is_some_and(|tracker| {
+        let Some(goal) = tracker.snapshot() else {
+            return false;
+        };
+        if goal.status != crate::session::goal_tracker::GoalStatus::Active
+            || goal.phase != crate::session::goal_tracker::GoalPhase::Summarizing
+        {
+            return false;
+        }
+        let updates_path = session_dir.join(crate::session::storage::UPDATES_FILE);
+        match crate::session::storage::has_successful_goal_finalization(
+            &updates_path,
+            &goal.goal_id,
+        ) {
+            Ok(true) => tracker.complete_verified(),
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(
+                    goal_id = %goal.goal_id,
+                    %error,
+                    "could not reconcile Goal finalization terminal during restore"
+                );
+                false
+            }
+        }
+    });
     let goal_was_restored = restored_goal_tracker.is_some();
     let goal_state_needs_clear = had_persisted_goal && !goal_was_restored;
     if goal_state_needs_clear {
@@ -625,45 +767,62 @@ pub(crate) async fn spawn_session_actor(
         );
     }
     let goal_tracker = Arc::new(parking_lot::Mutex::new(
-        restored_goal_tracker.unwrap_or_else(crate::session::goal_tracker::GoalTracker::new),
+        restored_goal_tracker.unwrap_or_default(),
     ));
-    let (behavior, mut restored_prompt_mode) = {
+    let persisted_behavior = persisted_behavior.and_then(|snapshot| {
+        let valid = snapshot.runtime_fields_match_selection()
+            && match &snapshot.state {
+                crate::session::behavior::BehaviorState::Plan(phase) => {
+                    restored_plan_artifact_is_valid(&session_dir, &snapshot, *phase)
+                }
+                crate::session::behavior::BehaviorState::DeepResearch {
+                    run_id: Some(run_id),
+                } => persisted_workflow_runs.iter().any(|run| {
+                    run.manifest.version
+                        == crate::session::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
+                        && run.manifest.state.run_id == *run_id
+                        && run.manifest.state.name == "deep-research"
+                }),
+                _ => true,
+            };
+        if valid {
+            Some(snapshot)
+        } else {
+            ::diagnostics::unified_log::info(
+                "shell.behavior.restore_rejected",
+                Some(session_info.id.0.as_ref()),
+                Some(serde_json::json!({ "state": snapshot.state })),
+            );
+            None
+        }
+    });
+    let (behavior, restored_behavior) = {
         let mut tracker = if let Some(snapshot) = persisted_behavior {
-            crate::session::behavior::BehaviorController::from_snapshot(
+            crate::session::behavior::BehaviorCoordinator::from_snapshot(
                 session_dir.clone(),
                 snapshot,
             )
         } else {
-            crate::session::behavior::BehaviorController::new(session_dir.clone())
+            crate::session::behavior::BehaviorCoordinator::new(session_dir.clone())
         };
-        let prompt_mode = match tracker.behavior() {
-            None => PromptMode::Agent,
-            Some(tool_types::BehaviorId::Clarify) => PromptMode::Ask,
-            Some(tool_types::BehaviorId::Plan) => PromptMode::Plan,
-            Some(tool_types::BehaviorId::Workflow) => PromptMode::Workflow,
-            Some(tool_types::BehaviorId::DeepResearch) => PromptMode::DeepResearch,
-            Some(tool_types::BehaviorId::Goal) => PromptMode::Goal,
-        };
-        (Arc::new(parking_lot::Mutex::new(tracker)), prompt_mode)
+        let selected_behavior = tracker.behavior();
+        (
+            Arc::new(parking_lot::Mutex::new(tracker)),
+            selected_behavior,
+        )
     };
     // Goal state is authoritative for Goal Behavior restoration. An unfinished
     // Goal must remain in Goal; a completed receipt or a missing/rejected state
-    // must be Normal. This also repairs crashes between the two separately
-    // persisted files.
+    // must be Normal. Behavior and Goal come from one atomic control snapshot,
+    // so this only repairs semantic inconsistencies within that snapshot.
     let restored_goal_status = goal_tracker.lock().status();
-    let desired_goal_prompt_mode =
-        reconcile_goal_prompt_mode(restored_goal_status, restored_prompt_mode);
-    let goal_behavior_normalized = desired_goal_prompt_mode != restored_prompt_mode;
+    let desired_goal_behavior = reconcile_goal_behavior(restored_goal_status, restored_behavior);
+    let goal_behavior_normalized = desired_goal_behavior != restored_behavior;
     if goal_behavior_normalized {
-        behavior
-            .lock()
-            .select_behavior(desired_goal_prompt_mode.behavior());
-        restored_prompt_mode = desired_goal_prompt_mode;
+        behavior.lock().select_behavior(desired_goal_behavior);
     }
     let goal_projection_needs_clear =
         goal_state_needs_clear || (goal_behavior_normalized && restored_goal_status.is_none());
-    let current_prompt_mode = Arc::new(parking_lot::Mutex::new(restored_prompt_mode));
-    let turn_prompt_mode = Arc::new(parking_lot::Mutex::new(restored_prompt_mode));
     let task_output_tool_name = Arc::new(std::sync::OnceLock::new());
     let read_tool_name = Arc::new(std::sync::OnceLock::new());
     let tools_notification_handle = crate::tools::notification_bridge::spawn_notification_bridge(
@@ -1051,27 +1210,28 @@ pub(crate) async fn spawn_session_actor(
             );
             e
         })?;
-    let selected_behavior_unavailable = match behavior.lock().behavior() {
-        Some(tool_types::BehaviorId::Plan) => agent
+    let selected_behavior = behavior.lock().behavior();
+    let selected_behavior_unavailable = match selected_behavior {
+        tool_types::BehaviorId::Plan => agent
             .tool_bridge()
             .tool_for_kind(tools::types::tool::ToolKind::PlanControl)
             .await
             .is_none(),
-        Some(tool_types::BehaviorId::Workflow) => agent
+        tool_types::BehaviorId::Workflow => agent
             .tool_bridge()
             .tool_for_kind(tools::types::tool::ToolKind::Workflow)
             .await
             .is_none(),
-        Some(tool_types::BehaviorId::DeepResearch) => !background_workflows_enabled,
-        Some(tool_types::BehaviorId::Goal) => false,
-        Some(tool_types::BehaviorId::Clarify) | None => false,
+        tool_types::BehaviorId::DeepResearch => !background_workflows_enabled,
+        tool_types::BehaviorId::Goal => false,
+        tool_types::BehaviorId::Clarify | tool_types::BehaviorId::Normal => false,
     };
     let (mut behavior_normalized, reset_unavailable_behavior) =
         restored_behavior_actions(goal_behavior_normalized, selected_behavior_unavailable);
     if reset_unavailable_behavior {
-        behavior.lock().select_behavior(None);
-        *current_prompt_mode.lock() = PromptMode::Agent;
-        *turn_prompt_mode.lock() = PromptMode::Agent;
+        behavior
+            .lock()
+            .select_behavior(tool_types::BehaviorId::Normal);
     }
     agent
         .tool_bridge()
@@ -1250,6 +1410,34 @@ pub(crate) async fn spawn_session_actor(
             persistence.tx.clone(),
             persisted_workflow_runs,
         );
+    let restored_behavior = behavior.lock().behavior();
+    let restored_deep_research_run = behavior.lock().deep_research_run_id().map(str::to_owned);
+    let public_workflow_active = workflow_snapshots.iter().any(|run| {
+        !run.status.is_terminal()
+            && restored_deep_research_run.as_deref() != Some(run.run_id.as_str())
+    });
+    let unfinished_goal = goal_tracker
+        .lock()
+        .status()
+        .is_some_and(|status| status != crate::session::goal_tracker::GoalStatus::Complete);
+    let (pause_goal, reset_behavior) = restored_runtime_conflict_actions(
+        restored_behavior,
+        unfinished_goal,
+        public_workflow_active,
+    );
+    if pause_goal {
+        goal_tracker.lock().pause_with_message(
+            crate::session::goal_tracker::GoalPauseReason::Infra,
+            "Recovered a non-terminal public Workflow alongside this Goal. Stop or finish the Workflow, then use /goal resume."
+                .to_string(),
+        );
+    }
+    if reset_behavior {
+        behavior
+            .lock()
+            .select_behavior(tool_types::BehaviorId::Normal);
+        behavior_normalized = true;
+    }
     let workflow_tracker = Arc::new(parking_lot::Mutex::new(
         crate::session::workflow::tracker::WorkflowTracker::from_snapshot(workflow_snapshots),
     ));
@@ -1290,6 +1478,7 @@ pub(crate) async fn spawn_session_actor(
     >();
     {
         let manager = workflow_manager.clone();
+        let behavior = behavior.clone();
         let launch_cwd = std::path::PathBuf::from(session_info.cwd.as_str());
         let launch_session_dir = crate::session::persistence::session_dir(&session_info);
         tokio::spawn(async move {
@@ -1422,6 +1611,17 @@ pub(crate) async fn spawn_session_actor(
                 };
                 let launch_outcome = {
                     let mut mgr = manager.lock().await;
+                    let active_behavior = behavior.lock().behavior();
+                    if active_behavior.owns_special_runtime() {
+                        let _ = ack.send(WorkflowLaunchAck::Rejected {
+                            code: "workflow_behavior_conflict",
+                            detail: format!(
+                                "public Workflow cannot run inside {} behavior",
+                                active_behavior.display_label()
+                            ),
+                        });
+                        continue;
+                    }
                     let result = mgr.launch(resolved, spec);
                     let script_path = result
                         .as_ref()
@@ -1468,11 +1668,10 @@ pub(crate) async fn spawn_session_actor(
         .unwrap_or_default();
     effective_config.remote_settings = remote_settings.clone();
     let goal_behavior_available = goal_enabled;
-    if behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal) && !goal_behavior_available
-    {
-        behavior.lock().select_behavior(None);
-        *current_prompt_mode.lock() = PromptMode::Agent;
-        *turn_prompt_mode.lock() = PromptMode::Agent;
+    if behavior.lock().behavior() == tool_types::BehaviorId::Goal && !goal_behavior_available {
+        behavior
+            .lock()
+            .select_behavior(tool_types::BehaviorId::Normal);
         behavior_normalized = true;
     }
     let doom_loop_recovery = effective_config.resolve_doom_loop_recovery();
@@ -1590,10 +1789,11 @@ pub(crate) async fn spawn_session_actor(
         },
         active_agent_type: parking_lot::Mutex::new(initial_agent_type),
         active_skill: parking_lot::Mutex::new(None),
-        current_prompt_mode: current_prompt_mode.clone(),
-        turn_start_prompt_mode: parking_lot::Mutex::new(restored_prompt_mode),
-        turn_prompt_mode: turn_prompt_mode.clone(),
+        turn_behavior: parking_lot::Mutex::new(behavior.lock().behavior()),
         behavior: behavior.clone(),
+        control_revision: Arc::new(std::sync::atomic::AtomicU64::new(
+            persisted_control_revision,
+        )),
         goal_enabled,
         background_workflows_enabled,
         // Fail closed until the live tool bridge proves all Goal tools exist.
@@ -1678,14 +1878,29 @@ pub(crate) async fn spawn_session_actor(
             .send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
             .await;
     }
-    if behavior_normalized {
-        session.persist_behavior_state();
+    if goal_finalization_reconciled {
+        tracing::info!(
+            session_id = %session.session_info.id.0,
+            "reconciled durable Goal finalization terminal into Complete control state"
+        );
+    }
+    if behavior_normalized || goal_was_restored {
+        let behavior = session.behavior.lock().snapshot();
+        let goal = session.goal_tracker.lock().snapshot().cloned();
+        if let Err(error) = session
+            .persist_control_snapshot_durably(behavior, goal)
+            .await
+        {
+            tracing::warn!(%error, "failed to persist reconciled session control state");
+        }
     }
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = session.goal_tokens(current_tokens);
+        // The durable write above also captures any fail-closed sanitization
+        // performed by `from_snapshot`; do not enqueue a second, weaker copy.
         session.goal_notify_sender().emit_goal_updated(
-            &mut session.goal_tracker.lock(),
+            &session.goal_tracker.lock(),
             tokens_used,
             finished_marginal,
         );
@@ -1842,15 +2057,15 @@ pub(crate) async fn spawn_session_actor(
         };
         let gateway = session.notifications.gateway.clone();
         let session_id = session.session_info.id.clone();
-        let current_prompt_mode = session.current_prompt_mode.clone();
+        let behavior = session.behavior.clone();
         let pending_interactions = session.pending_interactions.clone();
         let session_for_hooks = session.clone();
         let mut user_question_rx = user_question_rx;
         tokio::task::spawn_local(async move {
             while let Some(mut request) = user_question_rx.recv().await {
                 use tools::implementations::grow_build::ask_user_question::AskUserQuestionMode;
-                let mode = match *current_prompt_mode.lock() {
-                    PromptMode::Plan => AskUserQuestionMode::Plan,
+                let mode = match behavior.lock().behavior() {
+                    tool_types::BehaviorId::Plan => AskUserQuestionMode::Plan,
                     _ => AskUserQuestionMode::Default,
                 };
                 let ext_req = AskUserQuestionExtRequest {
@@ -2082,6 +2297,7 @@ pub(crate) async fn spawn_session_on_thread(
     persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
     persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     persisted_goal_mode_rejected: bool,
+    persisted_control_revision: u64,
     persisted_workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
     persisted_announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     memory_config: Option<crate::config::MemoryConfig>,
@@ -2229,6 +2445,7 @@ pub(crate) async fn spawn_session_on_thread(
                         persisted_behavior,
                         persisted_goal_mode,
                         persisted_goal_mode_rejected,
+                        persisted_control_revision,
                         persisted_workflow_runs,
                         persisted_announcement_state,
                         memory_config,

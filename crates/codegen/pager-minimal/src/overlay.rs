@@ -140,14 +140,18 @@ fn modal_target(tail_h: u16, modal_h: u16, base: u16, ceiling: u16) -> u16 {
 /// band** — and only scrolls when the growth would overflow the screen bottom.
 /// As blocks commit, `insert_before` pushes the viewport down naturally; once it
 /// reaches the bottom, further commits scroll. A no-op when height is unchanged.
-pub fn sync_viewport(app: &mut AppView, terminal: &mut PagerTerminal) {
+pub fn sync_viewport(
+    app: &mut AppView,
+    terminal: &mut PagerTerminal,
+    frame: pager::motion::FrameStamp,
+) {
     let term_h = terminal.last_known_area().height;
     if term_h < 3 {
         return;
     }
     let width = terminal.viewport_area().width;
 
-    let target = compute_target(app, term_h, width);
+    let target = compute_target(app, term_h, width, frame);
 
     let cur = terminal.viewport_area();
     if cur.height == target {
@@ -211,7 +215,12 @@ fn will_commit(app: &AppView) -> bool {
 }
 
 /// Resolve the target viewport height for the active agent's overlay state.
-fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
+fn compute_target(
+    app: &mut AppView,
+    term_h: u16,
+    width: u16,
+    frame: pager::motion::FrameStamp,
+) -> u16 {
     let minimal_live_rows = app.appearance.minimal_live_rows;
     let ceiling = term_h.saturating_sub(1).max(3);
     let base = minimal_live_rows.clamp(3, ceiling);
@@ -284,7 +293,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     // clips the top.
     if let Some(modal) = active_modal(agent) {
         let modal_h = modal_height(modal, agent, term_h, content_w);
-        let tail_h = super::live::tail_height(agent, width, &commit_app);
+        let tail_h = super::live::tail_height(agent, width, &commit_app, frame);
         return modal_target(tail_h, modal_h, base, ceiling);
     }
 
@@ -305,7 +314,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     // region; as output streams the tail grows and the viewport grows downward
     // with it. The region is not bottom-pinned, so the rest of the screen below
     // stays empty (the app "owns" the window from the top down).
-    let tail_h = super::live::tail_height(agent, width, &commit_app);
+    let tail_h = super::live::tail_height(agent, width, &commit_app, frame);
     let todos_h = super::todo::todo_panel_height(agent, force_todos);
     // Below the prompt sits either the dropdown overlay or the 1-row info bar
     // (model · context usage · turn time/tokens); reserve at least the info row

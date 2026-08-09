@@ -1,7 +1,7 @@
 //! Plan-approval chrome restored by the shell after quit + resume.
 //!
 //! When Plan approval is parked and the user quits, the shell persists
-//! `approval_pending = true` in `behavior.json`. On `--continue` the
+//! `approval_pending = true` in `session-control.json`. On `--continue` the
 //! shell re-issues the `grow/plan_approval` reverse-request — a real live ACP
 //! waiter — so the pager re-shows approval chrome through its normal path with
 //! no pager-side disk logic. Approving then leaves plan mode and starts the
@@ -139,7 +139,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
 }
 
 /// Mark the persisted session as having a parked plan approval: write `plan.md`
-/// and flip `approval_pending` to `true` in `behavior.json` for every
+/// and flip `approval_pending` to `true` in `session-control.json` for every
 /// session dir under the sandbox home.
 fn seed_parked_approval(home: &Path) -> Result<usize> {
     let sessions_root = home.join(".grow").join("sessions");
@@ -162,7 +162,7 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
             }
             let dir = sess_ent.path();
             std::fs::write(dir.join("plan.md"), PLAN_BODY).context("write plan.md")?;
-            write_awaiting_plan_mode(&dir.join("behavior.json"))?;
+            write_awaiting_plan_mode(&dir.join("session-control.json"))?;
             seeded += 1;
         }
     }
@@ -175,32 +175,54 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
     Ok(seeded)
 }
 
-/// Round-trip the shell-written `behavior.json` and flip `approval_pending`
-/// to `true`, preserving every other field. Falls back to an AwaitingApproval
-/// snapshot if the shell wrote nothing. The shape mirrors
-/// `shell::session::behavior::BehaviorSnapshot`; we only touch the one
-/// field (robust to schema growth) rather than depend on the heavy shell crate
-/// from this test-only harness.
+/// Round-trip the shell-written atomic control snapshot and park Plan
+/// approval, preserving Goal and every unrelated field. The harness mirrors
+/// only the public JSON shape instead of depending on the heavy shell crate.
 fn write_awaiting_plan_mode(path: &Path) -> Result<()> {
     let mut value: serde_json::Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_else(|| {
             serde_json::json!({
-                "state": { "Plan": "AwaitingApproval" },
-                "approval_pending": true,
-                "reminder_count": 0,
+                "architecture_version": 1,
+                "control_revision": 1,
+                "behavior": {
+                    "state": { "Plan": "AwaitingApproval" },
+                    "approval_pending": true,
+                    "reminder_count": 0,
+                    "plan_artifact_revision": 1,
+                    "plan_artifact_hash": blake3::hash(PLAN_BODY.as_bytes()).to_hex().to_string(),
+                },
             })
         });
     let obj = value
         .as_object_mut()
-        .context("behavior.json must be a JSON object")?;
+        .context("session-control.json must be a JSON object")?;
+    obj.insert("architecture_version".into(), serde_json::json!(1));
+    let revision = obj
+        .get("control_revision")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(1);
+    obj.insert("control_revision".into(), serde_json::json!(revision));
+    let behavior = obj
+        .entry("behavior")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("session-control.json behavior must be an object")?;
     // The Plan phase and transport flag must agree for a valid re-park.
-    obj.insert(
+    behavior.insert(
         "state".into(),
         serde_json::json!({ "Plan": "AwaitingApproval" }),
     );
-    obj.insert("approval_pending".into(), serde_json::Value::Bool(true));
-    std::fs::write(path, serde_json::to_vec_pretty(&value)?).context("write behavior.json")?;
+    behavior.insert("approval_pending".into(), serde_json::Value::Bool(true));
+    behavior.insert("reminder_count".into(), serde_json::json!(0));
+    behavior.insert("plan_artifact_revision".into(), serde_json::json!(1));
+    behavior.insert(
+        "plan_artifact_hash".into(),
+        serde_json::json!(blake3::hash(PLAN_BODY.as_bytes()).to_hex().to_string()),
+    );
+    std::fs::write(path, serde_json::to_vec_pretty(&value)?)
+        .context("write session-control.json")?;
     Ok(())
 }

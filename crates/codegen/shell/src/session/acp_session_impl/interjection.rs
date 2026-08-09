@@ -28,6 +28,23 @@ impl SessionActor {
         self.pending_interjections
             .push(PendingInterjection { text, attachments });
     }
+
+    /// Close the current turn's steering scope.
+    ///
+    /// The buffer is deliberately not a cross-turn queue: every entry was
+    /// admitted against an exact running turn id. A residual entry can only
+    /// be a steer that missed the sampler's final drain point, so carrying it
+    /// into the next foreground owner would violate turn identity.
+    pub(super) fn discard_residual_interjections_at_turn_end(&self) {
+        let discarded = self.pending_interjections.drain_all().len();
+        if discarded > 0 {
+            tracing::debug!(
+                discarded,
+                "discarded residual same-turn steering at terminal boundary"
+            );
+        }
+    }
+
     /// Normalize interjection images for injection (shared pipeline above);
     /// notices append to `wrapped` (TEXT side only). Returns the images to
     /// attach structurally after normalization.
@@ -44,12 +61,11 @@ impl SessionActor {
     }
 
     /// Broadcast a mid-turn interjection to every attached client.
+    ///
     /// Fan it out (sessionId-routed, fire-and-forget) so every pane viewing the
-    /// session renders the interjection block — not just the originator. The
-    /// originating pager rendered an optimistic block locally and dedups this
-    /// echo by `id`; other panes (which never minted the id) render it. `id` is
-    /// to chat state. Shared by `add_followup_message_as_user_turn` (which
-    /// `None` only for older clients, in which case every pane renders.
+    /// session renders the interjection block, not just the originator. The
+    /// originating pager deduplicates its optimistic block by `id`; other
+    /// panes render it. `None` remains valid for older clients.
     pub(super) fn broadcast_interjection(&self, text: &str, id: Option<&str>) {
         let mut payload = serde_json::json!({
             "sessionId": self.session_info.id.0.as_ref(),
@@ -68,10 +84,9 @@ impl SessionActor {
         }
     }
 
-    /// Inject a synthetic user message: persist, optionally notify pager, push
-    /// notifies) and `drain_pending_interjections` (which skips notification
-    /// `<skill_information>` envelope (loaded + substituted SKILL.md bodies).
-    /// because the pager already has a local user prompt block).
+    /// Inject a synthetic user message into persistence and conversation
+    /// context, optionally notifying the pager. Interjection drains skip the
+    /// notification because the pager already owns the optimistic user row.
     pub(super) async fn inject_synthetic_user_message(
         &self,
         text: &str,
@@ -122,14 +137,13 @@ impl SessionActor {
         self.chat_state_handle.push_user_message(item);
     }
 
-    /// Expand skill slash references in interjection text into the
+    /// Expand skill slash references in interjection text.
     ///
     /// Interjections bypass turn-start slash resolution
     /// (`slash_commands::resolve`), so without this a queued `/skill` row
     /// force-sent mid-turn — or a typed `/skill` interjection — reaches the
-    /// model as a bare, unexpanded slash command. Returns `None` when the
-    /// conversation as a standalone synthetic user message
-    /// text references no known skill.
+    /// model as a bare, unexpanded slash command. Returns `None` when the text
+    /// references no known skill.
     async fn interjection_skill_information(&self, text: &str) -> Option<String> {
         // Mirror turn-start gating (`parse_slash_prefix`): only a leading
         // slash invokes skills — "don't run /commit yet" is steering text,
@@ -166,13 +180,12 @@ impl SessionActor {
         .await
     }
 
-    /// Drain all pending interjections, wrap them, and inject each into the
-    /// ([`ConversationItem::interjection`], tagged
+    /// Drain all pending interjections, wrap them, and inject each as a
+    /// [`ConversationItem::interjection`] tagged
     /// `SyntheticReason::Interjection`) — never appended to tool results, so
     /// compaction, replay, and analytics see the user's steering text as its
     /// own user turn.
     ///
-    /// Returns `true` if any interjections were drained (caller may want to
     /// Returns `true` if any interjections were drained (caller may want to
     /// `continue` the turn loop so the model sees them on the next iteration).
     pub(super) async fn drain_pending_interjections(&self) -> bool {

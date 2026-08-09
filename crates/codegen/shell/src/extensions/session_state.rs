@@ -19,9 +19,8 @@ const SUMMARY_COLUMN: &str = "summary";
 /// is last so import writes it last, as the commit marker; keep it there.
 const COLUMNS: &[(&str, &str)] = &[
     ("plan", st::PLAN_FILE),
-    ("behavior", st::BEHAVIOR_STATE_FILE),
+    ("control", st::SESSION_CONTROL_FILE),
     ("signals", st::SIGNALS_FILE),
-    ("goal", st::GOAL_STATE_FILE),
     ("announcement", st::ANNOUNCEMENT_STATE_FILE),
     (SUMMARY_COLUMN, st::SUMMARY_FILE),
 ];
@@ -273,7 +272,20 @@ mod tests {
             json!({ "info": { "id": "s1", "cwd": "/work" } }),
         );
         state.insert("plan".to_string(), json!({ "items": [] }));
-        state.insert("goal".to_string(), json!({ "active": false }));
+        state.insert(
+            "control".to_string(),
+            json!({
+                "architecture_version": crate::session::control::SESSION_CONTROL_ARCHITECTURE_VERSION,
+                "control_revision": 3,
+                "behavior": {
+                    "state": "Normal",
+                    "approval_pending": false,
+                    "reminder_count": 0,
+                    "plan_artifact_revision": 0,
+                    "plan_artifact_hash": null
+                }
+            }),
+        );
         let updates = vec![
             json!({ "method": "session/update", "params": { "a": 1 } }),
             json!({ "method": "session/update", "params": { "b": 2 } }),
@@ -287,8 +299,8 @@ mod tests {
             r#"{"items":[]}"#
         );
         assert_eq!(
-            std::fs::read_to_string(dir.join("goal/state.json")).unwrap(),
-            r#"{"active":false}"#
+            std::fs::read_to_string(dir.join(st::SESSION_CONTROL_FILE)).unwrap(),
+            state["control"].to_string()
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("updates.jsonl"))

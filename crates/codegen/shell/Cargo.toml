@@ -146,6 +146,7 @@ parking_lot.workspace = true
 tool-runtime = { workspace = true }
 tool-protocol = { workspace = true }
 tool-types = { workspace = true }
+unicode-width = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

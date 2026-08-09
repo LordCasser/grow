@@ -8,9 +8,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::types::{
-    ActiveSubagentSummary, SubagentCompletionSummary, SubagentDescribeOutcome, SubagentInspection,
-    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentSnapshot,
-    SubagentSnapshotStatus, SubagentValidateTypeOutcome,
+    ActiveSubagentSummary, SubagentCompletionSummary, SubagentInspection, SubagentRequest,
+    SubagentResult, SubagentResumeLookup, SubagentSnapshot, SubagentSnapshotStatus,
+    SubagentValidateTypeOutcome,
 };
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
@@ -98,7 +98,6 @@ pub trait ChildRunner: 'static {
     type CompletionData: Default + 'static;
     type RunFuture: Future<Output = ChildRunOutput<Self::CompletionData>> + 'static;
     type ValidateFuture: Future<Output = SubagentValidateTypeOutcome> + 'static;
-    type DescribeFuture: Future<Output = SubagentDescribeOutcome> + 'static;
 
     fn run(&self, request: ChildRunRequest<Self::Control>) -> Self::RunFuture;
 
@@ -107,13 +106,6 @@ pub trait ChildRunner: 'static {
         subagent_type: String,
         parent_session_id: String,
     ) -> Self::ValidateFuture;
-
-    fn describe_type(
-        &self,
-        subagent_type: String,
-        harness_agent_type: Option<String>,
-        parent_session_id: String,
-    ) -> Self::DescribeFuture;
 
     fn on_completed(&self, completion: ChildCompletion<Self::CompletionData>);
 

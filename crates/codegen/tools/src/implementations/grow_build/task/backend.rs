@@ -14,11 +14,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget,
-    SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent, SubagentInspectRequest,
-    SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
-    SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
-    SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
-    SubagentValidateTypeRequest,
+    SubagentEvent, SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest,
+    SubagentQueryRequest, SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest,
+    SubagentResult, SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
+    SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
 };
 use crate::register_resource;
 use tool_runtime::ToolError;
@@ -58,26 +57,6 @@ pub trait SubagentBackend: Send + Sync + 'static {
         subagent_type: &str,
         parent_session_id: &str,
     ) -> SubagentValidateTypeOutcome;
-
-    /// Describe a subagent type's resolved toolset (tool names + capability
-    /// flags) before spawning. Read-only: builds the agent definition and
-    /// applies the same parent-dependent toolset re-selection a spawn would,
-    /// then reports the result without starting a child session.
-    ///
-    /// Returns [`SubagentDescribeOutcome::Unavailable`] on channel close /
-    /// responder drop / timeout (modeled exactly on [`Self::validate_type`]).
-    ///
-    /// `harness_agent_type` is the `/goal`-only harness override (see
-    /// [`super::types::SubagentRuntimeOverrides::harness_agent_type`]); the
-    /// coordinator resolves the toolset for `(subagent_type,
-    /// harness_agent_type)`. `None` (every non-goal caller) defers the flavor
-    /// to the parent agent.
-    async fn describe_subagent_type(
-        &self,
-        subagent_type: &str,
-        harness_agent_type: Option<&str>,
-        parent_session_id: &str,
-    ) -> SubagentDescribeOutcome;
 }
 
 /// Resource wrapper injected into every session's `Resources`.
@@ -408,54 +387,6 @@ impl SubagentBackend for ChannelBackend {
                     "coordinator validation timed out, treating as ValidationUnavailable",
                 );
                 SubagentValidateTypeOutcome::ValidationUnavailable
-            }
-        }
-    }
-
-    async fn describe_subagent_type(
-        &self,
-        subagent_type: &str,
-        harness_agent_type: Option<&str>,
-        parent_session_id: &str,
-    ) -> SubagentDescribeOutcome {
-        let parent_session_id = self
-            .parent_session_id
-            .as_deref()
-            .unwrap_or(parent_session_id);
-        let (respond_to, response_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(SubagentEvent::DescribeType(SubagentDescribeRequest {
-                subagent_type: subagent_type.to_string(),
-                harness_agent_type: harness_agent_type.map(str::to_string),
-                parent_session_id: parent_session_id.to_string(),
-                respond_to,
-            }))
-            .is_err()
-        {
-            tracing::warn!(
-                subagent_type,
-                "coordinator describe channel closed, treating as Unavailable",
-            );
-            return SubagentDescribeOutcome::Unavailable;
-        }
-        let timeout = validate_type_timeout();
-        match tokio::time::timeout(timeout, response_rx).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => {
-                tracing::warn!(
-                    subagent_type,
-                    "coordinator describe responder dropped, treating as Unavailable",
-                );
-                SubagentDescribeOutcome::Unavailable
-            }
-            Err(_) => {
-                tracing::warn!(
-                    subagent_type,
-                    timeout_ms = timeout.as_millis() as u64,
-                    "coordinator describe timed out, treating as Unavailable",
-                );
-                SubagentDescribeOutcome::Unavailable
             }
         }
     }

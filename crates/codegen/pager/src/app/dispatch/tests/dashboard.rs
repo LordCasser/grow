@@ -435,7 +435,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
             effort: Some(shell::sampling::types::ReasoningEffort::High),
             display: "grow-4.5".to_string(),
         });
-        d.pending_behavior = tools::types::SessionMode::Plan;
+        d.pending_behavior = tools::types::BehaviorId::Plan;
         d.dispatch.set_text("do the thing");
         d.pending_worktree_prompt = Some(d.dispatch.stash());
     }
@@ -465,7 +465,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
     );
     assert_eq!(
         agent.deferred_session_mode,
-        Some(tools::types::SessionMode::Plan),
+        Some(tools::types::BehaviorId::Plan),
     );
     assert_eq!(agent.plan_mode_pending, Some(true));
 }
@@ -805,7 +805,7 @@ fn apply_pending_dispatch_config_always_approve_blocked_by_policy_pin() {
     apply_pending_dispatch_config(
         agent,
         None,
-        tools::types::SessionMode::Default,
+        tools::types::BehaviorId::Normal,
         crate::app::actions::PermissionModeKind::AlwaysApprove,
         Some(POLICY_WARNING),
     );
@@ -820,7 +820,7 @@ fn apply_pending_dispatch_config_always_approve_blocked_by_policy_pin() {
     apply_pending_dispatch_config(
         agent,
         None,
-        tools::types::SessionMode::Default,
+        tools::types::BehaviorId::Normal,
         crate::app::actions::PermissionModeKind::AlwaysApprove,
         None,
     );
@@ -1066,13 +1066,13 @@ fn dashboard_slash_plan_selects_pending_plan_behavior() {
     let _ = dispatch_dashboard_dispatch_slash(&mut app, "/plan".into());
     assert_eq!(
         app.dashboard.as_ref().unwrap().pending_behavior,
-        tools::types::SessionMode::Plan,
+        tools::types::BehaviorId::Plan,
         "first /plan must select Plan"
     );
     let _ = dispatch_dashboard_dispatch_slash(&mut app, "/plan".into());
     assert_eq!(
         app.dashboard.as_ref().unwrap().pending_behavior,
-        tools::types::SessionMode::Plan,
+        tools::types::BehaviorId::Plan,
         "second /plan must remain idempotently on Plan"
     );
 }
@@ -1086,7 +1086,7 @@ fn dashboard_behavior_and_permission_are_staged_independently() {
     let _ = dispatch_dashboard_dispatch_slash(&mut app, "/clarify".into());
     let _ = dispatch_dashboard_dispatch_slash(&mut app, "/always-approve".into());
     let d = app.dashboard.as_ref().unwrap();
-    assert_eq!(d.pending_behavior, tools::types::SessionMode::Ask);
+    assert_eq!(d.pending_behavior, tools::types::BehaviorId::Clarify);
     assert_eq!(
         d.pending_permission,
         crate::app::actions::PermissionModeKind::AlwaysApprove
@@ -1096,7 +1096,7 @@ fn dashboard_behavior_and_permission_are_staged_independently() {
     let spawned = app.agents.values().next().unwrap();
     assert_eq!(
         spawned.deferred_session_mode,
-        Some(tools::types::SessionMode::Ask)
+        Some(tools::types::BehaviorId::Clarify)
     );
     assert!(spawned.session.is_yolo());
 }
@@ -1154,7 +1154,7 @@ fn dashboard_plan_description_transforms_snapshot_and_chip_ranges() {
     );
     assert_eq!(
         agent.deferred_session_mode,
-        Some(tools::types::SessionMode::Plan)
+        Some(tools::types::BehaviorId::Plan)
     );
 }
 /// Removed dashboard aliases are not retained in the command registry.
@@ -1261,7 +1261,7 @@ fn dashboard_open_reseeds_pending_dispatch_config() {
             effort: None,
             display: "grow-4.5".to_string(),
         });
-        d.pending_behavior = tools::types::SessionMode::Plan;
+        d.pending_behavior = tools::types::BehaviorId::Plan;
         d.pending_permission = crate::app::actions::PermissionModeKind::AlwaysApprove;
     }
     app.active_view = ActiveView::Welcome;
@@ -1273,7 +1273,7 @@ fn dashboard_open_reseeds_pending_dispatch_config() {
     );
     assert_eq!(
         d.pending_behavior,
-        tools::types::SessionMode::Default,
+        tools::types::BehaviorId::Normal,
         "re-open must reset Behavior to Normal",
     );
     assert_eq!(
@@ -1449,7 +1449,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
             effort: Some(shell::sampling::types::ReasoningEffort::High),
             display: "grow-4.5".to_string(),
         });
-        d.pending_behavior = tools::types::SessionMode::Plan;
+        d.pending_behavior = tools::types::BehaviorId::Plan;
     }
     let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     assert_eq!(app.agents.len(), 1);
@@ -1469,7 +1469,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     );
     assert_eq!(
         agent.deferred_session_mode,
-        Some(tools::types::SessionMode::Plan),
+        Some(tools::types::BehaviorId::Plan),
     );
     assert_eq!(agent.plan_mode_pending, Some(true));
 }
@@ -1490,7 +1490,7 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
             effort: Some(shell::sampling::types::ReasoningEffort::High),
             display: "grow-4.5".to_string(),
         });
-        d.pending_behavior = tools::types::SessionMode::Plan;
+        d.pending_behavior = tools::types::BehaviorId::Plan;
     }
     let effects = dispatch(Action::DashboardCreateNewAgentWithDetail, &mut app);
     assert_eq!(app.agents.len(), 1);
@@ -1510,11 +1510,11 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
     );
     assert_eq!(
         agent.deferred_session_mode,
-        Some(tools::types::SessionMode::Plan),
+        Some(tools::types::BehaviorId::Plan),
     );
     assert_eq!(agent.plan_mode_pending, Some(true));
 }
-/// The deferred plan `SessionMode` is emitted (and cleared) once the
+/// The deferred plan `BehaviorId` is emitted (and cleared) once the
 /// session exists, mirroring the deferred model switch.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
@@ -1523,7 +1523,7 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
     let id = AgentId(0);
     let session_id: acp::SessionId = "new-session".into();
     app.agents.get_mut(&id).unwrap().session.session_id = None;
-    app.agents.get_mut(&id).unwrap().deferred_session_mode = Some(tools::types::SessionMode::Plan);
+    app.agents.get_mut(&id).unwrap().deferred_session_mode = Some(tools::types::BehaviorId::Plan);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionCreated {
             agent_id: id,

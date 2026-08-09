@@ -618,19 +618,19 @@ fn render_prompt_info(
         }
         let behavior = minimal_api::effective_behavior_mode(agent);
         let behavior_label = match behavior {
-            minimal_api::SessionMode::Default => "normal",
-            minimal_api::SessionMode::Ask => "clarify",
-            minimal_api::SessionMode::Plan => match minimal_api::plan_phase(agent) {
+            minimal_api::BehaviorId::Normal => "normal",
+            minimal_api::BehaviorId::Clarify => "clarify",
+            minimal_api::BehaviorId::Plan => match minimal_api::plan_phase(agent) {
                 Some("awaiting_approval") => "plan · awaiting approval",
                 Some("executing") => "plan · executing",
                 Some("amending") => "plan · amending",
                 _ => "plan · drafting",
             },
-            minimal_api::SessionMode::Workflow => "workflow",
-            minimal_api::SessionMode::DeepResearch => "deep-research",
-            minimal_api::SessionMode::Goal => "goal",
+            minimal_api::BehaviorId::Workflow => "workflow",
+            minimal_api::BehaviorId::DeepResearch => "deep-research",
+            minimal_api::BehaviorId::Goal => "goal",
         };
-        let behavior_color = if behavior == minimal_api::SessionMode::Plan {
+        let behavior_color = if behavior == minimal_api::BehaviorId::Plan {
             theme.accent_plan
         } else {
             theme.accent_system
@@ -723,6 +723,7 @@ pub(super) fn tail_height(
     agent: &pager::app::agent_view::AgentView,
     width: u16,
     appearance: &pager::appearance::AppearanceConfig,
+    frame: pager::motion::FrameStamp,
 ) -> u16 {
     let theme = Theme::current();
     let sb = &agent.scrollback;
@@ -731,14 +732,8 @@ pub(super) fn tail_height(
     let mut i = super::commit::scan_frontier(sb, turn_running).tail_start;
     let mut total = 0u16;
     while let Some(e) = sb.get(i) {
-        let h = live_tail_renderer(
-            e,
-            &theme,
-            appearance,
-            &agent.session.cwd,
-            pager::motion::FrameStamp::default(),
-        )
-        .desired_height(width);
+        let h = live_tail_renderer(e, &theme, appearance, &agent.session.cwd, frame)
+            .desired_height(width);
         total = total.saturating_add(h).saturating_add(gap);
         i += 1;
     }
@@ -806,7 +801,12 @@ mod tests {
             .expect("fixture must wrap differently when the accent column is reclaimed");
         assert_ne!(painted_height, visible_accent_height);
         assert_eq!(
-            tail_height(&agent, width, &appearance),
+            tail_height(
+                &agent,
+                width,
+                &appearance,
+                pager::motion::FrameStamp::default(),
+            ),
             painted_height.saturating_add(super::super::commit::MINIMAL_BLOCK_GAP)
         );
     }
@@ -1088,9 +1088,9 @@ mod tests {
         assert!(text.contains("normal"), "normal behavior: {text:?}");
         assert!(text.contains("ask"), "ask permission: {text:?}");
         assert!(!text.contains("always-approve"), "normal: {text:?}");
-        minimal_api::set_behavior_mode_for_test(&mut a, minimal_api::SessionMode::Plan);
+        minimal_api::set_behavior_mode_for_test(&mut a, minimal_api::BehaviorId::Plan);
         assert!(render(&a).contains("plan"), "plan flag: {:?}", render(&a));
-        minimal_api::set_behavior_mode_for_test(&mut a, minimal_api::SessionMode::Workflow);
+        minimal_api::set_behavior_mode_for_test(&mut a, minimal_api::BehaviorId::Workflow);
         assert!(
             render(&a).contains("workflow"),
             "workflow flag: {:?}",

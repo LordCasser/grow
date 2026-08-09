@@ -1,9 +1,9 @@
 //! Goal detail overlay with two projections of the durable Markdown board.
 //!
 //! The default summary shows progress and task-list items only. The full-board
-//! view is a scrollable Markdown document. Both are derived from the same
-//! `GoalDisplayState::plan_markdown`; this module never creates a second task
-//! state or writes back into the Goal runtime.
+//! view is a scrollable Markdown document. The compact tree consumes the
+//! shell's validated task projection; the full view renders the same canonical
+//! Markdown that produced it. This module never creates writable task state.
 //!
 //! Rendered as a centered overlay when `AgentView::show_goal_detail` is true
 //! and `goal_state` is `Some`.
@@ -28,6 +28,7 @@ const MAX_TASK_DISPLAY_ROWS: usize = 10;
 /// the source document; parsing, syntax highlighting, and width-dependent
 /// wrapping belong to the view and are cached independently of animation
 /// frames and Goal persistence.
+#[derive(Default)]
 pub(crate) struct GoalBoardRenderer {
     source: String,
     full_content: Option<MarkdownContent>,
@@ -42,44 +43,37 @@ pub(crate) struct GoalBoardRenderer {
     scroll: u16,
 }
 
-impl Default for GoalBoardRenderer {
-    fn default() -> Self {
-        Self {
-            source: String::new(),
-            full_content: None,
-            task_content: None,
-            width: 0,
-            theme: None,
-            full_lines: Vec::new(),
-            task_lines: Vec::new(),
-            task_count: 0,
-            completed_task_count: 0,
-            full_board: false,
-            scroll: 0,
-        }
-    }
-}
-
 impl GoalBoardRenderer {
-    fn refresh(&mut self, markdown: &str, width: u16) {
+    fn refresh(&mut self, markdown: &str, tasks: &[tool_types::GoalTaskProjection], width: u16) {
         if self.source != markdown {
             self.source.clear();
             self.source.push_str(markdown);
             self.full_content =
                 (!markdown.trim().is_empty()).then(|| MarkdownContent::new(markdown));
 
-            let tasks = markdown.lines().filter_map(parse_markdown_task);
             let mut task_markdown = String::new();
             self.task_count = 0;
             self.completed_task_count = 0;
-            for task in tasks {
+            for task in tasks.iter().filter(|task| task.depth == 1) {
                 if !task_markdown.is_empty() {
                     task_markdown.push('\n');
                 }
-                task_markdown.push_str(if task.complete { "- [x] " } else { "- [ ] " });
-                task_markdown.push_str(&strip_control_chars(task.label, false));
+                let complete = task.status == tool_types::GoalTaskStatus::Done;
+                task_markdown.push_str(if complete { "- [x] " } else { "- [ ] " });
+                task_markdown.push_str("**");
+                task_markdown.push_str(&task.id);
+                task_markdown.push_str("** `");
+                task_markdown.push_str(task.status.as_str());
+                task_markdown.push_str("` — ");
+                task_markdown.push_str(&strip_control_chars(&task.summary, false));
+                if task.total_descendants > 0 {
+                    task_markdown.push_str(&format!(
+                        " ({}/{})",
+                        task.completed_descendants, task.total_descendants
+                    ));
+                }
                 self.task_count += 1;
-                self.completed_task_count += usize::from(task.complete);
+                self.completed_task_count += usize::from(complete);
             }
             self.task_content =
                 (!task_markdown.is_empty()).then(|| MarkdownContent::new(task_markdown.as_str()));
@@ -152,58 +146,6 @@ impl GoalBoardRenderer {
         crate::views::modal::apply_doc_scroll_delta(&mut self.scroll, lines);
         true
     }
-}
-
-struct MarkdownTask<'a> {
-    complete: bool,
-    label: &'a str,
-}
-
-/// Extract a GitHub-flavoured task-list item without interpreting arbitrary
-/// prose. Both unordered and ordered Markdown list markers are accepted, as
-/// are nested blockquotes. The source remains the only canonical task state;
-/// this parser is a lossy, read-only projection for the compact UI.
-fn parse_markdown_task(line: &str) -> Option<MarkdownTask<'_>> {
-    let mut rest = line.trim_start();
-    while let Some(after) = rest.strip_prefix('>') {
-        rest = after.strip_prefix(' ').unwrap_or(after).trim_start();
-    }
-
-    rest = if let Some(after) = rest
-        .strip_prefix("- ")
-        .or_else(|| rest.strip_prefix("* "))
-        .or_else(|| rest.strip_prefix("+ "))
-    {
-        after
-    } else {
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        if digits == 0 {
-            return None;
-        }
-        let after_digits = &rest[digits..];
-        after_digits
-            .strip_prefix(". ")
-            .or_else(|| after_digits.strip_prefix(") "))?
-    };
-    rest = rest.trim_start();
-
-    let (complete, after_box) = if let Some(after) = rest.strip_prefix("[ ]") {
-        (false, after)
-    } else if let Some(after) = rest
-        .strip_prefix("[x]")
-        .or_else(|| rest.strip_prefix("[X]"))
-    {
-        (true, after)
-    } else {
-        return None;
-    };
-    if !after_box.is_empty() && !after_box.starts_with(char::is_whitespace) {
-        return None;
-    }
-    Some(MarkdownTask {
-        complete,
-        label: after_box.trim(),
-    })
 }
 
 /// Maximum per-model token rows displayed before a "+N more" summary row.
@@ -514,7 +456,7 @@ fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, board: &mut GoalBoard
     // Mirror that here so pause-message wrapping computes the same row
     // count the renderer will produce.
     let inner_w = w.saturating_sub(4);
-    board.refresh(&goal.plan_markdown, inner_w.max(1));
+    board.refresh(&goal.plan_markdown, &goal.tasks, inner_w.max(1));
 
     if board.full_board {
         let h = screen.height.saturating_sub(4).max(6);
@@ -804,8 +746,8 @@ pub(crate) fn render_goal_detail(
 
     if board.full_board {
         let header = format!(
-            "Blackboard r{} (objective r{}) — full document",
-            goal.plan_revision, goal.objective_revision
+            "Blackboard b{} / plan p{} (objective r{}) — full document",
+            goal.board_revision, goal.plan_revision, goal.objective_revision
         );
         buf.set_line_safe(
             x,
@@ -983,8 +925,8 @@ pub(crate) fn render_goal_detail(
     };
     let task_header = if board.task_count == 0 {
         format!(
-            "Tasks — blackboard r{} (objective r{})",
-            goal.plan_revision, goal.objective_revision
+            "Tasks — blackboard b{} / plan p{} (objective r{})",
+            goal.board_revision, goal.plan_revision, goal.objective_revision
         )
     } else {
         format!(
@@ -1257,6 +1199,26 @@ mod tests {
         goal.plan_markdown =
             "# Private-looking prose\nThis belongs only in the full board.\n\n- [x] implementation\n- [ ] verification"
                 .into();
+        goal.tasks = vec![
+            tool_types::GoalTaskProjection {
+                id: "T1".into(),
+                parent_id: None,
+                depth: 1,
+                status: tool_types::GoalTaskStatus::Done,
+                summary: "implementation".into(),
+                completed_descendants: 0,
+                total_descendants: 0,
+            },
+            tool_types::GoalTaskProjection {
+                id: "T2".into(),
+                parent_id: None,
+                depth: 1,
+                status: tool_types::GoalTaskStatus::Pending,
+                summary: "verification".into(),
+                completed_descendants: 0,
+                total_descendants: 0,
+            },
+        ];
         goal.verifier_feedback = Some("missing restart evidence".into());
         goal.phase = GoalDisplayPhase::Verifying;
         let screen = Rect::new(0, 0, 100, 32);
@@ -1275,8 +1237,8 @@ mod tests {
         );
         let text = buffer_text(&buf);
         assert!(text.contains("Tasks: 1/2 complete (50%)"));
-        assert!(text.contains("[x] implementation"));
-        assert!(text.contains("[ ] verification"));
+        assert!(text.contains("[x] T1 done"));
+        assert!(text.contains("[ ] T2 pending"));
         assert!(text.contains("implementation"));
         assert!(text.contains("verification"));
         assert!(!text.contains("Private-looking prose"));
@@ -1290,6 +1252,7 @@ mod tests {
     fn compact_detail_does_not_fall_back_to_full_prose_without_tasks() {
         let mut goal = GoalDisplayState::test_stub();
         goal.plan_markdown = "# Status\n\nEvidence exists, but no task list was supplied.".into();
+        goal.tasks.clear();
         let screen = Rect::new(0, 0, 100, 24);
         let mut board = GoalBoardRenderer::default();
         let mut buf = Buffer::empty(screen);
@@ -1384,29 +1347,50 @@ mod tests {
     }
 
     #[test]
-    fn task_projection_accepts_nested_unordered_and_ordered_markdown_lists() {
-        let source = concat!(
-            "- [x] done\n",
-            "  * [ ] nested\n",
-            "> 2. [X] quoted order\n",
-            "+ [ ] next\n",
-            "- [maybe] prose\n",
-            "plain [x] text\n"
-        );
-        let tasks: Vec<_> = source.lines().filter_map(parse_markdown_task).collect();
-        assert_eq!(tasks.len(), 4);
-        assert_eq!(tasks.iter().filter(|task| task.complete).count(), 2);
-        assert_eq!(tasks[1].label, "nested");
-        assert_eq!(tasks[2].label, "quoted order");
+    fn compact_projection_uses_only_structured_top_level_tasks() {
+        let tasks = vec![
+            tool_types::GoalTaskProjection {
+                id: "T1".into(),
+                parent_id: None,
+                depth: 1,
+                status: tool_types::GoalTaskStatus::InProgress,
+                summary: "top level".into(),
+                completed_descendants: 1,
+                total_descendants: 2,
+            },
+            tool_types::GoalTaskProjection {
+                id: "T1.1".into(),
+                parent_id: Some("T1".into()),
+                depth: 2,
+                status: tool_types::GoalTaskStatus::Done,
+                summary: "child".into(),
+                completed_descendants: 0,
+                total_descendants: 0,
+            },
+        ];
+        let mut board = GoalBoardRenderer::default();
+        board.refresh("board", &tasks, 80);
+        assert_eq!(board.task_count, 1);
+        assert_eq!(board.completed_task_count, 0);
+        assert_eq!(board.task_lines.len(), 1);
     }
 
     #[test]
     fn replacing_the_board_resets_full_document_scroll() {
         let mut board = GoalBoardRenderer::default();
         board.show_full_board();
-        board.refresh("- [ ] old", 80);
+        let tasks = [tool_types::GoalTaskProjection {
+            id: "T1".into(),
+            parent_id: None,
+            depth: 1,
+            status: tool_types::GoalTaskStatus::Pending,
+            summary: "task".into(),
+            completed_descendants: 0,
+            total_descendants: 0,
+        }];
+        board.refresh("old", &tasks, 80);
         board.scroll = 42;
-        board.refresh("- [ ] new", 80);
+        board.refresh("new", &tasks, 80);
         assert!(board.is_full_board());
         assert_eq!(board.scroll, 0);
         assert_eq!(board.task_count, 1);

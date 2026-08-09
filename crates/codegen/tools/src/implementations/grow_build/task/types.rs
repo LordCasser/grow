@@ -33,16 +33,37 @@ pub enum SubagentOwner {
     Task,
     Goal {
         goal_id: String,
+        objective_revision: u64,
+        plan_revision: u64,
+        board_revision: u64,
+        role: GoalSubagentRole,
     },
     Workflow {
         run_id: String,
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalSubagentRole {
+    Planner,
+    Verifier,
+    Worker,
+}
+
 impl SubagentOwner {
-    pub fn goal(goal_id: impl Into<String>) -> Self {
+    pub fn goal(
+        goal_id: impl Into<String>,
+        objective_revision: u64,
+        plan_revision: u64,
+        board_revision: u64,
+        role: GoalSubagentRole,
+    ) -> Self {
         Self::Goal {
             goal_id: goal_id.into(),
+            objective_revision,
+            plan_revision,
+            board_revision,
+            role,
         }
     }
 
@@ -61,13 +82,20 @@ impl SubagentOwner {
 
     pub fn goal_id(&self) -> Option<&str> {
         match self {
-            Self::Goal { goal_id } => Some(goal_id),
+            Self::Goal { goal_id, .. } => Some(goal_id),
             Self::Task | Self::Workflow { .. } => None,
         }
     }
 
     pub fn is_workflow(&self) -> bool {
         matches!(self, Self::Workflow { .. })
+    }
+
+    pub fn goal_role(&self) -> Option<GoalSubagentRole> {
+        match self {
+            Self::Goal { role, .. } => Some(*role),
+            Self::Task | Self::Workflow { .. } => None,
+        }
     }
 }
 
@@ -113,6 +141,9 @@ pub struct SubagentRequest {
     /// `prompt`. Not on TaskToolInput. Successful `resume_from` takes precedence.
     pub fork_context: bool,
     pub owner: SubagentOwner,
+    /// Immutable blackboard snapshot available to a Goal-owned child through
+    /// `get_goal`. It is captured at spawn and never follows later revisions.
+    pub goal_context: Option<crate::implementations::grow_build::update_goal::GoalContextSnapshot>,
     pub cancel_token: CancellationToken,
 }
 
@@ -175,15 +206,6 @@ pub struct SubagentRuntimeOverrides {
     /// Isolation mode for child execution environment.
     /// `None` means "use role/persona default" (which itself defaults to `None`/shared workspace).
     pub isolation: Option<SubagentIsolationMode>,
-    /// `/goal`-only harness override: the `agent_type` (e.g. `"cursor"` or
-    /// `"grow"`) whose `AgentDefinition` decides the child's harness
-    /// flavor — system prompt + toolset — applied
-    /// REGARDLESS of the parent agent (so a session can pin a
-    /// compat-harness verifier and vice versa).
-    /// Orthogonal to `subagent_type`, which still selects the toolset-role
-    /// (implementer vs explorer). `None` for every non-goal spawn ⇒ the parent
-    /// agent decides the flavor (unchanged behavior).
-    pub harness_agent_type: Option<String>,
     pub completion_output_cap: Option<usize>,
     pub spawn_depth: Option<u32>,
     pub output_token_budget: Option<u64>,
@@ -227,8 +249,7 @@ pub trait SubagentCapabilityModeExt {
     ///
     /// Uses the `kind` field on each `ToolConfig`, populated automatically
     /// by `for_tool::<T>()` / `From<&T: Tool>` at toolset construction time.
-    /// Tools without a `kind` (e.g. MCP/custom tools via
-    /// `ToolConfig::from_id()`) are preserved unconditionally.
+    /// Restricted modes reject tools without an explicit kind.
     fn filter_tool_config(self, config: &mut crate::registry::types::ToolServerConfig);
 
     /// Return the set of `ToolKind`s allowed under this capability mode.
@@ -271,13 +292,12 @@ fn is_background_capable_bash_tool(tc: &crate::registry::types::ToolConfig) -> b
 
 impl SubagentCapabilityModeExt for SubagentCapabilityMode {
     fn filter_tool_config(self, config: &mut crate::registry::types::ToolServerConfig) {
-        if self == Self::All {
-            return;
-        }
         let allowed = self.allowed_tool_kinds();
         config.tools.retain(|tc| match tc.kind {
-            Some(k) => allowed.contains(&k),
-            None => true,
+            // `All` means every classified capability, not an escape hatch
+            // for opaque tools. Other modes use their explicit allowlist.
+            Some(k) => self == Self::All || allowed.contains(&k),
+            None => false,
         });
         prune_orphaned_background_task_tools(config);
     }
@@ -302,6 +322,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::PlanControl,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                ToolKind::GoalRead,
             ],
             Self::ReadWrite => &[
                 ToolKind::Read,
@@ -323,6 +344,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::PlanControl,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                ToolKind::GoalRead,
             ],
             Self::Execute => &[
                 ToolKind::Read,
@@ -341,6 +363,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::PlanControl,
                 ToolKind::AskUser,
                 ToolKind::Skill,
+                ToolKind::GoalRead,
             ],
             Self::All => &[
                 ToolKind::Read,
@@ -766,75 +789,6 @@ pub struct SubagentValidateTypeRequest {
     pub respond_to: oneshot::Sender<SubagentValidateTypeOutcome>,
 }
 
-// Describe-type protocol
-
-/// Outcome of a `describe_subagent_type` round-trip.
-///
-/// Mirrors [`SubagentValidateTypeOutcome`] but, on success, additionally
-/// carries the resolved toolset summary (tool names + capability flags)
-/// so the parent can gate per-role capability and render per-role prompts
-/// WITHOUT spawning the toolset. The non-`Ok` variants are 1:1 with the
-/// validate outcomes (config-bug cases) plus `Unavailable` (infra
-/// flakiness), so a caller maps every variant to a fail-open reason.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum SubagentDescribeOutcome {
-    Ok(SubagentTypeSummary),
-    /// The type does not resolve to an agent definition. `available` is
-    /// sorted by `str::cmp` and filtered by `[subagents.toggle]`.
-    Unknown {
-        available: Vec<String>,
-    },
-    /// The type resolves but is disabled via `[subagents.toggle]`.
-    Disabled,
-    /// Coordinator unreachable / responder dropped / timed out — treat as
-    /// fail-open (the type may be valid; the description just could not be
-    /// obtained).
-    Unavailable,
-}
-
-/// Resolved toolset summary for a subagent type.
-///
-/// Built by the coordinator from the type's `AgentDefinition` AFTER the
-/// same parent-dependent toolset re-selection a real spawn applies, so a
-/// parent's described tool names match what the child would
-/// actually get. The capability booleans key on the exact `ToolKind`
-/// variants used by the per-role gates (`Search` for grep, `Execute` for
-/// terminal/bash — there is no `Grep`/`Bash` variant).
-#[derive(Debug, Clone, Default)]
-pub struct SubagentTypeSummary {
-    /// Client-facing tool name per [`ToolKind`](crate::types::tool::ToolKind),
-    /// derived exactly like the finalize-time `kind_to_name` map:
-    /// `ToolConfig::resolve_client_name(&entry.id)` (the `name_override`
-    /// when set, else the unqualified tool id). First tool per kind wins,
-    /// matching `FinalizedToolset`.
-    pub tool_names: std::collections::HashMap<crate::types::tool::ToolKind, String>,
-    /// The toolset has a [`ToolKind::Read`](crate::types::tool::ToolKind::Read) tool.
-    pub can_read: bool,
-    /// The toolset has a [`ToolKind::Search`](crate::types::tool::ToolKind::Search)
-    /// tool (grep maps to `Search`).
-    pub can_search: bool,
-    /// The toolset has a [`ToolKind::Execute`](crate::types::tool::ToolKind::Execute)
-    /// tool (terminal/bash maps to `Execute`).
-    pub can_execute: bool,
-}
-
-#[derive(Educe)]
-#[educe(Debug)]
-pub struct SubagentDescribeRequest {
-    pub subagent_type: String,
-    /// `/goal`-only harness override mirrored from
-    /// [`SubagentRuntimeOverrides::harness_agent_type`]: the coordinator
-    /// resolves the toolset for `(subagent_type, harness_agent_type)` so the
-    /// per-role capability gate + prompt tool names reflect the harness the
-    /// spawn will actually run on. `None` ⇒ the parent agent decides the flavor
-    /// (unchanged behavior).
-    pub harness_agent_type: Option<String>,
-    pub parent_session_id: String,
-    #[educe(Debug(ignore))]
-    pub respond_to: oneshot::Sender<SubagentDescribeOutcome>,
-}
-
 /// Coordinator message enum. Kept exhaustive so every actor command is handled.
 pub enum SubagentEvent {
     Spawn(SubagentSpawnRequest),
@@ -860,7 +814,6 @@ pub enum SubagentEvent {
     Inspect(SubagentInspectRequest),
     SpawnedRefs(SubagentSpawnedRefsRequest),
     ValidateType(SubagentValidateTypeRequest),
-    DescribeType(SubagentDescribeRequest),
     LoopUnitActive(SubagentLoopUnitActiveRequest),
 }
 
@@ -1196,6 +1149,50 @@ mod tests {
             config.tools.is_empty(),
             "execute tools should still be filtered out"
         );
+    }
+
+    #[test]
+    fn every_subagent_mode_fails_closed_and_restricted_modes_keep_goal_read_only() {
+        let mut opaque = ToolConfig::from_id("custom:opaque");
+        opaque.kind = None;
+        let goal_read = tc("Grow:get_goal", ToolKind::GoalRead);
+        let goal_progress = tc("Grow:update_goal_progress", ToolKind::GoalProgressUpdate);
+        let goal_replan = tc("Grow:request_goal_replan", ToolKind::GoalReplanRequest);
+        let goal_lifecycle = tc("Grow:update_goal", ToolKind::GoalLifecycleUpdate);
+
+        for mode in [
+            SubagentCapabilityMode::ReadOnly,
+            SubagentCapabilityMode::ReadWrite,
+            SubagentCapabilityMode::Execute,
+        ] {
+            let mut config = ToolServerConfig {
+                tools: vec![
+                    opaque.clone(),
+                    goal_read.clone(),
+                    goal_progress.clone(),
+                    goal_replan.clone(),
+                    goal_lifecycle.clone(),
+                ],
+                behavior_preset: None,
+            };
+            mode.filter_tool_config(&mut config);
+            let kinds: Vec<_> = config.tools.iter().filter_map(|tool| tool.kind).collect();
+            assert_eq!(kinds, [ToolKind::GoalRead], "mode={mode:?}");
+        }
+
+        let mut all = ToolServerConfig {
+            tools: vec![
+                opaque,
+                goal_read,
+                goal_progress,
+                goal_replan,
+                goal_lifecycle,
+            ],
+            behavior_preset: None,
+        };
+        SubagentCapabilityMode::All.filter_tool_config(&mut all);
+        assert!(all.tools.iter().all(|tool| tool.kind.is_some()));
+        assert_eq!(all.tools.len(), 4, "All keeps every classified capability");
     }
 
     #[test]

@@ -680,13 +680,13 @@ fn agent_scheduler_background_loops(app: &AppView) -> bool {
     app.scheduler_background_loops_seed
 }
 
-fn agent_behavior_mode(app: &AppView) -> tools::types::SessionMode {
+fn agent_behavior_mode(app: &AppView) -> tools::types::BehaviorId {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
         return agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
     }
-    tools::types::SessionMode::Default
+    tools::types::BehaviorId::Normal
 }
 
 fn agent_workflows_available(app: &AppView) -> bool {

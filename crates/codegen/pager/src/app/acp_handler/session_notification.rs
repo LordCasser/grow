@@ -880,6 +880,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             status,
             phase,
             plan_revision,
+            board_revision,
+            tasks,
             plan_markdown,
             verifier_feedback,
             token_budget,
@@ -945,6 +947,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     status: new_status,
                     phase: new_phase,
                     plan_revision,
+                    board_revision,
+                    tasks,
                     plan_markdown,
                     verifier_feedback,
                     token_budget,
@@ -1273,11 +1277,17 @@ pub(super) fn apply_retry_state(
 /// caller can refresh open settings modals after the per-agent borrow
 /// releases.
 pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut AgentView) -> bool {
-    use tools::types::SessionMode;
+    use tools::types::BehaviorId;
     let acp::SessionUpdate::CurrentModeUpdate(cmu) = update else {
         return false;
     };
-    let mode = SessionMode::from_id(cmu.current_mode_id.0.as_ref());
+    let Some(mode) = BehaviorId::try_from_id(cmu.current_mode_id.0.as_ref()) else {
+        tracing::warn!(
+            mode_id = %cmu.current_mode_id.0,
+            "ignoring CurrentModeUpdate with unknown Behavior id"
+        );
+        return false;
+    };
     let previous = agent.behavior_mode;
     agent.behavior_mode = mode;
     agent.behavior_mode_pending = None;
@@ -1287,7 +1297,6 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         .and_then(|meta| meta.get("grow/planPhase"))
         .and_then(|phase| phase.as_str())
         .map(str::to_owned);
-    agent.behavior_switch_warning_pending = false;
     if let Some(change) = cmu
         .meta
         .as_ref()
@@ -1296,35 +1305,17 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         let status = change.get("status").and_then(serde_json::Value::as_str);
         if status == Some("confirmation_required") {
             if let Some(message) = change.get("message").and_then(serde_json::Value::as_str) {
-                agent.show_behavior_switch_warning(message);
+                let remaining_ms = change
+                    .get("remainingMs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1);
+                agent.show_behavior_switch_warning(message, remaining_ms);
             }
-            // Park the interrupting switch, preserving any prompt stashed by
-            // the `SetModeThenPrompt` task: the notification and the task
-            // result arrive over independent channels in unspecified order,
-            // so re-creating the confirm state must never drop the prompt.
-            if let Some(target) = change.get("target").and_then(serde_json::Value::as_str) {
-                let target = SessionMode::from_id(target);
-                let already_parked = matches!(&mut agent.behavior_switch_confirm, Some(confirm) if confirm.target == target);
-                if !already_parked {
-                    let prompt = agent.behavior_switch_confirm.take().and_then(|c| c.prompt);
-                    agent.behavior_switch_confirm =
-                        Some(crate::app::agent_view::BehaviorSwitchConfirm { target, prompt });
-                }
-            }
-        } else {
-            agent.behavior_switch_warning_pending = false;
-            // applied / rejected: the parked switch is resolved either way.
-            agent.behavior_switch_confirm = None;
-            if status == Some("rejected")
-                && let Some(message) = change.get("message").and_then(serde_json::Value::as_str)
-            {
-                agent.show_toast_for(message, std::time::Duration::from_millis(990));
-            }
+        } else if status == Some("rejected")
+            && let Some(message) = change.get("message").and_then(serde_json::Value::as_str)
+        {
+            agent.show_toast_for(message, std::time::Duration::from_millis(990));
         }
-    } else {
-        // A plain mode update (no behavior-change meta) also resolves any
-        // parked confirmation.
-        agent.behavior_switch_confirm = None;
     }
     let was_active = agent.plan_mode_active;
     let now_active = mode.is_plan();
@@ -1339,4 +1330,29 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         );
     }
     true
+}
+
+/// Whether this authoritative mode update completed a Behavior selection.
+/// Confirmation and rejection responses keep the Shell's selection unchanged
+/// and must not release locally-held prompts. Plain updates and explicit
+/// `applied` responses may release the ordinary FIFO after the new identity is
+/// installed by [`detect_plan_mode_change`].
+pub(super) fn behavior_mode_update_applied(update: &acp::SessionUpdate) -> bool {
+    let acp::SessionUpdate::CurrentModeUpdate(cmu) = update else {
+        return false;
+    };
+    if tools::types::BehaviorId::try_from_id(cmu.current_mode_id.0.as_ref()).is_none() {
+        return false;
+    }
+    match cmu
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/behaviorChange"))
+        .and_then(|change| change.get("status"))
+        .and_then(serde_json::Value::as_str)
+    {
+        None | Some("applied") => true,
+        Some("confirmation_required" | "rejected") => false,
+        Some(_) => false,
+    }
 }

@@ -19,7 +19,7 @@ use crate::implementations::grow_build::read_file::ReadFileInput;
 use crate::implementations::grow_build::search_replace::SearchReplaceInput;
 use crate::implementations::grow_build::todo::TodoWriteInput;
 use crate::implementations::grow_build::update_goal::{
-    GetGoalInput, UpdateGoalInput, UpdateGoalPlanInput,
+    GetGoalInput, RequestGoalReplanInput, UpdateGoalInput, UpdateGoalProgressInput,
 };
 use crate::implementations::grow_build::web_fetch::WebFetchInput;
 use crate::implementations::grow_build::write::WriteInput;
@@ -79,7 +79,8 @@ pub enum ToolInput {
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListInput),
     GetGoal(GetGoalInput),
     UpdateGoal(UpdateGoalInput),
-    UpdateGoalPlan(UpdateGoalPlanInput),
+    UpdateGoalProgress(UpdateGoalProgressInput),
+    RequestGoalReplan(RequestGoalReplanInput),
     Workflow(crate::implementations::grow_build::workflow::WorkflowToolInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),

@@ -119,8 +119,12 @@ impl JsonlStorageAdapter {
     fn plan_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::PLAN_FILE)
     }
-    fn behavior_state_file(&self, info: &Info) -> PathBuf {
-        self.session_dir(info).join(super::BEHAVIOR_STATE_FILE)
+    fn session_control_file(&self, info: &Info) -> PathBuf {
+        self.session_dir(info).join(super::SESSION_CONTROL_FILE)
+    }
+    fn legacy_behavior_state_file(&self, info: &Info) -> PathBuf {
+        self.session_dir(info)
+            .join(super::LEGACY_BEHAVIOR_STATE_FILE)
     }
     fn signals_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::SIGNALS_FILE)
@@ -128,8 +132,8 @@ impl JsonlStorageAdapter {
     fn announcement_state_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::ANNOUNCEMENT_STATE_FILE)
     }
-    fn goal_mode_state_file(&self, info: &Info) -> PathBuf {
-        self.session_dir(info).join(super::GOAL_STATE_FILE)
+    fn legacy_goal_mode_state_file(&self, info: &Info) -> PathBuf {
+        self.session_dir(info).join(super::LEGACY_GOAL_STATE_FILE)
     }
     fn workflows_dir(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join("workflows")
@@ -643,27 +647,39 @@ impl JsonlStorageAdapter {
         }
     }
 
-    /// Goal state is optional, but a present unreadable snapshot must not be
-    /// retried forever. Atomic writes make a malformed file an invalid state,
-    /// not an observable in-progress write, so quarantine it by deletion and
-    /// let Behavior/Goal reconciliation retire any stale UI projection.
-    fn read_goal_mode_state_sync(
+    /// Load the atomic control plane. Split pre-v1 files are intentionally not
+    /// migrated: mixing independently committed Behavior and Goal snapshots is
+    /// exactly the crash window this format removes.
+    fn read_session_control_sync(
         &self,
         info: &Info,
     ) -> io::Result<(
-        Option<crate::session::goal_tracker::GoalOrchestration>,
+        Option<crate::session::control::SessionControlSnapshot>,
         bool,
     )> {
-        let path = self.goal_mode_state_file(info);
+        let path = self.session_control_file(info);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((None, false)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let legacy_behavior = self.legacy_behavior_state_file(info);
+                let legacy_goal = self.legacy_goal_mode_state_file(info);
+                let rejected = legacy_behavior.exists() || legacy_goal.exists();
+                if rejected {
+                    tracing::warn!(
+                        session_id = %info.id,
+                        "discarding obsolete split Behavior/Goal control state"
+                    );
+                    let _ = std::fs::remove_file(legacy_behavior);
+                    let _ = std::fs::remove_file(legacy_goal);
+                }
+                return Ok((None, rejected));
+            }
             Err(error) => {
                 tracing::warn!(
                     session_id = %info.id,
                     path = %path.display(),
                     %error,
-                    "failed reading Goal state"
+                    "failed reading session control state"
                 );
                 return Ok((None, true));
             }
@@ -672,20 +688,30 @@ impl JsonlStorageAdapter {
             tracing::warn!(
                 session_id = %info.id,
                 path = %path.display(),
-                "discarding empty Goal state"
+                "discarding empty session control state"
             );
             let _ = std::fs::remove_file(path);
             return Ok((None, true));
         }
-        let parsed = serde_json::from_slice(&bytes);
+        let parsed: Result<crate::session::control::SessionControlSnapshot, _> =
+            serde_json::from_slice(&bytes);
         match parsed {
-            Ok(state) => Ok((Some(state), false)),
+            Ok(state) if state.architecture_is_current() => Ok((Some(state), false)),
+            Ok(state) => {
+                tracing::warn!(
+                    session_id = %info.id,
+                    architecture_version = state.architecture_version,
+                    "discarding unsupported session control architecture"
+                );
+                let _ = std::fs::remove_file(path);
+                Ok((None, true))
+            }
             Err(error) => {
                 tracing::warn!(
                     session_id = %info.id,
                     path = %path.display(),
                     %error,
-                    "discarding malformed Goal state"
+                    "discarding malformed session control state"
                 );
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
@@ -694,7 +720,7 @@ impl JsonlStorageAdapter {
                         session_id = %info.id,
                         path = %path.display(),
                         error = %delete_error,
-                        "failed deleting malformed Goal state"
+                        "failed deleting malformed session control state"
                     ),
                 }
                 Ok((None, true))
@@ -1163,7 +1189,7 @@ impl JsonlStorageAdapter {
             .collect();
         for target in [
             self.workflows_dir(target_info),
-            self.goal_mode_state_file(target_info)
+            self.legacy_goal_mode_state_file(target_info)
                 .parent()
                 .expect("goal state has a parent")
                 .to_path_buf(),
@@ -1281,13 +1307,22 @@ impl JsonlStorageAdapter {
         } else {
             false
         };
-        let behavior_state_copied = if options.copy_behavior_state {
-            let behavior_path = self.behavior_state_file(source_info);
-            if behavior_path.exists() {
-                std::fs::write(
-                    self.behavior_state_file(target_info),
-                    std::fs::read(&behavior_path)?,
-                )?;
+        let session_control_copied = if options.copy_session_control {
+            let (control, _) = self.read_session_control_sync(source_info)?;
+            if let Some(mut control) = control {
+                // Forks never inherit runtime ownership. A Goal or private
+                // Deep Research run belongs to exactly one parent session.
+                control.goal = None;
+                if matches!(
+                    control.behavior.state,
+                    crate::session::behavior::BehaviorState::Goal
+                        | crate::session::behavior::BehaviorState::DeepResearch { .. }
+                ) {
+                    control.behavior = crate::session::behavior::BehaviorSnapshot::normal();
+                }
+                let json = serde_json::to_vec_pretty(&control)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                super::write_bytes_atomic(&self.session_control_file(target_info), &json)?;
                 true
             } else {
                 false
@@ -1424,7 +1459,7 @@ impl JsonlStorageAdapter {
             chat_messages_copied: num_chat_messages,
             updates_copied: num_messages,
             plan_state_copied: plan_copied,
-            behavior_state_copied,
+            session_control_copied,
             signals_copied,
             tool_state_copied,
             announcement_state_copied,
@@ -1575,14 +1610,14 @@ impl StorageAdapter for JsonlStorageAdapter {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         tokio::fs::write(self.plan_file(info), state_json).await
     }
-    async fn write_behavior_state(
+    async fn write_session_control(
         &self,
         info: &Info,
-        state: &crate::session::behavior::BehaviorSnapshot,
+        state: &crate::session::control::SessionControlSnapshot,
     ) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic_async(&self.behavior_state_file(info), json).await
+        super::write_bytes_atomic_durable_async(&self.session_control_file(info), json).await
     }
     async fn write_signals(
         &self,
@@ -1601,26 +1636,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         let json =
             serde_json::to_vec(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         super::write_bytes_atomic_async(&self.announcement_state_file(info), json).await
-    }
-    async fn write_goal_mode_state(
-        &self,
-        info: &Info,
-        state: &crate::session::goal_tracker::GoalOrchestration,
-    ) -> io::Result<()> {
-        let json = serde_json::to_vec_pretty(state)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let target = self.goal_mode_state_file(info);
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        super::write_bytes_atomic_async(&target, json).await
-    }
-    async fn delete_goal_mode_state(&self, info: &Info) -> io::Result<()> {
-        match tokio::fs::remove_file(self.goal_mode_state_file(info)).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
     }
     async fn write_workflow_run_state(
         &self,
@@ -1695,10 +1710,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
         let updates = self.read_updates_jsonl(self.updates_file(info))?;
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
-        let behavior_state = self
-            .read_optional_json_sync::<crate::session::behavior::BehaviorSnapshot>(
-                &self.behavior_state_file(info),
-            )?;
+        let (session_control, session_control_rejected) = self.read_session_control_sync(info)?;
         let signals = self.read_optional_json_sync::<crate::session::signals::SessionSignals>(
             &self.signals_file(info),
         )?;
@@ -1706,7 +1718,6 @@ impl StorageAdapter for JsonlStorageAdapter {
             .read_optional_json_sync::<crate::session::announcement_state::AnnouncementState>(
                 &self.announcement_state_file(info),
             )?;
-        let (goal_mode_state, goal_mode_state_rejected) = self.read_goal_mode_state_sync(info)?;
         let workflow_runs = self.load_workflow_runs_sync(info)?;
         let rewind_points = self.read_jsonl::<RewindPoint>(self.rewind_points_file(info))?;
         let result = PersistedData {
@@ -1714,12 +1725,11 @@ impl StorageAdapter for JsonlStorageAdapter {
             chat_history,
             updates,
             plan_state,
-            behavior_state,
+            session_control,
             rewind_points,
             signals,
             announcement_state,
-            goal_mode_state,
-            goal_mode_state_rejected,
+            session_control_rejected,
             workflow_runs,
         };
         tracing::info!(
@@ -1747,10 +1757,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         self.ensure_chat_history(info, summary.chat_format_version)?;
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
-        let behavior_state = self
-            .read_optional_json_sync::<crate::session::behavior::BehaviorSnapshot>(
-                &self.behavior_state_file(info),
-            )?;
+        let (session_control, session_control_rejected) = self.read_session_control_sync(info)?;
         let signals = self.read_optional_json_sync::<crate::session::signals::SessionSignals>(
             &self.signals_file(info),
         )?;
@@ -1758,17 +1765,15 @@ impl StorageAdapter for JsonlStorageAdapter {
             .read_optional_json_sync::<crate::session::announcement_state::AnnouncementState>(
                 &self.announcement_state_file(info),
             )?;
-        let (goal_mode_state, goal_mode_state_rejected) = self.read_goal_mode_state_sync(info)?;
         let workflow_runs = self.load_workflow_runs_sync(info)?;
         let result = super::PersistedDataLight {
             summary,
             chat_history,
             plan_state,
-            behavior_state,
+            session_control,
             signals,
             announcement_state,
-            goal_mode_state,
-            goal_mode_state_rejected,
+            session_control_rejected,
             workflow_runs,
         };
         tracing::info!(

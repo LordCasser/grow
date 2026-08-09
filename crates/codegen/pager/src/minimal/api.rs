@@ -30,7 +30,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-pub use tools::types::SessionMode;
+pub use tools::types::BehaviorId;
 
 use crate::acp::tracker::TurnActivity;
 // Only the test-only setters below reference `AgentSession`.
@@ -363,7 +363,7 @@ pub fn hovered_permission_item(v: &AgentView) -> Option<usize> {
 }
 
 /// Confirmed or optimistically selected user-facing Behavior.
-pub fn effective_behavior_mode(v: &AgentView) -> SessionMode {
+pub fn effective_behavior_mode(v: &AgentView) -> BehaviorId {
     v.behavior_mode_pending.unwrap_or(v.behavior_mode)
 }
 
@@ -834,10 +834,9 @@ pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
 
 /// Test-only setter for the confirmed user-facing Behavior.
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_behavior_mode_for_test(v: &mut AgentView, mode: SessionMode) {
+pub fn set_behavior_mode_for_test(v: &mut AgentView, mode: BehaviorId) {
     v.behavior_mode = mode;
     v.behavior_mode_pending = None;
-    v.behavior_switch_confirm = None;
 }
 
 /// Test-only mutable access to `PromptWidget::suggestions`.

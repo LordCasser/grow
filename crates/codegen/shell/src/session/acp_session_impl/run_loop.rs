@@ -76,7 +76,6 @@ async fn maybe_wake_for_deferred_completion(
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
             "A deferred background result is now available. Process the system reminder and respond or continue as appropriate.",
         ))],
-        prompt_mode: crate::session::behavior::PromptMode::Agent,
         client_identifier: None,
         screen_mode: None,
         verbatim: true,
@@ -743,6 +742,18 @@ pub(super) async fn run_session(
                     SessionCommand::ReplaceSystemPrompt { system_prompt } => {
                         session.handle_replace_system_prompt(system_prompt).await;
                     }
+                    SessionCommand::SetGoalContextSnapshot { snapshot } => {
+                        session
+                            .agent
+                            .borrow()
+                            .tool_bridge()
+                            .update_resource(
+                                tools::implementations::grow_build::update_goal::GoalContextSnapshotResource(
+                                    Some(snapshot),
+                                ),
+                            )
+                            .await;
+                    }
                     SessionCommand::RestorePlanApproval => {
                         // Resume re-park: spawn the approval
                         // round-trip so the command loop is not blocked on
@@ -761,7 +772,7 @@ pub(super) async fn run_session(
                             s.resume_plan_approval(completion_tx).await;
                         });
                     }
-                    SessionCommand::QueuePrompt { prompt_id, prompt_blocks, origin, turn_kind, prompt_mode, client_identifier, screen_mode, verbatim, json_schema, admission, respond_to, persist_ack, parsed_prompt_tx } => {
+                    SessionCommand::QueuePrompt { prompt_id, prompt_blocks, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, admission, respond_to, persist_ack, parsed_prompt_tx } => {
                         let (actor_admitted, task_wake_fallback) = match admission {
                             Some(admission) => {
                                 let fallback = session
@@ -822,7 +833,7 @@ pub(super) async fn run_session(
                             );
                         }
                         session
-                            .queue_input(prompt_blocks, prompt_id, origin, turn_kind, prompt_mode, client_identifier, screen_mode, verbatim, json_schema, task_wake_fallback, respond_to, persist_ack, parsed_prompt_tx)
+                            .queue_input(prompt_blocks, prompt_id, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, task_wake_fallback, respond_to, persist_ack, parsed_prompt_tx)
                             .await;
                         if !maybe_start_pending_manual_compaction(
                             session.clone(),
@@ -845,7 +856,7 @@ pub(super) async fn run_session(
                             // Preserve steering that reached the interjection
                             // buffer before the control invalidated this turn.
                             session
-                                .cancel_turn_for_goal_control(*trigger, &mut replay_buffer)
+                                .cancel_turn_for_goal_control(trigger, &mut replay_buffer)
                                 .await;
                         }
                         if !maybe_start_pending_manual_compaction(
@@ -937,22 +948,9 @@ pub(super) async fn run_session(
                             .await;
                         }
                     }
-                    SessionCommand::SessionMode { session_mode, responds_to } => {
-                        let entering_goal = session_mode.0.as_ref()
-                            == tools::types::SessionMode::Goal.as_id()
-                            && *session.current_prompt_mode.lock()
-                                != crate::session::behavior::PromptMode::Goal;
+                    SessionCommand::BehaviorChange { session_mode, responds_to } => {
                         let outcome = session.request_behavior_change(session_mode).await;
-                        if entering_goal
-                            && matches!(
-                                outcome,
-                                crate::session::behavior::BehaviorChangeOutcome::Applied
-                            )
-                        {
-                            session
-                                .cancel_turn_for_goal_control("goal_enter", &mut replay_buffer)
-                                .await;
-                        }
+                        let _ = outcome;
                         SessionActor::maybe_start_running_task(
                             session.clone(),
                             completion_tx.clone(),
@@ -1012,8 +1010,8 @@ pub(super) async fn run_session(
                             .unwrap_or_default();
                         let _ = responds_to.send(model);
                     }
-                    SessionCommand::GetCurrentPromptMode { responds_to } => {
-                        let mode = *session.current_prompt_mode.lock();
+                    SessionCommand::GetCurrentBehavior { responds_to } => {
+                        let mode = session.behavior.lock().behavior();
                         let _ = responds_to.send(mode);
                     }
                     SessionCommand::GetModelMetadata { responds_to } => {
@@ -1249,17 +1247,10 @@ pub(super) async fn run_session(
                         if let Some(notification) = replay_buffer.flush() {
                             session.emit_buffered(notification).await;
                         }
-                        // A Goal cancel is also a pause: steering that
-                        // missed the final model boundary remains user
-                        // work for a later resume instead of disappearing.
-                        // Other modes retain the established cancel/drop
-                        // policy.
-                        if session.goal_tracker.lock().status()
-                            == Some(crate::session::goal_tracker::GoalStatus::Active)
-                        {
-                        } else {
-                            session.pending_interjections.clear();
-                        }
+                        // Cancellation terminates the exact turn named when a
+                        // steer was admitted. Never leak residual steering to
+                        // the next user turn or Goal continuation.
+                        session.discard_residual_interjections_at_turn_end();
                         let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
                         session
                             .cancel_running_task(
@@ -2126,6 +2117,7 @@ pub(super) async fn run_session(
                             session.finish_deep_research_run(&run_id, outcome).await;
                             continue;
                         }
+                        session.send_available_commands_update().await;
                         let state_suppressed = session.state.lock().await.notifications_suppressed;
                         let wake_suppressed = state_suppressed
                             || session.goal_loop_active()
@@ -2158,7 +2150,6 @@ pub(super) async fn run_session(
                                 prompt_id,
                                 turn_kind: crate::session::TurnKind::Internal,
                                 prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
-                                prompt_mode: crate::session::behavior::PromptMode::Agent,
                                 client_identifier: None,
                                 screen_mode: None,
                                 verbatim: true,

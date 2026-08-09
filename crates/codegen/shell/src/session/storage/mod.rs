@@ -27,9 +27,10 @@ pub(crate) mod summary_write;
 /// the storage adapter and the session/state and session/import extensions.
 pub(crate) const SUMMARY_FILE: &str = "summary.json";
 pub(crate) const PLAN_FILE: &str = "plan.json";
-pub(crate) const BEHAVIOR_STATE_FILE: &str = "behavior.json";
+pub(crate) const SESSION_CONTROL_FILE: &str = "session-control.json";
+pub(crate) const LEGACY_BEHAVIOR_STATE_FILE: &str = "behavior.json";
 pub(crate) const SIGNALS_FILE: &str = "signals.json";
-pub(crate) const GOAL_STATE_FILE: &str = "goal/state.json";
+pub(crate) const LEGACY_GOAL_STATE_FILE: &str = "goal/state.json";
 pub(crate) const ANNOUNCEMENT_STATE_FILE: &str = "announcement_state.json";
 pub(crate) const CHAT_HISTORY_FILE: &str = "chat_history.jsonl";
 pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
@@ -89,6 +90,28 @@ pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io:
         let _ = tokio::fs::remove_file(&tmp).await;
     }
     result
+}
+
+/// Atomically replace a control-plane file and do not acknowledge until both
+/// the new file contents and its directory entry have crossed a durability
+/// barrier. This is intentionally reserved for state whose caller changes
+/// live ownership only after the write returns.
+pub(crate) async fn write_bytes_atomic_durable_async(
+    path: &Path,
+    bytes: Vec<u8>,
+) -> io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        write_bytes_atomic(&path, &bytes)?;
+        let file = std::fs::File::open(&path)?;
+        sync_file_durable(&file)?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 /// Serialize `items` to newline-delimited JSON bytes.
@@ -555,6 +578,76 @@ pub enum SessionUpdate {
     Grow(Box<SessionNotification>),
 }
 
+/// Scan the durable update log from newest to oldest for a successful Goal
+/// finalization terminal. This closes the crash window between persisting the
+/// regular turn's sole terminal and committing the Goal `Complete` receipt.
+pub(crate) fn has_successful_goal_finalization(
+    updates_path: &Path,
+    goal_id: &str,
+) -> io::Result<bool> {
+    let bytes = std::fs::read(updates_path)?;
+    for raw_line in bytes.split(|byte| *byte == b'\n').rev() {
+        let Ok(line) = std::str::from_utf8(raw_line.trim_ascii()) else {
+            continue;
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(update) = SessionUpdateEnvelope::from_str(line) else {
+            continue;
+        };
+        let SessionUpdate::Grow(notification) = update else {
+            continue;
+        };
+        if let crate::extensions::notification::SessionUpdate::TurnCompleted {
+            identity: Some(identity),
+            stop_reason,
+            ..
+        } = &notification.update
+            && identity.origin == "goal_finalization"
+            && identity.goal_id.as_deref() == Some(goal_id)
+        {
+            return Ok(stop_reason == "end_turn");
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod goal_finalization_reconcile_tests {
+    use super::*;
+
+    #[test]
+    fn finds_only_successful_structured_goal_finalization_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("updates.jsonl");
+        let notification = crate::extensions::notification::SessionNotification {
+            session_id: acp::SessionId::new("session"),
+            update: crate::extensions::notification::SessionUpdate::TurnCompleted {
+                prompt_id: "prompt".into(),
+                identity: Some(crate::extensions::notification::TurnIdentity {
+                    origin: "goal_finalization".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: Some("goal-1".into()),
+                    stage_id: Some(4),
+                }),
+                stop_reason: "end_turn".into(),
+                agent_result: None,
+                usage: None,
+            },
+            meta: None,
+        };
+        let update = SessionUpdate::Grow(Box::new(notification));
+        let envelope = SessionUpdateEnvelope::from_update(&update).unwrap();
+        let mut bytes = serde_json::to_vec(&envelope).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(has_successful_goal_finalization(&path, "goal-1").unwrap());
+        assert!(!has_successful_goal_finalization(&path, "goal-2").unwrap());
+    }
+}
+
 impl serde::Serialize for SessionUpdate {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -694,18 +787,16 @@ pub struct PersistedData {
     /// All session updates (ACP updates and Grow extension updates) in chronological order
     pub updates: Vec<SessionUpdate>,
     pub plan_state: Option<TodoState>,
-    /// Persisted mutually-exclusive Behavior state.
-    pub behavior_state: Option<crate::session::behavior::BehaviorSnapshot>,
+    /// Persisted atomic Behavior/Goal control plane.
+    pub session_control: Option<crate::session::control::SessionControlSnapshot>,
     /// Rewind points for session rewind functionality
     pub rewind_points: Vec<RewindPoint>,
     /// Persisted session signals (None for sessions created before signals persistence)
     pub signals: Option<SessionSignals>,
     /// Persisted announcement tracking state (None for sessions before this feature)
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
-    /// Persisted goal mode orchestration state (None for sessions without goal mode)
-    pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
-    /// A Goal file existed but could not be read or decoded and was rejected.
-    pub goal_mode_state_rejected: bool,
+    /// A control snapshot existed but was invalid, or obsolete split state was discarded.
+    pub session_control_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
@@ -715,17 +806,14 @@ pub struct PersistedDataLight {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
-    pub behavior_state: Option<crate::session::behavior::BehaviorSnapshot>,
+    pub session_control: Option<crate::session::control::SessionControlSnapshot>,
     // No `rewind_points` field: the resume path defers them (loaded lazily by
     // `FileStateTracker`). Use `load_session` for the eager set.
     /// Persisted session signals (None for sessions created before signals persistence)
     pub signals: Option<SessionSignals>,
     /// Persisted announcement tracking state (None for sessions before this feature)
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
-    /// Persisted goal mode orchestration state (None for sessions without goal mode)
-    pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
-    /// A Goal file existed but could not be read or decoded and was rejected.
-    pub goal_mode_state_rejected: bool,
+    pub session_control_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
@@ -735,8 +823,8 @@ pub struct CopySessionResult {
     pub chat_messages_copied: usize,
     pub updates_copied: usize,
     pub plan_state_copied: bool,
-    /// Whether `behavior.json` was copied.
-    pub behavior_state_copied: bool,
+    /// Whether `session-control.json` was copied.
+    pub session_control_copied: bool,
     pub signals_copied: bool,
     /// Whether `tool_state.json` (persisted tool state, e.g. TodoState) was copied.
     pub tool_state_copied: bool,
@@ -782,7 +870,7 @@ pub struct CopySessionOptions {
     /// Whether to copy the plan state file. Defaults to `true`.
     pub copy_plan_state: bool,
     /// Whether to copy the plan mode state file. Defaults to `true`.
-    pub copy_behavior_state: bool,
+    pub copy_session_control: bool,
     /// Whether to copy the signals file. Defaults to `true`.
     pub copy_signals: bool,
     /// Whether to copy `tool_state.json` (persisted tool state). Defaults to `true`.
@@ -826,7 +914,7 @@ impl Default for CopySessionOptions {
             fork_context_source: None,
             fork_parent_prompt_id: None,
             copy_plan_state: true,
-            copy_behavior_state: true,
+            copy_session_control: true,
             copy_signals: true,
             copy_tool_state: true,
             copy_announcement_state: true,
@@ -1090,11 +1178,11 @@ pub trait StorageAdapter: Send + Sync {
     /// Write/update the plan state
     async fn write_plan_state(&self, info: &Info, state: &TodoState) -> io::Result<()>;
 
-    /// Write/update plan mode lifecycle state
-    async fn write_behavior_state(
+    /// Atomically write Behavior selection and Goal runtime state.
+    async fn write_session_control(
         &self,
         info: &Info,
-        state: &crate::session::behavior::BehaviorSnapshot,
+        state: &crate::session::control::SessionControlSnapshot,
     ) -> io::Result<()>;
 
     /// Write/update the session signals snapshot
@@ -1106,15 +1194,6 @@ pub trait StorageAdapter: Send + Sync {
         info: &Info,
         state: &crate::session::announcement_state::AnnouncementState,
     ) -> io::Result<()>;
-
-    /// Write/update the goal mode orchestration state
-    async fn write_goal_mode_state(
-        &self,
-        info: &Info,
-        state: &crate::session::goal_tracker::GoalOrchestration,
-    ) -> io::Result<()>;
-
-    async fn delete_goal_mode_state(&self, info: &Info) -> io::Result<()>;
 
     async fn write_workflow_run_state(
         &self,

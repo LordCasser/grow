@@ -251,17 +251,15 @@ impl AgentView {
         self.mode_switch_banner = Some((msg, Instant::now() + MODE_BANNER_DURATION));
     }
 
-    pub fn show_behavior_switch_warning(&mut self, message: &str) {
-        self.mode_switch_banner =
-            Some((message.to_string(), Instant::now() + MODE_BANNER_DURATION));
-        self.behavior_switch_warning_pending = true;
+    pub fn show_behavior_switch_warning(&mut self, message: &str, remaining_ms: u64) {
+        // The Shell owns the confirmation latch. The Pager merely renders its
+        // deadline and never intercepts Enter/Esc as a second control protocol.
+        let lifetime = Duration::from_millis(remaining_ms.max(1));
+        self.mode_switch_banner = Some((message.to_string(), Instant::now() + lifetime));
     }
 
     /// Expire the mode-switch banner at its absolute deadline.
     pub fn maintain_mode_banner(&mut self, now: Instant) -> bool {
-        if self.behavior_switch_warning_pending {
-            return false;
-        }
         if self
             .mode_switch_banner
             .as_ref()
@@ -274,9 +272,6 @@ impl AgentView {
     }
 
     pub(crate) fn mode_banner_ui_deadline(&self, now: Instant) -> Option<Instant> {
-        if self.behavior_switch_warning_pending {
-            return None;
-        }
         let deadline = self.mode_switch_banner.as_ref()?.1;
         let fade_start = deadline.checked_sub(MODE_BANNER_FADE).unwrap_or(deadline);
         Some(if now < fade_start {
@@ -287,9 +282,6 @@ impl AgentView {
     }
 
     pub(crate) fn mode_banner_animating(&self, now: Instant) -> bool {
-        if self.behavior_switch_warning_pending {
-            return false;
-        }
         self.mode_switch_banner
             .as_ref()
             .is_some_and(|(_, deadline)| {

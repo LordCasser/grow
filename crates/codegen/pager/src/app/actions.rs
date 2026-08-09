@@ -618,17 +618,11 @@ pub enum Action {
     /// Select a Behavior and, only after the shell applies the transition,
     /// optionally start a turn in that Behavior.
     SetBehaviorThenPrompt {
-        mode: tools::types::SessionMode,
+        mode: tools::types::BehaviorId,
         prompt: Option<String>,
     },
     /// Select the primary Agent Behavior from the Ctrl+X, B picker.
-    SetBehaviorMode(tools::types::SessionMode),
-    /// Dismiss an interrupt warning and clear the shell's ephemeral guard.
-    DismissBehaviorSwitchWarning,
-    /// Confirm an interrupting Behavior switch (Enter) after the warning
-    /// banner appeared. With a stashed prompt, replays it after the switch;
-    /// without one, re-issues the `SetSessionMode` for the parked target.
-    ConfirmBehaviorSwitchWarning,
+    SetBehaviorMode(tools::types::BehaviorId),
     /// Enter remember mode (visual prompt change, not a send).
     EnterRememberMode,
     /// Send a remember note from # mode. Routes through LLM rewrite when a
@@ -2125,18 +2119,19 @@ pub enum TaskResult {
         /// constructions that don't need gating.
         prompt_id: Option<String>,
     },
-    /// The `SetModeThenPrompt` RPC answered `confirmation_required`: the
-    /// target Behavior is parked on the shell, but the mode+prompt path must
-    /// NOT drop the prompt. The text is stashed on the agent until the user
-    /// confirms (Enter) or cancels (Esc); `prompt_id` retires the optimistic
-    /// echo of the never-run prompt, and token ranges are re-derived on replay.
+    /// The `SetModeThenPrompt` RPC answered `confirmation_required`. The
+    /// prompt never ran and is returned to the ordinary local FIFO. The user
+    /// confirms only by selecting the same Behavior again; no Pager-owned
+    /// confirmation state or synthetic input can confirm the transition.
     PromptRequiresBehaviorConfirmation {
         agent_id: AgentId,
         session_id: acp::SessionId,
         mode_id: acp::SessionModeId,
         text: String,
         prompt_id: String,
+        skill_token_ranges: Vec<std::ops::Range<usize>>,
         message: String,
+        remaining_ms: u64,
     },
     /// A send-now `session/prompt` RPC failed at the transport/RPC layer —
     /// the prompt never reached the shell's queue. Carries the payload so

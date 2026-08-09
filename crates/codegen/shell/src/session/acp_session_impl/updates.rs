@@ -200,13 +200,14 @@ impl SessionActor {
         behavior_change: Option<serde_json::Value>,
     ) {
         let behavior_meta = serde_json::json!({
-            "grow/behavior": self.behavior.lock().behavior().map(|behavior| match behavior {
+            "grow/behavior": match self.behavior.lock().behavior() {
+                tool_types::BehaviorId::Normal => "normal",
                 tool_types::BehaviorId::Clarify => "clarify",
                 tool_types::BehaviorId::Plan => "plan",
                 tool_types::BehaviorId::Workflow => "workflow",
                 tool_types::BehaviorId::DeepResearch => "deep_research",
                 tool_types::BehaviorId::Goal => "goal",
-            }),
+            },
             "grow/planPhase": self.behavior.lock().plan_phase_label(),
             "grow/behaviorChange": behavior_change,
         });
@@ -509,9 +510,10 @@ impl SessionActor {
                 if self.goal_harness_enabled() && goal_owned {
                     let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                     let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+                    self.persist_behavior_state();
                     let notify = self.goal_notify_sender();
                     notify.emit_goal_updated(
-                        &mut self.goal_tracker.lock(),
+                        &self.goal_tracker.lock(),
                         tokens_used,
                         finished_marginal,
                     );
@@ -542,6 +544,9 @@ impl SessionActor {
                 tokens_used,
                 ..
             } => {
+                let previous_goal = self.goal_tracker.lock().snapshot().cloned();
+                let previous_token_record =
+                    self.subagent_token_records.lock().get(subagent_id).cloned();
                 let goal_tokens_settled = self
                     .settle_goal_subagent_tokens(subagent_id, *tokens_used)
                     .is_some();
@@ -558,9 +563,24 @@ impl SessionActor {
                 if self.goal_harness_enabled() && goal_tokens_settled {
                     let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                     let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+                    if let Some(previous) = previous_goal
+                        && let Err(error) = self.commit_goal_mutation_or_restore(previous).await
+                    {
+                        if let Some(previous_record) = previous_token_record {
+                            self.subagent_token_records
+                                .lock()
+                                .insert(subagent_id.clone(), previous_record);
+                        }
+                        tracing::error!(
+                            %error,
+                            subagent_id,
+                            "failed to persist terminal Goal subagent accounting"
+                        );
+                        return;
+                    }
                     let notify = self.goal_notify_sender();
                     notify.emit_goal_updated(
-                        &mut self.goal_tracker.lock(),
+                        &self.goal_tracker.lock(),
                         tokens_used,
                         finished_marginal,
                     );
@@ -625,7 +645,7 @@ impl SessionActor {
                             self.goal_tokens(current_tokens);
                         let notify = self.goal_notify_sender();
                         notify.emit_goal_updated_ephemeral(
-                            &mut self.goal_tracker.lock(),
+                            &self.goal_tracker.lock(),
                             goal_tokens_used,
                             finished_marginal,
                         );
@@ -741,24 +761,33 @@ impl SessionActor {
         extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
     ) {
         self.close_rewind_window().await;
-        let meta = {
-            let mut meta = self.build_notification_meta();
-            if let (Some(obj), Some(extra)) = (meta.as_object_mut(), extra_meta) {
-                obj.extend(extra);
-            }
-            meta
-        };
-        let notification = GrowSessionNotification {
-            session_id: self.session_info.id.clone(),
-            update,
-            meta: Some(meta),
-        };
+        let notification = self.build_grow_notification(update, extra_meta);
         let _ = self
             .notifications
             .persistence_tx
             .send(PersistenceMsg::Update(
                 crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
             ));
+        self.forward_grow_notification(notification).await;
+    }
+
+    pub(super) fn build_grow_notification(
+        &self,
+        update: GrowSessionUpdate,
+        extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> GrowSessionNotification {
+        let mut meta = self.build_notification_meta();
+        if let (Some(obj), Some(extra)) = (meta.as_object_mut(), extra_meta) {
+            obj.extend(extra);
+        }
+        GrowSessionNotification {
+            session_id: self.session_info.id.clone(),
+            update,
+            meta: Some(meta),
+        }
+    }
+
+    pub(super) async fn forward_grow_notification(&self, notification: GrowSessionNotification) {
         let params = serde_json::to_value(&notification)
             .and_then(|v| serde_json::value::to_raw_value(&v))
             .ok();
@@ -777,15 +806,39 @@ impl SessionActor {
         }
     }
 }
+
+#[cfg(test)]
+fn acking_persistence_channel() -> (
+    tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = rx.recv().await {
+            match message {
+                PersistenceMsg::SessionControlAndAck { respond_to, .. } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::SessionControl(_) => {}
+                other => {
+                    let _ = observed_tx.send(other);
+                }
+            }
+        }
+    });
+    (tx, observed_rx)
+}
+
 #[cfg(test)]
 mod grow_event_id_stamping_tests {
     use super::support::create_test_actor;
     use super::*;
-    fn persisted_grow_event_id(
+    async fn persisted_grow_event_id(
         prx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
     ) -> String {
         loop {
-            match prx.try_recv().expect("an Grow line must be persisted") {
+            match prx.recv().await.expect("an Grow line must be persisted") {
                 PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
                     return notif
                         .meta
@@ -798,6 +851,23 @@ mod grow_event_id_stamping_tests {
                 _ => continue,
             }
         }
+    }
+    async fn persisted_acp_lines(
+        prx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+        expected: usize,
+    ) -> Vec<acp::SessionNotification> {
+        let mut persisted = Vec::with_capacity(expected);
+        while persisted.len() < expected {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(1), prx.recv())
+                .await
+                .expect("persisted ACP lines must arrive")
+                .expect("persistence observation channel must remain open");
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(n)) = message
+            {
+                persisted.push(*n);
+            }
+        }
+        persisted
     }
     /// Persisted⇒stamped chokepoint at the actor: both actor persist paths —
     /// `send_grow_notification` (own emission) and
@@ -821,7 +891,7 @@ mod grow_event_id_stamping_tests {
                         message: "own emission".into(),
                     })
                     .await;
-                let own_id = persisted_grow_event_id(&mut prx);
+                let own_id = persisted_grow_event_id(&mut prx).await;
                 assert!(own_id.starts_with("test-actor-"));
                 actor
                     .handle_grow_session_notification(GrowSessionNotification {
@@ -832,13 +902,13 @@ mod grow_event_id_stamping_tests {
                         meta: None,
                     })
                     .await;
-                let inbound_id = persisted_grow_event_id(&mut prx);
+                let inbound_id = persisted_grow_event_id(&mut prx).await;
                 assert!(inbound_id.starts_with("test-actor-"));
                 assert_ne!(own_id, inbound_id);
                 actor.persist_update_only(GrowSessionUpdate::HookAnnotation {
                     message: "persist-only".into(),
                 });
-                let persist_only_id = persisted_grow_event_id(&mut prx);
+                let persist_only_id = persisted_grow_event_id(&mut prx).await;
                 assert!(persist_only_id.starts_with("test-actor-"));
                 assert_ne!(inbound_id, persist_only_id);
             })
@@ -866,7 +936,7 @@ mod grow_event_id_stamping_tests {
                         )),
                     ))
                     .await;
-                match prx.try_recv().expect("must persist") {
+                match prx.recv().await.expect("must persist") {
                     PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) => {
                         assert!(
                             notif
@@ -900,8 +970,7 @@ mod grow_event_id_stamping_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-                let (persistence_tx, mut prx) =
-                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let (persistence_tx, mut prx) = super::acking_persistence_channel();
                 let (actor, mut event_rx) = super::support::create_test_actor_ex(
                     0,
                     256_000,
@@ -937,7 +1006,11 @@ mod grow_event_id_stamping_tests {
                         }
                     }
                 }
-                assert_eq!(queued.len(), 2, "chunk + mode update must be queued");
+                assert_eq!(
+                    queued.len(),
+                    3,
+                    "chunk + mode update + refreshed command projection must be queued"
+                );
                 match &queued[1] {
                     SessionNotification::Acp(n) => {
                         assert!(matches!(n.update, acp::SessionUpdate::CurrentModeUpdate(_)));
@@ -970,15 +1043,12 @@ mod grow_event_id_stamping_tests {
                         .and_then(|s| s.parse().ok())
                         .expect("persisted ACP lines must carry a numeric eventId")
                 };
-                let mut persisted = Vec::new();
-                while let Ok(msg) = prx.try_recv() {
-                    if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(n)) =
-                        msg
-                    {
-                        persisted.push(*n);
-                    }
-                }
-                assert_eq!(persisted.len(), 2, "both lines must persist on drain");
+                let persisted = persisted_acp_lines(&mut prx, 2).await;
+                assert_eq!(
+                    persisted.len(),
+                    2,
+                    "chunk and mode update must persist; command availability is transient"
+                );
                 assert!(matches!(
                     persisted[0].update,
                     acp::SessionUpdate::AgentMessageChunk(_)
@@ -1022,8 +1092,8 @@ mod grow_event_id_stamping_tests {
                 }
                 assert_eq!(
                     queued.len(),
-                    3,
-                    "chunk + confirmation + applied mode update must be queued"
+                    4,
+                    "chunk + confirmation + applied mode update + command projection must be queued"
                 );
                 match &queued[2] {
                     SessionNotification::Acp(n) => match &n.update {
@@ -1052,18 +1122,11 @@ mod grow_event_id_stamping_tests {
                         }
                     }
                 }
-                let mut persisted = Vec::new();
-                while let Ok(msg) = prx.try_recv() {
-                    if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(n)) =
-                        msg
-                    {
-                        persisted.push(*n);
-                    }
-                }
+                let persisted = persisted_acp_lines(&mut prx, 3).await;
                 assert_eq!(
                     persisted.len(),
                     3,
-                    "exit leg must persist the chunk, confirmation, and applied update"
+                    "exit leg persists the chunk, confirmation, and applied update only"
                 );
                 assert!(matches!(
                     persisted[2].update,
@@ -1078,9 +1141,9 @@ mod grow_event_id_stamping_tests {
             .await;
     }
     /// An interrupting Behavior switch parks on the first request and applies
-    /// on the immediately-following same-target request (the pager's Enter).
-    /// Pins the 8-second confirmation window constant AND the Enter/Esc hint
-    /// the pager relies on to render the confirm/cancel affordance.
+    /// on the immediately-following same-target selection. Pins the 8-second
+    /// confirmation window while keeping confirmation in the Shell coordinator;
+    /// ordinary Pager input never confirms or cancels a Behavior transition.
     #[tokio::test]
     async fn interrupting_behavior_switch_parks_then_confirms_on_second_request() {
         let local = tokio::task::LocalSet::new();
@@ -1088,8 +1151,7 @@ mod grow_event_id_stamping_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-                let (persistence_tx, _prx) =
-                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let (persistence_tx, _prx) = super::acking_persistence_channel();
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
                 // Enter Plan first (Normal → Plan is not an interrupting switch).
@@ -1113,7 +1175,7 @@ mod grow_event_id_stamping_tests {
                     panic!("expected ConfirmationRequired, got {first:?}");
                 };
                 assert!(
-                    message.contains("Press Enter to confirm the switch"),
+                    message.contains("Select it again to confirm"),
                     "the confirmation message must carry the Enter/Esc hint: {message}"
                 );
                 assert!(
@@ -1136,14 +1198,13 @@ mod grow_event_id_stamping_tests {
     }
 
     #[tokio::test]
-    async fn completed_goal_receipt_survives_normal_but_special_behavior_retires_it() {
+    async fn completed_goal_receipt_survives_every_behavior_switch_until_clear() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-                let (persistence_tx, mut persistence_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let (persistence_tx, _persistence_rx) = super::acking_persistence_channel();
                 let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 {
                     let mut tracker = actor.goal_tracker.lock();
@@ -1155,16 +1216,16 @@ mod grow_event_id_stamping_tests {
                         "now".into(),
                         None,
                     );
-                    assert!(tracker.replace_plan(
-                        "- [x] done".into(),
-                        crate::session::goal_tracker::GoalPlanAuthor::Planner,
-                        None,
-                    ));
-                    assert!(tracker.candidate_complete("done".into()));
+                    let planner = tracker
+                        .claim_stage(crate::session::goal_tracker::GoalPhase::Planning)
+                        .expect("planner lease");
+                    let board = "# Goal\n\n> done\n\n## Plan\n\n- [x] **T1** `done` — Finish\n  - Scope: runtime\n  - Acceptance: complete\n\n## Goal acceptance\n\n- Complete\n\n## Verification evidence\n\n- Verified\n\n## Open gaps\n\n- None";
+                    assert!(tracker.apply_planner_result(&planner, board.into()).unwrap());
+                    assert!(tracker.candidate_complete(1, 1, "done".into()).unwrap());
                     let lease = tracker
                         .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
                         .expect("verifier lease");
-                    assert!(tracker.verification_achieved(&lease));
+                    assert!(tracker.verification_achieved(&lease).unwrap());
                     assert!(tracker.complete_verified());
                 }
 
@@ -1181,26 +1242,21 @@ mod grow_event_id_stamping_tests {
                     "Normal keeps the completed Goal receipt visible"
                 );
 
-                let persistence = tokio::task::spawn_local(async move {
-                    while let Some(message) = persistence_rx.recv().await {
-                        if let PersistenceMsg::DeleteGoalModeState { respond_to } = message {
-                            let _ = respond_to.send(Ok(()));
-                            return;
-                        }
-                    }
-                });
                 let ask = actor
                     .request_behavior_change(acp::SessionModeId::new("ask"))
                     .await;
-                persistence.await.unwrap();
                 assert!(matches!(
                     ask,
                     crate::session::behavior::BehaviorChangeOutcome::Applied
                 ));
-                assert!(actor.goal_tracker.lock().snapshot().is_none());
                 assert_eq!(
-                    *actor.current_prompt_mode.lock(),
-                    crate::session::behavior::PromptMode::Ask
+                    actor.goal_tracker.lock().status(),
+                    Some(crate::session::goal_tracker::GoalStatus::Complete),
+                    "Behavior switching must not replace explicit Goal receipt clearing"
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Clarify
                 );
             })
             .await;
@@ -1210,7 +1266,7 @@ mod grow_event_id_stamping_tests {
 /// Synthetic auto-wake prompts (background subagent / bash / monitor /
 /// workflow completions, notification drain) are completion notifications,
 /// NOT Behavior-switch requests. `handle_prompt` must run them under the
-/// session's current Behavior: previously the hardcoded `PromptMode::Agent`
+/// session's current Behavior: previously the hardcoded `BehaviorId::Normal`
 /// tripped the interrupting-switch gate while Plan work was active, failing
 /// the wake turn with "Turn failed: switching to default will interrupt the
 /// active Plan work", and could even auto-confirm a parked user-initiated
@@ -1230,8 +1286,7 @@ mod synthetic_prompt_behavior_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-                let (persistence_tx, _prx) =
-                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let (persistence_tx, _prx) = super::acking_persistence_channel();
                 let actor = std::sync::Arc::new(
                     create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
                 );
@@ -1246,12 +1301,12 @@ mod synthetic_prompt_behavior_tests {
                 ));
                 assert!(actor.behavior.lock().is_plan());
                 assert_eq!(
-                    *actor.current_prompt_mode.lock(),
-                    crate::session::behavior::PromptMode::Plan
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Plan
                 );
 
                 // A background subagent completes: the shell injects
-                // `subagent-completed-*` hardcoded to PromptMode::Agent. With
+                // `subagent-completed-*` hardcoded to BehaviorId::Normal. With
                 // the bug this failed the wake turn with the behaviorChange
                 // `confirmation_required` meta; now it must pass the gate and
                 // record the CURRENT (Plan) turn mode before the turn blocks
@@ -1269,7 +1324,7 @@ mod synthetic_prompt_behavior_tests {
                                 vec![acp::ContentBlock::Text(acp::TextContent::new(
                                     "subagent sa-1 finished",
                                 ))],
-                                crate::session::behavior::PromptMode::Agent,
+                                tool_types::BehaviorId::Plan,
                                 None,
                                 None,
                                 true,
@@ -1282,9 +1337,7 @@ mod synthetic_prompt_behavior_tests {
                 };
                 tokio::time::timeout(std::time::Duration::from_secs(2), async {
                     loop {
-                        if *actor.turn_start_prompt_mode.lock()
-                            == crate::session::behavior::PromptMode::Plan
-                        {
+                        if *actor.turn_behavior.lock() == tool_types::BehaviorId::Plan {
                             break;
                         }
                         tokio::task::yield_now().await;
@@ -1300,8 +1353,8 @@ mod synthetic_prompt_behavior_tests {
                     "the synthetic wake must leave Plan active"
                 );
                 assert_eq!(
-                    *actor.current_prompt_mode.lock(),
-                    crate::session::behavior::PromptMode::Plan,
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Plan,
                     "the synthetic wake must inherit the current prompt mode"
                 );
             })
@@ -1319,8 +1372,7 @@ mod synthetic_prompt_behavior_tests {
             .run_until(async {
                 let (gateway_tx, _gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-                let (persistence_tx, _prx) =
-                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let (persistence_tx, _prx) = super::acking_persistence_channel();
                 let actor = std::sync::Arc::new(
                     create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
                 );
@@ -1357,7 +1409,7 @@ mod synthetic_prompt_behavior_tests {
                                 vec![acp::ContentBlock::Text(acp::TextContent::new(
                                     "subagent sa-2 finished",
                                 ))],
-                                crate::session::behavior::PromptMode::Agent,
+                                tool_types::BehaviorId::Plan,
                                 None,
                                 None,
                                 true,
@@ -1370,9 +1422,7 @@ mod synthetic_prompt_behavior_tests {
                 };
                 tokio::time::timeout(std::time::Duration::from_secs(2), async {
                     loop {
-                        if *actor.turn_start_prompt_mode.lock()
-                            == crate::session::behavior::PromptMode::Plan
-                        {
+                        if *actor.turn_behavior.lock() == tool_types::BehaviorId::Plan {
                             break;
                         }
                         tokio::task::yield_now().await;

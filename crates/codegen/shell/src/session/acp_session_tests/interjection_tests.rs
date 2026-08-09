@@ -162,6 +162,31 @@ async fn drain_with_empty_buffer_is_a_noop() {
         .await;
 }
 
+/// A steer is scoped to the exact foreground turn against which it was
+/// admitted. Completion/cancellation must discard a late residual instead of
+/// letting the next turn consume it.
+#[tokio::test]
+async fn terminal_boundary_discards_residual_same_turn_interjections() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            actor.pending_interjections.push(PendingInterjection {
+                text: "too late for this turn".to_string(),
+                attachments: vec![],
+            });
+
+            actor.discard_residual_interjections_at_turn_end();
+
+            assert!(actor.pending_interjections.is_empty());
+            assert!(
+                actor.chat_state_handle.get_conversation().await.is_empty(),
+                "a terminal fence discards; it must not synthesize input for the next turn"
+            );
+        })
+        .await;
+}
+
 mod interjection_format_tests {
     use super::format_interjection;
 

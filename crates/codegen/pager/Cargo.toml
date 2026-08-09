@@ -97,6 +97,7 @@ chrono = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 tools = { workspace = true }
+tool-types = { workspace = true }
 agent = { workspace = true }
 plugin-marketplace = { path = "../plugin-marketplace" }
 extension-types = { path = "../extension-types" }

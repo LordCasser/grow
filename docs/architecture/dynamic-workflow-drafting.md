@@ -56,13 +56,14 @@
    `WorkflowTracker`(阶段、agent 行、预算、历史、result_summary)、`WorkflowRunStore`
    (script.rhai + journal.jsonl + manifest)、`/workflows` 运行列表与
    `/workflow-run pause|resume|stop|save`。
-4. **相邻行为**:Deep Research(私有工作流 + 强制终态报告契约);Goal(固定控制循环:
-   planner → 主 Agent 分轮工作 → verifier/skeptic 面板验证 → strategist 调整 → 循环)。
+4. **相邻行为**:Deep Research(私有工作流 + 强制终态报告契约);Goal(后台 planner
+   产出规范黑板 → 主 Agent 分轮执行 → 独立 verifier 返回 verdict → runtime 根据证据进入
+   执行、阻塞或最终汇报)。Goal 不再有 strategist/classifier/hidden turn。
 
 **命名约定(本次修正后)**:用户可见命名统一为 "Static Workflow";wire id 与内部标识
 **保持不变**——`"workflow"`(ACP SessionModeId / BehaviorId / tool name)、
-`SessionMode::Workflow`、`PromptMode::Workflow`、`BehaviorState::Workflow`、
-包名 `workflow`。
+`BehaviorId::Workflow`（唯一的内部 Behavior 身份；ACP 仍以 `SessionModeId` 传输）、
+`BehaviorState::Workflow`、包名 `workflow`。不存在 Behavior 含义的 `PromptMode`。
 
 ## 5. 差距对比
 

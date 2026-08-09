@@ -2117,12 +2117,11 @@ impl AgentView {
                     }
                 }
                 let remaining = deadline.saturating_duration_since(frame_stamp.now());
-                let opacity =
-                    if self.behavior_switch_warning_pending || remaining >= MODE_BANNER_FADE {
-                        1.0
-                    } else {
-                        remaining.as_secs_f32() / MODE_BANNER_FADE.as_secs_f32()
-                    };
+                let opacity = if remaining >= MODE_BANNER_FADE {
+                    1.0
+                } else {
+                    remaining.as_secs_f32() / MODE_BANNER_FADE.as_secs_f32()
+                };
                 let base_fg = theme.text_secondary;
                 let fg = crate::render::color::blend_color(theme.bg_base, base_fg, opacity)
                     .unwrap_or(base_fg);
@@ -2196,20 +2195,20 @@ impl AgentView {
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-        let behavior_label = if effective_behavior == tools::types::SessionMode::Plan {
+        let behavior_label = if effective_behavior == tools::types::BehaviorId::Plan {
             match self.plan_phase.as_deref() {
                 Some("awaiting_approval") => "plan · awaiting approval",
                 Some("executing") => "plan · executing",
                 Some("amending") => "plan · amending",
                 _ => "plan · drafting",
             }
-        } else if effective_behavior == tools::types::SessionMode::Ask {
+        } else if effective_behavior == tools::types::BehaviorId::Clarify {
             "clarify"
-        } else if effective_behavior == tools::types::SessionMode::Workflow {
+        } else if effective_behavior == tools::types::BehaviorId::Workflow {
             "workflow"
-        } else if effective_behavior == tools::types::SessionMode::DeepResearch {
+        } else if effective_behavior == tools::types::BehaviorId::DeepResearch {
             "deep-research"
-        } else if effective_behavior == tools::types::SessionMode::Goal {
+        } else if effective_behavior == tools::types::BehaviorId::Goal {
             "goal"
         } else {
             "normal"
@@ -4368,7 +4367,7 @@ mod behavior_status_tests {
     #[test]
     fn prompt_status_places_behavior_before_permission() {
         let mut agent = make_agent();
-        agent.behavior_mode = tools::types::SessionMode::Workflow;
+        agent.behavior_mode = tools::types::BehaviorId::Workflow;
         agent.session.yolo_mode = true;
         let text = draw_text(&mut agent);
         let behavior = text.find("workflow").expect("workflow Behavior status");
@@ -4381,7 +4380,7 @@ mod behavior_status_tests {
     #[test]
     fn prompt_status_shows_the_active_plan_phase() {
         let mut agent = make_agent();
-        agent.behavior_mode = tools::types::SessionMode::Plan;
+        agent.behavior_mode = tools::types::BehaviorId::Plan;
         agent.plan_phase = Some("executing".into());
         let text = draw_text(&mut agent);
         assert!(

@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-pub const GOAL_ARCHITECTURE_VERSION: u8 = 4;
+pub const GOAL_ARCHITECTURE_VERSION: u8 = 5;
 pub const IDENTICAL_GAP_BLOCK_THRESHOLD: u32 = 3;
 pub const INFRA_FAILURE_PAUSE_THRESHOLD: u8 = 3;
 
@@ -56,51 +56,24 @@ impl GoalPauseReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalPlanAuthor {
-    Planner,
-    Agent,
-    User,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GoalPlan {
-    pub revision: u64,
+pub struct GoalBoard {
+    /// Structural planning intent. Advanced only by create/edit/replan.
+    pub plan_revision: u64,
+    /// Any accepted planner, primary-Agent progress, or runtime feedback write.
+    pub board_revision: u64,
     pub markdown: String,
     pub updated_at: String,
-    pub updated_by: GoalPlanAuthor,
 }
 
-impl GoalPlan {
-    fn empty(created_at: String) -> Self {
+impl GoalBoard {
+    fn empty(created_at: String, plan_revision: u64) -> Self {
         Self {
-            revision: 0,
+            plan_revision,
+            board_revision: 0,
             markdown: String::new(),
             updated_at: created_at,
-            updated_by: GoalPlanAuthor::Planner,
         }
     }
-}
-
-/// Canonicalize the shared, user-visible Goal blackboard at its single write
-/// boundary. Models sometimes wrap an otherwise valid Markdown document in a
-/// `markdown`/`md` code fence despite being asked for the document itself.
-/// Keeping that transport wrapper would make every consumer either display a
-/// code block or invent its own cleanup rule, so unwrap exactly that one
-/// whole-document shape here. Inner fences remain untouched.
-fn normalize_goal_board_markdown(markdown: String) -> String {
-    let trimmed = markdown.trim();
-    let Some((opening, rest)) = trimmed.split_once('\n') else {
-        return trimmed.to_string();
-    };
-    let opening = opening.trim();
-    if !opening.eq_ignore_ascii_case("```markdown") && !opening.eq_ignore_ascii_case("```md") {
-        return trimmed.to_string();
-    }
-    let Some(body) = rest.strip_suffix("```") else {
-        return trimmed.to_string();
-    };
-    body.trim().to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -108,6 +81,7 @@ pub struct StageLease {
     pub goal_id: String,
     pub objective_revision: u64,
     pub plan_revision: u64,
+    pub board_revision: u64,
     pub stage_id: u64,
 }
 
@@ -118,6 +92,8 @@ pub enum GoalEvent {
     GoalRevised,
     PlanningStarted,
     PlanningCompleted,
+    ReplanRequested,
+    ProgressUpdated,
     PlanningFailed,
     WorkerStarted,
     WorkerCompleted,
@@ -157,7 +133,7 @@ pub struct GoalOrchestration {
     pub objective_revision: u64,
     pub status: GoalStatus,
     pub phase: GoalPhase,
-    pub plan: GoalPlan,
+    pub board: GoalBoard,
     pub token_budget: Option<i64>,
     pub token_baseline: i64,
     #[serde(default)]
@@ -216,7 +192,27 @@ pub struct GoalTracker {
     next_stage_id: u64,
 }
 
+impl Default for GoalTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GoalTracker {
+    fn clear_stage(goal: &mut GoalOrchestration) {
+        goal.in_flight_stage = None;
+        goal.current_subagent_role = None;
+    }
+
+    fn commit_runtime_feedback(
+        goal: &mut GoalOrchestration,
+        board: crate::session::goal_board::ParsedGoalBoard,
+    ) {
+        goal.board.markdown = board.markdown().to_string();
+        goal.board.board_revision = goal.board.board_revision.saturating_add(1);
+        goal.board.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+
     pub fn new() -> Self {
         Self {
             orchestration: None,
@@ -225,9 +221,12 @@ impl GoalTracker {
         }
     }
 
-    /// Old or internally inconsistent Goal snapshots deliberately do not
-    /// migrate. A valid active snapshot keeps its phase and is re-driven by
-    /// the idle hook with a fresh lease.
+    /// Obsolete Goal architectures are discarded. A current snapshot whose
+    /// identity is intact but whose phase/board invariants are inconsistent is
+    /// recovered fail-closed as Paused/Planning: the user can inspect, edit or
+    /// clear it, but no autonomous work can run against untrusted state.
+    /// Valid active snapshots keep their phase and are re-driven by the idle
+    /// hook with a fresh lease.
     pub fn from_snapshot(mut snapshot: GoalOrchestration) -> Option<Self> {
         if snapshot.architecture_version != GOAL_ARCHITECTURE_VERSION {
             tracing::warn!(
@@ -242,12 +241,30 @@ impl GoalTracker {
                 goal_id = snapshot.goal_id,
                 status = ?snapshot.status,
                 phase = ?snapshot.phase,
-                "discarding internally inconsistent Goal state"
+                "recovering internally inconsistent Goal state as paused"
             );
-            return None;
+            if snapshot.goal_id.trim().is_empty() || snapshot.objective.trim().is_empty() {
+                return None;
+            }
+            snapshot.status = GoalStatus::Paused;
+            snapshot.phase = GoalPhase::Planning;
+            snapshot.board = GoalBoard::empty(
+                chrono::Utc::now().to_rfc3339(),
+                snapshot.board.plan_revision.max(1),
+            );
+            snapshot.parent_tokens_spent = snapshot.parent_tokens_spent.max(0);
+            snapshot.subagent_tokens_spent = snapshot.subagent_tokens_spent.max(0);
+            snapshot.pause_message = Some(
+                "Recovered inconsistent Goal control state. Use /goal edit to replan or /goal clear."
+                    .into(),
+            );
+            snapshot.verifier_feedback = None;
+            snapshot.candidate_summary = None;
+            snapshot.last_gap_fingerprint = None;
+            snapshot.repeated_gap_count = 0;
+            snapshot.planner_failures = 0;
         }
-        snapshot.in_flight_stage = None;
-        snapshot.current_subagent_role = None;
+        Self::clear_stage(&mut snapshot);
         snapshot.live_subagent_tokens = 0;
         snapshot.live_tokens_by_model.clear();
         snapshot.live_context_pct = 0;
@@ -261,6 +278,30 @@ impl GoalTracker {
         })
     }
 
+    /// Restore a snapshot captured by the same live tracker after a durable
+    /// control write failed.
+    ///
+    /// Unlike [`Self::from_snapshot`], this is an in-process transaction
+    /// rollback: transient stage ownership is still real and must be retained
+    /// so the running planner/verifier remains paired with its cancellation
+    /// handle. Stage ids stay monotonic across the failed mutation.
+    pub fn restore_runtime_snapshot(&mut self, snapshot: GoalOrchestration) {
+        debug_assert_eq!(snapshot.architecture_version, GOAL_ARCHITECTURE_VERSION);
+        if let Some(stage_id) = snapshot
+            .in_flight_stage
+            .as_ref()
+            .map(|lease| lease.stage_id)
+        {
+            self.next_stage_id = self.next_stage_id.max(stage_id);
+        }
+        self.active_since = if snapshot.status == GoalStatus::Active {
+            self.active_since.or_else(|| Some(Instant::now()))
+        } else {
+            None
+        };
+        self.orchestration = Some(snapshot);
+    }
+
     fn snapshot_invariants_hold(snapshot: &GoalOrchestration) -> bool {
         if snapshot.goal_id.trim().is_empty()
             || snapshot.objective.trim().is_empty()
@@ -269,7 +310,16 @@ impl GoalTracker {
         {
             return false;
         }
-        if snapshot.phase != GoalPhase::Planning && snapshot.plan.markdown.trim().is_empty() {
+        if snapshot.phase != GoalPhase::Planning && snapshot.board.markdown.trim().is_empty() {
+            return false;
+        }
+        if !snapshot.board.markdown.trim().is_empty()
+            && crate::session::goal_board::parse_goal_board(
+                &snapshot.objective,
+                snapshot.board.markdown.clone(),
+            )
+            .is_err()
+        {
             return false;
         }
         if matches!(
@@ -313,6 +363,21 @@ impl GoalTracker {
             .and_then(|goal| goal.token_budget)
     }
 
+    pub fn task_projection(&self) -> Vec<tool_types::GoalTaskProjection> {
+        self.orchestration
+            .as_ref()
+            .filter(|goal| !goal.board.markdown.is_empty())
+            .and_then(|goal| {
+                crate::session::goal_board::parse_goal_board(
+                    &goal.objective,
+                    goal.board.markdown.clone(),
+                )
+                .ok()
+            })
+            .map(|board| board.task_projection())
+            .unwrap_or_default()
+    }
+
     pub fn create_goal(
         &mut self,
         goal_id: String,
@@ -329,7 +394,7 @@ impl GoalTracker {
             objective_revision: 0,
             status: GoalStatus::Active,
             phase: GoalPhase::Planning,
-            plan: GoalPlan::empty(created_at.clone()),
+            board: GoalBoard::empty(created_at.clone(), 1),
             token_budget,
             token_baseline,
             parent_tokens_spent: 0,
@@ -381,63 +446,141 @@ impl GoalTracker {
         }
         goal.status = GoalStatus::Active;
         goal.phase = GoalPhase::Planning;
-        goal.plan = GoalPlan::empty(chrono::Utc::now().to_rfc3339());
+        let next_plan_revision = goal.board.plan_revision.saturating_add(1);
+        goal.board = GoalBoard::empty(chrono::Utc::now().to_rfc3339(), next_plan_revision);
         goal.pause_message = None;
         goal.verifier_feedback = None;
         goal.candidate_summary = None;
         goal.last_gap_fingerprint = None;
         goal.repeated_gap_count = 0;
         goal.planner_failures = 0;
-        goal.in_flight_stage = None;
+        Self::clear_stage(goal);
         goal.history
             .push(GoalHistoryEntry::new(GoalEvent::GoalRevised, None));
         self.active_since = Some(Instant::now());
         true
     }
 
-    pub fn replace_plan(
+    fn commit_planner_board(
         &mut self,
         markdown: String,
-        updated_by: GoalPlanAuthor,
         reason: Option<String>,
-    ) -> bool {
-        let markdown = normalize_goal_board_markdown(markdown);
+    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
         let Some(goal) = self.orchestration.as_mut() else {
-            return false;
+            return Ok(false);
         };
-        if goal.status != GoalStatus::Active || markdown.trim().is_empty() {
-            return false;
+        if goal.status != GoalStatus::Active || goal.phase != GoalPhase::Planning {
+            return Ok(false);
         }
-        goal.plan.revision = goal.plan.revision.saturating_add(1);
-        goal.plan.markdown = markdown;
-        goal.plan.updated_at = chrono::Utc::now().to_rfc3339();
-        goal.plan.updated_by = updated_by;
+        let parsed = crate::session::goal_board::parse_goal_board(&goal.objective, markdown)?;
+        goal.board.board_revision = goal.board.board_revision.saturating_add(1);
+        goal.board.markdown = parsed.markdown().to_string();
+        goal.board.updated_at = chrono::Utc::now().to_rfc3339();
         goal.phase = GoalPhase::Executing;
-        goal.in_flight_stage = None;
-        // A plan revision starts a new execution attempt. A candidate belongs
-        // to the plan revision that produced it and must not survive into the
-        // revised plan, even though useful verifier feedback remains on the
-        // blackboard for the implementer.
+        Self::clear_stage(goal);
         goal.candidate_summary = None;
         goal.planner_failures = 0;
         goal.history
             .push(GoalHistoryEntry::new(GoalEvent::PlanningCompleted, reason));
-        true
+        Ok(true)
     }
 
-    pub fn apply_planner_result(&mut self, lease: &StageLease, markdown: String) -> bool {
+    pub fn apply_planner_result(
+        &mut self,
+        lease: &StageLease,
+        markdown: String,
+    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
         if !self.lease_is_current(lease, GoalPhase::Planning) {
-            return false;
+            return Ok(false);
         }
-        self.release_stage(lease);
-        self.replace_plan(
-            markdown,
-            GoalPlanAuthor::Planner,
-            Some("background planner".into()),
+        // Keep the lease current on error so the caller can account it through
+        // the normal planner retry/backoff transition.
+        self.commit_planner_board(markdown, Some("background planner".into()))
+    }
+
+    pub fn request_replan(
+        &mut self,
+        expected_plan_revision: u64,
+        expected_board_revision: u64,
+        guidance: String,
+    ) -> Result<bool, String> {
+        let Some(goal) = self.orchestration.as_mut() else {
+            return Ok(false);
+        };
+        Self::check_revisions(goal, expected_plan_revision, expected_board_revision)?;
+        if goal.status != GoalStatus::Active || goal.phase == GoalPhase::Summarizing {
+            return Ok(false);
+        }
+        goal.board.plan_revision = goal.board.plan_revision.saturating_add(1);
+        goal.phase = GoalPhase::Planning;
+        Self::clear_stage(goal);
+        goal.candidate_summary = None;
+        goal.verifier_feedback = None;
+        goal.planner_failures = 0;
+        goal.history.push(GoalHistoryEntry::new(
+            GoalEvent::ReplanRequested,
+            Some(guidance),
+        ));
+        Ok(true)
+    }
+
+    pub fn update_progress(
+        &mut self,
+        expected_plan_revision: u64,
+        expected_board_revision: u64,
+        updates: &[tool_types::GoalProgressUpdate],
+        reason: String,
+    ) -> Result<bool, String> {
+        let Some(goal) = self.orchestration.as_mut() else {
+            return Ok(false);
+        };
+        Self::check_revisions(goal, expected_plan_revision, expected_board_revision)?;
+        if goal.status != GoalStatus::Active
+            || !matches!(goal.phase, GoalPhase::Executing | GoalPhase::Verifying)
+        {
+            return Ok(false);
+        }
+        let parsed = crate::session::goal_board::apply_progress_updates(
+            &goal.objective,
+            &goal.board.markdown,
+            updates,
         )
+        .map_err(|error| error.to_string())?;
+        goal.board.markdown = parsed.markdown().to_string();
+        goal.board.board_revision = goal.board.board_revision.saturating_add(1);
+        goal.board.updated_at = chrono::Utc::now().to_rfc3339();
+        if goal.phase == GoalPhase::Verifying {
+            goal.phase = GoalPhase::Executing;
+            goal.candidate_summary = None;
+            Self::clear_stage(goal);
+        }
+        goal.history.push(GoalHistoryEntry::new(
+            GoalEvent::ProgressUpdated,
+            Some(reason),
+        ));
+        Ok(true)
+    }
+
+    fn check_revisions(
+        goal: &GoalOrchestration,
+        expected_plan_revision: u64,
+        expected_board_revision: u64,
+    ) -> Result<(), String> {
+        if goal.board.plan_revision != expected_plan_revision
+            || goal.board.board_revision != expected_board_revision
+        {
+            return Err(format!(
+                "stale Goal update: expected plan/board r{expected_plan_revision}/r{expected_board_revision}, current r{}/r{}",
+                goal.board.plan_revision, goal.board.board_revision
+            ));
+        }
+        Ok(())
     }
 
     pub fn claim_stage(&mut self, phase: GoalPhase) -> Option<StageLease> {
+        if !matches!(phase, GoalPhase::Planning | GoalPhase::Verifying) {
+            return None;
+        }
         let goal = self.orchestration.as_mut()?;
         if goal.status != GoalStatus::Active
             || goal.phase != phase
@@ -449,10 +592,19 @@ impl GoalTracker {
         let lease = StageLease {
             goal_id: goal.goal_id.clone(),
             objective_revision: goal.objective_revision,
-            plan_revision: goal.plan.revision,
+            plan_revision: goal.board.plan_revision,
+            board_revision: goal.board.board_revision,
             stage_id: self.next_stage_id,
         };
         goal.in_flight_stage = Some(lease.clone());
+        goal.current_subagent_role = Some(
+            match phase {
+                GoalPhase::Planning => "planner",
+                GoalPhase::Verifying => "verifier",
+                GoalPhase::Executing | GoalPhase::Summarizing => unreachable!(),
+            }
+            .to_string(),
+        );
         Some(lease)
     }
 
@@ -471,7 +623,7 @@ impl GoalTracker {
         if goal.in_flight_stage.as_ref() != Some(lease) {
             return false;
         }
-        goal.in_flight_stage = None;
+        Self::clear_stage(goal);
         true
     }
 
@@ -494,17 +646,23 @@ impl GoalTracker {
         true
     }
 
-    pub fn candidate_complete(&mut self, message: String) -> bool {
+    pub fn candidate_complete(
+        &mut self,
+        expected_plan_revision: u64,
+        expected_board_revision: u64,
+        message: String,
+    ) -> Result<bool, String> {
         let Some(goal) = self.orchestration.as_mut() else {
-            return false;
+            return Ok(false);
         };
+        Self::check_revisions(goal, expected_plan_revision, expected_board_revision)?;
         if goal.status != GoalStatus::Active || goal.phase != GoalPhase::Executing {
-            return false;
+            return Ok(false);
         }
         goal.candidate_summary = Some(message);
         goal.phase = GoalPhase::Verifying;
-        goal.in_flight_stage = None;
-        true
+        Self::clear_stage(goal);
+        Ok(true)
     }
 
     pub fn verification_not_achieved(
@@ -512,10 +670,23 @@ impl GoalTracker {
         lease: &StageLease,
         feedback: String,
         fingerprint: String,
-    ) -> bool {
-        if !self.release_stage(lease) {
-            return false;
+    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
+        if !self.lease_is_current(lease, GoalPhase::Verifying) {
+            return Ok(false);
         }
+        let board = {
+            let goal = self
+                .orchestration
+                .as_ref()
+                .expect("current lease has a goal");
+            crate::session::goal_board::apply_runtime_feedback(
+                &goal.objective,
+                &goal.board.markdown,
+                None,
+                Some(&feedback),
+            )?
+        };
+        debug_assert!(self.release_stage(lease));
         self.account_elapsed();
         let goal = self.orchestration.as_mut().expect("lease had a goal");
         goal.total_verify_rounds = goal.total_verify_rounds.saturating_add(1);
@@ -527,6 +698,7 @@ impl GoalTracker {
         }
         goal.verifier_feedback = Some(feedback.clone());
         goal.candidate_summary = None;
+        Self::commit_runtime_feedback(goal, board);
         goal.history.push(GoalHistoryEntry::new(
             GoalEvent::VerificationRejected,
             Some(feedback.clone()),
@@ -538,35 +710,115 @@ impl GoalTracker {
         } else {
             goal.phase = GoalPhase::Executing;
         }
-        true
+        Ok(true)
     }
 
-    pub fn verification_blocked(&mut self, lease: &StageLease, message: String) -> bool {
-        if !self.release_stage(lease) {
-            return false;
+    pub fn verification_blocked(
+        &mut self,
+        lease: &StageLease,
+        message: String,
+    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
+        if !self.lease_is_current(lease, GoalPhase::Verifying) {
+            return Ok(false);
         }
+        let board = {
+            let goal = self
+                .orchestration
+                .as_ref()
+                .expect("current lease has a goal");
+            crate::session::goal_board::apply_runtime_feedback(
+                &goal.objective,
+                &goal.board.markdown,
+                None,
+                Some(&message),
+            )?
+        };
+        debug_assert!(self.release_stage(lease));
         self.account_elapsed();
         let goal = self.orchestration.as_mut().expect("lease had a goal");
+        goal.total_verify_rounds = goal.total_verify_rounds.saturating_add(1);
+        goal.verifier_feedback = Some(message.clone());
+        goal.candidate_summary = None;
+        Self::commit_runtime_feedback(goal, board);
         goal.status = GoalStatus::Blocked;
-        goal.pause_message = Some(message);
-        goal.in_flight_stage = None;
+        goal.pause_message = Some(message.clone());
+        goal.history.push(GoalHistoryEntry::new(
+            GoalEvent::VerificationRejected,
+            Some(message),
+        ));
         self.active_since = None;
-        true
+        Ok(true)
     }
 
-    pub fn verification_achieved(&mut self, lease: &StageLease) -> bool {
-        if !self.release_stage(lease) {
-            return false;
+    pub fn report_blocked(
+        &mut self,
+        expected_plan_revision: u64,
+        expected_board_revision: u64,
+        message: String,
+    ) -> Result<bool, String> {
+        let board = {
+            let Some(goal) = self.orchestration.as_ref() else {
+                return Ok(false);
+            };
+            Self::check_revisions(goal, expected_plan_revision, expected_board_revision)?;
+            if goal.status != GoalStatus::Active {
+                return Ok(false);
+            }
+            crate::session::goal_board::apply_runtime_feedback(
+                &goal.objective,
+                &goal.board.markdown,
+                None,
+                Some(&message),
+            )
+            .map_err(|error| error.to_string())?
+        };
+        self.account_elapsed();
+        let goal = self
+            .orchestration
+            .as_mut()
+            .expect("validated Goal still exists");
+        Self::commit_runtime_feedback(goal, board);
+        goal.status = GoalStatus::Blocked;
+        goal.pause_message = Some(message.clone());
+        goal.verifier_feedback = Some(message.clone());
+        goal.candidate_summary = None;
+        Self::clear_stage(goal);
+        goal.history
+            .push(GoalHistoryEntry::new(GoalEvent::GoalPaused, Some(message)));
+        self.active_since = None;
+        Ok(true)
+    }
+
+    pub fn verification_achieved(
+        &mut self,
+        lease: &StageLease,
+    ) -> Result<bool, crate::session::goal_board::GoalBoardError> {
+        if !self.lease_is_current(lease, GoalPhase::Verifying) {
+            return Ok(false);
         }
+        let board = {
+            let goal = self
+                .orchestration
+                .as_ref()
+                .expect("current lease has a goal");
+            crate::session::goal_board::apply_runtime_feedback(
+                &goal.objective,
+                &goal.board.markdown,
+                Some("Independent verifier accepted the latest candidate and workspace evidence."),
+                Some("None."),
+            )?
+        };
+        debug_assert!(self.release_stage(lease));
         let goal = self.orchestration.as_mut().expect("lease had a goal");
         goal.total_verify_rounds = goal.total_verify_rounds.saturating_add(1);
+        Self::commit_runtime_feedback(goal, board);
         goal.phase = GoalPhase::Summarizing;
         goal.verifier_feedback = None;
         goal.last_gap_fingerprint = None;
         goal.repeated_gap_count = 0;
         goal.history
             .push(GoalHistoryEntry::new(GoalEvent::VerificationAccepted, None));
-        true
+        Ok(true)
     }
 
     pub fn worker_started(&mut self) -> bool {
@@ -591,7 +843,7 @@ impl GoalTracker {
             return false;
         }
         goal.status = GoalStatus::Complete;
-        goal.in_flight_stage = None;
+        Self::clear_stage(goal);
         goal.history
             .push(GoalHistoryEntry::new(GoalEvent::GoalCompleted, None));
         self.active_since = None;
@@ -616,7 +868,7 @@ impl GoalTracker {
             GoalStatus::Paused
         };
         goal.pause_message = Some(message.clone());
-        goal.in_flight_stage = None;
+        Self::clear_stage(goal);
         goal.history
             .push(GoalHistoryEntry::new(GoalEvent::GoalPaused, Some(message)));
         self.active_since = None;
@@ -632,7 +884,7 @@ impl GoalTracker {
         }
         goal.status = GoalStatus::Active;
         goal.pause_message = None;
-        goal.in_flight_stage = None;
+        Self::clear_stage(goal);
         goal.history
             .push(GoalHistoryEntry::new(GoalEvent::GoalResumed, None));
         self.active_since = Some(Instant::now());
@@ -648,7 +900,7 @@ impl GoalTracker {
             return false;
         }
         goal.status = GoalStatus::BudgetLimited;
-        goal.in_flight_stage = None;
+        Self::clear_stage(goal);
         goal.history
             .push(GoalHistoryEntry::new(GoalEvent::BudgetExceeded, None));
         self.active_since = None;
@@ -743,242 +995,237 @@ impl GoalTracker {
 mod tests {
     use super::*;
 
-    fn tracker() -> GoalTracker {
+    fn canonical_board(objective: &str) -> String {
+        format!(
+            "# Goal\n\n> {objective}\n\n## Plan\n\n- [ ] **T1** `in_progress` — Implement safely\n  - Scope: runtime\n  - Acceptance: tests pass\n  - [ ] **T1.1** `pending` — Add regression coverage\n\n## Goal acceptance\n\n- Tests pass\n\n## Verification evidence\n\n- Pending\n\n## Open gaps\n\n- None"
+        )
+    }
+
+    fn executing_tracker() -> GoalTracker {
         let mut tracker = GoalTracker::new();
         tracker.create_goal("g1".into(), "ship it".into(), None, 0, "now".into(), None);
+        let lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
+        assert!(
+            tracker
+                .apply_planner_result(&lease, canonical_board("ship it"))
+                .unwrap()
+        );
         tracker
     }
 
     #[test]
-    fn plan_revision_invalidates_old_lease() {
-        let mut tracker = tracker();
-        let lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
-        assert!(tracker.replace_plan("- [ ] implement".into(), GoalPlanAuthor::Agent, None));
-        assert!(!tracker.lease_is_current(&lease, GoalPhase::Planning));
-    }
-
-    #[test]
-    fn plan_write_unwraps_only_a_whole_document_markdown_fence() {
-        let mut tracker = tracker();
-        assert!(tracker.replace_plan(
-            "\n```Markdown\n# Status\n\n- [ ] implement\n```\n".into(),
-            GoalPlanAuthor::Planner,
-            None,
-        ));
-        assert_eq!(
-            tracker.snapshot().unwrap().plan.markdown,
-            "# Status\n\n- [ ] implement"
-        );
-
-        assert!(tracker.replace_plan(
-            "# Status\n\n```rust\nfn main() {}\n```".into(),
-            GoalPlanAuthor::Agent,
-            None,
-        ));
-        assert_eq!(
-            tracker.snapshot().unwrap().plan.markdown,
-            "# Status\n\n```rust\nfn main() {}\n```"
-        );
-    }
-
-    #[test]
-    fn plan_update_invalidates_in_flight_verifier() {
-        let mut tracker = tracker();
-        tracker.replace_plan("- [ ] implement".into(), GoalPlanAuthor::Planner, None);
-        tracker.candidate_complete("candidate".into());
-        let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        assert!(tracker.replace_plan(
-            "- [x] implement\n- [ ] integration test".into(),
-            GoalPlanAuthor::Agent,
-            Some("new evidence".into()),
-        ));
-        assert!(!tracker.lease_is_current(&lease, GoalPhase::Verifying));
-        assert_eq!(tracker.phase(), Some(GoalPhase::Executing));
-        assert!(tracker.snapshot().unwrap().candidate_summary.is_none());
-    }
-
-    #[test]
-    fn explicit_edit_replans_and_clears_verification_evidence() {
-        let mut tracker = tracker();
-        tracker.replace_plan("- [ ] implement".into(), GoalPlanAuthor::Planner, None);
-        tracker.candidate_complete("candidate".into());
-        let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        tracker.verification_not_achieved(&lease, "missing test".into(), "test".into());
-
-        assert!(tracker.revise_goal("ship it safely".into(), Some(42)));
-        let goal = tracker.snapshot().unwrap();
-        assert_eq!(goal.objective_revision, 1);
-        assert_eq!(goal.phase, GoalPhase::Planning);
-        assert_eq!(goal.plan.revision, 0);
-        assert!(goal.plan.markdown.is_empty());
-        assert!(goal.verifier_feedback.is_none());
-        assert!(goal.candidate_summary.is_none());
-        assert_eq!(goal.token_budget, Some(42));
-    }
-
-    #[test]
-    fn execution_round_does_not_change_objective_or_plan_revision() {
-        let mut tracker = tracker();
-        tracker.replace_plan("- [ ] implement".into(), GoalPlanAuthor::Planner, None);
-        let before = tracker.snapshot().unwrap();
-        let revisions = (before.objective_revision, before.plan.revision);
-        assert!(tracker.worker_started());
-        let after = tracker.snapshot().unwrap();
-        assert_eq!((after.objective_revision, after.plan.revision), revisions);
-    }
-
-    #[test]
-    fn planner_retries_three_times_then_pauses_and_resume_rearms_it() {
-        let mut tracker = tracker();
-        for attempt in 1..=INFRA_FAILURE_PAUSE_THRESHOLD {
-            let lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
-            assert!(tracker.planner_failed(&lease, format!("infra {attempt}")));
-        }
-        assert_eq!(tracker.status(), Some(GoalStatus::Paused));
-        assert!(tracker.claim_stage(GoalPhase::Planning).is_none());
-        assert!(tracker.resume());
-        assert!(tracker.claim_stage(GoalPhase::Planning).is_some());
-    }
-
-    #[test]
-    fn explicit_pause_invalidates_planner_lease() {
-        let mut tracker = tracker();
-        let lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
-        assert!(tracker.pause(GoalPauseReason::User));
-        assert!(!tracker.lease_is_current(&lease, GoalPhase::Planning));
-        assert!(!tracker.apply_planner_result(&lease, "stale".into()));
-    }
-
-    #[test]
-    fn third_identical_gap_blocks() {
-        let mut tracker = tracker();
-        tracker.replace_plan("- [ ] implement".into(), GoalPlanAuthor::Planner, None);
-        for attempt in 1..=3 {
-            tracker.candidate_complete("done".into());
-            let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-            tracker.verification_not_achieved(&lease, "still broken".into(), "same".into());
-            assert_eq!(
-                tracker.status(),
-                Some(if attempt == 3 {
-                    GoalStatus::Blocked
-                } else {
-                    GoalStatus::Active
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn a_distinct_gap_resets_the_block_counter() {
-        let mut tracker = tracker();
-        tracker.replace_plan("- [ ] implement".into(), GoalPlanAuthor::Planner, None);
-        for fingerprint in ["same", "same", "different"] {
-            tracker.candidate_complete("done".into());
-            let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-            tracker.verification_not_achieved(
-                &lease,
-                format!("gap {fingerprint}"),
-                fingerprint.into(),
-            );
-        }
-        let goal = tracker.snapshot().unwrap();
-        assert_eq!(goal.status, GoalStatus::Active);
-        assert_eq!(goal.repeated_gap_count, 1);
-        assert_eq!(goal.phase, GoalPhase::Executing);
-    }
-
-    #[test]
-    fn achieved_candidate_requires_finalization_before_complete() {
-        let mut tracker = tracker();
-        tracker.replace_plan("- [x] implement".into(), GoalPlanAuthor::Planner, None);
-        tracker.candidate_complete("verified candidate".into());
-        let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        assert!(tracker.verification_achieved(&lease));
-        assert_eq!(tracker.phase(), Some(GoalPhase::Summarizing));
-        assert_eq!(tracker.status(), Some(GoalStatus::Active));
-        assert!(tracker.complete_verified());
-        assert_eq!(tracker.status(), Some(GoalStatus::Complete));
-    }
-
-    #[test]
-    fn verifier_can_block_immediately_with_evidence() {
-        let mut tracker = tracker();
-        tracker.replace_plan("- [x] inspect".into(), GoalPlanAuthor::Planner, None);
-        tracker.candidate_complete("candidate".into());
-        let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        assert!(tracker.verification_blocked(&lease, "missing credentials".into()));
-        assert_eq!(tracker.status(), Some(GoalStatus::Blocked));
-        assert_eq!(
-            tracker.snapshot().unwrap().pause_message.as_deref(),
-            Some("missing credentials")
-        );
-    }
-
-    #[test]
-    fn restart_drops_transient_lease_and_preserves_active_phase() {
-        let mut tracker = tracker();
-        let old_lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
-        let snapshot = tracker.snapshot().unwrap().clone();
-        let mut restored =
-            GoalTracker::from_snapshot(snapshot).expect("current snapshot should restore");
-        assert!(!restored.lease_is_current(&old_lease, GoalPhase::Planning));
-        assert_eq!(restored.status(), Some(GoalStatus::Active));
-        assert_eq!(restored.phase(), Some(GoalPhase::Planning));
-        assert!(restored.claim_stage(GoalPhase::Planning).is_some());
-    }
-
-    #[test]
-    fn restart_preserves_durable_subagent_tokens() {
-        let mut tracker = tracker();
-        assert!(tracker.settle_subagent_tokens(250));
-        let encoded = serde_json::to_vec(tracker.snapshot().unwrap()).unwrap();
-        let snapshot: GoalOrchestration = serde_json::from_slice(&encoded).unwrap();
-        let restored =
-            GoalTracker::from_snapshot(snapshot).expect("current snapshot should restore");
-        assert_eq!(restored.subagent_tokens_spent(), 250);
-    }
-
-    #[test]
-    fn revising_an_active_goal_preserves_elapsed_time() {
-        let mut tracker = tracker();
-        tracker.active_since = Some(Instant::now() - std::time::Duration::from_millis(50));
-
-        assert!(tracker.revise_goal("revised objective".into(), None));
-
-        assert!(
-            tracker.snapshot().unwrap().elapsed_ms >= 40,
-            "the active interval before /goal edit must be retained"
-        );
-    }
-
-    #[test]
-    fn completed_receipt_freezes_parent_token_accounting() {
-        let mut tracker = tracker();
-        assert_eq!(tracker.account_parent_tokens(100), 100);
-        assert!(tracker.replace_plan("- [x] done".into(), GoalPlanAuthor::Planner, None));
-        assert!(tracker.candidate_complete("candidate".into()));
-        let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
-        assert!(tracker.verification_achieved(&lease));
-        assert_eq!(tracker.account_parent_tokens(150), 150);
-        assert!(tracker.complete_verified());
-        assert_eq!(tracker.account_parent_tokens(10_000), 150);
-    }
-
-    #[test]
-    fn inconsistent_verifying_snapshot_is_dropped() {
-        let mut tracker = tracker();
-        assert!(tracker.replace_plan("- [ ] verify".into(), GoalPlanAuthor::Planner, None));
-        assert!(tracker.candidate_complete("candidate".into()));
+    fn inconsistent_current_snapshot_recovers_paused_without_autonomous_work() {
+        let tracker = executing_tracker();
         let mut snapshot = tracker.snapshot().unwrap().clone();
-        snapshot.candidate_summary = None;
+        snapshot.board.markdown = "not a canonical board".into();
+        snapshot.in_flight_stage = Some(StageLease {
+            goal_id: snapshot.goal_id.clone(),
+            objective_revision: snapshot.objective_revision,
+            plan_revision: snapshot.board.plan_revision,
+            board_revision: snapshot.board.board_revision,
+            stage_id: 9,
+        });
+
+        let restored = GoalTracker::from_snapshot(snapshot).expect("identity is recoverable");
+        let goal = restored.snapshot().unwrap();
+        assert_eq!(goal.status, GoalStatus::Paused);
+        assert_eq!(goal.phase, GoalPhase::Planning);
+        assert!(goal.board.markdown.is_empty());
+        assert!(goal.in_flight_stage.is_none());
+        assert!(
+            goal.pause_message
+                .as_deref()
+                .is_some_and(|message| { message.contains("inconsistent Goal control state") })
+        );
+    }
+
+    #[test]
+    fn runtime_rollback_preserves_a_live_stage_lease() {
+        let mut tracker = GoalTracker::new();
+        tracker.create_goal("g1".into(), "ship it".into(), None, 0, "now".into(), None);
+        let lease = tracker.claim_stage(GoalPhase::Planning).unwrap();
+        let before = tracker.snapshot().unwrap().clone();
+
+        assert!(tracker.request_replan(1, 0, "new guidance".into()).unwrap());
+        tracker.restore_runtime_snapshot(before);
+
+        assert!(tracker.lease_is_current(&lease, GoalPhase::Planning));
+        assert!(
+            tracker.claim_stage(GoalPhase::Planning).is_none(),
+            "rollback must not admit a duplicate stage"
+        );
+    }
+
+    #[test]
+    fn incompatible_snapshot_architecture_is_not_migrated() {
+        let tracker = executing_tracker();
+        let mut snapshot = tracker.snapshot().unwrap().clone();
+        snapshot.architecture_version = GOAL_ARCHITECTURE_VERSION.saturating_sub(1);
         assert!(GoalTracker::from_snapshot(snapshot).is_none());
     }
 
     #[test]
-    fn pre_shared_blackboard_snapshot_is_dropped() {
-        let tracker = tracker();
+    fn planner_commit_advances_only_board_revision() {
+        let tracker = executing_tracker();
+        let goal = tracker.snapshot().unwrap();
+        assert_eq!(goal.board.plan_revision, 1);
+        assert_eq!(goal.board.board_revision, 1);
+        assert_eq!(goal.phase, GoalPhase::Executing);
+    }
+
+    #[test]
+    fn progress_patch_invalidates_verifier_and_stale_result() {
+        let mut tracker = executing_tracker();
+        assert!(
+            tracker
+                .candidate_complete(1, 1, "candidate".into())
+                .unwrap()
+        );
+        let verifier = tracker.claim_stage(GoalPhase::Verifying).unwrap();
+        let updates = [tool_types::GoalProgressUpdate {
+            task_id: "T1.1".into(),
+            status: Some(tool_types::GoalTaskStatus::Done),
+            progress: None,
+            evidence: Some("regression test passes".into()),
+            gap: None,
+        }];
+        assert!(
+            tracker
+                .update_progress(1, 1, &updates, "new evidence".into())
+                .unwrap()
+        );
+        assert_eq!(tracker.snapshot().unwrap().phase, GoalPhase::Executing);
+        assert!(!tracker.verification_achieved(&verifier).unwrap());
+    }
+
+    #[test]
+    fn replan_advances_plan_revision_and_invalidates_verifier() {
+        let mut tracker = executing_tracker();
+        assert!(
+            tracker
+                .candidate_complete(1, 1, "candidate".into())
+                .unwrap()
+        );
+        let verifier = tracker.claim_stage(GoalPhase::Verifying).unwrap();
+        assert!(
+            tracker
+                .request_replan(1, 1, "revise structure".into())
+                .unwrap()
+        );
+        let goal = tracker.snapshot().unwrap();
+        assert_eq!(goal.board.plan_revision, 2);
+        assert_eq!(goal.board.board_revision, 1);
+        assert_eq!(goal.phase, GoalPhase::Planning);
+        assert!(!tracker.lease_is_current(&verifier, GoalPhase::Verifying));
+    }
+
+    #[test]
+    fn replan_during_planning_invalidates_the_old_planner_lease() {
+        let mut tracker = GoalTracker::new();
+        tracker.create_goal("g1".into(), "ship it".into(), None, 0, "now".into(), None);
+        let planner = tracker.claim_stage(GoalPhase::Planning).unwrap();
+
+        assert!(
+            tracker
+                .request_replan(1, 0, "incorporate new structural guidance".into())
+                .unwrap()
+        );
+
+        let goal = tracker.snapshot().unwrap();
+        assert_eq!(goal.board.plan_revision, 2);
+        assert_eq!(goal.board.board_revision, 0);
+        assert_eq!(goal.phase, GoalPhase::Planning);
+        assert!(!tracker.lease_is_current(&planner, GoalPhase::Planning));
+        assert!(tracker.claim_stage(GoalPhase::Planning).is_some());
+    }
+
+    #[test]
+    fn repeated_identical_gap_blocks_on_third_round() {
+        let mut tracker = executing_tracker();
+        for round in 1..=3 {
+            let goal = tracker.snapshot().unwrap();
+            assert!(
+                tracker
+                    .candidate_complete(
+                        goal.board.plan_revision,
+                        goal.board.board_revision,
+                        format!("candidate {round}"),
+                    )
+                    .unwrap()
+            );
+            let lease = tracker.claim_stage(GoalPhase::Verifying).unwrap();
+            assert!(
+                tracker
+                    .verification_not_achieved(
+                        &lease,
+                        "same missing evidence".into(),
+                        "same-gap".into(),
+                    )
+                    .unwrap()
+            );
+        }
+        assert_eq!(tracker.status(), Some(GoalStatus::Blocked));
+    }
+
+    #[test]
+    fn verifier_role_and_blocked_feedback_share_the_committed_board_revision() {
+        let mut tracker = executing_tracker();
+        assert!(
+            tracker
+                .candidate_complete(1, 1, "candidate".into())
+                .unwrap()
+        );
+        let verifier = tracker.claim_stage(GoalPhase::Verifying).unwrap();
+        assert_eq!(
+            tracker.snapshot().unwrap().current_subagent_role.as_deref(),
+            Some("verifier")
+        );
+        assert!(
+            tracker
+                .verification_blocked(&verifier, "missing external fixture".into())
+                .unwrap()
+        );
+        let goal = tracker.snapshot().unwrap();
+        assert_eq!(goal.status, GoalStatus::Blocked);
+        assert_eq!(goal.board.board_revision, 2);
+        assert!(goal.board.markdown.contains("missing external fixture"));
+        assert!(goal.current_subagent_role.is_none());
+        assert_eq!(goal.total_verify_rounds, 1);
+    }
+
+    #[test]
+    fn primary_agent_blocker_updates_open_gaps_and_invalidates_the_stage() {
+        let mut tracker = executing_tracker();
+        assert!(
+            tracker
+                .candidate_complete(1, 1, "candidate".into())
+                .unwrap()
+        );
+        let verifier = tracker.claim_stage(GoalPhase::Verifying).unwrap();
+        assert!(
+            tracker
+                .report_blocked(1, 1, "waiting for user credentials".into())
+                .unwrap()
+        );
+        let goal = tracker.snapshot().unwrap();
+        assert_eq!(goal.status, GoalStatus::Blocked);
+        assert_eq!(goal.board.board_revision, 2);
+        assert!(goal.board.markdown.contains("waiting for user credentials"));
+        assert!(goal.current_subagent_role.is_none());
+        assert!(!tracker.lease_is_current(&verifier, GoalPhase::Verifying));
+    }
+
+    #[test]
+    fn restore_drops_transient_lease_and_rejects_old_architecture() {
+        let mut tracker = executing_tracker();
+        tracker
+            .candidate_complete(1, 1, "candidate".into())
+            .unwrap();
+        let _ = tracker.claim_stage(GoalPhase::Verifying);
         let mut snapshot = tracker.snapshot().unwrap().clone();
-        snapshot.architecture_version = 3;
+        let restored = GoalTracker::from_snapshot(snapshot.clone()).unwrap();
+        assert!(restored.snapshot().unwrap().in_flight_stage.is_none());
+        snapshot.architecture_version -= 1;
         assert!(GoalTracker::from_snapshot(snapshot).is_none());
     }
 }

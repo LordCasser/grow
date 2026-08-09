@@ -17,10 +17,6 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
         tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
             tools::implementations::grow_build::task::types::SubagentValidateTypeOutcome,
         >;
-    type DescribeFuture =
-        tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
-            tools::implementations::grow_build::task::types::SubagentDescribeOutcome,
-        >;
     fn run(
         &self,
         run: tools::implementations::grow_build::task::coordinator::ChildRunRequest<
@@ -87,32 +83,6 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
             let this = agent_ref.get();
             let ctx = this.build_subagent_validation_context(&parent_session_id);
             crate::agent::subagent::validate_subagent_type(&subagent_type, &ctx)
-        })
-    }
-    fn describe_type(
-        &self,
-        subagent_type: String,
-        harness_agent_type: Option<String>,
-        parent_session_id: String,
-    ) -> Self::DescribeFuture {
-        let agent_ref = self.agent_ref.clone();
-        Box::pin(async move {
-            let this = agent_ref.get();
-            match this.try_build_subagent_spawn_context(&parent_session_id) {
-                Some(ctx) => crate::agent::subagent::describe_subagent_type(
-                    &subagent_type,
-                    harness_agent_type.as_deref(),
-                    &ctx,
-                ),
-                None => {
-                    tracing::warn!(
-                        parent_session_id,
-                        subagent_type,
-                        "DescribeType for unknown/evicted parent session, replying Unavailable",
-                    );
-                    tools::implementations::grow_build::task::types::SubagentDescribeOutcome::Unavailable
-                }
-            }
         })
     }
     fn on_completed(

@@ -24,7 +24,6 @@ use crate::sampling::{
     SyntheticReason, ToolSpec, conversation_truncate_for_prompt,
 };
 use crate::session::ClientFsConfig;
-use crate::session::behavior::PromptMode;
 use crate::session::fs_watch::{self, git_head_dedup_key};
 use crate::session::info::Info as SessionInfo;
 use crate::session::mcp_servers::McpInitStrategy;
@@ -188,7 +187,6 @@ pub(crate) struct InputItem {
     pub(crate) prompt_id: String,
     pub(crate) turn_kind: super::TurnKind,
     pub(crate) prompt_blocks: Vec<ContentBlock>,
-    pub(crate) prompt_mode: PromptMode,
     /// Optional client identifier from the prompt request meta (overrides session-level one)
     pub(crate) client_identifier: Option<String>,
     /// See [`SessionCommand::QueuePrompt::screen_mode`]. Diagnostic-only.
@@ -551,20 +549,14 @@ pub(crate) struct SessionActor {
     /// recorded as `skill.name` on the turn span. Reset at the start of each
     /// prompt (`handle_prompt`), so it never leaks across turns.
     pub(crate) active_skill: parking_lot::Mutex<Option<String>>,
-    /// Canonical session mode last set via ACP `session/set_mode`.
-    /// Used as the fallback start prompt mode when prompt request metadata
-    /// does not explicitly provide one.
-    pub(crate) current_prompt_mode: Arc<parking_lot::Mutex<PromptMode>>,
-    /// Prompt mode captured at the start of the current turn. Set once in
-    /// `handle_prompt` and never modified during the turn. Used for
-    /// `start_prompt_mode` diagnostics.
-    pub(crate) turn_start_prompt_mode: parking_lot::Mutex<PromptMode>,
-    /// Effective Behavior of the currently running turn, captured for
-    /// diagnostics. Behavior transitions go through `request_behavior_change`.
-    pub(crate) turn_prompt_mode: Arc<parking_lot::Mutex<PromptMode>>,
+    /// Behavior captured atomically when the current user-visible turn wins
+    /// foreground admission. Selection changes never mutate an admitted turn.
+    pub(crate) turn_behavior: parking_lot::Mutex<tool_types::BehaviorId>,
     /// Session-scoped primary-Agent Behavior controller. It owns the selected
     /// collaboration protocol and Plan phase, not permissions or runtimes.
-    pub(crate) behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorController>>,
+    pub(crate) behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorCoordinator>>,
+    /// Monotonic revision of the atomic session-control snapshot.
+    pub(crate) control_revision: Arc<std::sync::atomic::AtomicU64>,
     /// Whether goal mode (`/goal`) is enabled for this session (feature flag).
     pub(crate) goal_enabled: bool,
     pub(crate) background_workflows_enabled: bool,
@@ -828,8 +820,7 @@ impl SessionActor {
     async fn command_availability(&self) -> slash_commands::CommandAvailability {
         let tool_names = self.registered_tool_names().await;
         let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
-        let availability = self.build_command_availability(&tool_names, has_workflow_runs);
-        availability
+        self.build_command_availability(&tool_names, has_workflow_runs)
     }
     /// Build the `CommandAvailability` snapshot from a precomputed slice
     /// of tool names plus the live session-scoped capability state.
@@ -1373,7 +1364,6 @@ mod turn_end_guard_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
 mod wait_for_mcp_prefix_tests;
-#[cfg(test)]
 #[cfg(test)]
 mod managed_gateway_tool_tests {
     use super::*;

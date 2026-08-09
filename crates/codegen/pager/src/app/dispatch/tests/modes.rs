@@ -8,14 +8,14 @@ fn behavior_picker_selection_changes_behavior_without_touching_permission() {
     app.current_ui.permission_mode = Some("ask".into());
 
     let effects = dispatch(
-        Action::SetBehaviorMode(tools::types::SessionMode::Plan),
+        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
         &mut app,
     );
 
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert_eq!(
         agent.behavior_mode_pending,
-        Some(tools::types::SessionMode::Plan)
+        Some(tools::types::BehaviorId::Plan)
     );
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
     assert!(matches!(
@@ -196,7 +196,7 @@ fn slash_plan_no_args_already_in_plan_shows_plan() {
     let id = AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
     agent.plan_mode_active = true;
-    agent.behavior_mode = tools::types::SessionMode::Plan;
+    agent.behavior_mode = tools::types::BehaviorId::Plan;
 
     let effects = dispatch(Action::SendPrompt("/plan".into()), &mut app);
 
@@ -246,107 +246,35 @@ fn slash_plan_with_args_already_in_plan_sends_prompt_after_idempotent_transition
     ));
 }
 
-// ── interrupting Behavior switch confirm (Enter) / dismiss (Esc) ──
-
-/// Enter without a stashed prompt re-issues the parked `SetSessionMode`
-/// (the shell's second same-target request within the window applies the
-/// switch) and clears the warning state.
+/// A second explicit user selection is the only Pager action that can confirm
+/// a Shell-owned interrupt window. The first confirmation-required update has
+/// already restored the confirmed source identity and cleared optimistic state.
 #[test]
-fn confirm_behavior_switch_warning_without_prompt_issues_set_session_mode() {
+fn repeated_behavior_selection_reissues_the_same_target() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
-            target: tools::types::SessionMode::Default,
-            prompt: None,
-        });
-        agent.behavior_switch_warning_pending = true;
-        agent.mode_switch_banner = Some((
-            "banner".into(),
-            std::time::Instant::now() + std::time::Duration::from_secs(1),
-        ));
+        agent.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.behavior_mode_pending = None;
     }
 
-    let effects = dispatch(Action::ConfirmBehaviorSwitchWarning, &mut app);
+    let effects = dispatch(
+        Action::SetBehaviorMode(tools::types::BehaviorId::Normal),
+        &mut app,
+    );
 
+    let agent = app.agents.get(&id).unwrap();
     assert!(
         matches!(
             effects.as_slice(),
             [Effect::SetSessionMode { mode_id, .. }] if mode_id.0.as_ref() == "normal"
         ),
-        "confirm must re-issue the parked SetSessionMode, got: {effects:?}"
+        "the repeated user selection must reach the Shell unchanged: {effects:?}"
     );
-    let agent = app.agents.get(&id).unwrap();
-    assert!(agent.behavior_switch_confirm.is_none());
-    assert!(!agent.behavior_switch_warning_pending);
-    assert!(agent.mode_switch_banner.is_none());
     assert_eq!(
         agent.behavior_mode_pending,
-        Some(tools::types::SessionMode::Default)
-    );
-}
-
-/// Enter with a stashed prompt replays it through the mode+prompt path —
-/// the prompt text must NOT be lost across the confirmation round-trip.
-#[test]
-fn confirm_behavior_switch_warning_with_prompt_replays_set_mode_then_prompt() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
-            target: tools::types::SessionMode::Plan,
-            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
-                text: "add auth to the app".into(),
-            }),
-        });
-    }
-
-    let effects = dispatch(Action::ConfirmBehaviorSwitchWarning, &mut app);
-
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::SetModeThenPrompt { mode_id, text, .. }]
-                if mode_id.0.as_ref() == "plan" && text == "add auth to the app"
-        ),
-        "confirm with a stashed prompt must replay SetModeThenPrompt, got: {effects:?}"
-    );
-    assert!(
-        app.agents[&id].behavior_switch_confirm.is_none(),
-        "the parked confirm must be consumed"
-    );
-}
-
-/// Esc drops the parked switch AND the stashed prompt, then returns the
-/// session to the confirmed behavior.
-#[test]
-fn dismiss_behavior_switch_warning_clears_parked_switch_and_prompt() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
-            target: tools::types::SessionMode::Plan,
-            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
-                text: "dropped on cancel".into(),
-            }),
-        });
-        agent.behavior_switch_warning_pending = true;
-    }
-
-    let effects = dispatch(Action::DismissBehaviorSwitchWarning, &mut app);
-
-    let agent = app.agents.get(&id).unwrap();
-    assert!(agent.behavior_switch_confirm.is_none());
-    assert!(!agent.behavior_switch_warning_pending);
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::SetSessionMode { mode_id: _, .. }]
-        ),
-        "dismiss must re-sync the confirmed behavior, got: {effects:?}"
+        Some(tools::types::BehaviorId::Normal)
     );
 }
 
@@ -364,7 +292,7 @@ fn set_plan_mode_mutates_only_active_agent_not_others() {
     assert!(app.agents[&AgentId(1)].plan_mode_pending.is_none());
 
     let _ = dispatch(
-        Action::SetBehaviorMode(tools::types::SessionMode::Plan),
+        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
         &mut app,
     );
 

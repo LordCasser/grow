@@ -34,17 +34,17 @@ impl CapabilityMode {
     /// Filter `config.tools` by capability mode, returning a copy with
     /// disallowed tools dropped.
     ///
-    /// Tools whose `kind` is `None` (baseline, e.g. ad-hoc tools
-    /// declared via `ToolConfig::simple`) are preserved across all
-    /// modes. **MCP-origin** `kind: None` tools are NOT preserved by
-    /// this method; see `resolve_session_toolset` for the asymmetric
-    /// handling.
+    /// Tools whose `kind` is `None` are rejected by every restricted mode.
+    /// A delegated Agent cannot infer authority from registration alone.
     pub fn filter(self, config: &ToolServerConfig) -> ToolServerConfig {
         let kept: Vec<ToolConfig> = config
             .tools
             .iter()
             .filter(|tool| match tool.kind {
-                None => true,
+                // Restricted agents fail closed on tools without an explicit
+                // taxonomy. Permission mode may only further restrict an
+                // authorized capability; it cannot classify an unknown tool.
+                None => matches!(self, CapabilityMode::All),
                 Some(kind) => kind_allowed(self, kind),
             })
             .cloned()
@@ -96,7 +96,10 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::SearchTool,
     ToolKind::UseTool,
     ToolKind::Monitor,
-    ToolKind::GoalUpdate,
+    ToolKind::GoalRead,
+    ToolKind::GoalProgressUpdate,
+    ToolKind::GoalReplanRequest,
+    ToolKind::GoalLifecycleUpdate,
     ToolKind::Workflow,
     ToolKind::Other,
 ];
@@ -122,7 +125,12 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
 
     match kind {
         // Meta tools: always allowed.
-        Plan | PlanControl | AskUser | Skill | SearchTool | GoalUpdate => true,
+        Plan | PlanControl | AskUser | Skill | SearchTool => true,
+
+        GoalRead => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
+        GoalProgressUpdate | GoalReplanRequest | GoalLifecycleUpdate => {
+            matches!(mode, M::ReadWrite)
+        }
 
         // Read class.
         Read | MemoryGet | MemorySearch => {
@@ -238,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_mode_baseline_kind_none_always_kept_via_filter() {
+    fn capability_mode_kind_none_fails_closed_outside_all() {
         let cfg = make_cfg(vec![
             test_support::tc("baseline.opaque", None),
             test_support::tc("baseline.also_opaque", None),
@@ -249,19 +257,20 @@ mod tests {
             CapabilityMode::ReadOnly,
             CapabilityMode::ReadWrite,
             CapabilityMode::Execute,
-            CapabilityMode::All,
         ] {
             let filtered = mode.filter(&cfg);
             let ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
             assert!(
-                ids.contains(&"baseline.opaque"),
-                "kind: None tool dropped under {mode:?}: {ids:?}"
+                !ids.contains(&"baseline.opaque"),
+                "kind: None tool survived under {mode:?}: {ids:?}"
             );
             assert!(
-                ids.contains(&"baseline.also_opaque"),
-                "kind: None tool dropped under {mode:?}: {ids:?}"
+                !ids.contains(&"baseline.also_opaque"),
+                "kind: None tool survived under {mode:?}: {ids:?}"
             );
         }
+        let all = CapabilityMode::All.filter(&cfg);
+        assert_eq!(all.tools.len(), 3);
     }
 
     #[test]

@@ -62,7 +62,10 @@ impl ToolKind {
             ToolKind::SearchTool => "Search Tools",
             ToolKind::UseTool => "Use Tool",
             ToolKind::Monitor => "Monitor",
-            ToolKind::GoalUpdate => "Update Goal",
+            ToolKind::GoalRead => "Read Goal",
+            ToolKind::GoalProgressUpdate => "Update Goal Progress",
+            ToolKind::GoalReplanRequest => "Request Goal Replan",
+            ToolKind::GoalLifecycleUpdate => "Update Goal Lifecycle",
             ToolKind::Workflow => "Workflow",
             ToolKind::Other => "Tool",
         }
@@ -80,6 +83,7 @@ impl ToolKind {
             | ToolKind::List
             | ToolKind::MemorySearch
             | ToolKind::MemoryGet
+            | ToolKind::GoalRead
             | ToolKind::WebFetch
             | ToolKind::PlanControl
             | ToolKind::AskUser => ToolScope::Read,
@@ -98,7 +102,9 @@ impl ToolKind {
             | ToolKind::SearchTool
             | ToolKind::UseTool
             | ToolKind::Monitor
-            | ToolKind::GoalUpdate
+            | ToolKind::GoalProgressUpdate
+            | ToolKind::GoalReplanRequest
+            | ToolKind::GoalLifecycleUpdate
             | ToolKind::Workflow
             | ToolKind::Other => ToolScope::Write,
         }

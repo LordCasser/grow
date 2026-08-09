@@ -7,12 +7,13 @@ use tools::implementations::grow_build::LoopFireMode;
 pub(super) fn should_capture_implicit_goal_objective(
     origin: &crate::session::PromptOrigin,
     goal_behavior_selected: bool,
-    goal_exists: bool,
+    goal_status: Option<crate::session::goal_tracker::GoalStatus>,
     text: &str,
 ) -> bool {
     matches!(origin, crate::session::PromptOrigin::User)
         && goal_behavior_selected
-        && !goal_exists
+        && goal_status
+            .is_none_or(|status| status == crate::session::goal_tracker::GoalStatus::Complete)
         && !text.trim_start().starts_with('/')
         && !text.trim().is_empty()
 }
@@ -251,7 +252,7 @@ impl SessionActor {
         origin: super::super::PromptOrigin,
         turn_kind: super::super::TurnKind,
         mut prompt_blocks: Vec<acp::ContentBlock>,
-        prompt_mode: PromptMode,
+        admitted_behavior: tool_types::BehaviorId,
         prompt_client_identifier: Option<String>,
         prompt_screen_mode: Option<String>,
         verbatim: bool,
@@ -292,39 +293,11 @@ impl SessionActor {
         if !origin.is_synthetic() {
             self.cancel_pending_recap_for_new_prompt();
         }
-        // Synthetic auto-wake prompts (subagent/bash/monitor/workflow
-        // completions, notification drain, goal summaries) are completion
-        // notifications, NOT Behavior-switch requests. They run under the
-        // session's current Behavior:
-        //  - the interrupting-switch gate must not fail the wake turn while
-        //    Plan (or Goal/Deep Research) work is active — it surfaced as
-        //    "Turn failed: switching to default will interrupt the active
-        //    Plan work" whenever a background subagent finished during Plan;
-        //  - a parked user-initiated switch must not be auto-confirmed or
-        //    cleared by an unrelated completion.
-        // Only `User` prompts may drive the Behavior state machine.
-        let prompt_mode = if origin.is_synthetic() {
-            *self.current_prompt_mode.lock()
-        } else {
-            prompt_mode
-        };
-        if !origin.is_synthetic() {
-            let behavior_outcome = self
-                .request_behavior_change(acp::SessionModeId::new(
-                    session_mode_from_prompt_mode(prompt_mode).as_id(),
-                ))
-                .await;
-            if !matches!(behavior_outcome, BehaviorChangeOutcome::Applied) {
-                return Err(acp::Error::invalid_params().data(
-                    serde_json::to_value(behavior_outcome.response_meta())
-                        .unwrap_or_else(|_| serde_json::json!({})),
-                ));
-            }
-        }
-        *self.turn_start_prompt_mode.lock() = prompt_mode;
-        *self.turn_prompt_mode.lock() = prompt_mode;
+        // `admitted_behavior` is captured atomically by the idle admission path.
+        // Prompt text and queued metadata never drive Behavior transitions.
+        *self.turn_behavior.lock() = admitted_behavior;
         self.signals_handle().increment_turn();
-        self.sync_active_behavior_prompt().await;
+        self.sync_active_behavior_prompt(admitted_behavior).await;
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
@@ -356,32 +329,25 @@ impl SessionActor {
         });
         let implicit_goal_set = should_capture_implicit_goal_objective(
             &origin,
-            self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal),
-            self.goal_tracker.lock().snapshot().is_some(),
+            admitted_behavior == tool_types::BehaviorId::Goal,
+            self.goal_tracker.lock().status(),
             &original_prompt_text,
         );
         if implicit_goal_set {
             self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-            self.initialize_goal_runtime(original_prompt_text.trim(), None)
-                .await;
+            if let Err(message) = self
+                .initialize_goal_runtime(original_prompt_text.trim(), None)
+                .await
+            {
+                self.send_host_turn_slash_command_output(&message).await;
+            }
             return ok_end_turn(0, None);
         }
-        if self.behavior.lock().behavior() == Some(tool_types::BehaviorId::DeepResearch)
+        if admitted_behavior == tool_types::BehaviorId::DeepResearch
             && !original_prompt_text.trim_start().starts_with('/')
+            && self.behavior.lock().deep_research_run_id().is_none()
         {
             self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-            if let Some(run_id) = self
-                .behavior
-                .lock()
-                .deep_research_run_id()
-                .map(str::to_owned)
-            {
-                self.send_host_turn_slash_command_output(&format!(
-                    "Deep Research is already running ({run_id}). Use /workflow to inspect, pause, resume, or stop it, or switch Behavior explicitly."
-                ))
-                .await;
-                return ok_end_turn(0, None);
-            }
             match self
                 .launch_deep_research(original_prompt_text.trim().to_string())
                 .await
@@ -440,6 +406,7 @@ impl SessionActor {
                     action @ (BuiltinAction::GoalSet { .. }
                     | BuiltinAction::GoalEdit { .. }
                     | BuiltinAction::GoalEnter
+                    | BuiltinAction::GoalUsage
                     | BuiltinAction::GoalStatus
                     | BuiltinAction::GoalPause
                     | BuiltinAction::GoalResume
@@ -903,12 +870,6 @@ impl SessionActor {
                         ..
                     })
                 ) {
-                    self.auto_pause_goal_if_active_with_message(
-                        crate::session::goal_tracker::GoalPauseReason::Infra,
-                        "The model provider refused this goal round. Use /goal resume to retry."
-                            .to_string(),
-                    )
-                    .await;
                     break round;
                 }
                 if matches!(
@@ -1221,7 +1182,7 @@ impl SessionActor {
                     ),
                 };
                 if let Some(snapshot) = snapshot.as_mut() {
-                    self.apply_prompt_modes_to_snapshot(snapshot);
+                    self.apply_behavior_to_snapshot(snapshot);
                 }
                 Ok(crate::session::commands::PromptTurnOk {
                     stop_reason,
@@ -1751,7 +1712,7 @@ impl SessionActor {
         self.signals_handle().record_turn_complete();
         let mut snapshot = self.signals_handle().take_turn_end_snapshot().await;
         if let Some(snap) = snapshot.as_mut() {
-            self.apply_prompt_modes_to_snapshot(snap);
+            self.apply_behavior_to_snapshot(snap);
             snap.turn_input_tokens = turn_span_totals.input_tokens.max(0) as u64;
             snap.turn_output_tokens = turn_span_totals.output_tokens.max(0) as u64;
             snap.turn_cached_input_tokens = turn_span_totals.cache_read_tokens.max(0) as u64;

@@ -21,7 +21,28 @@ fn send_goal_update_at_revision(
             "status": status,
             "phase": phase,
             "plan_revision": 4,
-            "plan_markdown": "- [x] implement\n- [ ] verify",
+            "board_revision": 7,
+            "tasks": [
+                {
+                    "id": "T1",
+                    "parent_id": null,
+                    "depth": 1,
+                    "status": "done",
+                    "summary": "implement",
+                    "completed_descendants": 0,
+                    "total_descendants": 0
+                },
+                {
+                    "id": "T2",
+                    "parent_id": null,
+                    "depth": 1,
+                    "status": "pending",
+                    "summary": "verify",
+                    "completed_descendants": 0,
+                    "total_descendants": 0
+                }
+            ],
+            "plan_markdown": "# Goal\n\n> ship it\n\n## Plan\n\n- [x] **T1** `done` — implement\n- [ ] **T2** `pending` — verify\n\n## Goal acceptance\n\n- verified\n\n## Verification evidence\n\n- pending\n\n## Open gaps\n\n- verify",
             "verifier_feedback": "missing restart evidence",
             "tokens_used": 123,
             "elapsed_ms": 750,
@@ -43,7 +64,7 @@ fn send_goal_update_at_revision(
 }
 
 #[test]
-fn goal_update_maps_v2_blackboard_and_background_phase() {
+fn goal_update_maps_canonical_blackboard_and_background_phase() {
     let mut app = make_app_with_agent("sess-A");
     assert!(send_goal_update(&mut app, "active", "verifying"));
     let goal = app.agents[&AgentId(0)].goal_state.as_ref().unwrap();
@@ -51,7 +72,9 @@ fn goal_update_maps_v2_blackboard_and_background_phase() {
     assert_eq!(goal.phase, GoalDisplayPhase::Verifying);
     assert_eq!(goal.objective_revision, 2);
     assert_eq!(goal.plan_revision, 4);
-    assert_eq!(goal.plan_markdown, "- [x] implement\n- [ ] verify");
+    assert_eq!(goal.board_revision, 7);
+    assert_eq!(goal.tasks.len(), 2);
+    assert!(goal.plan_markdown.starts_with("# Goal\n"));
     assert_eq!(goal.verifier_feedback.as_deref(), Some("missing restart evidence"));
 }
 

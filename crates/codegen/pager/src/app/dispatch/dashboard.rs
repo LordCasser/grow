@@ -93,7 +93,7 @@ fn configure_dashboard_state(app: &mut AppView) {
             .sync_acp_commands(&bootstrap_commands, None, &models);
         d.models = models;
         d.pending_model = None;
-        d.pending_behavior = tools::types::SessionMode::Default;
+        d.pending_behavior = tools::types::BehaviorId::Normal;
         d.pending_permission = pending_permission;
         d.dispatch.slash_controller.set_selection_context(
             None,
@@ -603,7 +603,7 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
         .as_ref()
         .map(|d| (d.pending_behavior, d.pending_permission))
         .unwrap_or((
-            tools::types::SessionMode::Default,
+            tools::types::BehaviorId::Normal,
             crate::app::actions::PermissionModeKind::Ask,
         ));
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
@@ -895,7 +895,7 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
         .as_ref()
         .map(|d| (d.pending_behavior, d.pending_permission))
         .unwrap_or((
-            tools::types::SessionMode::Default,
+            tools::types::BehaviorId::Normal,
             crate::app::actions::PermissionModeKind::Ask,
         ));
     if !app.cwd_has_git_ancestor {
@@ -1107,7 +1107,7 @@ pub(super) fn dispatch_dashboard_dispatch(
         .as_ref()
         .map(|d| (d.pending_behavior, d.pending_permission))
         .unwrap_or((
-            tools::types::SessionMode::Default,
+            tools::types::BehaviorId::Normal,
             crate::app::actions::PermissionModeKind::Ask,
         ));
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
@@ -1306,7 +1306,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             .as_ref()
             .map(|d| (d.pending_behavior, d.pending_permission))
             .unwrap_or((
-                tools::types::SessionMode::Default,
+                tools::types::BehaviorId::Normal,
                 crate::app::actions::PermissionModeKind::Ask,
             ));
         let mut ctx = CommandExecCtx {
@@ -1538,11 +1538,11 @@ fn stage_dashboard_model(
 /// spawned agent. The base model is already seeded via `CreateSession`'s
 /// `model_id`; here we stash the reasoning effort (pushed to the shell once
 /// the session exists, mirroring the agent-view flow) and the deferred
-/// `SessionMode` (consumed in the `SessionCreated` handlers).
+/// `BehaviorId` (consumed in the `SessionCreated` handlers).
 pub(super) fn apply_pending_dispatch_config(
     agent: &mut AgentView,
     pending_model: Option<&crate::views::dashboard::PendingDispatchModel>,
-    pending_behavior: tools::types::SessionMode,
+    pending_behavior: tools::types::BehaviorId,
     pending_permission: crate::app::actions::PermissionModeKind,
     policy_block: Option<&'static str>,
 ) {
@@ -1554,8 +1554,8 @@ pub(super) fn apply_pending_dispatch_config(
         agent.session.deferred_model_switch = m.effort.map(|e| (m.id.clone(), Some(e)));
     }
     agent.deferred_session_mode =
-        (pending_behavior != tools::types::SessionMode::Default).then_some(pending_behavior);
-    if pending_behavior == tools::types::SessionMode::Plan {
+        (pending_behavior != tools::types::BehaviorId::Normal).then_some(pending_behavior);
+    if pending_behavior == tools::types::BehaviorId::Plan {
         // Optimistic so the Agent view reflects Plan immediately when opened,
         // before the ACP round-trip confirms it.
         agent.plan_mode_pending = Some(true);

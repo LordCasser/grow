@@ -61,6 +61,7 @@ async fn channel_backend_spawn_success() {
         await_to_completion: false,
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
+        goal_context: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
@@ -94,6 +95,7 @@ async fn channel_backend_spawn_closed_channel() {
         await_to_completion: false,
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
+        goal_context: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
@@ -241,6 +243,7 @@ async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
             await_to_completion: true,
             fork_context: false,
             owner,
+            goal_context: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -294,6 +297,7 @@ async fn channel_backend_spawn_result_dropped() {
         await_to_completion: false,
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
+        goal_context: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
@@ -436,106 +440,6 @@ async fn channel_backend_validate_type_logs_warn_on_timeout() {
     }
     assert!(saw_timeout_warn, "must emit WARN with timeout_ms field");
 
-    holder.abort();
-}
-
-// ── describe_subagent_type ───────────────────────────────────────
-
-#[tokio::test]
-async fn channel_backend_describe_round_trips_summary() {
-    use super::super::types::{SubagentDescribeOutcome, SubagentTypeSummary};
-    use crate::types::tool::ToolKind;
-
-    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
-    let backend = ChannelBackend::new(tx);
-
-    let handle = tokio::spawn(async move {
-        match rx.recv().await.unwrap() {
-            SubagentEvent::DescribeType(req) => {
-                assert_eq!(req.subagent_type, "explore");
-                assert_eq!(req.harness_agent_type.as_deref(), Some("cursor"));
-                assert_eq!(req.parent_session_id, "parent-1");
-                let mut summary = SubagentTypeSummary {
-                    can_read: true,
-                    can_search: true,
-                    ..Default::default()
-                };
-                summary
-                    .tool_names
-                    .insert(ToolKind::Read, "read_file".to_string());
-                req.respond_to
-                    .send(SubagentDescribeOutcome::Ok(summary))
-                    .unwrap();
-            }
-            _ => panic!("Expected DescribeType event"),
-        }
-    });
-
-    let outcome = backend
-        .describe_subagent_type("explore", Some("cursor"), "parent-1")
-        .await;
-    match outcome {
-        SubagentDescribeOutcome::Ok(summary) => {
-            assert!(summary.can_read && summary.can_search && !summary.can_execute);
-            assert_eq!(
-                summary.tool_names.get(&ToolKind::Read).unwrap(),
-                "read_file"
-            );
-        }
-        other => panic!("expected Ok, got {other:?}"),
-    }
-    handle.await.unwrap();
-}
-
-#[tokio::test]
-async fn channel_backend_describe_returns_unavailable_when_channel_closed() {
-    use super::super::types::SubagentDescribeOutcome;
-    let (tx, rx) = mpsc::unbounded_channel::<SubagentEvent>();
-    drop(rx);
-    let backend = ChannelBackend::new(tx);
-    assert!(matches!(
-        backend.describe_subagent_type("explore", None, "p").await,
-        SubagentDescribeOutcome::Unavailable
-    ));
-}
-
-#[tokio::test]
-async fn channel_backend_describe_returns_unavailable_when_responder_dropped() {
-    use super::super::types::SubagentDescribeOutcome;
-    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
-    let backend = ChannelBackend::new(tx);
-    let handle = tokio::spawn(async move {
-        if let Some(SubagentEvent::DescribeType(req)) = rx.recv().await {
-            drop(req.respond_to);
-        }
-    });
-    assert!(matches!(
-        backend.describe_subagent_type("explore", None, "p").await,
-        SubagentDescribeOutcome::Unavailable
-    ));
-    handle.await.unwrap();
-}
-
-#[tokio::test(start_paused = true)]
-async fn channel_backend_describe_returns_unavailable_on_timeout() {
-    use super::super::types::SubagentDescribeOutcome;
-    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
-    let backend = ChannelBackend::new(tx);
-
-    let holder = tokio::spawn(async move {
-        if let Some(SubagentEvent::DescribeType(req)) = rx.recv().await {
-            std::mem::forget(req.respond_to);
-            std::future::pending::<()>().await;
-        }
-    });
-
-    let describe =
-        tokio::spawn(async move { backend.describe_subagent_type("explore", None, "p").await });
-    tokio::time::advance(VALIDATE_TYPE_TIMEOUT + std::time::Duration::from_millis(1)).await;
-    assert!(matches!(
-        describe.await.unwrap(),
-        SubagentDescribeOutcome::Unavailable
-    ));
     holder.abort();
 }
 

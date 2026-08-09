@@ -239,7 +239,6 @@ mod tests {
             persona: persona.map(String::from),
             capability_mode,
             isolation,
-            harness_agent_type: None,
             completion_output_cap: None,
             spawn_depth: None,
             output_token_budget: None,

@@ -27,8 +27,8 @@ use tools::implementations::grow_build::task::coordinator::{
     LocalBoxFuture, MAX_COMPLETED_ENTRIES, StartedChild, SubagentCoordinator, SubagentProgress,
 };
 use tools::implementations::grow_build::task::types::{
-    SubagentDescribeOutcome, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
-    SubagentResult, SubagentValidateTypeOutcome,
+    SubagentOwner, SubagentRegistryCounts, SubagentRequest, SubagentResult,
+    SubagentValidateTypeOutcome,
 };
 
 const PARENT_SESSION_ID: &str = "subagent-soak-parent";
@@ -301,7 +301,6 @@ impl ChildRunner for SoakRunner {
     type CompletionData = ();
     type RunFuture = LocalBoxFuture<ChildRunOutput<()>>;
     type ValidateFuture = LocalBoxFuture<SubagentValidateTypeOutcome>;
-    type DescribeFuture = LocalBoxFuture<SubagentDescribeOutcome>;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
         let gate = self.gate.clone();
@@ -363,15 +362,6 @@ impl ChildRunner for SoakRunner {
         Box::pin(std::future::ready(SubagentValidateTypeOutcome::Ok))
     }
 
-    fn describe_type(
-        &self,
-        _subagent_type: String,
-        _harness_agent_type: Option<String>,
-        _parent: String,
-    ) -> Self::DescribeFuture {
-        Box::pin(std::future::ready(SubagentDescribeOutcome::Unavailable))
-    }
-
     fn on_completed(&self, _completion: ChildCompletion<Self::CompletionData>) {}
 }
 
@@ -391,6 +381,7 @@ fn soak_request(id: String, background: bool) -> SubagentRequest {
         await_to_completion: false,
         fork_context: false,
         owner: SubagentOwner::Task,
+        goal_context: None,
         cancel_token: CancellationToken::new(),
     }
 }

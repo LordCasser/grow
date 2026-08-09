@@ -18,7 +18,6 @@ impl SessionActor {
         prompt_id: String,
         origin: crate::session::PromptOrigin,
         turn_kind: crate::session::TurnKind,
-        prompt_mode: PromptMode,
         client_identifier: Option<String>,
         screen_mode: Option<String>,
         verbatim: bool,
@@ -142,11 +141,10 @@ impl SessionActor {
             .map(|m| m.kind.clone())
             .unwrap_or_else(|| "synthetic".to_string());
         let log_owner = client_identifier.clone().unwrap_or_default();
-        let mut item = InputItem {
+        let item = InputItem {
             prompt_id,
             turn_kind,
             prompt_blocks,
-            prompt_mode,
             client_identifier,
             screen_mode,
             verbatim,

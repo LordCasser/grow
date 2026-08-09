@@ -81,11 +81,20 @@ impl SessionActor {
             self.workflow_manager.lock().await.cancel(&run_id);
             return Err("Deep Research behavior changed before the run could start.".to_string());
         }
-        self.persist_behavior_state();
+        let behavior = self.behavior.lock().snapshot();
+        let goal = self.goal_tracker.lock().snapshot().cloned();
+        if let Err(error) = self.persist_control_snapshot_durably(behavior, goal).await {
+            self.behavior.lock().clear_deep_research_run();
+            self.workflow_manager.lock().await.cancel(&run_id);
+            return Err(format!(
+                "Deep Research was cancelled because its ownership could not be persisted: {error}"
+            ));
+        }
         // WorkflowManager delivers the terminal outcome through the session
         // mailbox. Dropping this secondary observer keeps all Behavior
         // transitions serialized on SessionActor.
         drop(outcome_rx);
+        self.send_available_commands_update().await;
         Ok(run_id)
     }
 
@@ -109,19 +118,31 @@ impl SessionActor {
             .map(|run| run.objective.clone())
             .unwrap_or_default();
         let report = deep_research_terminal_report(&query, &outcome);
-        self.send_host_turn_slash_command_output(&report).await;
-        let mut behavior = self.behavior.lock();
-        if behavior.deep_research_run_id() != Some(run_id) {
+        let goal = self.goal_tracker.lock().snapshot().cloned();
+        if self
+            .persist_control_snapshot_durably(
+                crate::session::behavior::BehaviorSnapshot::normal(),
+                goal,
+            )
+            .await
+            .is_err()
+        {
+            self.send_host_turn_slash_command_output(&format!(
+                "{report}\n\nThe terminal report is available, but the Behavior transition could not be persisted. Select another Behavior to retry."
+            ))
+            .await;
             return;
         }
-        behavior.clear_deep_research_run();
-        behavior.select_behavior(None);
-        drop(behavior);
-        *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
-        self.persist_behavior_state();
+        self.send_host_turn_slash_command_output(&report).await;
+        {
+            let mut behavior = self.behavior.lock();
+            behavior.clear_deep_research_run();
+            behavior.select_behavior(tool_types::BehaviorId::Normal);
+        }
         self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-            tools::types::SessionMode::Default.as_id(),
+            tools::types::BehaviorId::Normal.as_id(),
         ));
+        self.send_available_commands_update().await;
     }
 
     pub(crate) async fn cancel_deep_research_with_report(&self, run_id: &str) {
@@ -136,7 +157,6 @@ impl SessionActor {
         self.behavior.lock().clear_deep_research_run();
         let report = deep_research_terminal_report(&query, &workflow::WorkflowOutcome::Cancelled);
         self.send_host_turn_slash_command_output(&report).await;
-        self.persist_behavior_state();
     }
     pub(crate) fn named_workflow_snapshot(
         &self,
@@ -155,8 +175,21 @@ impl SessionActor {
         name: &str,
         input: &str,
     ) -> String {
-        if self.behavior.lock().is_plan() {
-            return "Workflow cannot be launched while Plan behavior is active. Complete or cancel the Plan first.".to_string();
+        // This lock is also the special-Behavior admission gate. Recheck the
+        // Behavior after acquiring it: a slash command may have been resolved
+        // while a concurrent Behavior switch was still committing.
+        let mut manager = self.workflow_manager.lock().await;
+        let behavior = self.behavior.lock().behavior();
+        if matches!(
+            behavior,
+            tool_types::BehaviorId::Plan
+                | tool_types::BehaviorId::Goal
+                | tool_types::BehaviorId::DeepResearch
+        ) {
+            return format!(
+                "Workflow cannot be launched while {} behavior is active.",
+                behavior.display_label()
+            );
         }
         let resolved = match registry.resolve_by_name(name) {
             Ok(r) => r,
@@ -170,7 +203,8 @@ impl SessionActor {
             max_concurrency: None,
             resume_run_id: None,
         };
-        let launched = self.workflow_manager.lock().await.launch(resolved, spec);
+        let launched = manager.launch(resolved, spec);
+        drop(manager);
         match launched {
             Ok((run_id, outcome_rx)) => {
                 let (display, objective) = self
@@ -264,12 +298,22 @@ impl SessionActor {
                 let owned_by_deep_research =
                     self.behavior.lock().deep_research_run_id() == Some(full_id.as_str());
                 if owned_by_deep_research {
+                    let goal = self.goal_tracker.lock().snapshot().cloned();
+                    if let Err(error) = self
+                        .persist_control_snapshot_durably(
+                            crate::session::behavior::BehaviorSnapshot::normal(),
+                            goal,
+                        )
+                        .await
+                    {
+                        return format!("Could not durably stop Deep Research: {error}");
+                    }
                     self.cancel_deep_research_with_report(&full_id).await;
-                    self.behavior.lock().select_behavior(None);
-                    *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
-                    self.persist_behavior_state();
+                    self.behavior
+                        .lock()
+                        .select_behavior(tool_types::BehaviorId::Normal);
                     self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                        tools::types::SessionMode::Default.as_id(),
+                        tools::types::BehaviorId::Normal.as_id(),
                     ));
                 } else {
                     self.workflow_manager.lock().await.cancel(&full_id);
@@ -277,9 +321,31 @@ impl SessionActor {
                 format!("Stopped {name}.")
             }
             "resume" => {
-                if self.behavior.lock().is_plan() {
-                    return "Workflow cannot be resumed while Plan behavior is active. Complete or cancel the Plan first.".to_string();
+                // Resume is a fresh public-work admission. Serialize it with
+                // Behavior selection and re-read both Behavior and run state
+                // after acquiring the shared gate; the command may have been
+                // parsed before a concurrent switch or terminal event.
+                let mut manager = self.workflow_manager.lock().await;
+                let behavior = self.behavior.lock().behavior();
+                if matches!(
+                    behavior,
+                    tool_types::BehaviorId::Plan
+                        | tool_types::BehaviorId::Goal
+                        | tool_types::BehaviorId::DeepResearch
+                ) {
+                    return format!(
+                        "Workflow cannot be resumed while {} behavior is active.",
+                        behavior.display_label()
+                    );
                 }
+                let tracker = manager.tracker();
+                let (status, objective, agent_budget) = {
+                    let tracker = tracker.lock();
+                    let Some(run) = tracker.get(&full_id) else {
+                        return format!("Workflow run '{name}' disappeared before resume.");
+                    };
+                    (run.status, run.objective.clone(), run.agent_budget)
+                };
                 if status == WorkflowRunStatus::Active {
                     return format!("Run '{name}' is already running.");
                 }
@@ -291,7 +357,7 @@ impl SessionActor {
                 }
                 if status == WorkflowRunStatus::BudgetLimited {
                     let (used, limit) = {
-                        let tracker = self.workflow_tracker().await;
+                        let tracker = manager.tracker();
                         let tracker = tracker.lock();
                         let run = tracker.get(&full_id);
                         (
@@ -311,37 +377,19 @@ impl SessionActor {
                         "Run '{name}' exhausted its agent budget ({used}{limit} agents). \
                          Resuming keeps all finished work but needs a higher absolute cap — \
                          ask the agent to resume it with an agent budget above {used}, e.g. \
-                         \"resume {name} with an agent budget of {suggested}\"."
+                        \"resume {name} with an agent budget of {suggested}\"."
                     );
                 }
-                let (script, args) = {
-                    let manager = self.workflow_manager.lock().await;
-                    (
-                        manager.script_copy_for(&full_id),
-                        manager.args_copy_for(&full_id),
-                    )
-                };
+                let (script, args) = (
+                    manager.script_copy_for(&full_id),
+                    manager.args_copy_for(&full_id),
+                );
                 let Some(script) = script else {
                     return format!("No persisted script for '{name}'; cannot resume.");
                 };
                 let resolved = match crate::session::workflow::registry::resolve_inline(script) {
                     Ok(r) => r,
                     Err(e) => return format!("Persisted script invalid: {e}"),
-                };
-                let objective = {
-                    let tracker = self.workflow_tracker().await;
-                    tracker
-                        .lock()
-                        .get(&full_id)
-                        .map(|r| r.objective.clone())
-                        .unwrap_or_default()
-                };
-                let agent_budget = {
-                    let tracker = self.workflow_tracker().await;
-                    tracker
-                        .lock()
-                        .get(&full_id)
-                        .and_then(|run| run.agent_budget)
                 };
                 let objective_echo = objective.clone();
                 let spec = crate::session::workflow::manager::LaunchSpec {
@@ -351,7 +399,7 @@ impl SessionActor {
                     max_concurrency: None,
                     resume_run_id: Some(full_id.clone()),
                 };
-                match self.workflow_manager.lock().await.launch(resolved, spec) {
+                match manager.launch(resolved, spec) {
                     Ok((rid, outcome_rx)) => {
                         tokio::spawn(async move {
                             if let Ok(outcome) = outcome_rx.await {
@@ -414,7 +462,10 @@ impl SessionActor {
     }
 }
 
-fn deep_research_terminal_report(query: &str, outcome: &workflow::WorkflowOutcome) -> String {
+pub(super) fn deep_research_terminal_report(
+    query: &str,
+    outcome: &workflow::WorkflowOutcome,
+) -> String {
     use workflow::WorkflowOutcome;
     if let WorkflowOutcome::Completed { result } = outcome
         && let Some(report) = result.get("report").and_then(serde_json::Value::as_str)

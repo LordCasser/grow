@@ -144,7 +144,6 @@ impl AwaitingApprovalGuard<'_> {
     /// A decision arrived. The caller still owns the phase transition.
     fn resolve(mut self) {
         self.actor.behavior.lock().set_approval_pending(false);
-        self.actor.persist_behavior_state();
         self.armed = false;
     }
 
@@ -168,6 +167,15 @@ impl Drop for AwaitingApprovalGuard<'_> {
 }
 pub(super) fn is_plan_control_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
     matches!(kind, Some(tools::types::tool::ToolKind::PlanControl))
+}
+
+fn public_workflow_conflict(
+    admitted: tool_types::BehaviorId,
+    current: tool_types::BehaviorId,
+) -> Option<tool_types::BehaviorId> {
+    [current, admitted]
+        .into_iter()
+        .find(|behavior| behavior.owns_special_runtime())
 }
 /// Run Plan lifecycle transitions after every ordinary call in the batch.
 fn split_plan_control_tail(
@@ -208,7 +216,7 @@ pub(super) enum PlanEditGate {
 /// non-MCP access kinds. Callers resolve it from `McpState` (async) BEFORE
 /// taking the `behavior` lock.
 pub(super) fn plan_mode_edit_gate(
-    tracker: &crate::session::behavior::BehaviorController,
+    tracker: &crate::session::behavior::BehaviorCoordinator,
     tool_input: &ToolInput,
     access_kind: &AccessKind,
     mcp_scope: Option<tool_protocol::ToolScope>,
@@ -530,9 +538,11 @@ impl SessionActor {
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
-                let tracked_task_ids = goal_active
-                    .then(|| super::completion_delivery::wait_task_ids(&prepared.parsed_args))
-                    .unwrap_or_default();
+                let tracked_task_ids = if goal_active {
+                    super::completion_delivery::wait_task_ids(&prepared.parsed_args)
+                } else {
+                    Default::default()
+                };
                 let lock = lock_path_for_args(&prepared.parsed_args)
                     .and_then(|fp| file_locks.get(fp).cloned());
                 let tools_execute_span = tracing::Span::current();
@@ -995,12 +1005,42 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
+        let admitted_behavior = *self.turn_behavior.lock();
+        let declared_scope = self
+            .agent
+            .borrow()
+            .tool_bridge()
+            .tool_scope(&call.function.name);
+        if admitted_behavior == tool_types::BehaviorId::DeepResearch
+            && declared_scope != Some(tool_protocol::ToolScope::Read)
+        {
+            let message = "Rejected: Deep Research foreground turns are read-only.".to_string();
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
+        let current_behavior = self.behavior.lock().behavior();
+        if let Some(conflict) = matches!(tool_input, ToolInput::Workflow(_))
+            .then(|| public_workflow_conflict(admitted_behavior, current_behavior))
+            .flatten()
+        {
+            let message = format!(
+                "Rejected: public Workflow cannot run inside {} behavior.",
+                conflict.display_label()
+            );
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
         // Lock order: resolve the read-only MCP classification from the
         // (async) `mcp_state` BEFORE taking the `behavior` lock — never hold
         // one lock while awaiting the other.
         let mcp_scope = plan_gate_mcp_scope(&self.mcp_state, &access_kind).await;
-        let plan_gate =
-            plan_mode_edit_gate(&self.behavior.lock(), &tool_input, &access_kind, mcp_scope);
+        let plan_gate = if admitted_behavior == tool_types::BehaviorId::Plan {
+            plan_mode_edit_gate(&self.behavior.lock(), &tool_input, &access_kind, mcp_scope)
+        } else {
+            PlanEditGate::Allow
+        };
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(
                 "tool.decision",
@@ -1353,7 +1393,11 @@ impl SessionActor {
                     .await?;
                     return Ok(Err(ToolLoop::Continue));
                 }
-                self.finish_plan_to_default();
+                if let Err(message) = self.finish_plan_to_default().await {
+                    self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                        .await?;
+                    return Ok(Err(ToolLoop::Continue));
+                }
             } else {
                 let valid = match input.action {
                     PlanControlAction::Submit => self.behavior.lock().is_drafting_plan(),
@@ -1412,6 +1456,8 @@ impl SessionActor {
                     .await?;
                     return Ok(Err(ToolLoop::Continue));
                 }
+                let previous_behavior = self.behavior.lock().snapshot();
+                self.behavior.lock().record_plan_artifact(&plan_content);
                 let submitted = match input.action {
                     PlanControlAction::Submit => self.behavior.lock().submit_initial_plan(),
                     PlanControlAction::Amend => self.behavior.lock().submit_plan_amendment(),
@@ -1426,7 +1472,14 @@ impl SessionActor {
                 .await?;
                     return Ok(Err(ToolLoop::Continue));
                 }
-                self.persist_behavior_state();
+                if let Err(message) = self
+                    .commit_behavior_mutation_or_restore(previous_behavior)
+                    .await
+                {
+                    self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                        .await?;
+                    return Ok(Err(ToolLoop::Continue));
+                }
 
                 tracing::info!(
                     tool_call_id = %tool_call_id,
@@ -1439,7 +1492,11 @@ impl SessionActor {
                     Ok(parsed) => match PlanApprovalOutcome::from_response(&parsed) {
                         PlanApprovalOutcome::Abandoned => {
                             tracing::info!("plan_control: user abandoned Plan");
-                            self.finish_plan_to_default();
+                            if let Err(message) = self.finish_plan_to_default().await {
+                                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                    .await?;
+                                return Ok(Err(ToolLoop::Continue));
+                            }
                             let message = format!(
                                 "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
                                 call.function.name
@@ -1461,8 +1518,16 @@ impl SessionActor {
                             return Ok(Err(ToolLoop::Continue));
                         }
                         PlanApprovalOutcome::Cancelled => {
+                            let previous_behavior = self.behavior.lock().snapshot();
                             self.behavior.lock().reject_submitted_plan();
-                            self.persist_behavior_state();
+                            if let Err(message) = self
+                                .commit_behavior_mutation_or_restore(previous_behavior)
+                                .await
+                            {
+                                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                    .await?;
+                                return Ok(Err(ToolLoop::Continue));
+                            }
                             let message =
                                 revise_plan_message(parsed.feedback.as_deref().unwrap_or(""));
                             let tool_update = acp::ToolCallUpdate::new(
@@ -1491,8 +1556,11 @@ impl SessionActor {
                             .await
                             {
                                 tracing::error!(%error, "failed to freeze approved Plan artifact");
+                                let previous_behavior = self.behavior.lock().snapshot();
                                 self.behavior.lock().reject_submitted_plan();
-                                self.persist_behavior_state();
+                                let _ = self
+                                    .commit_behavior_mutation_or_restore(previous_behavior)
+                                    .await;
                                 self.handle_tool_not_executed(
                                     &call.id,
                                     &tool_call_id,
@@ -1501,6 +1569,7 @@ impl SessionActor {
                                 .await?;
                                 return Ok(Err(ToolLoop::Continue));
                             }
+                            let previous_behavior = self.behavior.lock().snapshot();
                             if !self.behavior.lock().approve_submitted_plan() {
                                 self.handle_tool_not_executed(
                                     &call.id,
@@ -1510,9 +1579,16 @@ impl SessionActor {
                                 .await?;
                                 return Ok(Err(ToolLoop::Continue));
                             }
-                            self.persist_behavior_state();
+                            if let Err(message) = self
+                                .commit_behavior_mutation_or_restore(previous_behavior)
+                                .await
+                            {
+                                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                    .await?;
+                                return Ok(Err(ToolLoop::Continue));
+                            }
                             self.enqueue_current_mode_update(acp::SessionModeId::new(
-                                tools::types::SessionMode::Plan.as_id(),
+                                tools::types::BehaviorId::Plan.as_id(),
                             ));
                             tracing::info!("plan_control: user approved frozen Plan contract");
                         }
@@ -1520,8 +1596,16 @@ impl SessionActor {
                     Err(err) => {
                         if ext_method_no_client(&err) {
                             tracing::warn!(%err, "plan_control: no approval client; failing closed");
+                            let previous_behavior = self.behavior.lock().snapshot();
                             self.behavior.lock().reject_submitted_plan();
-                            self.persist_behavior_state();
+                            if let Err(message) = self
+                                .commit_behavior_mutation_or_restore(previous_behavior)
+                                .await
+                            {
+                                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                    .await?;
+                                return Ok(Err(ToolLoop::Continue));
+                            }
                             self.handle_tool_not_executed(
                             &call.id,
                             &tool_call_id,
@@ -1601,8 +1685,7 @@ impl SessionActor {
             Some("info".into()),
         )
         .await;
-        self.behavior.lock().set_approval_pending(true);
-        self.persist_behavior_state();
+        debug_assert!(self.behavior.lock().approval_pending());
         let approval_guard = AwaitingApprovalGuard::new(self);
         let resp = {
             let _pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
@@ -1634,16 +1717,17 @@ impl SessionActor {
     /// Leave plan mode (approved/abandoned) and tell the client to show the
     /// Default mode. Mirrors the mid-turn exit so the resume re-park
     /// drives the mode change through the same path.
-    fn finish_plan_to_default(&self) {
+    async fn finish_plan_to_default(&self) -> Result<(), String> {
+        let previous_behavior = self.behavior.lock().snapshot();
         let deactivated = self.behavior.lock().finish_plan();
         if deactivated {
-            *self.current_prompt_mode.lock() = PromptMode::Agent;
-            *self.turn_prompt_mode.lock() = PromptMode::Agent;
-            self.persist_behavior_state();
+            self.commit_behavior_mutation_or_restore(previous_behavior)
+                .await?;
             self.enqueue_current_mode_update(acp::SessionModeId::new(
-                tools::types::SessionMode::Default.as_id(),
+                tools::types::BehaviorId::Normal.as_id(),
             ));
         }
+        Ok(())
     }
     /// Resume hook: re-issue the parked Plan approval
     /// after a session restored with `approval_pending == true`, so the
@@ -1693,14 +1777,21 @@ impl SessionActor {
         match resume_action_for(PlanApprovalOutcome::from_response(&parsed), parsed.feedback) {
             ResumeAction::LeaveOnly => {
                 tracing::info!("plan_control resume: user abandoned Plan");
-                self.finish_plan_to_default();
+                if let Err(error) = self.finish_plan_to_default().await {
+                    tracing::warn!(%error, "failed to persist abandoned Plan on resume");
+                }
             }
             ResumeAction::StayAndRevise(text) => {
                 tracing::info!("plan_control resume: user requested changes");
+                let previous_behavior = self.behavior.lock().snapshot();
                 self.behavior.lock().reject_submitted_plan();
-                self.persist_behavior_state();
-                self.start_resume_turn(text, PromptMode::Plan, completion_tx)
-                    .await;
+                if self
+                    .commit_behavior_mutation_or_restore(previous_behavior)
+                    .await
+                    .is_ok()
+                {
+                    self.start_resume_turn(text, completion_tx).await;
+                }
             }
             ResumeAction::LeaveAndImplement => {
                 tracing::info!("plan_control resume: user approved Plan");
@@ -1712,18 +1803,26 @@ impl SessionActor {
                 .await
                 {
                     tracing::error!(%error, "failed to freeze approved Plan artifact on resume");
+                    let previous_behavior = self.behavior.lock().snapshot();
                     self.behavior.lock().reject_submitted_plan();
-                    self.persist_behavior_state();
+                    let _ = self
+                        .commit_behavior_mutation_or_restore(previous_behavior)
+                        .await;
                     return;
                 }
+                let previous_behavior = self.behavior.lock().snapshot();
                 self.behavior.lock().approve_submitted_plan();
-                self.persist_behavior_state();
-                self.start_resume_turn(
-                    PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string(),
-                    PromptMode::Plan,
-                    completion_tx,
-                )
-                .await;
+                if self
+                    .commit_behavior_mutation_or_restore(previous_behavior)
+                    .await
+                    .is_ok()
+                {
+                    self.start_resume_turn(
+                        PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string(),
+                        completion_tx,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -1732,7 +1831,6 @@ impl SessionActor {
     async fn start_resume_turn(
         self: Arc<Self>,
         text: String,
-        mode: PromptMode,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
         let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
@@ -1743,7 +1841,6 @@ impl SessionActor {
             prompt_id,
             crate::session::PromptOrigin::PlanResume,
             crate::session::TurnKind::Internal,
-            mode,
             None,
             None,
             false,
@@ -2007,8 +2104,14 @@ impl SessionActor {
                 };
                 (title, acp::ToolKind::Other, vec![], vec![])
             }
-            ToolInput::UpdateGoalPlan(_) => (
-                "Goal: update plan".to_string(),
+            ToolInput::UpdateGoalProgress(_) => (
+                "Goal: update progress".to_string(),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::RequestGoalReplan(_) => (
+                "Goal: request replan".to_string(),
                 acp::ToolKind::Other,
                 vec![],
                 vec![],
@@ -2957,8 +3060,8 @@ mod plan_control_tail_predicate_tests {
 }
 #[cfg(test)]
 mod plan_mode_edit_gate_tests {
-    use super::{PlanEditGate, plan_gate_mcp_scope, plan_mode_edit_gate};
-    use crate::session::behavior::BehaviorController;
+    use super::{PlanEditGate, plan_gate_mcp_scope, plan_mode_edit_gate, public_workflow_conflict};
+    use crate::session::behavior::BehaviorCoordinator;
     use crate::session::mcp_servers::McpState;
     use std::sync::Arc;
     use tokio::sync::Mutex as TokioMutex;
@@ -2966,18 +3069,26 @@ mod plan_mode_edit_gate_tests {
     use workspace::permission::AccessKind;
     /// Tracker in Plan Drafting with the session artifact at
     /// `/tmp/gate-session/plan.md`.
-    fn active_tracker() -> BehaviorController {
-        let mut t = BehaviorController::new(std::path::PathBuf::from("/tmp/gate-session"));
-        assert!(t.select_behavior(Some(tool_types::BehaviorId::Plan)));
+    fn active_tracker() -> BehaviorCoordinator {
+        let mut t = BehaviorCoordinator::new(std::path::PathBuf::from("/tmp/gate-session"));
+        assert!(t.select_behavior(tool_types::BehaviorId::Plan));
         t
     }
+    #[test]
+    fn workflow_creation_observes_both_turn_and_current_behavior() {
+        use tool_types::BehaviorId::*;
+        assert_eq!(public_workflow_conflict(Normal, Plan), Some(Plan));
+        assert_eq!(public_workflow_conflict(Goal, Normal), Some(Goal));
+        assert_eq!(public_workflow_conflict(Normal, Normal), None);
+        assert_eq!(public_workflow_conflict(Workflow, Clarify), None);
+    }
     /// Non-MCP inputs resolve no read-only classification (`None`).
-    fn gate(tracker: &BehaviorController, input: &ToolInput) -> PlanEditGate {
+    fn gate(tracker: &BehaviorCoordinator, input: &ToolInput) -> PlanEditGate {
         plan_mode_edit_gate(tracker, input, &AccessKind::from(input), None)
     }
     /// MCP inputs carry the call-site-resolved side-effect scope.
     fn gate_mcp(
-        tracker: &BehaviorController,
+        tracker: &BehaviorCoordinator,
         input: &ToolInput,
         scope: tool_protocol::ToolScope,
     ) -> PlanEditGate {
@@ -3164,13 +3275,13 @@ mod plan_mode_edit_gate_tests {
     /// Normal allows edits; a selected Drafting Plan already narrows them.
     #[test]
     fn inactive_allows_edits_but_pending_plan_rejects_them() {
-        let inactive = BehaviorController::new(std::path::PathBuf::from("/tmp/gate-session"));
+        let inactive = BehaviorCoordinator::new(std::path::PathBuf::from("/tmp/gate-session"));
         assert_eq!(
             gate(&inactive, &search_replace("/tmp/src/main.rs")),
             PlanEditGate::Allow
         );
-        let mut pending = BehaviorController::new(std::path::PathBuf::from("/tmp/gate-session"));
-        assert!(pending.select_behavior(Some(tool_types::BehaviorId::Plan)));
+        let mut pending = BehaviorCoordinator::new(std::path::PathBuf::from("/tmp/gate-session"));
+        assert!(pending.select_behavior(tool_types::BehaviorId::Plan));
         assert_eq!(
             gate(&pending, &search_replace("/tmp/src/main.rs")),
             PlanEditGate::RejectEdit

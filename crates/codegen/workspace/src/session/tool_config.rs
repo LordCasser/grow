@@ -61,9 +61,8 @@ pub(crate) fn resolve_session_toolset(
 /// the caller can store it on the session. The FinalizedToolset reflects
 /// MCP merging and capability filtering on top of that baseline.
 ///
-/// **MCP-origin `kind: None` tools are dropped under
-/// every non-`All` mode.** Baseline `kind: None` tools are always kept —
-/// but before filtering, kind-less baseline entries whose id the binary's
+/// Every `kind: None` tool is dropped under a non-`All` mode. Before
+/// filtering, kind-less baseline entries whose id the binary's
 /// registry knows get their [`ToolKind`] backfilled (see
 /// [`backfill_tool_kinds`]), so the capability filter applies to pinned
 /// server-bind toolsets whose wire entries cannot carry a kind.
@@ -110,9 +109,9 @@ pub(crate) fn resolve_session_toolset_rebuild(
 /// Backfill `kind: None` baseline entries from the binary's own registry
 /// (fully-qualified id -> declared [`ToolKind`]).
 ///
-/// Ids unknown to the registry stay `None` and keep the always-kept
-/// baseline behavior (ad-hoc `ToolConfig::simple` tools). Entries that
-/// already carry a kind are left untouched.
+/// Ids unknown to the registry stay `None` and are dropped by every
+/// restricted capability mode. Entries that already carry a kind are left
+/// untouched.
 fn backfill_tool_kinds(
     config: &ToolServerConfig,
     kinds: &HashMap<String, ToolKind>,
@@ -136,7 +135,7 @@ fn backfill_tool_kinds(
 ///
 /// - **Step 2** -- MCP merge: append MCP-origin tools, skipping ID/name collisions with baseline.
 /// - **Step 3** -- Capability filter: drop tools whose `kind` is not allowed by the mode.
-///   MCP tools with `kind: None` are only kept under `CapabilityMode::All`.
+///   Every tool with `kind: None` is only kept under `CapabilityMode::All`.
 ///
 /// Priority on ID/name collision: baseline wins over MCP.
 pub(crate) fn merge_and_filter(
@@ -158,8 +157,7 @@ pub(crate) fn merge_and_filter(
             t.resolve_client_name(unqualified)
         })
         .collect();
-    let mut tagged: Vec<(ToolConfig, bool)> =
-        baseline.tools.iter().cloned().map(|t| (t, false)).collect();
+    let mut merged: Vec<ToolConfig> = baseline.tools.clone();
     for mcp_tool in mcp_snapshot {
         if baseline_ids.contains(mcp_tool.id.as_str()) {
             tracing::warn!(
@@ -179,16 +177,14 @@ pub(crate) fn merge_and_filter(
             );
             continue;
         }
-        tagged.push((mcp_tool.clone(), true));
+        merged.push(mcp_tool.clone());
     }
-    let kept: Vec<ToolConfig> = tagged
+    let kept: Vec<ToolConfig> = merged
         .into_iter()
-        .filter(|(tool, is_external)| match tool.kind {
+        .filter(|tool| match tool.kind {
             Some(k) => kind_allowed(mode, k),
-            None if !*is_external => true,
             None => matches!(mode, CapabilityMode::All),
         })
-        .map(|(t, _)| t)
         .collect();
     ToolServerConfig {
         tools: kept,
@@ -664,8 +660,8 @@ mod tests {
         let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::ReadOnly, "test_session");
         let kept_ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(
-            kept_ids.contains(&"baseline.opaque"),
-            "baseline kind: None must survive ReadOnly: {kept_ids:?}"
+            !kept_ids.contains(&"baseline.opaque"),
+            "baseline kind: None must fail closed under ReadOnly: {kept_ids:?}"
         );
         assert!(
             !kept_ids.contains(&"mcp.opaque"),

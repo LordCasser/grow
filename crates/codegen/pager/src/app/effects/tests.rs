@@ -1547,7 +1547,7 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
 /// dropping it. The fake agent answers the `SetSessionMode` RPC with the
 /// shell's `BehaviorChangeOutcome::ConfirmationRequired` response meta.
 #[tokio::test]
-async fn set_mode_then_prompt_confirmation_required_parks_prompt_in_task_result() {
+async fn set_mode_then_prompt_confirmation_required_returns_prompt_to_fifo_result() {
     use std::sync::Arc;
     use acp_transport::AcpAgentMessage;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1560,7 +1560,7 @@ async fn set_mode_then_prompt_confirmation_required_parks_prompt_in_task_result(
                         serde_json::json!({
                             "grow/behaviorChange": {
                                 "status": "confirmation_required",
-                                "message": "Switching to Plan will interrupt the active default work. Press Enter to confirm the switch, or press Esc to cancel.",
+                                "message": "Switching to Plan will interrupt active work. Select it again to confirm.",
                                 "remainingMs": 8000,
                             }
                         })
@@ -1594,15 +1594,19 @@ async fn set_mode_then_prompt_confirmation_required_parks_prompt_in_task_result(
             mode_id,
             text,
             prompt_id,
+            skill_token_ranges,
             message,
+            remaining_ms,
         } => {
             assert_eq!(agent_id, AgentId(0));
             assert_eq!(session_id.0.as_ref(), "s1");
             assert_eq!(mode_id.0.as_ref(), "plan");
             assert_eq!(text, "keep this prompt", "the prompt text must survive");
             assert_eq!(prompt_id, "p-1");
+            assert_eq!(skill_token_ranges, vec![6..18]);
+            assert_eq!(remaining_ms, 8_000);
             assert!(
-                message.contains("Press Enter to confirm the switch"),
+                message.contains("Select it again to confirm"),
                 "the shell's confirm hint must ride the message: {message}"
             );
         }

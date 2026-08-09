@@ -270,6 +270,7 @@ pub(crate) fn committed_appearance(base: &AppearanceConfig) -> AppearanceConfig 
     a
 }
 
+#[cfg(test)]
 pub(crate) fn committed_frame() -> pager::motion::FrameStamp {
     pager::motion::FrameStamp::default()
 }
@@ -406,7 +407,11 @@ fn paint_committed(
 /// resumed session looks empty (nothing redrawn). The commit frontier
 /// (`committed` flags + `commit_scan_cursor`) still guarantees each block prints
 /// exactly once.
-pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
+pub fn commit_active(
+    app: &mut AppView,
+    terminal: &mut PagerTerminal,
+    frame: pager::motion::FrameStamp,
+) {
     let id = match &app.active_view {
         ActiveView::Agent(id) => *id,
         _ => return, // welcome / dashboard: nothing to commit
@@ -473,7 +478,7 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
             // place later (`get_by_id_mut` + edit, the `/recap` fill pattern)
             // will NOT reach the screen — append a fresh block instead (see
             // the `SessionRecap` handler in `acp_handler.rs`).
-            let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, committed_frame());
+            let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, frame);
             if insert_committed(terminal, renderer, width, max_rows, footer_style).is_err() {
                 return false;
             }
@@ -517,7 +522,11 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
 /// the block under `minimal_max_commit_rows`, and this is the explicit "show me
 /// the whole thing" action — capping it again just reprinted the same footer
 /// (bugbot). A one-shot user-initiated tall insert is an acceptable burst.
-pub fn expand_pending(app: &mut AppView, terminal: &mut PagerTerminal) {
+pub fn expand_pending(
+    app: &mut AppView,
+    terminal: &mut PagerTerminal,
+    frame: pager::motion::FrameStamp,
+) {
     if minimal_api::minimal_pending_expand(app).is_empty() {
         return;
     }
@@ -567,8 +576,7 @@ pub fn expand_pending(app: &mut AppView, terminal: &mut PagerTerminal) {
                 e.set_display_mode(DisplayMode::Expanded);
             }
             if let Some(e) = sb.get(idx) {
-                let renderer =
-                    minimal_renderer(e, &theme, appearance.clone(), cwd, committed_frame());
+                let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, frame);
                 if insert_committed(terminal, renderer, width, 0, footer_style).is_err() {
                     // Terminal write failed: keep this id and the rest queued
                     // so the request retries next frame instead of vanishing.

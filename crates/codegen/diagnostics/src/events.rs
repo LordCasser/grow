@@ -202,17 +202,6 @@ impl McpErrorType {
 
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-pub enum BehaviorKind {
-    Normal,
-    Clarify,
-    Plan,
-    Workflow,
-    DeepResearch,
-    Goal,
-}
-
-#[derive(Serialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
 pub enum PlanPhase {
     Drafting,
     AwaitingApproval,
@@ -783,7 +772,7 @@ pub struct SessionLoad {
     pub compaction_count: u64,
     pub turn_count: u64,
     pub tool_call_count: u64,
-    pub behavior: BehaviorKind,
+    pub behavior: tool_types::BehaviorId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_phase: Option<PlanPhase>,
     pub permission_mode: PermissionMode,
@@ -810,8 +799,8 @@ pub struct PromptSubmitted {
     pub client_identifier: Option<String>,
     /// Pager screen mode from the prompt request `_meta.screenMode`
     /// (`fullscreen` | `inline` | `minimal` | `headless`). `None` for
-    /// non-pager clients and synthetic prompts (goal summaries, drains,
-    /// interjections).
+    /// non-pager clients and internal prompts (workflow wakes, drains,
+    /// compaction).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
 }

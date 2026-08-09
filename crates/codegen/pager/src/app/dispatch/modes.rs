@@ -8,6 +8,49 @@ use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 
+fn unavailable_reason(
+    agent: &crate::app::agent_view::AgentView,
+    mode: tools::types::BehaviorId,
+) -> Option<String> {
+    if let Some(availability) = agent.session.tracker.behavior_availability() {
+        let Some(choice) = availability.choice(mode) else {
+            return Some(format!(
+                "{} behavior was not advertised by the Shell",
+                mode.display_label()
+            ));
+        };
+        if choice.disposition == tools::types::BehaviorAvailabilityDisposition::Unavailable {
+            return Some(
+                choice
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| format!("{} behavior is unavailable", mode.display_label())),
+            );
+        }
+        return None;
+    }
+    // Bootstrap fallback: both signals still originate in the Shell's
+    // AvailableCommandsUpdate. Once the structured projection arrives, it is
+    // the only local source used for Behavior admission hints.
+    let unavailable = match mode {
+        tools::types::BehaviorId::Workflow => !agent.prompt.slash_controller.workflows_available(),
+        tools::types::BehaviorId::DeepResearch => agent
+            .prompt
+            .slash_controller
+            .registry()
+            .get("deep-research")
+            .is_none(),
+        tools::types::BehaviorId::Goal => agent
+            .prompt
+            .slash_controller
+            .registry()
+            .get("goal")
+            .is_none(),
+        _ => false,
+    };
+    unavailable.then(|| format!("{} behavior is unavailable", mode.display_label()))
+}
+
 /// Show the current plan: if a plan file exists, open it in the preview
 /// overlay popover. If no plan has been written yet, show a toast.
 ///
@@ -29,7 +72,7 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
 /// delivered to the old Behavior while confirmation or rejection is pending.
 pub(super) fn dispatch_set_behavior_then_prompt(
     app: &mut AppView,
-    mode: tools::types::SessionMode,
+    mode: tools::types::BehaviorId,
     prompt: Option<String>,
 ) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
@@ -39,24 +82,8 @@ pub(super) fn dispatch_set_behavior_then_prompt(
         return vec![];
     };
 
-    let unavailable = match mode {
-        tools::types::SessionMode::Workflow => !agent.prompt.slash_controller.workflows_available(),
-        tools::types::SessionMode::DeepResearch => agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("deep-research")
-            .is_none(),
-        tools::types::SessionMode::Goal => agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("goal")
-            .is_none(),
-        _ => false,
-    };
-    if unavailable {
-        agent.show_toast(&format!("{} behavior is unavailable", mode.as_id()));
+    if let Some(reason) = unavailable_reason(agent, mode) {
+        agent.show_toast(&reason);
         return vec![];
     }
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -118,7 +145,7 @@ pub(super) fn dispatch_set_behavior_then_prompt(
 /// guards such as an active Workflow run blocking entry into Plan.
 pub(super) fn dispatch_set_behavior_mode(
     app: &mut AppView,
-    mode: tools::types::SessionMode,
+    mode: tools::types::BehaviorId,
 ) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -126,24 +153,8 @@ pub(super) fn dispatch_set_behavior_mode(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    let unavailable = match mode {
-        tools::types::SessionMode::Workflow => !agent.prompt.slash_controller.workflows_available(),
-        tools::types::SessionMode::DeepResearch => agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("deep-research")
-            .is_none(),
-        tools::types::SessionMode::Goal => agent
-            .prompt
-            .slash_controller
-            .registry()
-            .get("goal")
-            .is_none(),
-        _ => false,
-    };
-    if unavailable {
-        agent.show_toast("This behavior is unavailable in this session");
+    if let Some(reason) = unavailable_reason(agent, mode) {
+        agent.show_toast(&reason);
         return vec![];
     }
     let effective = agent.behavior_mode_pending.unwrap_or(agent.behavior_mode);
@@ -151,7 +162,7 @@ pub(super) fn dispatch_set_behavior_mode(
         agent.show_toast("Behavior is already selected");
         return vec![];
     }
-    if mode == tools::types::SessionMode::Plan
+    if mode == tools::types::BehaviorId::Plan
         && agent.ephemeral_tip.current_key() == Some(crate::tips::plan_nudge::PLAN_NUDGE_KEY)
     {
         diagnostics::session_ctx::log_event(diagnostics::events::ContextualTip {
@@ -168,7 +179,7 @@ pub(super) fn dispatch_set_behavior_mode(
 
     let session_id = agent.session.session_id.clone();
     if session_id.is_none() {
-        agent.deferred_session_mode = (mode != tools::types::SessionMode::Default).then_some(mode);
+        agent.deferred_session_mode = (mode != tools::types::BehaviorId::Normal).then_some(mode);
     }
     refresh_open_settings_modals(app);
     let Some(session_id) = session_id else {
@@ -177,66 +188,6 @@ pub(super) fn dispatch_set_behavior_mode(
     vec![Effect::SetSessionMode {
         session_id,
         mode_id: acp::SessionModeId::new(mode.as_id()),
-    }]
-}
-
-pub(super) fn dispatch_dismiss_behavior_switch_warning(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    agent.behavior_switch_warning_pending = false;
-    agent.mode_switch_banner = None;
-    agent.behavior_mode_pending = None;
-    // The user cancelled: drop the parked switch AND any stashed prompt.
-    agent.behavior_switch_confirm = None;
-    let Some(session_id) = agent.session.session_id.clone() else {
-        return vec![];
-    };
-    vec![Effect::SetSessionMode {
-        session_id,
-        mode_id: acp::SessionModeId::new(agent.behavior_mode.as_id()),
-    }]
-}
-
-/// Enter on an interrupting-switch warning: confirm the parked switch.
-///
-/// With a stashed mode+prompt, replays it through
-/// [`dispatch_set_behavior_then_prompt`] (fresh prompt id, recomputed skill
-/// token ranges) so the prompt text survives the confirmation round-trip.
-/// Without one, re-issues the `SetSessionMode` for the parked target — the
-/// shell's second same-target request within the window applies the switch.
-pub(super) fn dispatch_confirm_behavior_switch_warning(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    let Some(confirm) = agent.behavior_switch_confirm.take() else {
-        // Nothing parked (stale banner or double-Enter): degrade to the
-        // dismiss semantics so the warning state can never wedge.
-        agent.behavior_switch_warning_pending = false;
-        agent.mode_switch_banner = None;
-        agent.behavior_mode_pending = None;
-        return vec![];
-    };
-    agent.behavior_switch_warning_pending = false;
-    agent.mode_switch_banner = None;
-    if let Some(prompt) = confirm.prompt {
-        // Replay the stashed prompt through the normal mode+prompt path.
-        return dispatch_set_behavior_then_prompt(app, confirm.target, Some(prompt.text));
-    }
-    agent.behavior_mode_pending = Some(confirm.target);
-    let Some(session_id) = agent.session.session_id.clone() else {
-        agent.show_toast("No active session");
-        return vec![];
-    };
-    vec![Effect::SetSessionMode {
-        session_id,
-        mode_id: acp::SessionModeId::new(confirm.target.as_id()),
     }]
 }
 

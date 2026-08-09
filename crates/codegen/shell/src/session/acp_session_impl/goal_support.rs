@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SubagentTokenRecord {
     pub goal_id: Option<String>,
     pub resume_anchor_cumulative: u64,
@@ -26,12 +26,14 @@ impl SubagentTokenRecord {
 
 pub(crate) fn goal_slash_and_harness_available(goal_enabled: bool, tool_names: &[String]) -> bool {
     use tools::implementations::grow_build::{
-        GET_GOAL_TOOL_NAME, UPDATE_GOAL_PLAN_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
+        GET_GOAL_TOOL_NAME, REQUEST_GOAL_REPLAN_TOOL_NAME, UPDATE_GOAL_PROGRESS_TOOL_NAME,
+        UPDATE_GOAL_TOOL_NAME,
     };
     goal_enabled
         && [
             GET_GOAL_TOOL_NAME,
-            UPDATE_GOAL_PLAN_TOOL_NAME,
+            UPDATE_GOAL_PROGRESS_TOOL_NAME,
+            REQUEST_GOAL_REPLAN_TOOL_NAME,
             UPDATE_GOAL_TOOL_NAME,
         ]
         .into_iter()
@@ -73,6 +75,98 @@ fn fold_tokens_by_model<'a>(
 }
 
 impl SessionActor {
+    /// Publish the immutable ownership snapshot consumed by tools in one
+    /// admitted turn. Callers install a gated `RegularTurn` before awaiting
+    /// this method, then release the gate after it returns.
+    pub(super) async fn publish_turn_scope_resources(
+        &self,
+        prompt_id: String,
+        origin: &crate::session::PromptOrigin,
+        admitted_behavior: tool_types::BehaviorId,
+    ) {
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        // A delegated Goal child is a fixed-revision capability context, not a
+        // new independent session. Preserve that ownership when it spawns a
+        // descendant so nested work cannot escape Goal object permissions or
+        // lose revision audit data merely because child sessions use Normal
+        // as their visible Behavior.
+        let inherited_goal_context = bridge
+            .read_resource::<tools::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
+            .await
+            .and_then(|resource| resource.0);
+        let expected_goal_id = match origin {
+            crate::session::PromptOrigin::GoalContinuation { goal_id, .. }
+            | crate::session::PromptOrigin::GoalFinalization { goal_id, .. } => {
+                Some(goal_id.as_str())
+            }
+            crate::session::PromptOrigin::User
+                if admitted_behavior == tool_types::BehaviorId::Goal =>
+            {
+                None
+            }
+            _ => Some(""),
+        };
+        let (subagent_owner, delegation_snapshot) = if let Some(context) = inherited_goal_context {
+            (
+                tools::implementations::grow_build::task::types::SubagentOwner::goal(
+                    &context.view.goal_id,
+                    context.view.objective_revision,
+                    context.view.plan_revision,
+                    context.view.board_revision,
+                    context.role,
+                ),
+                Some(context.view),
+            )
+        } else {
+            let goal_snapshot = (expected_goal_id != Some(""))
+                .then(|| self.goal_tracker.lock().snapshot().cloned())
+                .flatten()
+                .filter(|goal| {
+                    goal.status == crate::session::goal_tracker::GoalStatus::Active
+                        && expected_goal_id.is_none_or(|expected| expected == goal.goal_id)
+                });
+            goal_snapshot
+                .as_ref()
+                .map(|goal| {
+                    (
+                        tools::implementations::grow_build::task::types::SubagentOwner::goal(
+                            &goal.goal_id,
+                            goal.objective_revision,
+                            goal.board.plan_revision,
+                            goal.board.board_revision,
+                            tools::implementations::grow_build::task::types::GoalSubagentRole::Worker,
+                        ),
+                        Some(super::goal::goal_view_from_snapshot(goal, 0)),
+                    )
+                })
+                .unwrap_or_default()
+        };
+
+        *self
+            .current_prompt_id
+            .lock()
+            .expect("current_prompt_id mutex poisoned") = Some(prompt_id.clone());
+        bridge
+            .update_resource(
+                tools::implementations::grow_build::task::types::CurrentPromptIdResource(prompt_id),
+            )
+            .await;
+        bridge
+            .update_resource(
+                tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource(
+                    subagent_owner,
+                ),
+            )
+            .await;
+        bridge
+            .update_resource(
+                tools::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(
+                    delegation_snapshot,
+                ),
+            )
+            .await;
+    }
+
     pub(super) fn goal_notify_sender(&self) -> crate::session::goal_orchestrator::GoalNotifySender {
         crate::session::goal_orchestrator::GoalNotifySender::new(
             self.session_info.id.clone(),
@@ -81,11 +175,25 @@ impl SessionActor {
         )
     }
 
-    pub(super) async fn delete_goal_state_durably(&self) -> std::io::Result<()> {
+    pub(super) async fn persist_control_snapshot_durably(
+        &self,
+        behavior: crate::session::behavior::BehaviorSnapshot,
+        goal: Option<crate::session::goal_tracker::GoalOrchestration>,
+    ) -> std::io::Result<()> {
         let (respond_to, deleted) = tokio::sync::oneshot::channel();
+        let revision = self
+            .control_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        let state = crate::session::control::SessionControlSnapshot::new(revision, behavior, goal);
         self.notifications
             .persistence_tx
-            .send(crate::session::persistence::PersistenceMsg::DeleteGoalModeState { respond_to })
+            .send(
+                crate::session::persistence::PersistenceMsg::SessionControlAndAck {
+                    state,
+                    respond_to,
+                },
+            )
             .map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, "persistence actor closed")
             })?;
@@ -95,6 +203,24 @@ impl SessionActor {
                 "persistence actor dropped Goal deletion acknowledgement",
             )
         })?
+    }
+
+    pub(super) async fn delete_goal_state_durably(&self) -> std::io::Result<()> {
+        let behavior = self.behavior.lock().snapshot();
+        self.persist_control_snapshot_durably(behavior, None).await
+    }
+
+    pub(super) async fn commit_goal_mutation_or_restore(
+        &self,
+        previous: crate::session::goal_tracker::GoalOrchestration,
+    ) -> Result<(), String> {
+        let next = self.goal_tracker.lock().snapshot().cloned();
+        let behavior = self.behavior.lock().snapshot();
+        if let Err(error) = self.persist_control_snapshot_durably(behavior, next).await {
+            self.goal_tracker.lock().restore_runtime_snapshot(previous);
+            return Err(format!("Goal control state was not persisted: {error}"));
+        }
+        Ok(())
     }
 
     /// Snapshot the only Goal state that is allowed to survive actor teardown,
@@ -109,9 +235,12 @@ impl SessionActor {
         self.settle_live_goal_subagent_tokens();
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let _ = self.goal_tokens(current_tokens);
-        let mut tracker = self.goal_tracker.lock();
-        tracker.account_elapsed();
-        self.goal_notify_sender().persist_goal_state(&tracker);
+        self.goal_tracker.lock().account_elapsed();
+        let behavior = self.behavior.lock().snapshot();
+        let goal = self.goal_tracker.lock().snapshot().cloned();
+        if let Err(error) = self.persist_control_snapshot_durably(behavior, goal).await {
+            tracing::warn!(%error, "failed to checkpoint Goal control state before shutdown");
+        }
     }
 
     pub(super) fn goal_harness_enabled(&self) -> bool {
@@ -153,7 +282,7 @@ impl SessionActor {
         if !enabled {
             self.auto_pause_goal_if_active_with_message(
                 crate::session::goal_tracker::GoalPauseReason::Infra,
-                "Goal runtime paused because one or more required Goal tools are unavailable. Re-enable get_goal, update_goal_plan, and update_goal before resuming."
+                "Goal runtime paused because one or more required Goal tools are unavailable. Re-enable get_goal, update_goal_progress, request_goal_replan, and update_goal before resuming."
                     .to_string(),
             )
             .await;
@@ -187,7 +316,7 @@ impl SessionActor {
     }
 
     pub(super) async fn inject_paused_goal_interaction_directive(&self) {
-        if self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal)
+        if self.behavior.lock().behavior() == tool_types::BehaviorId::Goal
             && self
                 .goal_tracker
                 .lock()
@@ -251,9 +380,7 @@ impl SessionActor {
                 records.remove(subagent_id);
                 return None;
             }
-            let Some(record) = records.get_mut(subagent_id) else {
-                return None;
-            };
+            let record = records.get_mut(subagent_id)?;
             record.last_cumulative_reported = record.last_cumulative_reported.max(reported_tokens);
             if record.goal_id != current_goal_id {
                 records.remove(subagent_id);

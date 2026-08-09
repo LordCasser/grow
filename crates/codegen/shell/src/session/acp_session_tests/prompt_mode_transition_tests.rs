@@ -1,28 +1,5 @@
 use super::support::build_actor;
 use super::*;
-#[test]
-fn prompt_mode_from_session_mode_id_uses_acp_session_mode() {
-    assert_eq!(
-        PromptMode::Ask,
-        prompt_mode_from_session_mode_id(&acp::SessionModeId::new("ask"))
-    );
-    assert_eq!(
-        PromptMode::Plan,
-        prompt_mode_from_session_mode_id(&acp::SessionModeId::new("plan"))
-    );
-    assert_eq!(
-        PromptMode::Workflow,
-        prompt_mode_from_session_mode_id(&acp::SessionModeId::new("workflow"))
-    );
-    assert_eq!(
-        PromptMode::Agent,
-        prompt_mode_from_session_mode_id(&acp::SessionModeId::new("normal"))
-    );
-    assert_eq!(
-        PromptMode::Agent,
-        prompt_mode_from_session_mode_id(&acp::SessionModeId::new("browser_use"))
-    );
-}
 
 #[tokio::test]
 async fn behavior_gateway_rejects_agent_role_ids_instead_of_switching_to_normal() {
@@ -33,11 +10,14 @@ async fn behavior_gateway_rejects_agent_role_ids_instead_of_switching_to_normal(
             actor
                 .behavior
                 .lock()
-                .select_behavior(Some(tool_types::BehaviorId::Clarify));
+                .select_behavior(tool_types::BehaviorId::Clarify);
 
-            let outcome = actor
-                .request_behavior_change(acp::SessionModeId::new("browser_use"))
-                .await;
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                actor.request_behavior_change(acp::SessionModeId::new("browser_use")),
+            )
+            .await
+            .expect("Behavior admission must not recursively acquire the Workflow gate");
 
             assert!(matches!(
                 outcome,
@@ -45,7 +25,7 @@ async fn behavior_gateway_rejects_agent_role_ids_instead_of_switching_to_normal(
             ));
             assert_eq!(
                 actor.behavior.lock().behavior(),
-                Some(tool_types::BehaviorId::Clarify)
+                tool_types::BehaviorId::Clarify
             );
         })
         .await;
@@ -102,21 +82,21 @@ fn plan_hides_workflow_launcher_but_default_keeps_it() {
 /// Pins the direct mapping from prompt metadata to mutually exclusive Behavior.
 #[test]
 fn prompt_mode_selects_exactly_one_behavior() {
-    use crate::session::behavior::{BehaviorController, BehaviorState, PlanPhase};
+    use crate::session::behavior::{BehaviorCoordinator, BehaviorState, PlanPhase};
     use std::path::PathBuf;
-    fn reconcile(tracker: &mut BehaviorController, mode: PromptMode) {
-        tracker.select_behavior(mode.behavior());
+    fn reconcile(tracker: &mut BehaviorCoordinator, mode: tool_types::BehaviorId) {
+        tracker.select_behavior(mode);
     }
-    let mut tracker = BehaviorController::new(PathBuf::from("/tmp/test"));
+    let mut tracker = BehaviorCoordinator::new(PathBuf::from("/tmp/test"));
     assert_eq!(tracker.state(), BehaviorState::Normal);
-    reconcile(&mut tracker, PromptMode::Plan);
+    reconcile(&mut tracker, tool_types::BehaviorId::Plan);
     assert_eq!(tracker.state(), BehaviorState::Plan(PlanPhase::Drafting));
-    reconcile(&mut tracker, PromptMode::Plan);
+    reconcile(&mut tracker, tool_types::BehaviorId::Plan);
     assert_eq!(tracker.state(), BehaviorState::Plan(PlanPhase::Drafting));
-    reconcile(&mut tracker, PromptMode::Agent);
+    reconcile(&mut tracker, tool_types::BehaviorId::Normal);
     assert_eq!(tracker.state(), BehaviorState::Normal);
-    reconcile(&mut tracker, PromptMode::Plan);
+    reconcile(&mut tracker, tool_types::BehaviorId::Plan);
     assert_eq!(tracker.state(), BehaviorState::Plan(PlanPhase::Drafting));
-    reconcile(&mut tracker, PromptMode::Ask);
+    reconcile(&mut tracker, tool_types::BehaviorId::Clarify);
     assert_eq!(tracker.state(), BehaviorState::Clarify);
 }

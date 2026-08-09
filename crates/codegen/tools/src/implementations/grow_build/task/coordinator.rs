@@ -25,10 +25,9 @@ use super::coordinator_state::{
     completion_summary, sleep_until, workflow_outstanding,
 };
 use super::types::{
-    SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
-    SubagentEvent, SubagentOutstandingReply, SubagentOwner, SubagentRegistryCounts,
-    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentResumeSource,
-    SubagentValidateTypeOutcome,
+    SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentEvent,
+    SubagentOutstandingReply, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
+    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentValidateTypeOutcome,
 };
 
 pub use super::coordinator_state::{
@@ -60,7 +59,6 @@ pub struct SubagentCoordinator<R: ChildRunner> {
         TaggedFuture<futures::future::CatchUnwind<std::panic::AssertUnwindSafe<R::RunFuture>>>,
     >,
     validations: FuturesUnordered<ReplyFuture<R::ValidateFuture, SubagentValidateTypeOutcome>>,
-    descriptions: FuturesUnordered<ReplyFuture<R::DescribeFuture, SubagentDescribeOutcome>>,
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
@@ -105,7 +103,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             pending_completions: Vec::new(),
             runs: FuturesUnordered::new(),
             validations: FuturesUnordered::new(),
-            descriptions: FuturesUnordered::new(),
             progress: FuturesUnordered::new(),
             list_requests: HashMap::new(),
             next_list_request_id: 0,
@@ -118,7 +115,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             if !commands_open
                 && self.runs.is_empty()
                 && self.validations.is_empty()
-                && self.descriptions.is_empty()
                 && self.progress.is_empty()
             {
                 break;
@@ -135,9 +131,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     }
                 }
                 Some((respond_to, outcome)) = self.validations.next(), if !self.validations.is_empty() => {
-                    let _ = respond_to.send(outcome);
-                }
-                Some((respond_to, outcome)) = self.descriptions.next(), if !self.descriptions.is_empty() => {
                     let _ = respond_to.send(outcome);
                 }
                 Some((seed, target, progress)) = self.progress.next(), if !self.progress.is_empty() => {
@@ -471,16 +464,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         self.runner
                             .validate_type(request.subagent_type, request.parent_session_id),
                     ),
-                    respond_to: Some(request.respond_to),
-                });
-            }
-            SubagentEvent::DescribeType(request) => {
-                self.descriptions.push(ReplyFuture {
-                    future: Box::pin(self.runner.describe_type(
-                        request.subagent_type,
-                        request.harness_agent_type,
-                        request.parent_session_id,
-                    )),
                     respond_to: Some(request.respond_to),
                 });
             }

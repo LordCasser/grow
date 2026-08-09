@@ -14,7 +14,6 @@ pub mod process_manager;
 pub mod requirements;
 pub mod resources;
 pub mod schema;
-pub mod session_mode;
 pub mod skill_discovery_tracker;
 pub mod template_renderer;
 pub mod tool;
@@ -32,6 +31,8 @@ pub use definition::{FunctionTool, ToolDefinition, ToolType};
 pub use memory_backend::MemoryBackend;
 pub use process_manager::{KillOutcome, TaskSnapshot, format_system_time_rfc3339};
 pub use schema::GrowIntegerSchema;
-pub use session_mode::SessionMode;
 pub use tool_index::{SearchSnapshot, ServerSummary, ToolIndex, ToolSearchIndex, ToolSearchResult};
 pub use tool_io::{MCPToolInput, ToolInput};
+pub use tool_types::{
+    BehaviorAvailability, BehaviorAvailabilityDisposition, BehaviorAvailabilityEntry, BehaviorId,
+};

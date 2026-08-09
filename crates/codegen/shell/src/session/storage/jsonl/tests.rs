@@ -2036,7 +2036,7 @@ async fn copy_session_preserves_head_fields() {
     assert_eq!(loaded.head_branch.as_deref(), Some("feature-branch"));
 }
 #[tokio::test]
-async fn copy_behavior_state_false_skips_behavior() {
+async fn copy_session_control_false_skips_control_snapshot() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
     let source_info = Info {
@@ -2048,21 +2048,85 @@ async fn copy_behavior_state_false_skips_behavior() {
         cwd: "/tgt".to_string(),
     };
     adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    std::fs::write(adapter.behavior_state_file(&source_info), b"{}").unwrap();
+    adapter
+        .write_session_control(
+            &source_info,
+            &crate::session::control::SessionControlSnapshot::new(
+                1,
+                crate::session::behavior::BehaviorSnapshot::selected(
+                    tool_types::BehaviorId::Clarify,
+                ),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
     let result = adapter
         .copy_session_data(
             &source_info,
             &target_info,
             CopySessionOptions {
-                copy_behavior_state: false,
+                copy_session_control: false,
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-    assert!(!result.behavior_state_copied);
-    assert!(!adapter.behavior_state_file(&target_info).exists());
+    assert!(!result.session_control_copied);
+    assert!(!adapter.session_control_file(&target_info).exists());
 }
+
+#[tokio::test]
+async fn forked_control_snapshot_drops_goal_runtime_ownership() {
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("src-goal"),
+        cwd: "/src".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("tgt-goal"),
+        cwd: "/tgt".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    let mut goal = crate::session::goal_tracker::GoalTracker::new();
+    goal.create_goal(
+        "goal-1".into(),
+        "ship safely".into(),
+        None,
+        0,
+        "2026-01-01T00:00:00Z".into(),
+        None,
+    );
+    adapter
+        .write_session_control(
+            &source_info,
+            &crate::session::control::SessionControlSnapshot::new(
+                7,
+                crate::session::behavior::BehaviorSnapshot::selected(
+                    tool_types::BehaviorId::Goal,
+                ),
+                goal.snapshot().cloned(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let result = adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    assert!(result.session_control_copied);
+    let (forked, rejected) = adapter.read_session_control_sync(&target_info).unwrap();
+    assert!(!rejected);
+    let forked = forked.expect("fork keeps non-runtime control metadata");
+    assert!(forked.goal.is_none());
+    assert_eq!(
+        forked.behavior.state,
+        crate::session::behavior::BehaviorState::Normal
+    );
+}
+
 #[tokio::test]
 async fn copy_tool_state_false_skips_tool_state() {
     let tmp = TempDir::new().unwrap();
@@ -3542,7 +3606,7 @@ async fn load_session_without_updates_survives_merged_chat_line() {
 }
 
 #[tokio::test]
-async fn goal_state_roundtrips_through_light_session_load() {
+async fn session_control_roundtrips_goal_through_light_session_load() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -3556,21 +3620,23 @@ async fn goal_state_roundtrips_through_light_session_load() {
         "now".into(),
         None,
     );
-    assert!(tracker.replace_plan(
-        "```markdown\n# Status\n\n- [ ] verify persistence\n```".into(),
-        crate::session::goal_tracker::GoalPlanAuthor::Planner,
-        None,
-    ));
+    let snapshot = crate::session::control::SessionControlSnapshot::new(
+        7,
+        crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+        tracker.snapshot().cloned(),
+    );
     adapter
-        .write_goal_mode_state(&info, tracker.snapshot().unwrap())
+        .write_session_control(&info, &snapshot)
         .await
         .unwrap();
 
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
-    let goal = loaded.goal_mode_state.expect("Goal state should load");
-    assert!(!loaded.goal_mode_state_rejected);
+    let control = loaded.session_control.expect("control state should load");
+    assert!(!loaded.session_control_rejected);
+    assert_eq!(control.control_revision, 7);
+    assert_eq!(control.behavior.state, crate::session::behavior::BehaviorState::Goal);
+    let goal = control.goal.expect("Goal state should load");
     assert_eq!(goal.goal_id, "goal-1");
-    assert_eq!(goal.plan.markdown, "# Status\n\n- [ ] verify persistence");
     assert_eq!(
         goal.architecture_version,
         crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION,
@@ -3578,19 +3644,19 @@ async fn goal_state_roundtrips_through_light_session_load() {
 }
 
 #[tokio::test]
-async fn malformed_goal_state_is_quarantined_without_bricking_session_load() {
+async fn malformed_session_control_is_quarantined_without_bricking_session_load() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    let path = adapter.goal_mode_state_file(&info);
+    let path = adapter.session_control_file(&info);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, b"{broken").unwrap();
 
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
-    assert!(loaded.goal_mode_state.is_none());
-    assert!(loaded.goal_mode_state_rejected);
-    assert!(!path.exists(), "malformed Goal state must not be retried");
+    assert!(loaded.session_control.is_none());
+    assert!(loaded.session_control_rejected);
+    assert!(!path.exists(), "malformed control state must not be retried");
 }
 
 #[tokio::test]
@@ -3613,7 +3679,16 @@ async fn session_copy_does_not_clone_goal_runtime_state() {
         None,
     );
     adapter
-        .write_goal_mode_state(&source, tracker.snapshot().unwrap())
+        .write_session_control(
+            &source,
+            &crate::session::control::SessionControlSnapshot::new(
+                3,
+                crate::session::behavior::BehaviorSnapshot::selected(
+                    tool_types::BehaviorId::Goal,
+                ),
+                tracker.snapshot().cloned(),
+            ),
+        )
         .await
         .unwrap();
 
@@ -3622,6 +3697,11 @@ async fn session_copy_does_not_clone_goal_runtime_state() {
         .await
         .unwrap();
     let loaded = adapter.load_session_without_updates(&target).await.unwrap();
-    assert!(loaded.goal_mode_state.is_none());
-    assert!(!loaded.goal_mode_state_rejected);
+    let control = loaded.session_control.expect("sanitized control snapshot");
+    assert!(control.goal.is_none());
+    assert_eq!(
+        control.behavior.state,
+        crate::session::behavior::BehaviorState::Normal
+    );
+    assert!(!loaded.session_control_rejected);
 }

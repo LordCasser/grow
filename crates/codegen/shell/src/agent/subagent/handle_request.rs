@@ -54,6 +54,52 @@ pub(super) fn task_model_override_error(
     let requested = requested?;
     crate::agent::models::task_model_error_for_catalog(requested, available)
 }
+
+fn validate_goal_context(request: &SubagentRequest) -> Result<(), String> {
+    use tools::implementations::grow_build::task::types::{GoalSubagentRole, SubagentOwner};
+    match (&request.owner, &request.goal_context) {
+        (
+            SubagentOwner::Goal {
+                goal_id,
+                objective_revision,
+                plan_revision,
+                board_revision,
+                role,
+            },
+            Some(context),
+        ) if context.role == *role
+            && context.view.goal_id == *goal_id
+            && context.view.objective_revision == *objective_revision
+            && context.view.plan_revision == *plan_revision
+            && context.view.board_revision == *board_revision =>
+        {
+            if matches!(role, GoalSubagentRole::Planner | GoalSubagentRole::Verifier) {
+                if request.resume_from.is_some() {
+                    return Err("Goal stages cannot resume another subagent session".to_string());
+                }
+                if request.runtime_overrides.persona.is_some() {
+                    return Err("Goal stages cannot apply a persona".to_string());
+                }
+                let expected_fork = *role == GoalSubagentRole::Planner;
+                if request.fork_context != expected_fork {
+                    return Err(format!(
+                        "Goal {role:?} stage has an invalid context isolation policy"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        (SubagentOwner::Goal { .. }, _) => Err(
+            "Goal-owned subagent request has a missing or mismatched immutable context snapshot"
+                .to_string(),
+        ),
+        (SubagentOwner::Task | SubagentOwner::Workflow { .. }, None) => Ok(()),
+        (SubagentOwner::Task | SubagentOwner::Workflow { .. }, Some(_)) => {
+            Err("Non-Goal subagent request cannot carry a Goal context snapshot".to_string())
+        }
+    }
+}
+
 /// Runtime adapter for one shell child. Shared lifecycle state is owned by the
 /// `tools` coordinator actor and reached only through `reporter`.
 #[tracing::instrument(
@@ -81,11 +127,41 @@ pub(crate) async fn run_shell_child(
             None,
         );
     }
-    let Some(mut definition) = resolve_agent_definition(&request.subagent_type, &ctx) else {
+    if let Err(message) = validate_goal_context(&request) {
+        return child_run_output(failure_result(&request, &message), completion_data, None);
+    }
+    use tools::implementations::grow_build::task::types::GoalSubagentRole;
+    let host_goal_stage = request
+        .owner
+        .goal_role()
+        .filter(|role| matches!(role, GoalSubagentRole::Planner | GoalSubagentRole::Verifier));
+    let definition = host_goal_stage
+        .and_then(|role| {
+            crate::agent::subagent::resolution::resolve_goal_stage_definition(
+                &request.subagent_type,
+                role,
+            )
+        })
+        .or_else(|| {
+            host_goal_stage
+                .is_none()
+                .then(|| resolve_agent_definition(&request.subagent_type, &ctx))
+                .flatten()
+        });
+    let Some(mut definition) = definition else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
         return child_run_output(failure_result(&request, &msg), completion_data, None);
     };
-    match gate_subagent_type(&request.subagent_type, &ctx) {
+    if host_goal_stage.is_some() {
+        // Session operator allow/deny remains the final clamp even for a
+        // host-owned profile; discovery and the user-visible subagent toggle
+        // intentionally do not govern internal runtime stages.
+        ctx.apply_session_cli_overrides(&mut definition);
+    }
+    match host_goal_stage
+        .map(|_| SubagentValidateTypeOutcome::Ok)
+        .unwrap_or_else(|| gate_subagent_type(&request.subagent_type, &ctx))
+    {
         SubagentValidateTypeOutcome::Disabled => {
             let msg = format!(
                 "Subagent '{}' is not available to the current Agent or is disabled via [subagents.toggle]",
@@ -104,24 +180,42 @@ pub(crate) async fn run_shell_child(
             return child_run_output(failure_result(&request, &msg), completion_data, None);
         }
     }
-    resolve_subagent_toolset(
-        &request.subagent_type,
-        request.runtime_overrides.harness_agent_type.as_deref(),
-        &ctx,
-        &mut definition,
-    );
+    if host_goal_stage.is_none() {
+        resolve_subagent_toolset(&request.subagent_type, &ctx, &mut definition);
+    }
     let cwd = ctx
         .parent_session_info
         .as_ref()
         .map(|i| std::path::Path::new(&i.cwd));
-    let mut effective_runtime = crate::agent::subagent::resolution::resolve_runtime_config(
-        &request.subagent_type,
-        &request.runtime_overrides,
-        &ctx.subagent_roles,
-        &ctx.subagent_personas,
-        cwd,
-        &definition,
-    );
+    let mut effective_runtime = if host_goal_stage.is_some() {
+        crate::agent::subagent::resolution::resolve_runtime_config(
+            &request.subagent_type,
+            &request.runtime_overrides,
+            &Default::default(),
+            &Default::default(),
+            cwd,
+            &definition,
+        )
+    } else {
+        crate::agent::subagent::resolution::resolve_runtime_config(
+            &request.subagent_type,
+            &request.runtime_overrides,
+            &ctx.subagent_roles,
+            &ctx.subagent_personas,
+            cwd,
+            &definition,
+        )
+    };
+    match host_goal_stage {
+        Some(GoalSubagentRole::Planner) => {
+            effective_runtime.isolation = tool_types::SubagentIsolationMode::None;
+        }
+        Some(GoalSubagentRole::Verifier) => {
+            effective_runtime.isolation = tool_types::SubagentIsolationMode::Worktree;
+            request.cwd = None;
+        }
+        Some(GoalSubagentRole::Worker) | None => {}
+    }
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {
         tracing::error!(
@@ -330,6 +424,16 @@ pub(crate) async fn run_shell_child(
     } else {
         None
     };
+    if host_goal_stage == Some(GoalSubagentRole::Verifier) && worktree_path.is_none() {
+        return child_run_output(
+            failure_result(
+                &request,
+                "Goal verifier requires an isolated worktree; creation failed",
+            ),
+            completion_data,
+            None,
+        );
+    }
     let worktree_freshly_created = resume_source.is_none() && worktree_path.is_some();
     if let Some(raw_cwd) = request.cwd.as_deref() {
         match sanitize_cwd_value(raw_cwd) {
@@ -378,6 +482,9 @@ pub(crate) async fn run_shell_child(
         effective_runtime.capability_mode,
         allow_nested_subagents,
     );
+    if request.owner.goal_role().is_some() {
+        crate::agent::subagent::resolution::apply_goal_object_tool_policy(&mut definition);
+    }
     if let Some(mode) = effective_runtime.capability_mode {
         tracing::info!(
             subagent_id = %request.id,
@@ -941,6 +1048,7 @@ pub(crate) async fn run_shell_child(
         None,
         None,
         false,
+        0,
         Vec::new(),
         None,
         if verbatim_mirror_fork {
@@ -1065,6 +1173,11 @@ pub(crate) async fn run_shell_child(
         cancel_token.clone(),
         goal_tick_cmd_tx(ctx.goal_enabled, ctx.parent_cmd_tx.as_ref()),
     );
+    if let Some(snapshot) = request.goal_context.clone() {
+        let _ = child_handle
+            .cmd_tx
+            .send(SessionCommand::SetGoalContextSnapshot { snapshot });
+    }
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
@@ -1073,9 +1186,6 @@ pub(crate) async fn run_shell_child(
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
         origin: crate::session::PromptOrigin::User,
         turn_kind: crate::session::TurnKind::Internal,
-        // Behaviors belong to the user-facing primary Agent. Delegated Agents
-        // receive an explicit role/task and never inherit the parent's mode.
-        prompt_mode: crate::session::behavior::PromptMode::Agent,
         client_identifier: None,
         screen_mode: None,
         verbatim: true,
@@ -1443,7 +1553,22 @@ pub(crate) async fn run_shell_child(
     let mut disposed_snapshot_ref: Option<String> = None;
     let mut worktree_removed = false;
     if let Some(ref wt_path) = worktree_path {
-        if snapshot_dispose_enabled {
+        if request.owner.goal_role()
+            == Some(tools::implementations::grow_build::task::types::GoalSubagentRole::Verifier)
+        {
+            // Verifier isolation is intentionally disposable evidence space,
+            // not resumable delegated work. Never create a snapshot ref that
+            // could later reintroduce its mutations.
+            match crate::session::worktree::remove_subagent_worktree(wt_path).await {
+                Ok(()) => worktree_removed = true,
+                Err(error) => tracing::warn!(
+                    subagent_id = %request.id,
+                    worktree_path = %wt_path.display(),
+                    %error,
+                    "failed removing disposable Goal verifier worktree"
+                ),
+            }
+        } else if snapshot_dispose_enabled {
             let ref_name = format!("refs/grow/subagents/{}", request.id);
             let source_repo = resolve_subagent_source_repo(&ctx);
             match crate::session::worktree::snapshot_subagent_worktree(

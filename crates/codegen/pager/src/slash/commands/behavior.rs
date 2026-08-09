@@ -2,43 +2,43 @@
 
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
-use tools::types::SessionMode;
+use tools::types::BehaviorId;
 
-pub(crate) fn available_modes(ctx: &AppCtx<'_>) -> Vec<(SessionMode, &'static str, &'static str)> {
+pub(crate) fn available_modes(ctx: &AppCtx<'_>) -> Vec<(BehaviorId, &'static str, &'static str)> {
     let mut modes = vec![
         (
-            SessionMode::Default,
+            BehaviorId::Normal,
             "Normal",
             "Direct execution without a specialized collaboration protocol",
         ),
         (
-            SessionMode::Ask,
+            BehaviorId::Clarify,
             "Clarify",
             "Keep asking until requirements and constraints are sufficient",
         ),
         (
-            SessionMode::Plan,
+            BehaviorId::Plan,
             "Plan",
             "Draft a complete plan, wait for approval, then execute it",
         ),
     ];
     if ctx.workflows_available {
         modes.push((
-            SessionMode::Workflow,
+            BehaviorId::Workflow,
             "Static Workflow",
             "Author and run one deterministic scripted workflow per phase, without approval",
         ));
     }
     if ctx.deep_research_available {
         modes.push((
-            SessionMode::DeepResearch,
+            BehaviorId::DeepResearch,
             "Deep Research",
             "Run read-only evidence research and always deliver a terminal report",
         ));
     }
     if ctx.goal_available {
         modes.push((
-            SessionMode::Goal,
+            BehaviorId::Goal,
             "Goal",
             "Persist until an independent verifier confirms the objective is achieved",
         ));
@@ -123,14 +123,14 @@ impl SlashCommand for BehaviorCommand {
         // Hyphen→underscore normalization lets both the documented
         // "deep-research" spelling and the canonical wire id
         // "deep_research" resolve to the same mode; parsing goes through
-        // `SessionMode::try_from_id` so unknown ids (including the legacy
+        // `BehaviorId::try_from_id` so unknown ids (including the legacy
         // "default") are strictly rejected instead of silently switching.
         let normalized = id.to_ascii_lowercase().replace('-', "_");
         let mode = match normalized.as_str() {
             // `clarify` is the documented command word for Ask (wire id:
             // `ask`) and stays accepted so the usage string remains accurate.
-            "clarify" => SessionMode::Ask,
-            _ => match SessionMode::try_from_id(&normalized) {
+            "clarify" => BehaviorId::Clarify,
+            _ => match BehaviorId::try_from_id(&normalized) {
                 Some(mode) => mode,
                 None => {
                     return CommandResult::Error(format!("Unknown or unavailable Behavior: {id}"));
@@ -138,9 +138,9 @@ impl SlashCommand for BehaviorCommand {
             },
         };
         let unavailable = match mode {
-            SessionMode::Workflow => !ctx.pager_state.workflows_available,
-            SessionMode::DeepResearch => !ctx.pager_state.deep_research_available,
-            SessionMode::Goal => !ctx.pager_state.goal_available,
+            BehaviorId::Workflow => !ctx.pager_state.workflows_available,
+            BehaviorId::DeepResearch => !ctx.pager_state.deep_research_available,
+            BehaviorId::Goal => !ctx.pager_state.goal_available,
             _ => false,
         };
         if unavailable {
@@ -152,7 +152,7 @@ impl SlashCommand for BehaviorCommand {
 
 pub struct BehaviorShortcutCommand {
     name: &'static str,
-    mode: SessionMode,
+    mode: BehaviorId,
     description: &'static str,
 }
 
@@ -160,14 +160,14 @@ impl BehaviorShortcutCommand {
     pub const fn normal() -> Self {
         Self {
             name: "normal",
-            mode: SessionMode::Default,
+            mode: BehaviorId::Normal,
             description: "[behavior] Switch to Normal",
         }
     }
     pub const fn clarify() -> Self {
         Self {
             name: "clarify",
-            mode: SessionMode::Ask,
+            mode: BehaviorId::Clarify,
             description: "[behavior] Switch to Clarify",
         }
     }
@@ -204,7 +204,7 @@ mod tests {
             models,
             agents: &[],
             current_agent: None,
-            behavior_mode: tools::types::SessionMode::Default,
+            behavior_mode: tools::types::BehaviorId::Normal,
             deep_research_available: true,
             goal_available: true,
             current_goal_objective: None,
@@ -292,27 +292,27 @@ mod tests {
         let bundle = crate::app::bundle::BundleState::default();
         assert!(matches!(
             run_in_ctx(&state, &bundle, "normal"),
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Default))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::Normal))
         ));
         assert!(matches!(
             run_in_ctx(&state, &bundle, "ask"),
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Ask))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::Clarify))
         ));
         assert!(matches!(
             run_in_ctx(&state, &bundle, "clarify"), // documented command word
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Ask))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::Clarify))
         ));
         assert!(matches!(
             run_in_ctx(&state, &bundle, "PLAN"), // case-insensitive, as before
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Plan))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::Plan))
         ));
         assert!(matches!(
             run_in_ctx(&state, &bundle, "workflow"),
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Workflow))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::Workflow))
         ));
         assert!(matches!(
             run_in_ctx(&state, &bundle, "goal"),
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::Goal))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::Goal))
         ));
     }
 
@@ -322,11 +322,11 @@ mod tests {
         let bundle = crate::app::bundle::BundleState::default();
         assert!(matches!(
             run_in_ctx(&state, &bundle, "deep-research"),
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::DeepResearch))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::DeepResearch))
         ));
         assert!(matches!(
             run_in_ctx(&state, &bundle, "deep_research"),
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::DeepResearch))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::DeepResearch))
         ));
     }
 
@@ -358,7 +358,7 @@ mod tests {
         let mut ctx = exec_ctx(&state, &bundle, false, true, false);
         assert!(matches!(
             BehaviorCommand.run(&mut ctx, "deep_research"),
-            CommandResult::Action(Action::SetBehaviorMode(SessionMode::DeepResearch))
+            CommandResult::Action(Action::SetBehaviorMode(BehaviorId::DeepResearch))
         ));
     }
 }

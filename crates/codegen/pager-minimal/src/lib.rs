@@ -101,9 +101,9 @@ pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal, frame: pager::motio
     full_view::pump_transcript(app);
     welcome::maybe_commit_welcome(app, terminal);
     plan::maybe_commit_plan(app);
-    overlay::sync_viewport(app, terminal);
-    commit::commit_active(app, terminal);
-    commit::expand_pending(app, terminal);
+    overlay::sync_viewport(app, terminal, frame);
+    commit::commit_active(app, terminal, frame);
+    commit::expand_pending(app, terminal, frame);
     live::draw_live(app, terminal, frame);
 }
 

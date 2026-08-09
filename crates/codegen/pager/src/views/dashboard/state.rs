@@ -658,7 +658,7 @@ pub struct DashboardState {
     pub pending_model: Option<PendingDispatchModel>,
     /// Behavior the next spawned agent starts in. Set through the same Slash
     /// selectors used in a live session; never persisted as a default.
-    pub pending_behavior: tools::types::SessionMode,
+    pub pending_behavior: tools::types::BehaviorId,
     /// Permission policy the next spawned agent starts with. Independent from
     /// Behavior so Plan/Clarify and Ask/Auto/Always Approve can be composed.
     pub pending_permission: crate::app::actions::PermissionModeKind,
@@ -1365,7 +1365,7 @@ impl DashboardState {
             manual_scroll_active: false,
             shortcuts_modal: None,
             pending_model: None,
-            pending_behavior: tools::types::SessionMode::Default,
+            pending_behavior: tools::types::BehaviorId::Normal,
             pending_permission: crate::app::actions::PermissionModeKind::Ask,
             models: crate::acp::model_state::ModelState::default(),
             location_picker: None,
@@ -1426,9 +1426,6 @@ impl DashboardState {
         self.dispatch.set_auto_mode_available(available);
         self.peek_reply.set_auto_mode_available(available);
     }
-
-    /// Replace the restricted slash-command deny list on both dashboard
-    /// prompt registries (dispatch + peek reply).
 
     /// Set the dispatch feedback slot to an error `msg`, prefixed with
     /// the error glyph (`✗`, or `x` on legacy consoles). The badge

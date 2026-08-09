@@ -1,27 +1,6 @@
 //! Session Behavior transitions, reminders, and persistence.
 use super::*;
 use crate::session::behavior::BehaviorChangeOutcome;
-pub(super) fn prompt_mode_from_session_mode_id(session_mode_id: &acp::SessionModeId) -> PromptMode {
-    use tools::types::SessionMode;
-    match SessionMode::from_id(session_mode_id.0.as_ref()) {
-        SessionMode::Plan => PromptMode::Plan,
-        SessionMode::Ask => PromptMode::Ask,
-        SessionMode::Workflow => PromptMode::Workflow,
-        SessionMode::DeepResearch => PromptMode::DeepResearch,
-        SessionMode::Goal => PromptMode::Goal,
-        SessionMode::Default => PromptMode::Agent,
-    }
-}
-pub(super) fn session_mode_from_prompt_mode(mode: PromptMode) -> tools::types::SessionMode {
-    match mode {
-        PromptMode::Agent => tools::types::SessionMode::Default,
-        PromptMode::Ask => tools::types::SessionMode::Ask,
-        PromptMode::Plan => tools::types::SessionMode::Plan,
-        PromptMode::Workflow => tools::types::SessionMode::Workflow,
-        PromptMode::DeepResearch => tools::types::SessionMode::DeepResearch,
-        PromptMode::Goal => tools::types::SessionMode::Goal,
-    }
-}
 /// Plan is a frozen, human-approved execution protocol. The Static Workflow
 /// launcher is therefore not advertised in any Plan phase; the runtime gate
 /// remains as defense in depth for stale or forged calls.
@@ -39,36 +18,124 @@ pub(super) fn filter_cursor_tools_by_plan_mode(
         .collect()
 }
 impl SessionActor {
-    /// Rebase queued user messages that were captured under Goal when Goal is
-    /// intentionally exited. Queue entries retain their submission mode in
-    /// general, but a terminal/cleared Goal can no longer consume Goal-bound
-    /// supplements; leaving them pinned would immediately switch the session
-    /// back to a completed or missing Goal when they promote.
-    pub(super) async fn retag_queued_goal_user_prompts(&self, target: PromptMode) {
-        let mut state = self.state.lock().await;
-        for input in &mut state.pending_inputs {
-            if matches!(input.origin, crate::session::PromptOrigin::User)
-                && input.prompt_mode == PromptMode::Goal
-            {
-                input.prompt_mode = target;
-            }
-        }
+    async fn behavior_capability_support(&self) -> (bool, bool, bool) {
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let tool_names: Vec<String> = bridge
+            .tool_definitions()
+            .await
+            .into_iter()
+            .map(|definition| definition.function.name)
+            .collect();
+        let plan_supported = bridge
+            .tool_for_kind(tools::types::tool::ToolKind::PlanControl)
+            .await
+            .is_some();
+        let workflow_supported = bridge
+            .tool_for_kind(tools::types::tool::ToolKind::Workflow)
+            .await
+            .is_some();
+        let goal_supported =
+            super::goal_support::goal_slash_and_harness_available(self.goal_enabled, &tool_names);
+        (plan_supported, workflow_supported, goal_supported)
+    }
+
+    fn behavior_availability_from_tracker(
+        &self,
+        workflow_tracker: &crate::session::workflow::tracker::WorkflowTracker,
+        (plan_supported, workflow_supported, goal_supported): (bool, bool, bool),
+    ) -> tool_types::BehaviorAvailability {
+        use crate::session::behavior::BehaviorSwitchFacts;
+        use tool_types::{BehaviorAvailability, BehaviorId};
+
+        let current = self.behavior.lock().behavior();
+        let unfinished_goal = self
+            .goal_tracker
+            .lock()
+            .status()
+            .is_some_and(|status| status != crate::session::goal_tracker::GoalStatus::Complete);
+        let owned_deep_research_run = self
+            .behavior
+            .lock()
+            .deep_research_run_id()
+            .map(str::to_owned);
+        let public_workflow_active = workflow_tracker.list().iter().any(|run| {
+            !run.status.is_terminal()
+                && owned_deep_research_run.as_deref() != Some(run.run_id.as_str())
+        });
+        let deep_research_active = current == BehaviorId::DeepResearch
+            && owned_deep_research_run.as_deref().is_some_and(|run_id| {
+                workflow_tracker
+                    .get(run_id)
+                    .is_some_and(|run| !run.status.is_terminal())
+            });
+        let source_owned_work_active = current == BehaviorId::Plan || deep_research_active;
+        let controller = self.behavior.lock();
+        let choices = [
+            BehaviorId::Normal,
+            BehaviorId::Clarify,
+            BehaviorId::Plan,
+            BehaviorId::Workflow,
+            BehaviorId::DeepResearch,
+            BehaviorId::Goal,
+        ]
+        .into_iter()
+        .map(|target| {
+            let unavailable_reason = match target {
+                BehaviorId::Plan if !plan_supported => Some(
+                    "Plan behavior is unavailable because PlanControl is not registered."
+                        .to_string(),
+                ),
+                BehaviorId::Workflow if !workflow_supported => {
+                    Some("Static Workflow behavior is unavailable in this session.".to_string())
+                }
+                BehaviorId::DeepResearch if !self.background_workflows_enabled => Some(
+                    "Deep Research behavior requires the background Workflow runtime.".to_string(),
+                ),
+                BehaviorId::Goal if !goal_supported => {
+                    Some("Goal behavior is unavailable in this session.".to_string())
+                }
+                _ => None,
+            };
+            controller.switch_availability(
+                target,
+                &BehaviorSwitchFacts {
+                    unavailable_reason,
+                    unfinished_goal,
+                    public_workflow_active,
+                    source_owned_work_active,
+                },
+            )
+        })
+        .collect();
+        BehaviorAvailability { current, choices }
+    }
+
+    /// Capture the Shell-authoritative Behavior choice projection from one
+    /// control-plane snapshot. Pager clients render this value but every
+    /// transition is revalidated by calling this method again.
+    pub(super) async fn behavior_availability_projection(
+        &self,
+    ) -> tool_types::BehaviorAvailability {
+        let support = self.behavior_capability_support().await;
+        let workflow_tracker = self.workflow_tracker().await;
+        let workflow_tracker = workflow_tracker.lock();
+        self.behavior_availability_from_tracker(&workflow_tracker, support)
     }
 
     /// Synchronize the selected primary-session Behavior into the fixed system
     /// prompt layer: Mandatory Core → Audience → Role → Behavior → Runtime.
-    pub(super) async fn sync_active_behavior_prompt(&self) {
+    pub(super) async fn sync_active_behavior_prompt(&self, admitted: tool_types::BehaviorId) {
         use crate::session::behavior::{
-            BehaviorState, clarify_reminder_template, deep_research_reminder_template,
-            goal_reminder_template, plan_behavior_template, static_workflow_reminder_template,
+            clarify_reminder_template, deep_research_reminder_template, goal_reminder_template,
+            plan_behavior_template, static_workflow_reminder_template,
         };
-        let instructions = match self.behavior.lock().state() {
-            BehaviorState::Normal => None,
-            BehaviorState::Clarify => Some(clarify_reminder_template()),
-            BehaviorState::Plan(_) => Some(plan_behavior_template()),
-            BehaviorState::Workflow => Some(static_workflow_reminder_template()),
-            BehaviorState::DeepResearch { .. } => Some(deep_research_reminder_template()),
-            BehaviorState::Goal => Some(goal_reminder_template()),
+        let instructions = match admitted {
+            tool_types::BehaviorId::Normal => None,
+            tool_types::BehaviorId::Clarify => Some(clarify_reminder_template()),
+            tool_types::BehaviorId::Plan => Some(plan_behavior_template()),
+            tool_types::BehaviorId::Workflow => Some(static_workflow_reminder_template()),
+            tool_types::BehaviorId::DeepResearch => Some(deep_research_reminder_template()),
+            tool_types::BehaviorId::Goal => Some(goal_reminder_template()),
         }
         .map(str::to_owned);
         let system_prompt = self
@@ -86,9 +153,10 @@ impl SessionActor {
         self.chat_state_handle.replace_conversation(conversation);
     }
 
-    pub(super) fn apply_prompt_modes_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
-        snapshot.start_prompt_mode = Some(self.turn_start_prompt_mode.lock().to_string());
-        snapshot.end_prompt_mode = Some(self.turn_prompt_mode.lock().to_string());
+    pub(super) fn apply_behavior_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
+        let behavior = self.turn_behavior.lock().to_string();
+        snapshot.admitted_behavior = Some(behavior.clone());
+        snapshot.completed_behavior = Some(behavior);
     }
     /// `false` twin: this template integration is not compiled into this
     /// build, so no session runs it. Keeps ungated call sites compiling in
@@ -100,257 +168,168 @@ impl SessionActor {
         &self,
         session_mode_id: acp::SessionModeId,
     ) -> BehaviorChangeOutcome {
-        use tools::types::SessionMode;
-        let previous_prompt_mode = *self.current_prompt_mode.lock();
-        let Some(mode) = SessionMode::try_from_id(session_mode_id.0.as_ref()) else {
+        use crate::session::behavior::{BehaviorEffect, BehaviorSwitchFacts};
+        use tool_types::BehaviorAvailabilityDisposition;
+        use tools::types::BehaviorId;
+
+        // Workflow launch and special-Behavior admission share the manager
+        // lock as their linearization point. Every public launch rechecks the
+        // selected Behavior while holding this lock; keeping it through the
+        // durable control commit and in-memory selection prevents both races:
+        // a run appearing after the conflict snapshot, or a launch admitted
+        // against the old Behavior after the new one was committed.
+        let support = self.behavior_capability_support().await;
+        let mut workflow_admission = self.workflow_manager.lock().await;
+        let availability = {
+            let workflow_tracker = workflow_admission.tracker();
+            let workflow_tracker = workflow_tracker.lock();
+            self.behavior_availability_from_tracker(&workflow_tracker, support)
+        };
+        let previous_behavior = availability.current;
+        let Some(mode) = BehaviorId::try_from_id(session_mode_id.0.as_ref()) else {
             let message = format!(
                 "Unknown Behavior id: {}. Agent Roles must be selected through the Agent interface.",
                 session_mode_id.0
             );
             self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(
-                    session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                ),
+                acp::SessionModeId::new(previous_behavior.as_id()),
                 serde_json::json!({ "status": "rejected", "message": message }),
             );
             return BehaviorChangeOutcome::Rejected { message };
         };
-        let prompt_mode = match mode {
-            SessionMode::Plan => PromptMode::Plan,
-            SessionMode::Ask => PromptMode::Ask,
-            SessionMode::Workflow => PromptMode::Workflow,
-            SessionMode::DeepResearch => PromptMode::DeepResearch,
-            SessionMode::Goal => PromptMode::Goal,
-            SessionMode::Default => PromptMode::Agent,
+        let Some(choice) = availability.choice(mode) else {
+            let message = format!("{} behavior is unavailable.", mode.display_label());
+            return BehaviorChangeOutcome::Rejected { message };
         };
-        let current_behavior = self.behavior.lock().behavior();
-        let target_behavior = mode.behavior();
-        let completed_goal_receipt = self.goal_tracker.lock().status()
-            == Some(crate::session::goal_tracker::GoalStatus::Complete);
-        if current_behavior == target_behavior
-            && !(mode != SessionMode::Default && completed_goal_receipt)
-        {
-            let cleared = self.behavior.lock().clear_pending_switch();
-            if cleared {
-                self.enqueue_current_mode_update(acp::SessionModeId::new(mode.as_id()));
-            }
-            return BehaviorChangeOutcome::Applied;
-        }
-        let unfinished_goal = self
-            .goal_tracker
-            .lock()
-            .status()
-            .is_some_and(|status| status != crate::session::goal_tracker::GoalStatus::Complete);
-        if unfinished_goal && target_behavior != Some(tool_types::BehaviorId::Goal) {
-            let message =
-                "Goal behavior is exclusive until the Goal completes or is cleared.".to_string();
-            self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(
-                    session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                ),
-                serde_json::json!({ "status": "rejected", "message": message }),
-            );
-            return BehaviorChangeOutcome::Rejected { message };
-        }
-        if mode == SessionMode::Goal && !self.goal_enabled {
-            let message = "Goal behavior is unavailable in this session.".to_string();
-            self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(
-                    session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                ),
-                serde_json::json!({ "status": "rejected", "message": message }),
-            );
-            return BehaviorChangeOutcome::Rejected { message };
-        }
-        if mode == SessionMode::DeepResearch && !self.background_workflows_enabled {
-            let message =
-                "Deep Research behavior requires the background Workflow runtime.".to_string();
-            self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(
-                    session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                ),
-                serde_json::json!({ "status": "rejected", "message": message }),
-            );
-            return BehaviorChangeOutcome::Rejected { message };
-        }
-
-        if mode == SessionMode::Plan
-            && self
-                .agent
-                .borrow()
-                .tool_bridge()
-                .tool_for_kind(tools::types::tool::ToolKind::PlanControl)
-                .await
-                .is_none()
-        {
-            let message =
-                "Plan behavior is unavailable because PlanControl is not registered.".to_string();
-            self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(
-                    session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                ),
-                serde_json::json!({ "status": "rejected", "message": message }),
-            );
-            return BehaviorChangeOutcome::Rejected { message };
-        }
-        if mode == SessionMode::Workflow
-            && self
-                .agent
-                .borrow()
-                .tool_bridge()
-                .tool_for_kind(tools::types::tool::ToolKind::Workflow)
-                .await
-                .is_none()
-        {
-            let message = "Static Workflow behavior is unavailable in this session.".to_string();
-            self.enqueue_current_mode_update_with_behavior_change(
-                acp::SessionModeId::new(
-                    session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                ),
-                serde_json::json!({ "status": "rejected", "message": message }),
-            );
-            return BehaviorChangeOutcome::Rejected { message };
-        }
-
         let owned_deep_research_run = self
             .behavior
             .lock()
             .deep_research_run_id()
             .map(str::to_owned);
-        if matches!(
+        let decision = self.behavior.lock().decide_switch(
             mode,
-            SessionMode::Plan | SessionMode::Goal | SessionMode::DeepResearch
-        ) {
-            let has_unrelated_live_workflow = self
-                .workflow_tracker()
-                .await
-                .lock()
-                .list()
-                .iter()
-                .any(|run| {
-                    !run.status.is_terminal()
-                        && owned_deep_research_run.as_deref() != Some(run.run_id.as_str())
-                });
-            if has_unrelated_live_workflow {
-                let message = format!(
-                    "{} behavior is unavailable while an unrelated Workflow run is active; wait for it or stop it explicitly.",
-                    mode.as_id()
-                );
-                self.enqueue_current_mode_update_with_behavior_change(
-                    acp::SessionModeId::new(
-                        session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                    ),
-                    serde_json::json!({ "status": "rejected", "message": message }),
-                );
-                return BehaviorChangeOutcome::Rejected { message };
-            }
-        }
-
-        let deep_research_active = if current_behavior == Some(tool_types::BehaviorId::DeepResearch)
-        {
-            match owned_deep_research_run.as_deref() {
-                Some(run_id) => self
-                    .workflow_tracker()
-                    .await
-                    .lock()
-                    .get(run_id)
-                    .is_some_and(|run| !run.status.is_terminal()),
-                None => false,
-            }
-        } else {
-            false
-        };
-        let interrupts_work = self.behavior.lock().is_plan() || deep_research_active;
-        if interrupts_work {
-            const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
-            if !self
-                .behavior
-                .lock()
-                .confirm_interrupting_switch(target_behavior, CONFIRM_WINDOW)
-            {
-                let remaining_ms = self
-                    .behavior
-                    .lock()
-                    .pending_switch()
-                    .map(|(_, _, ms)| ms)
-                    .unwrap_or(8_000);
-                let message = format!(
-                    "Switching to {} will interrupt the active {} work. Press Enter to confirm the switch, or press Esc to cancel.",
-                    mode.display_label(),
-                    current_behavior
-                        .map(|behavior| format!("{behavior:?}"))
-                        .unwrap_or_else(|| "session".to_string())
-                );
-                self.enqueue_current_mode_update_with_behavior_change(
-                    acp::SessionModeId::new(
-                        session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                    ),
-                    serde_json::json!({
-                        "status": "confirmation_required",
-                        "source": current_behavior.map(|x| format!("{x:?}").to_lowercase()),
-                        "target": mode.as_id(),
-                        "message": message,
-                        "remainingMs": remaining_ms,
+            BehaviorSwitchFacts {
+                unavailable_reason: (choice.disposition
+                    == BehaviorAvailabilityDisposition::Unavailable)
+                    .then(|| {
+                        choice.reason.clone().unwrap_or_else(|| {
+                            format!("{} behavior is unavailable.", mode.display_label())
+                        })
                     }),
-                );
-                return BehaviorChangeOutcome::ConfirmationRequired {
+                unfinished_goal: false,
+                public_workflow_active: false,
+                source_owned_work_active: choice.disposition
+                    == BehaviorAvailabilityDisposition::ConfirmationRequired,
+            },
+            std::time::Duration::from_secs(8),
+        );
+        if !matches!(&decision.outcome, BehaviorChangeOutcome::Applied) {
+            let meta = match &decision.outcome {
+                BehaviorChangeOutcome::ConfirmationRequired {
                     message,
                     remaining_ms,
-                };
-            }
-
-            if self.behavior.lock().is_plan() {
-                self.cancel_running_task(true, false, false, Some("behavior_switch".to_string()))
-                    .await;
-                self.behavior.lock().finish_plan();
-            }
-            if deep_research_active && let Some(run_id) = owned_deep_research_run.as_deref() {
-                self.cancel_deep_research_with_report(run_id).await;
-            }
+                } => serde_json::json!({
+                    "status": "confirmation_required",
+                    "source": previous_behavior.as_id(),
+                    "target": mode.as_id(),
+                    "message": message,
+                    "remainingMs": remaining_ms,
+                }),
+                BehaviorChangeOutcome::Rejected { message } => {
+                    serde_json::json!({ "status": "rejected", "message": message })
+                }
+                BehaviorChangeOutcome::Applied => unreachable!(),
+            };
+            self.enqueue_current_mode_update_with_behavior_change(
+                acp::SessionModeId::new(previous_behavior.as_id()),
+                meta,
+            );
+            return decision.outcome;
         }
 
-        if mode == SessionMode::Plan && self.state.lock().await.foreground.regular().is_some() {
-            self.cancel_running_task(true, false, false, Some("behavior_switch".to_string()))
-                .await;
-        }
-
-        // A completed Goal is a retained display receipt, not an active
-        // Behavior. Normal therefore leaves it visible. An explicit switch to
-        // any special Behavior starts a new control context and atomically
-        // retires that receipt so it cannot override the selected mode in the
-        // pager or reappear after session reload.
-        let clear_completed_goal = mode != SessionMode::Default
-            && self.goal_tracker.lock().status()
-                == Some(crate::session::goal_tracker::GoalStatus::Complete);
-        if clear_completed_goal {
-            if self.delete_goal_state_durably().await.is_err() {
+        if !decision.effects.is_empty() {
+            let persisted_goal = self.goal_tracker.lock().snapshot().cloned();
+            if self
+                .persist_control_snapshot_durably(
+                    crate::session::behavior::BehaviorSnapshot::selected(mode),
+                    persisted_goal,
+                )
+                .await
+                .is_err()
+            {
                 let message = format!(
-                    "Could not durably retire the completed Goal; {} Behavior was not changed.",
+                    "Could not durably select {} Behavior; no runtime was interrupted.",
                     mode.display_label()
                 );
                 self.enqueue_current_mode_update_with_behavior_change(
-                    acp::SessionModeId::new(
-                        session_mode_from_prompt_mode(previous_prompt_mode).as_id(),
-                    ),
+                    acp::SessionModeId::new(previous_behavior.as_id()),
                     serde_json::json!({ "status": "rejected", "message": message }),
                 );
                 return BehaviorChangeOutcome::Rejected { message };
             }
-            self.goal_tracker.lock().clear();
-            self.goal_turn_task_ids.lock().clear();
-            self.subagent_token_records.lock().clear();
-            self.send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
-                .await;
         }
-        *self.current_prompt_mode.lock() = prompt_mode;
-        self.behavior.lock().select_behavior(prompt_mode.behavior());
-        if current_behavior == Some(tool_types::BehaviorId::Goal)
-            && target_behavior != Some(tool_types::BehaviorId::Goal)
+
+        // Deep Research cancellation is part of the same ownership transfer:
+        // remove the owned run before releasing Workflow admission so it
+        // cannot briefly become an unowned public run or race a new launch.
+        let cancelled_deep_research_report = if decision
+            .effects
+            .contains(&BehaviorEffect::CancelDeepResearchRun)
         {
-            self.retag_queued_goal_user_prompts(prompt_mode).await;
+            owned_deep_research_run.as_deref().map(|run_id| {
+                let tracker = workflow_admission.tracker();
+                let query = tracker
+                    .lock()
+                    .get(run_id)
+                    .map(|run| run.objective.clone())
+                    .unwrap_or_default();
+                workflow_admission.cancel(run_id);
+                super::workflow_run::deep_research_terminal_report(
+                    &query,
+                    &workflow::WorkflowOutcome::Cancelled,
+                )
+            })
+        } else {
+            None
+        };
+
+        // Publish the new ownership identity before releasing Workflow
+        // admission. The admitted foreground keeps its own immutable
+        // `turn_behavior`, so this does not mutate a running turn's policy.
+        if let Some(target) = decision.effects.iter().find_map(|effect| match effect {
+            BehaviorEffect::Select(target) => Some(*target),
+            _ => None,
+        }) {
+            self.behavior.lock().select_behavior(target);
         }
-        self.persist_behavior_state();
+        drop(workflow_admission);
+
+        for effect in decision.effects {
+            match effect {
+                BehaviorEffect::CancelSourceForeground(source) => {
+                    let source_owns_foreground =
+                        self.state.lock().await.foreground.regular().is_some()
+                            && *self.turn_behavior.lock() == source;
+                    if source_owns_foreground {
+                        self.cancel_running_task(
+                            true,
+                            false,
+                            false,
+                            Some("behavior_switch".to_string()),
+                        )
+                        .await;
+                    }
+                }
+                BehaviorEffect::CancelDeepResearchRun => {
+                    if let Some(report) = cancelled_deep_research_report.as_deref() {
+                        self.send_host_turn_slash_command_output(report).await;
+                    }
+                }
+                BehaviorEffect::Select(_) => {}
+            }
+        }
         self.enqueue_current_mode_update(session_mode_id.clone());
+        self.send_available_commands_update().await;
         BehaviorChangeOutcome::Applied
     }
     /// Inject active Behavior guidance into the conversation.
@@ -364,6 +343,9 @@ impl SessionActor {
             BehaviorState, PlanPhase, plan_execution_reminder_template,
             plan_mode_reminder_full_template, plan_mode_reminder_sparse_template,
         };
+        if *self.turn_behavior.lock() != tool_types::BehaviorId::Plan {
+            return;
+        }
         let push_reminder = |this: &Self, content: &str| {
             this.push_system_reminder_with_tag(content, this.reminder_wrapper_tag());
         };
@@ -429,10 +411,37 @@ impl SessionActor {
     }
     /// Persist the current Behavior state after each transition.
     pub(super) fn persist_behavior_state(&self) {
-        let snapshot = self.behavior.lock().snapshot();
+        let revision = self
+            .control_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        let snapshot = crate::session::control::SessionControlSnapshot::new(
+            revision,
+            self.behavior.lock().snapshot(),
+            self.goal_tracker.lock().snapshot().cloned(),
+        );
         let _ = self
             .notifications
             .persistence_tx
-            .send(PersistenceMsg::BehaviorState(snapshot));
+            .send(PersistenceMsg::SessionControl(snapshot));
+    }
+
+    /// Commit a Behavior transition through the same atomic control snapshot
+    /// used by Goal. A failed persistence barrier restores the in-memory
+    /// coordinator, so callers never publish a transition that cannot survive
+    /// reconnect.
+    pub(super) async fn commit_behavior_mutation_or_restore(
+        &self,
+        previous: crate::session::behavior::BehaviorSnapshot,
+    ) -> Result<(), String> {
+        let next = self.behavior.lock().snapshot();
+        let goal = self.goal_tracker.lock().snapshot().cloned();
+        if let Err(error) = self.persist_control_snapshot_durably(next, goal).await {
+            let session_dir = crate::session::persistence::session_dir(&self.session_info);
+            *self.behavior.lock() =
+                crate::session::behavior::BehaviorCoordinator::from_snapshot(session_dir, previous);
+            return Err(format!("Behavior control state was not persisted: {error}"));
+        }
+        Ok(())
     }
 }

@@ -329,7 +329,6 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                         prompt_id: "user-real-prompt".to_string(),
                         turn_kind: crate::session::TurnKind::User,
                         prompt_blocks: vec![],
-                        prompt_mode: crate::session::behavior::PromptMode::Agent,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,

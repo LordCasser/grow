@@ -133,6 +133,7 @@ impl tool_runtime::Tool for TaskTool {
             parent_session_id,
             parent_prompt_id,
             owner,
+            goal_context,
             foreground_wait,
         ) = {
             let res = resources.lock().await;
@@ -165,6 +166,42 @@ impl tool_runtime::Tool for TaskTool {
                 .get::<CurrentSubagentOwnerResource>()
                 .map(|owner| owner.0.clone())
                 .unwrap_or_default();
+            let goal_context = match &owner {
+                SubagentOwner::Goal {
+                    goal_id,
+                    objective_revision,
+                    plan_revision,
+                    board_revision,
+                    role,
+                } => {
+                    let view = res
+                        .get::<crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource>()
+                        .and_then(|resource| resource.0.clone())
+                        .ok_or_else(|| {
+                            tool_runtime::ToolError::custom(
+                                "missing_goal_context",
+                                "Goal-owned subagents require an immutable Goal context snapshot.",
+                            )
+                        })?;
+                    if view.goal_id != *goal_id
+                        || view.objective_revision != *objective_revision
+                        || view.plan_revision != *plan_revision
+                        || view.board_revision != *board_revision
+                    {
+                        return Err(tool_runtime::ToolError::custom(
+                            "stale_goal_context",
+                            "Goal subagent ownership and delegated blackboard revisions do not match.",
+                        ));
+                    }
+                    Some(
+                        crate::implementations::grow_build::update_goal::GoalContextSnapshot {
+                            role: *role,
+                            view,
+                        },
+                    )
+                }
+                SubagentOwner::Task | SubagentOwner::Workflow { .. } => None,
+            };
             let foreground_wait = res.get::<SubagentForegroundWait>().cloned();
 
             (
@@ -175,6 +212,7 @@ impl tool_runtime::Tool for TaskTool {
                 parent_session_id,
                 parent_prompt_id,
                 owner,
+                goal_context,
                 foreground_wait,
             )
         };
@@ -336,10 +374,6 @@ impl tool_runtime::Tool for TaskTool {
                 persona: None,
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
-                // Model-issued `task` spawns never override the harness; the
-                // parent agent decides the flavor (the `/goal` harness override
-                // is set only by the harness-internal role spawners).
-                harness_agent_type: None,
                 completion_output_cap: None,
                 spawn_depth: None,
                 output_token_budget: None,
@@ -352,6 +386,7 @@ impl tool_runtime::Tool for TaskTool {
             await_to_completion: false,
             fork_context: false,
             owner,
+            goal_context,
             cancel_token: child_cancellation,
         };
 
@@ -500,6 +535,23 @@ mod tests {
         mpsc::UnboundedReceiver<SubagentEvent>,
     ) {
         make_backend_with_validation(SubagentValidateTypeOutcome::Ok)
+    }
+
+    fn goal_view() -> crate::implementations::grow_build::update_goal::GoalView {
+        crate::implementations::grow_build::update_goal::GoalView {
+            goal_id: "goal-123".into(),
+            objective: "test objective".into(),
+            objective_revision: 1,
+            status: "active".into(),
+            phase: "executing".into(),
+            token_budget: None,
+            tokens_used: 0,
+            plan_revision: 2,
+            board_revision: 3,
+            tasks: Vec::new(),
+            plan_markdown: String::new(),
+            verifier_feedback: None,
+        }
     }
 
     /// Backend that replays `outcome` for every `ValidateType` event.
@@ -695,7 +747,16 @@ mod tests {
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
         resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
             "goal-123",
+            1,
+            2,
+            3,
+            GoalSubagentRole::Worker,
         )));
+        resources.insert(
+            crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(Some(
+                goal_view(),
+            )),
+        );
 
         let tool = TaskTool;
         let shared = resources.into_shared();
@@ -707,6 +768,12 @@ mod tests {
             assert_eq!(request.parent_session_id, "parent-session");
             assert_eq!(request.parent_prompt_id.as_deref(), Some("prompt-123"));
             assert_eq!(request.owner.goal_id(), Some("goal-123"));
+            let context = request
+                .goal_context
+                .as_ref()
+                .expect("Goal worker must receive its immutable snapshot");
+            assert_eq!(context.role, GoalSubagentRole::Worker);
+            assert_eq!(context.view.board_revision, 3);
             request
                 .respond_with(|request| SubagentResult {
                     success: true,
@@ -752,6 +819,48 @@ mod tests {
             }
             other => panic!("Expected SubagentCompleted output, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn goal_owned_subagent_without_matching_snapshot_fails_closed() {
+        let (backend, _rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(0));
+        resources.insert(SessionIdResource("parent-session".to_string()));
+        resources.insert(CurrentSubagentOwnerResource(SubagentOwner::goal(
+            "goal-123",
+            1,
+            2,
+            4,
+            GoalSubagentRole::Worker,
+        )));
+        resources.insert(
+            crate::implementations::grow_build::update_goal::GoalDelegationSnapshotResource(Some(
+                goal_view(),
+            )),
+        );
+
+        let result = tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            TaskToolInput {
+                description: "test task".into(),
+                prompt: "do something".into(),
+                subagent_type: "general-purpose".into(),
+                run_in_background: false,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                cwd: None,
+                model: None,
+                task_id: None,
+            },
+        )
+        .await
+        .expect_err("mismatched Goal revisions must not spawn");
+
+        assert!(result.to_string().contains("do not match"), "{result}");
     }
 
     #[tokio::test]
@@ -1515,7 +1624,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_preserves_tools_without_kind() {
+    fn restricted_filter_rejects_tools_without_a_capability_kind() {
         use crate::registry::types::ToolServerConfig;
         use crate::types::tool::ToolKind;
         let mut config = ToolServerConfig {
@@ -1529,8 +1638,8 @@ mod tests {
         let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&"read_file"));
         assert!(
-            ids.contains(&"mcp_custom_tool"),
-            "tools without kind preserved"
+            !ids.contains(&"mcp_custom_tool"),
+            "restricted Agents must fail closed for unclassified tools"
         );
     }
 

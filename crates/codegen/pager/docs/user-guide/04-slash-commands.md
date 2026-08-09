@@ -134,7 +134,7 @@ Choose the current session's Permission policy. `/ask`, `/auto`, and `/always-ap
 
 ### `/behavior [normal|clarify|plan|workflow|deep-research|goal]`
 
-Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, `/deep-research`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Plan, active Goal, and running/paused Deep Research show a confirmation warning before interruption: press `Enter` to confirm the switch, or `Esc` to cancel.
+Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, `/deep-research`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Leaving unfinished Plan or active Deep Research shows an interruption warning; select the same target Behavior again within the displayed window to confirm. Ordinary Enter/Esc input never confirms a Behavior transition. An unfinished Goal remains exclusive until completion or `/goal clear`.
 
 These commands modify only the current session. Persistent defaults remain in Settings and affect future sessions only.
 
@@ -252,13 +252,14 @@ Intervals are `Ns` (seconds, minimum 60), `Nm` (minutes), `Nh` (hours), or `Nd` 
 
 ### `/goal`
 
-Enter Goal Behavior or manage a persistent objective. A bare `/goal` selects Goal Behavior; use `/goal resume` to resume a paused goal (a budget-limited goal must be re-budgeted first). When no goal exists, the next non-empty message becomes the objective. `/goal set <objective>` explicitly creates it. Later ordinary messages add constraints or evidence and never silently replace the objective.
+Enter Goal Behavior or manage a persistent objective. A bare `/goal` selects Goal Behavior; use `/goal resume` to resume a paused goal (a budget-limited goal must be re-budgeted first). When no goal exists, the next non-empty message becomes the objective. Outside Goal Behavior, `/goal set <objective>` switches to Goal and creates it. While a Goal is unfinished, `set` is hidden and rejected; use `/goal edit <objective>` to revise the objective and restart background planning. Tab completion after `/goal edit` pre-fills the complete current objective for editing. Later ordinary messages add constraints or evidence and never silently replace the objective or plan.
 
 Grow works across rounds and only marks the goal complete after an independent verifier returns `Achieved`. Missing verification, timeout, infrastructure failure, insufficient evidence, exhausted attempts, or exhausted budget pauses the goal; the Agent cannot self-report completion.
 
 ```
 /goal set Migrate the auth module to the new API
 /goal set Migrate the auth module to the new API --budget 500000
+/goal edit Migrate the auth module and preserve the legacy API
 /goal budget 800000
 /goal status
 /goal pause
@@ -266,7 +267,7 @@ Grow works across rounds and only marks the goal complete after an independent v
 /goal clear
 ```
 
-Arguments are `set <objective> [--budget <tokens>]`, `budget <tokens>`, or one of `status`, `pause`, `resume`, `clear`. The `--budget` here is a **token** budget for the goal run, separate from workflow child-call budgets. `/goal budget <tokens>` adjusts the budget mid-run and also unlocks a budget-exhausted goal — run `/goal resume` to continue afterwards. The bare `/goal <objective>` form is still supported and equivalent to `/goal set <objective>`; use the explicit `set` form when the objective starts with `set` or `budget`, or is exactly `status`, `pause`, `resume`, or `clear`. `/goal pause` keeps Goal Behavior selected; `/goal clear` removes the tracker and returns to Normal. Goal is only offered when orchestration and an independent verifier are configured.
+Arguments are `set <objective> [--budget <tokens>]`, `edit <objective> [--budget <tokens>]`, `budget <tokens>`, or one of `status`, `pause`, `resume`, `clear`. `set` is only valid outside Goal when no unfinished Goal exists. `edit` advances the objective revision, invalidates old verification evidence, cancels the matching planner/verifier lease, and returns the Goal to Planning. The `--budget` here is a **token** budget for the goal run, separate from workflow child-call budgets. `/goal budget <tokens>` adjusts the budget mid-run and also unlocks a budget-exhausted goal — run `/goal resume` to continue afterwards. `/goal pause` keeps Goal Behavior selected; `/goal clear` removes the tracker and returns to Normal. Goal is only offered when orchestration and an independent verifier are configured.
 
 ### `/deep-research [query]`
 

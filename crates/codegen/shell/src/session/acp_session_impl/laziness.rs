@@ -744,7 +744,7 @@ impl SessionActor {
         let nudge_text = build_laziness_nudge(
             category,
             &evidence,
-            Some(tools::implementations::grow_build::UPDATE_GOAL_PLAN_TOOL_NAME),
+            Some(tools::implementations::grow_build::UPDATE_GOAL_PROGRESS_TOOL_NAME),
         );
         if nudge_text.is_empty() {
             // Defensive — `evaluate_laziness` only returns Nudge for

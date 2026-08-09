@@ -68,11 +68,12 @@ impl AgentTask {
         origin: PromptOrigin,
         turn_kind: crate::session::TurnKind,
         input: Vec<ContentBlock>,
-        prompt_mode: PromptMode,
+        admitted_behavior: tool_types::BehaviorId,
         client_identifier: Option<String>,
         screen_mode: Option<String>,
         verbatim: bool,
         json_schema: Option<serde_json::Value>,
+        start_gate: Option<oneshot::Receiver<()>>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
@@ -87,10 +88,18 @@ impl AgentTask {
                 .unwrap_or_default()
                 .as_millis() as u64,
             handle: tokio::task::spawn_local(async move {
+                // Admission can install foreground ownership before async
+                // tool-resource publication. This one-shot keeps the task
+                // dormant until every turn-scoped capability is ready.
+                if let Some(start_gate) = start_gate
+                    && start_gate.await.is_err()
+                {
+                    return;
+                }
                 run_task(
                     session.clone(),
                     input,
-                    prompt_mode,
+                    admitted_behavior,
                     client_identifier,
                     screen_mode,
                     verbatim,
@@ -158,7 +167,7 @@ impl<T> TaskSlot<T> {
 async fn run_task(
     session: Arc<SessionActor>,
     input: Vec<ContentBlock>,
-    prompt_mode: PromptMode,
+    admitted_behavior: tool_types::BehaviorId,
     client_identifier: Option<String>,
     screen_mode: Option<String>,
     verbatim: bool,
@@ -176,7 +185,7 @@ async fn run_task(
             origin,
             turn_kind,
             input,
-            prompt_mode,
+            admitted_behavior,
             client_identifier,
             screen_mode,
             verbatim,
@@ -527,6 +536,14 @@ impl SessionActor {
             .as_ref()
             .map(|t| t.prompt_id.clone())
             .or(pinned_prompt_id);
+        let cancelled_identity = running_task
+            .as_ref()
+            .map(|task| (task.origin.clone(), task.turn_kind))
+            .or_else(|| {
+                pending_inputs
+                    .front()
+                    .map(|input| (input.origin.clone(), input.turn_kind))
+            });
 
         // Abort drops the wait tool's select future, so transfer or retire its
         // reservations while the authoritative prompt identity is still
@@ -547,6 +564,13 @@ impl SessionActor {
                 tools::implementations::grow_build::task::types::CurrentPromptIdResource(
                     String::new(),
                 ),
+            )
+            .await;
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
+                tools::implementations::grow_build::update_goal::GoalDelegationSnapshotResource::default(),
             )
             .await;
         self.agent
@@ -643,6 +667,9 @@ impl SessionActor {
             // a send-now cancel from an interactive Ctrl+C/Esc.
             self.emit_turn_completed(
                 prompt_id,
+                cancelled_identity
+                    .as_ref()
+                    .map(|(origin, turn_kind)| (origin, *turn_kind)),
                 &Ok(acp::StopReason::Cancelled),
                 cancelled_usage.clone(),
                 trigger.as_deref(),

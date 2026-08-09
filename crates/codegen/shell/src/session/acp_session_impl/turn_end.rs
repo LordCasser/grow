@@ -171,7 +171,7 @@ impl SessionActor {
         // Settle the exact foreground owner first. An internal Goal turn is
         // intentionally absent from `pending_inputs`, so FIFO membership can
         // never be used as the ownership test.
-        let (settled_input, broadcast_queue, goal_finalization) = {
+        let (settled_input, broadcast_queue, turn_origin, turn_kind) = {
             let mut state = self.state.lock().await;
             if state.running_prompt_id() != Some(prompt_id.as_str()) {
                 tracing::warn!("Received completion for unknown prompt: {prompt_id}");
@@ -189,10 +189,8 @@ impl SessionActor {
                 .foreground
                 .take_regular()
                 .expect("running prompt id implies a regular foreground task");
-            let goal_finalization = matches!(
-                task.origin,
-                crate::session::PromptOrigin::GoalFinalization { .. }
-            );
+            let turn_origin = task.origin.clone();
+            let turn_kind = task.turn_kind;
             let input = state
                 .pending_inputs
                 .front()
@@ -200,8 +198,13 @@ impl SessionActor {
                 .then(|| state.pending_inputs.pop_front())
                 .flatten();
             let broadcast = input.as_ref().is_some_and(|item| item.queue_meta.is_some());
-            (input, broadcast, goal_finalization)
+            (input, broadcast, turn_origin, turn_kind)
         };
+
+        // Terminal fence for exact-turn steering. The sampler drains at its
+        // safe points; anything left here arrived too late to belong to the
+        // completed turn and must never be consumed by its successor.
+        self.discard_residual_interjections_at_turn_end();
 
         if let Some(input) = settled_input {
             let _ = input.respond_to.send(result.clone());
@@ -222,6 +225,13 @@ impl SessionActor {
                 tools::implementations::grow_build::task::types::CurrentPromptIdResource(
                     String::new(),
                 ),
+            )
+            .await;
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
+                tools::implementations::grow_build::update_goal::GoalDelegationSnapshotResource::default(),
             )
             .await;
         self.agent
@@ -268,10 +278,30 @@ impl SessionActor {
                     } => ctx.trigger.as_deref(),
                     _ => None,
                 });
-            self.emit_turn_completed(prompt_id, &mapped, usage, cancel_trigger)
+            let terminal_persisted = self
+                .emit_turn_completed(
+                    prompt_id,
+                    Some((&turn_origin, turn_kind)),
+                    &mapped,
+                    usage,
+                    cancel_trigger,
+                )
                 .await;
-            if goal_finalization && Self::goal_finalization_terminal_succeeded(&result) {
-                self.finalize_goal_finalization_turn().await;
+            if matches!(
+                turn_origin,
+                crate::session::PromptOrigin::GoalFinalization { .. }
+            ) && Self::goal_finalization_terminal_succeeded(&result)
+            {
+                if terminal_persisted {
+                    self.finalize_goal_finalization_turn().await;
+                } else {
+                    self.auto_pause_goal_if_active_with_message(
+                        crate::session::goal_tracker::GoalPauseReason::Infra,
+                        "Goal final report was produced, but its TurnCompleted record could not be durably persisted. Resume after storage is healthy."
+                            .to_string(),
+                    )
+                    .await;
+                }
             }
         }
         // The terminal is durable before clients observe either a new running
@@ -286,16 +316,17 @@ impl SessionActor {
     /// chokepoint shared by the completion (`handle_completion`) and cancel
     /// (`cancel_running_task`) sites. Derives `(stop_reason, agent_result)`
     /// from the same source as PromptResponse (`prompt_complete_fields`), then
-    /// persists + forwards via `send_grow_notification`.
+    /// persists before forwarding the live notification.
     ///
     /// `cancel_trigger` (when `Some`) rides the `_meta` as `cancelTrigger`.
     pub(super) async fn emit_turn_completed(
         &self,
         prompt_id: String,
+        identity: Option<(&crate::session::PromptOrigin, crate::session::TurnKind)>,
         mapped: &std::result::Result<acp::StopReason, acp::Error>,
         usage: Option<crate::extensions::notification::PromptUsage>,
         cancel_trigger: Option<&str>,
-    ) {
+    ) -> bool {
         let (stop_reason, agent_result) = crate::sampling::error::prompt_complete_fields(mapped);
         self.state.lock().await.record_recent_terminal(
             crate::session::prompt_queue::RecentPromptTerminal {
@@ -309,16 +340,63 @@ impl SessionActor {
                 .into_iter()
                 .collect()
         });
-        self.send_grow_notification_with_extra_meta(
+        self.close_rewind_window().await;
+        let notification = self.build_grow_notification(
             crate::session::turn_completion::build_turn_completed(
                 prompt_id,
+                identity.map(|(origin, turn_kind)| {
+                    let (goal_id, stage_id) = match origin {
+                        crate::session::PromptOrigin::GoalContinuation { goal_id, stage_id }
+                        | crate::session::PromptOrigin::GoalFinalization { goal_id, stage_id } => {
+                            (Some(goal_id.clone()), Some(*stage_id))
+                        }
+                        _ => (None, None),
+                    };
+                    crate::extensions::notification::TurnIdentity {
+                        origin: origin.wire_name().to_string(),
+                        turn_kind: turn_kind.wire_name().to_string(),
+                        goal_id,
+                        stage_id,
+                    }
+                }),
                 stop_reason,
                 agent_result,
                 usage,
             ),
             extra_meta,
-        )
-        .await;
+        );
+        let update = crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone()));
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        let dispatched = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to })
+            .is_ok();
+        let persisted = if dispatched {
+            match response.await {
+                Ok(Ok(())) => true,
+                Ok(Err(crate::session::storage::AppendUpdateError::Committed(error))) => {
+                    tracing::error!(%error, "TurnCompleted append reached storage but its durable sync failed");
+                    false
+                }
+                Ok(Err(crate::session::storage::AppendUpdateError::NotCommitted(error))) => {
+                    tracing::error!(%error, "TurnCompleted was not persisted");
+                    false
+                }
+                Err(error) => {
+                    tracing::error!(%error, "TurnCompleted persistence acknowledgement was lost");
+                    false
+                }
+            }
+        } else {
+            tracing::error!("TurnCompleted persistence actor is unavailable");
+            false
+        };
+        // Keep the live client terminal even on storage failure so foreground
+        // ownership cannot appear wedged. Goal completion itself remains
+        // fail-closed on `persisted` above.
+        self.forward_grow_notification(notification).await;
+        persisted
     }
 
     /// Diagnostic error category; delegates to `stop_failure_error_type` so the
@@ -385,19 +463,22 @@ impl SessionActor {
         })
     }
 
-    /// `(turn_succeeded, suppress_goal_continuation, infra_pause_message)`.
-    /// StationarityEnded is success but suppresses the next idle continuation.
-    /// `infra_pause_message` is extracted before `handle_completion` consumes `result`.
+    /// `(turn_succeeded, suppress_goal_continuation, goal_pause_message)`.
+    /// Only a Goal-owned internal turn may degrade the Goal lifecycle. The same
+    /// provider outcome on an ordinary user turn belongs to that turn alone and
+    /// must still let the idle arbiter resume background Goal work.
     pub(super) fn post_turn_goal_degradation_plan(
         result: &PromptTurnResult,
         origin: Option<&crate::session::PromptOrigin>,
     ) -> (bool, bool, Option<String>) {
-        let suppress_goal_continuation = result.as_ref().ok().is_some_and(|ok| {
-            matches!(
-                ok.completion_kind,
-                crate::session::commands::PromptCompletionKind::StationarityEnded
-            )
-        });
+        let goal_internal = origin.is_some_and(crate::session::PromptOrigin::is_goal_internal);
+        let suppress_goal_continuation = goal_internal
+            && result.as_ref().ok().is_some_and(|ok| {
+                matches!(
+                    ok.completion_kind,
+                    crate::session::commands::PromptCompletionKind::StationarityEnded
+                )
+            });
         let turn_cancelled = result.as_ref().ok().is_some_and(|ok| {
             matches!(
                 ok.completion_kind,
@@ -409,16 +490,38 @@ impl SessionActor {
             .as_ref()
             .ok()
             .is_some_and(|ok| !turn_cancelled && ok.stop_reason != acp::StopReason::Refusal);
-        let infra_pause_message = result
+        let error_pause_message = result
             .as_ref()
             .err()
-            .filter(|_| origin.is_some_and(crate::session::PromptOrigin::is_goal_internal))
+            .filter(|_| goal_internal)
             .filter(|err| Self::is_infra_turn_error(err))
             .map(Self::format_turn_error_message);
+        let terminal_pause_message = goal_internal
+            .then(|| result.as_ref().ok())
+            .flatten()
+            .and_then(|ok| match &ok.completion_kind {
+                crate::session::commands::PromptCompletionKind::StationarityEnded => Some(
+                    "Goal continuation stopped after repeated identical actions. Review the blackboard and use /goal resume after correcting the blocker."
+                        .to_string(),
+                ),
+                crate::session::commands::PromptCompletionKind::MaxTurnsReached { .. } => Some(
+                    "Goal continuation reached the configured turn limit. Increase the limit or revise the plan, then use /goal resume."
+                        .to_string(),
+                ),
+                crate::session::commands::PromptCompletionKind::Completed
+                    if ok.stop_reason == acp::StopReason::Refusal =>
+                {
+                    Some(
+                        "The model provider refused the Goal continuation. Use /goal resume to retry after addressing the refusal."
+                            .to_string(),
+                    )
+                }
+                _ => None,
+            });
         (
             turn_succeeded,
             suppress_goal_continuation,
-            infra_pause_message,
+            error_pause_message.or(terminal_pause_message),
         )
     }
 

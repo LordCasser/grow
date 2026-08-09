@@ -534,7 +534,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             mode_id,
             text,
             prompt_id,
+            skill_token_ranges,
             message,
+            remaining_ms,
         } => {
             // This prompt's RPC resolved without running: retire its
             // optimistic echo exactly like the resolved-without-running arm
@@ -550,15 +552,39 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.shared_queue.retain(|e| e.id != prompt_id);
                 agent.note_queue_echo_retired(&prompt_id);
-                let target = tools::types::SessionMode::from_id(mode_id.0.as_ref());
-                agent.behavior_switch_confirm =
-                    Some(crate::app::agent_view::BehaviorSwitchConfirm {
-                        target,
-                        prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt { text }),
-                    });
-                if !agent.behavior_switch_warning_pending {
-                    agent.show_behavior_switch_warning(&message);
+                // `maybe_drain_queue` painted a provisional user bubble and
+                // entered TurnSubmitting before the sequential mode RPC ran.
+                // The Shell explicitly says no turn was admitted, so unwind
+                // that presentation boundary before returning the same user
+                // message to the ordinary FIFO. Otherwise the Pager stays
+                // busy forever and the eventual admitted turn paints a second
+                // bubble with a fresh message id.
+                if agent.session.current_prompt_id.as_deref() == Some(prompt_id.as_str())
+                    && matches!(
+                        agent.session.state,
+                        crate::app::agent::AgentState::TurnSubmitting
+                    )
+                {
+                    if let Some(in_flight) = agent.session.in_flight_prompt.take() {
+                        for entry_id in in_flight.combined_scrollback_entries {
+                            agent.scrollback.remove_entry(entry_id);
+                        }
+                        agent.scrollback.remove_entry(in_flight.scrollback_entry);
+                    }
+                    agent.session.finish_turn(&mut agent.scrollback);
+                    agent.mark_turn_finished();
+                    agent.activity_started_at = None;
+                    agent.last_activity = None;
                 }
+                agent
+                    .session
+                    .enqueue_prompt_with_skill_tokens(text, skill_token_ranges);
+                agent.show_behavior_switch_warning(&message, remaining_ms);
+                tracing::debug!(
+                    target_behavior = %mode_id.0,
+                    prompt_id,
+                    "Behavior confirmation returned prompt to the local FIFO"
+                );
             }
             vec![]
         }

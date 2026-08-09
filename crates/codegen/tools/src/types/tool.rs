@@ -85,7 +85,10 @@ pub enum ToolKind {
     SearchTool,
     UseTool,
     Monitor,
-    GoalUpdate,
+    GoalRead,
+    GoalProgressUpdate,
+    GoalReplanRequest,
+    GoalLifecycleUpdate,
     Workflow,
     #[serde(other)]
     Other,

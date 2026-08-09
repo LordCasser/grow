@@ -1364,10 +1364,7 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let _ = dispatch(Action::SetMaxThoughtsWidth(200), app);
         }
         "behavior" => {
-            let _ = dispatch(
-                Action::SetBehaviorMode(tools::types::SessionMode::Plan),
-                app,
-            );
+            let _ = dispatch(Action::SetBehaviorMode(tools::types::BehaviorId::Plan), app);
         }
         "show_tips" => {
             let _ = dispatch(Action::SetShowTips(false), app);

@@ -36,6 +36,19 @@ pub struct SessionNotification {
     pub meta: Option<serde_json::Value>,
 }
 
+/// Immutable ownership stamped on a terminal turn record. It lets crash
+/// recovery reconcile runtime-owned regular turns without parsing prompt ids
+/// or inferring ownership from the currently selected Behavior.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TurnIdentity {
+    pub origin: String,
+    pub turn_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_id: Option<u64>,
+}
+
 /// Wire usage for ACP `_meta.usage` and `TurnCompleted.usage`.
 ///
 /// # Wire contract (ACP vs headless)
@@ -890,6 +903,9 @@ pub enum SessionUpdate {
         /// `"planning"`, `"executing"`, `"verifying"`, `"summarizing"`.
         phase: String,
         plan_revision: u64,
+        board_revision: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tasks: Vec<tool_types::GoalTaskProjection>,
         plan_markdown: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verifier_feedback: Option<String>,
@@ -958,6 +974,9 @@ pub enum SessionUpdate {
         /// Correlation key the re-attaching viewer finalizes the turn on:
         /// the prompt/turn whose terminal outcome this carries.
         prompt_id: String,
+        /// Structured immutable owner captured when the turn was admitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<TurnIdentity>,
         /// Why the turn ended (the model's stop reason, or e.g. "cancelled").
         stop_reason: String,
         /// Final agent result text, when the turn produced one.
@@ -1812,7 +1831,9 @@ mod tests {
             status: "active".into(),
             phase: "verifying".into(),
             plan_revision: 4,
-            plan_markdown: "- [x] implement\n- [ ] verify".into(),
+            board_revision: 9,
+            tasks: Vec::new(),
+            plan_markdown: "board".into(),
             verifier_feedback: Some("Run the integration suite".into()),
             token_budget: Some(100_000),
             tokens_used: 25_000,
@@ -1842,7 +1863,8 @@ mod tests {
         assert_eq!(json["objective_revision"], 2);
         assert_eq!(json["phase"], "verifying");
         assert_eq!(json["plan_revision"], 4);
-        assert_eq!(json["plan_markdown"], "- [x] implement\n- [ ] verify");
+        assert_eq!(json["board_revision"], 9);
+        assert_eq!(json["plan_markdown"], "board");
         assert_eq!(json["verifier_feedback"], "Run the integration suite");
         assert_eq!(
             serde_json::from_value::<SessionUpdate>(json).unwrap(),
@@ -1951,6 +1973,12 @@ mod tests {
         // names on the wire.
         let update = SessionUpdate::TurnCompleted {
             prompt_id: "p-1".into(),
+            identity: Some(TurnIdentity {
+                origin: "goal_finalization".into(),
+                turn_kind: "internal".into(),
+                goal_id: Some("g-1".into()),
+                stage_id: Some(7),
+            }),
             stop_reason: "end_turn".into(),
             agent_result: Some("done".into()),
             usage: None,
@@ -1960,12 +1988,14 @@ mod tests {
         assert_eq!(json["prompt_id"], "p-1");
         assert_eq!(json["stop_reason"], "end_turn");
         assert_eq!(json["agent_result"], "done");
+        assert_eq!(json["identity"]["goal_id"], "g-1");
     }
 
     #[test]
     fn turn_completed_optional_fields_skipped_when_none() {
         let update = SessionUpdate::TurnCompleted {
             prompt_id: "p-2".into(),
+            identity: None,
             stop_reason: "cancelled".into(),
             agent_result: None,
             usage: None,
@@ -1980,12 +2010,19 @@ mod tests {
         for update in [
             SessionUpdate::TurnCompleted {
                 prompt_id: "p-rt".into(),
+                identity: Some(TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    stage_id: None,
+                }),
                 stop_reason: "end_turn".into(),
                 agent_result: Some("result text".into()),
                 usage: None,
             },
             SessionUpdate::TurnCompleted {
                 prompt_id: "p-min".into(),
+                identity: None,
                 stop_reason: "error".into(),
                 agent_result: None,
                 usage: None,

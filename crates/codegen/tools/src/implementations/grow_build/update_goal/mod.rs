@@ -1,19 +1,19 @@
-//! Goal model tools. All three commands share one session-owned runtime
-//! handle; the tools contain no Goal state and never run verifier work.
+//! Goal-scoped model tools.
+//!
+//! Tools are stateless command adapters. The primary Session runtime is the
+//! only authority that may commit planner data, progress patches, replans, or
+//! lifecycle transitions. Delegated Goal agents receive an immutable snapshot
+//! and are read-only at the object boundary.
 
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::types::tool_metadata::ToolMetadata;
 
 pub const GET_GOAL_TOOL_NAME: &str = "get_goal";
-pub const UPDATE_GOAL_PLAN_TOOL_NAME: &str = "update_goal_plan";
+pub const UPDATE_GOAL_PROGRESS_TOOL_NAME: &str = "update_goal_progress";
+pub const REQUEST_GOAL_REPLAN_TOOL_NAME: &str = "request_goal_replan";
 pub use crate::slash_commands::UPDATE_GOAL_TOOL_NAME;
 
-/// Explicit empty-object input for `get_goal`.
-///
-/// `serde_json::Value` has no object-shaped root schema, which makes providers
-/// that validate function definitions reject the entire sampling request even
-/// though the tool itself takes no arguments.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetGoalInput {}
@@ -26,7 +26,10 @@ pub enum UpdateGoalAction {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateGoalInput {
+    pub expected_plan_revision: u64,
+    pub expected_board_revision: u64,
     #[schemars(
         description = "candidate_complete requests independent verification; blocked stops autonomous execution."
     )]
@@ -36,13 +39,25 @@ pub struct UpdateGoalInput {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct UpdateGoalPlanInput {
+#[serde(deny_unknown_fields)]
+pub struct UpdateGoalProgressInput {
+    pub expected_plan_revision: u64,
+    pub expected_board_revision: u64,
     #[schemars(
-        description = "The complete replacement user-visible Markdown blackboard. Include only shared task status, checklist, acceptance criteria, verification evidence, and unresolved gaps; exclude Agent-only instructions, tool directions, and orchestration policy."
+        description = "Typed updates to existing stable task ids. Task structure is immutable."
     )]
-    pub markdown: String,
-    #[serde(default)]
-    pub reason: Option<String>,
+    pub updates: Vec<tool_types::GoalProgressUpdate>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestGoalReplanInput {
+    pub expected_plan_revision: u64,
+    pub expected_board_revision: u64,
+    #[schemars(description = "Planner guidance; this is not replacement Markdown.")]
+    pub guidance: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -55,19 +70,54 @@ pub struct GoalView {
     pub token_budget: Option<i64>,
     pub tokens_used: i64,
     pub plan_revision: u64,
+    pub board_revision: u64,
+    pub tasks: Vec<tool_types::GoalTaskProjection>,
     pub plan_markdown: String,
     pub verifier_feedback: Option<String>,
 }
 
 impl tool_runtime::ToolOutput for GoalView {}
 
+/// Immutable Goal data delegated to a child session. A child reads this
+/// snapshot instead of consulting the parent's live runtime.
+#[derive(Debug, Clone)]
+pub struct GoalContextSnapshot {
+    pub role: crate::implementations::grow_build::task::types::GoalSubagentRole,
+    pub view: GoalView,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GoalContextSnapshotResource(pub Option<GoalContextSnapshot>);
+
+crate::register_resource!(
+    "grow_build",
+    "GoalContextSnapshotResource",
+    GoalContextSnapshotResource
+);
+
+/// Parent-turn snapshot consumed by `task` when it creates a Goal-owned
+/// worker. Unlike `GoalContextSnapshotResource`, this does not make the
+/// primary Agent read-only.
+#[derive(Debug, Clone, Default)]
+pub struct GoalDelegationSnapshotResource(pub Option<GoalView>);
+
+crate::register_resource!(
+    "grow_build",
+    "GoalDelegationSnapshotResource",
+    GoalDelegationSnapshotResource
+);
+
 #[derive(Debug)]
 pub enum GoalCommand {
     Get {
         respond_to: tokio::sync::oneshot::Sender<Result<GoalView, String>>,
     },
-    ReplacePlan {
-        input: UpdateGoalPlanInput,
+    Progress {
+        input: UpdateGoalProgressInput,
+        respond_to: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
+    Replan {
+        input: RequestGoalReplanInput,
         respond_to: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
     Update {
@@ -98,6 +148,15 @@ async fn runtime_sender(
     use crate::types::tool_metadata::shared_resources;
     let resources = shared_resources(ctx)?;
     let resources = resources.lock().await;
+    if resources
+        .get::<GoalContextSnapshotResource>()
+        .is_some_and(|resource| resource.0.is_some())
+    {
+        return Err(tool_runtime::ToolError::custom(
+            "delegated_goal_read_only",
+            "Delegated Goal agents may read their immutable Goal snapshot but cannot mutate it.",
+        ));
+    }
     resources
         .get::<GoalRuntimeHandle>()
         .map(|handle| handle.0.clone())
@@ -111,10 +170,10 @@ fn channel_error() -> tool_runtime::ToolError {
 }
 
 macro_rules! goal_metadata {
-    ($tool:ty, $description:literal) => {
+    ($tool:ty, $kind:expr, $description:literal) => {
         impl crate::types::tool_metadata::ToolMetadata for $tool {
             fn kind(&self) -> ToolKind {
-                ToolKind::GoalUpdate
+                $kind
             }
             fn tool_namespace(&self) -> ToolNamespace {
                 ToolNamespace::Grow
@@ -129,12 +188,32 @@ macro_rules! goal_metadata {
     };
 }
 
+async fn command_output(
+    sender: tokio::sync::mpsc::UnboundedSender<GoalCommand>,
+    build: impl FnOnce(tokio::sync::oneshot::Sender<Result<String, String>>) -> GoalCommand,
+    code: &'static str,
+) -> Result<UpdateGoalOutput, tool_runtime::ToolError> {
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    sender
+        .send(build(respond_to))
+        .map_err(|_| channel_error())?;
+    let summary = response
+        .await
+        .map_err(|_| channel_error())?
+        .map_err(|message| tool_runtime::ToolError::custom(code, message))?;
+    Ok(UpdateGoalOutput {
+        success: true,
+        summary,
+    })
+}
+
 #[derive(Debug, Default)]
 pub struct GetGoalTool;
 
 goal_metadata!(
     GetGoalTool,
-    "Read the active Goal, phase, budget, Markdown plan, and verifier feedback."
+    ToolKind::GoalRead,
+    "Read the active Goal, revisions, structured tasks, Markdown board, and verifier feedback."
 );
 
 impl tool_runtime::Tool for GetGoalTool {
@@ -161,6 +240,17 @@ impl tool_runtime::Tool for GetGoalTool {
         ctx: tool_runtime::ToolCallContext,
         _input: GetGoalInput,
     ) -> Result<GoalView, tool_runtime::ToolError> {
+        use crate::types::tool_metadata::shared_resources;
+        let resources = shared_resources(&ctx)?;
+        if let Some(snapshot) = resources
+            .lock()
+            .await
+            .get::<GoalContextSnapshotResource>()
+            .and_then(|resource| resource.0.as_ref())
+            .cloned()
+        {
+            return Ok(snapshot.view);
+        }
         let sender = runtime_sender(&ctx).await?;
         let (respond_to, response) = tokio::sync::oneshot::channel();
         sender
@@ -173,64 +263,78 @@ impl tool_runtime::Tool for GetGoalTool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::GetGoalInput;
-
-    #[test]
-    fn get_goal_exports_an_empty_object_schema() {
-        let schema = crate::registry::types::generate_schema::<GetGoalInput>();
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["properties"], serde_json::json!({}));
-        assert_eq!(schema["required"], serde_json::json!([]));
-    }
-}
-
 #[derive(Debug, Default)]
-pub struct UpdateGoalPlanTool;
+pub struct UpdateGoalProgressTool;
 
 goal_metadata!(
-    UpdateGoalPlanTool,
-    "Replace the active Goal's shared, user-visible Markdown blackboard. Keep Agent-only instructions out of it."
+    UpdateGoalProgressTool,
+    ToolKind::GoalProgressUpdate,
+    "Update status, progress, evidence, or gap fields on existing Goal task ids."
 );
 
-impl tool_runtime::Tool for UpdateGoalPlanTool {
-    type Args = UpdateGoalPlanInput;
+impl tool_runtime::Tool for UpdateGoalProgressTool {
+    type Args = UpdateGoalProgressInput;
     type Output = UpdateGoalOutput;
 
     fn id(&self) -> tool_protocol::ToolId {
-        tool_protocol::ToolId::new(UPDATE_GOAL_PLAN_TOOL_NAME).expect("valid tool id")
+        tool_protocol::ToolId::new(UPDATE_GOAL_PROGRESS_TOOL_NAME).expect("valid tool id")
     }
 
     fn description(&self, _ctx: &tool_runtime::ListToolsContext) -> tool_types::ToolDescription {
-        tool_types::ToolDescription::new(UPDATE_GOAL_PLAN_TOOL_NAME, self.description_template())
-    }
-
-    fn capabilities(&self) -> tool_protocol::ToolCapabilities {
-        tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Write,
-            ..Default::default()
-        }
+        tool_types::ToolDescription::new(
+            UPDATE_GOAL_PROGRESS_TOOL_NAME,
+            self.description_template(),
+        )
     }
 
     async fn run(
         &self,
         ctx: tool_runtime::ToolCallContext,
-        input: UpdateGoalPlanInput,
+        input: UpdateGoalProgressInput,
     ) -> Result<UpdateGoalOutput, tool_runtime::ToolError> {
         let sender = runtime_sender(&ctx).await?;
-        let (respond_to, response) = tokio::sync::oneshot::channel();
-        sender
-            .send(GoalCommand::ReplacePlan { input, respond_to })
-            .map_err(|_| channel_error())?;
-        let summary = response
-            .await
-            .map_err(|_| channel_error())?
-            .map_err(|message| tool_runtime::ToolError::custom("goal_plan_rejected", message))?;
-        Ok(UpdateGoalOutput {
-            success: true,
-            summary,
-        })
+        command_output(
+            sender,
+            |respond_to| GoalCommand::Progress { input, respond_to },
+            "goal_progress_rejected",
+        )
+        .await
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RequestGoalReplanTool;
+
+goal_metadata!(
+    RequestGoalReplanTool,
+    ToolKind::GoalReplanRequest,
+    "Request a structural replan from the background Goal planner. Do not provide replacement Markdown."
+);
+
+impl tool_runtime::Tool for RequestGoalReplanTool {
+    type Args = RequestGoalReplanInput;
+    type Output = UpdateGoalOutput;
+
+    fn id(&self) -> tool_protocol::ToolId {
+        tool_protocol::ToolId::new(REQUEST_GOAL_REPLAN_TOOL_NAME).expect("valid tool id")
+    }
+
+    fn description(&self, _ctx: &tool_runtime::ListToolsContext) -> tool_types::ToolDescription {
+        tool_types::ToolDescription::new(REQUEST_GOAL_REPLAN_TOOL_NAME, self.description_template())
+    }
+
+    async fn run(
+        &self,
+        ctx: tool_runtime::ToolCallContext,
+        input: RequestGoalReplanInput,
+    ) -> Result<UpdateGoalOutput, tool_runtime::ToolError> {
+        let sender = runtime_sender(&ctx).await?;
+        command_output(
+            sender,
+            |respond_to| GoalCommand::Replan { input, respond_to },
+            "goal_replan_rejected",
+        )
+        .await
     }
 }
 
@@ -239,6 +343,7 @@ pub struct UpdateGoalTool;
 
 goal_metadata!(
     UpdateGoalTool,
+    ToolKind::GoalLifecycleUpdate,
     "Submit a completion candidate for independent verification, or report a genuine blocker."
 );
 
@@ -254,30 +359,30 @@ impl tool_runtime::Tool for UpdateGoalTool {
         tool_types::ToolDescription::new(UPDATE_GOAL_TOOL_NAME, self.description_template())
     }
 
-    fn capabilities(&self) -> tool_protocol::ToolCapabilities {
-        tool_protocol::ToolCapabilities {
-            tool_scope: tool_protocol::ToolScope::Write,
-            ..Default::default()
-        }
-    }
-
     async fn run(
         &self,
         ctx: tool_runtime::ToolCallContext,
         input: UpdateGoalInput,
     ) -> Result<UpdateGoalOutput, tool_runtime::ToolError> {
         let sender = runtime_sender(&ctx).await?;
-        let (respond_to, response) = tokio::sync::oneshot::channel();
-        sender
-            .send(GoalCommand::Update { input, respond_to })
-            .map_err(|_| channel_error())?;
-        let summary = response
-            .await
-            .map_err(|_| channel_error())?
-            .map_err(|message| tool_runtime::ToolError::custom("goal_update_rejected", message))?;
-        Ok(UpdateGoalOutput {
-            success: true,
-            summary,
-        })
+        command_output(
+            sender,
+            |respond_to| GoalCommand::Update { input, respond_to },
+            "goal_update_rejected",
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GetGoalInput;
+
+    #[test]
+    fn get_goal_exports_an_empty_object_schema() {
+        let schema = crate::registry::types::generate_schema::<GetGoalInput>();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"], serde_json::json!({}));
+        assert_eq!(schema["required"], serde_json::json!([]));
     }
 }

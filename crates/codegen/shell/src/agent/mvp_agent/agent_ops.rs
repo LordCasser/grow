@@ -694,7 +694,7 @@ impl MvpAgent {
         );
         let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let activity = crate::agent::activity::AgentActivity::default();
-        let instance = Self {
+        Self {
             sessions: RefCell::new(HashMap::new()),
             activity,
             loading_sessions: RefCell::new(HashMap::new()),
@@ -750,8 +750,7 @@ impl MvpAgent {
             roster_delta_spy: RefCell::new(Vec::new()),
             #[cfg(test)]
             supervisor_spawn_count: std::cell::Cell::new(0),
-        };
-        instance
+        }
     }
     /// Handle `grow/internal/evict_sessions` — the leader server tells us a
     /// client disconnected and these sessions lost their IPC owner.
@@ -1476,6 +1475,7 @@ impl MvpAgent {
             persisted_behavior,
             persisted_goal_mode,
             persisted_goal_mode_rejected,
+            persisted_control_revision,
             persisted_workflow_runs,
             persisted_announcement_state,
             session_meta,
@@ -2025,6 +2025,7 @@ impl MvpAgent {
                     persisted_behavior,
                     persisted_goal_mode,
                     persisted_goal_mode_rejected,
+                    persisted_control_revision,
                     persisted_workflow_runs,
                     persisted_announcement_state,
                     self.memory_config.clone(),

@@ -27,7 +27,7 @@ impl SlashCommand for WorkflowCommand {
     }
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         CommandResult::Action(Action::SetBehaviorThenPrompt {
-            mode: tools::types::SessionMode::Workflow,
+            mode: tools::types::BehaviorId::Workflow,
             prompt: (!args.trim().is_empty()).then(|| args.trim().to_owned()),
         })
     }

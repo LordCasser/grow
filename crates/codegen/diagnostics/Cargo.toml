@@ -40,6 +40,7 @@ uuid = { workspace = true, features = ["v5", "v7"] }
 mid = "4.0.0"
 tokio = { workspace = true, features = ["macros", "sync", "rt"] }
 parking_lot = { workspace = true }
+tool-types = { workspace = true }
 
 [dev-dependencies]
 # Pre-main unified-log redirect for this crate's own test binary.

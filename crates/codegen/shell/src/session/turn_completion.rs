@@ -14,12 +14,14 @@ use crate::extensions::notification::SessionUpdate;
 /// dropped for a shape mismatch.
 pub(crate) fn build_turn_completed(
     prompt_id: String,
+    identity: Option<crate::extensions::notification::TurnIdentity>,
     stop_reason: serde_json::Value,
     agent_result: serde_json::Value,
     usage: Option<crate::extensions::notification::PromptUsage>,
 ) -> SessionUpdate {
     SessionUpdate::TurnCompleted {
         prompt_id,
+        identity,
         stop_reason: json_to_string(stop_reason),
         agent_result: match agent_result {
             serde_json::Value::Null => None,
@@ -47,6 +49,7 @@ mod tests {
         // The exact pair `prompt_complete_fields(&Ok(EndTurn))` produces.
         let update = build_turn_completed(
             "p-1".into(),
+            None,
             serde_json::json!("end_turn"),
             serde_json::Value::Null,
             None,
@@ -55,6 +58,7 @@ mod tests {
             update,
             SessionUpdate::TurnCompleted {
                 prompt_id: "p-1".into(),
+                identity: None,
                 stop_reason: "end_turn".into(),
                 agent_result: None,
                 usage: None,
@@ -67,6 +71,7 @@ mod tests {
         // The pair `prompt_complete_fields(&Err(..))` produces for a generic error.
         let update = build_turn_completed(
             "p-2".into(),
+            None,
             serde_json::json!("error"),
             serde_json::json!("connection reset"),
             None,
@@ -75,6 +80,7 @@ mod tests {
             update,
             SessionUpdate::TurnCompleted {
                 prompt_id: "p-2".into(),
+                identity: None,
                 stop_reason: "error".into(),
                 agent_result: Some("connection reset".into()),
                 usage: None,
@@ -86,6 +92,7 @@ mod tests {
     fn null_agent_result_maps_to_none() {
         let update = build_turn_completed(
             "p-3".into(),
+            None,
             serde_json::json!("cancelled"),
             serde_json::Value::Null,
             None,
@@ -105,6 +112,7 @@ mod tests {
         // produces a best-effort terminal rather than being dropped.
         let update = build_turn_completed(
             "p-4".into(),
+            None,
             serde_json::json!(42),
             serde_json::json!({ "k": "v" }),
             None,
@@ -113,6 +121,7 @@ mod tests {
             update,
             SessionUpdate::TurnCompleted {
                 prompt_id: "p-4".into(),
+                identity: None,
                 stop_reason: "42".into(),
                 agent_result: Some("{\"k\":\"v\"}".into()),
                 usage: None,

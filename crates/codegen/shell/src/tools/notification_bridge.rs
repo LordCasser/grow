@@ -38,7 +38,7 @@ pub struct NotificationBridgeConfig {
     /// `grow/incrementalBashOutput` capability.
     pub incremental_bash_output: bool,
     /// Read-only Behavior state used to annotate tool notifications.
-    pub behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorController>>,
+    pub behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorCoordinator>>,
     /// Session command channel for monitor events and task-completed injections.
     pub session_cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     pub task_completion_reservations: tools::reminders::task_completion::TaskCompletionReservations,
@@ -181,25 +181,26 @@ pub fn spawn_notification_bridge(config: NotificationBridgeConfig) -> ToolNotifi
     });
     handle
 }
-/// Emit a `CurrentModeUpdate` for the given [`SessionMode`] — persisted to
+/// Emit a `CurrentModeUpdate` for the given [`BehaviorId`] — persisted to
 /// `updates.jsonl` so session replay re-applies the mode, and forwarded to
 /// the gateway so the pager updates live.
 async fn emit_current_mode_update(
     config: &NotificationBridgeConfig,
-    mode: tools::types::SessionMode,
+    mode: tools::types::BehaviorId,
 ) {
     let mut notification = acp::SessionNotification::new(
         config.session_id.clone(),
         acp::SessionUpdate::CurrentModeUpdate(
             acp::CurrentModeUpdate::new(acp::SessionModeId::new(mode.as_id())).meta(
                 serde_json::json!({
-                    "grow/behavior": config.behavior.lock().behavior().map(|behavior| match behavior {
+                    "grow/behavior": match config.behavior.lock().behavior() {
+                        tool_types::BehaviorId::Normal => "normal",
                         tool_types::BehaviorId::Clarify => "clarify",
                         tool_types::BehaviorId::Plan => "plan",
                         tool_types::BehaviorId::Workflow => "workflow",
                         tool_types::BehaviorId::DeepResearch => "deep_research",
                         tool_types::BehaviorId::Goal => "goal",
-                    }),
+                    },
                     "grow/planPhase": config.behavior.lock().plan_phase_label(),
                 })
                 .as_object()
@@ -443,7 +444,6 @@ async fn handle_notification(
                             task_id: task_id.clone(),
                         },
                         turn_kind: crate::session::TurnKind::Internal,
-                        prompt_mode: crate::session::behavior::PromptMode::Agent,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,
@@ -499,15 +499,12 @@ async fn handle_notification(
                         "gate": config.task_wake_suppressed.get(),
                     })),
                 );
-                if will_wake {
-                    if is_monitor {
-                        let _ =
-                            config
-                                .session_cmd_tx
-                                .send(SessionCommand::DropMonitorNotifications {
-                                    task_id: task_id.clone(),
-                                });
-                    }
+                if will_wake && is_monitor {
+                    let _ = config
+                        .session_cmd_tx
+                        .send(SessionCommand::DropMonitorNotifications {
+                            task_id: task_id.clone(),
+                        });
                 }
             } else {
                 let tool_name = resolved_tool_name(&config.task_output_tool_name);
@@ -825,7 +822,7 @@ mod tests {
             persistence: PersistenceHandle::from_sender_for_test(persistence_tx),
             incremental_bash_output: false,
             behavior: Arc::new(parking_lot::Mutex::new(
-                crate::session::behavior::BehaviorController::new(PathBuf::from(
+                crate::session::behavior::BehaviorCoordinator::new(PathBuf::from(
                     "/tmp/test-session",
                 )),
             )),
@@ -1665,7 +1662,7 @@ mod tests {
     #[tokio::test]
     async fn current_mode_update_persisted_line_is_stamped() {
         let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
-        emit_current_mode_update(&config, tools::types::SessionMode::Plan).await;
+        emit_current_mode_update(&config, tools::types::BehaviorId::Plan).await;
         match persistence_rx.try_recv().expect("must persist") {
             PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notif)) => {
                 assert!(matches!(

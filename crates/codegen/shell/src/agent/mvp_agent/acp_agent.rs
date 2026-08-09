@@ -439,6 +439,7 @@ impl acp::Agent for MvpAgent {
                         persisted_behavior: None,
                         persisted_goal_mode: None,
                         persisted_goal_mode_rejected: false,
+                        persisted_control_revision: 0,
                         persisted_workflow_runs: Vec::new(),
                         persisted_announcement_state: None,
                         session_meta: arguments.meta.as_ref(),
@@ -674,15 +675,48 @@ impl acp::Agent for MvpAgent {
             mut summary,
             chat_history,
             plan_state: _,
-            behavior_state: persisted_behavior,
+            mut session_control,
             updates_file_path,
             rewind_points_file_path,
             signals: persisted_signals,
             announcement_state: persisted_announcement_state,
-            goal_mode_state: _persisted_goal_mode,
-            goal_mode_state_rejected: persisted_goal_mode_rejected,
+            session_control_rejected,
             workflow_runs: persisted_workflow_runs,
         } = persistence_info;
+        if let (Some(updates_path), Some(control)) =
+            (updates_file_path.as_ref(), session_control.as_mut())
+            && let Some(goal) = control.goal.as_mut()
+            && goal.status == crate::session::goal_tracker::GoalStatus::Active
+            && goal.phase == crate::session::goal_tracker::GoalPhase::Summarizing
+        {
+            match crate::session::storage::has_successful_goal_finalization(
+                updates_path,
+                &goal.goal_id,
+            ) {
+                Ok(true) => {
+                    goal.status = crate::session::goal_tracker::GoalStatus::Complete;
+                    control.behavior = crate::session::behavior::BehaviorSnapshot::normal();
+                    tracing::info!(
+                        goal_id = %goal.goal_id,
+                        "reconciled Goal completion from durable finalization terminal"
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    goal_id = %goal.goal_id,
+                    "could not scan Goal finalization terminal during restore"
+                ),
+            }
+        }
+        let persisted_control_revision = session_control
+            .as_ref()
+            .map_or(0, |control| control.control_revision);
+        let persisted_behavior = session_control
+            .as_ref()
+            .map(|control| control.behavior.clone());
+        let _persisted_goal_mode = session_control.and_then(|control| control.goal);
+        let persisted_goal_mode_rejected = session_control_rejected;
         let configured_models = self.models_manager.models();
         let available_models = self.models_manager.available();
         let persisted_model_id = summary.current_model_id.clone();
@@ -739,7 +773,7 @@ impl acp::Agent for MvpAgent {
             .map(|snapshot| &snapshot.state)
         {
             Some(crate::session::behavior::BehaviorState::Clarify) => {
-                (::diagnostics::events::BehaviorKind::Clarify, None)
+                (tool_types::BehaviorId::Clarify, None)
             }
             Some(crate::session::behavior::BehaviorState::Plan(phase)) => {
                 let phase = match phase {
@@ -756,19 +790,19 @@ impl acp::Agent for MvpAgent {
                         ::diagnostics::events::PlanPhase::Amending
                     }
                 };
-                (::diagnostics::events::BehaviorKind::Plan, Some(phase))
+                (tool_types::BehaviorId::Plan, Some(phase))
             }
             Some(crate::session::behavior::BehaviorState::Workflow) => {
-                (::diagnostics::events::BehaviorKind::Workflow, None)
+                (tool_types::BehaviorId::Workflow, None)
             }
             Some(crate::session::behavior::BehaviorState::DeepResearch { .. }) => {
-                (::diagnostics::events::BehaviorKind::DeepResearch, None)
+                (tool_types::BehaviorId::DeepResearch, None)
             }
             Some(crate::session::behavior::BehaviorState::Goal) => {
-                (::diagnostics::events::BehaviorKind::Goal, None)
+                (tool_types::BehaviorId::Goal, None)
             }
             Some(crate::session::behavior::BehaviorState::Normal) | None => {
-                (::diagnostics::events::BehaviorKind::Normal, None)
+                (tool_types::BehaviorId::Normal, None)
             }
         };
         let restored_approval_pending = persisted_behavior
@@ -965,6 +999,7 @@ impl acp::Agent for MvpAgent {
                         persisted_behavior,
                         persisted_goal_mode: _persisted_goal_mode,
                         persisted_goal_mode_rejected,
+                        persisted_control_revision,
                         persisted_workflow_runs,
                         persisted_announcement_state,
                         session_meta: request_meta.as_ref(),
@@ -1229,7 +1264,6 @@ impl acp::Agent for MvpAgent {
         &self,
         mut arguments: acp::PromptRequest,
     ) -> Result<acp::PromptResponse, acp::Error> {
-        use crate::session::behavior::PromptMode;
         tracing::debug!(
             target: "sampling_log",
             session_id = %arguments.session_id.0,
@@ -1334,23 +1368,6 @@ impl acp::Agent for MvpAgent {
         }
         let dispatch_lock = self.dispatch_lock(&arguments.session_id);
         let dispatch_guard = dispatch_lock.lock().await;
-        let meta_prompt_mode = arguments
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("mode"))
-            .and_then(|v| v.as_str())
-            .map(PromptMode::from_meta_str);
-        let prompt_mode = if let Some(mode) = meta_prompt_mode {
-            mode
-        } else {
-            let (mode_tx, mode_rx) = oneshot::channel();
-            let _ = handle
-                .cmd_tx
-                .send(crate::session::SessionCommand::GetCurrentPromptMode {
-                    responds_to: mode_tx,
-                });
-            mode_rx.await.unwrap_or_default()
-        };
         let prompt_id = arguments
             .meta
             .as_ref()
@@ -1406,7 +1423,6 @@ impl acp::Agent for MvpAgent {
                 prompt_blocks: arguments.prompt.clone(),
                 origin: crate::session::PromptOrigin::User,
                 turn_kind: crate::session::TurnKind::User,
-                prompt_mode,
                 client_identifier: prompt_client_identifier,
                 screen_mode: prompt_screen_mode,
                 verbatim,
@@ -1636,7 +1652,7 @@ impl acp::Agent for MvpAgent {
         if let Some(handle) = handle {
             let _ = handle
                 .cmd_tx
-                .send(SessionCommand::SessionMode {
+                .send(SessionCommand::BehaviorChange {
                     session_mode: args.mode_id,
                     responds_to: tx,
                 });
@@ -1949,14 +1965,14 @@ impl acp::Agent for MvpAgent {
             if let Some(handle) = handle {
                 let is_engaged = handle.behavior.lock().is_plan();
                 let next_mode_id = acp::SessionModeId::new(if is_engaged {
-                    tools::types::SessionMode::Default.as_id()
+                    tools::types::BehaviorId::Normal.as_id()
                 } else {
                     "plan"
                 });
                 let (tx, rx) = oneshot::channel();
                 let _ = handle
                     .cmd_tx
-                    .send(SessionCommand::SessionMode {
+                    .send(SessionCommand::BehaviorChange {
                         session_mode: next_mode_id.clone(),
                         responds_to: tx,
                     });

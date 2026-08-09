@@ -2914,12 +2914,12 @@ fn paint_dispatch_config_badge(
     let agent_label = default_agent.as_str();
 
     let behavior = match state.pending_behavior {
-        tools::types::SessionMode::Default => "normal",
-        tools::types::SessionMode::Ask => "clarify",
-        tools::types::SessionMode::Plan => "plan",
-        tools::types::SessionMode::Workflow => "workflow",
-        tools::types::SessionMode::DeepResearch => "deep-research",
-        tools::types::SessionMode::Goal => "goal",
+        tools::types::BehaviorId::Normal => "normal",
+        tools::types::BehaviorId::Clarify => "clarify",
+        tools::types::BehaviorId::Plan => "plan",
+        tools::types::BehaviorId::Workflow => "workflow",
+        tools::types::BehaviorId::DeepResearch => "deep-research",
+        tools::types::BehaviorId::Goal => "goal",
     };
     let permission = state.pending_permission.as_canonical();
     let flags = vec![

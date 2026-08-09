@@ -166,6 +166,11 @@ impl SessionActor {
                 .combine_queued_prompts
                 .unwrap_or(false);
 
+        // Resolve the workflow tracker before taking the foreground lock. A
+        // stale workflow-completion item may need this projection, but turn
+        // admission must never hold `state` across an async dependency lookup.
+        let workflow_tracker = self.workflow_tracker().await;
+
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
         if !state.foreground.is_idle() || state.pending_inputs.is_empty() {
@@ -187,10 +192,9 @@ impl SessionActor {
                                 .ok()
                                 .map(|revision| (run_id, revision))
                         }) {
-                        Some((run_id, revision)) => {
-                            let tracker = self.workflow_tracker().await;
-                            !tracker.lock().is_unreported_completion(run_id, revision)
-                        }
+                        Some((run_id, revision)) => !workflow_tracker
+                            .lock()
+                            .is_unreported_completion(run_id, revision),
                         None => true,
                     }
                 }
@@ -230,7 +234,6 @@ impl SessionActor {
             parsed_prompt_tx,
             prompt_id,
             prompt_blocks,
-            prompt_mode,
             client_identifier,
             screen_mode,
             verbatim,
@@ -248,7 +251,6 @@ impl SessionActor {
                 front.parsed_prompt_tx.take(),
                 front.prompt_id.clone(),
                 front.prompt_blocks.clone(),
-                front.prompt_mode,
                 front.client_identifier.clone(),
                 front.screen_mode.clone(),
                 front.verbatim,
@@ -269,51 +271,13 @@ impl SessionActor {
                 Some(serde_json::json!({ "reason": "queued_user_promotion" })),
             );
         }
-        {
-            let mut current_prompt_id = self
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned");
-            *current_prompt_id = Some(prompt_id.clone());
-        }
         state.rewindable = true;
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(
-                tools::implementations::grow_build::task::types::CurrentPromptIdResource(
-                    prompt_id.clone(),
-                ),
-            )
-            .await;
-        let subagent_owner = match &origin {
-            super::PromptOrigin::GoalContinuation { goal_id, .. }
-            | super::PromptOrigin::GoalFinalization { goal_id, .. } => {
-                tools::implementations::grow_build::task::types::SubagentOwner::goal(goal_id)
-            }
-            super::PromptOrigin::User if prompt_mode == PromptMode::Goal => self
-                .goal_tracker
-                .lock()
-                .snapshot()
-                .filter(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active)
-                .map(|goal| {
-                    tools::implementations::grow_build::task::types::SubagentOwner::goal(
-                        &goal.goal_id,
-                    )
-                })
-                .unwrap_or_default(),
-            _ => tools::implementations::grow_build::task::types::SubagentOwner::Task,
-        };
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(
-                tools::implementations::grow_build::task::types::CurrentSubagentOwnerResource(
-                    subagent_owner,
-                ),
-            )
-            .await;
 
+        // This is the admission linearization point: capture Behavior and
+        // Goal ownership, then install the foreground owner without yielding.
+        // A concurrent Behavior command may affect the next queued message,
+        // but can never retag this turn after it owns foreground.
+        let admitted_behavior = self.behavior.lock().behavior();
         tracing::debug!(
             target: "qtrace",
             pid = std::process::id(),
@@ -328,25 +292,34 @@ impl SessionActor {
             session = self.session_info.id.0.as_ref(),
             "promoting front of pending_inputs to the running turn",
         );
-        // Promote broadcast before spawn so clients paint (and arm echo-skip)
-        // before the user-message chunk can race in.
+        // Promote broadcast before spawn so clients paint the structured
+        // message identity before its user-message chunk can race in.
         self.broadcast_queue_changed_promoting(&state, running_display);
 
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
         state.foreground = ForegroundState::RegularTurn(AgentTask::new_prompt(
             self.clone(),
-            prompt_id,
-            origin,
+            prompt_id.clone(),
+            origin.clone(),
             turn_kind,
             prompt_blocks,
-            prompt_mode,
+            admitted_behavior,
             client_identifier,
             screen_mode,
             verbatim,
             json_schema,
+            Some(start_rx),
             completion_tx,
             persist_ack,
             parsed_prompt_tx,
         ));
+        drop(state);
+
+        // The installed task waits on `start_rx`, so it cannot observe stale
+        // turn-scoped ownership while these resources are published.
+        self.publish_turn_scope_resources(prompt_id, &origin, admitted_behavior)
+            .await;
+        let _ = start_tx.send(());
     }
 
     /// Drain pending notifications into a single batched turn, if idle and not suppressed.
@@ -580,7 +553,6 @@ impl SessionActor {
             prompt_id: merged_prompt_id,
             turn_kind: crate::session::TurnKind::Internal,
             prompt_blocks: merged_blocks,
-            prompt_mode: crate::session::behavior::PromptMode::Agent,
             client_identifier: None,
             screen_mode: None,
             verbatim: true,

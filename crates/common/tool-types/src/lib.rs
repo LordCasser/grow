@@ -1,13 +1,17 @@
 //! Canonical, extensible tool types.
 mod behavior;
 mod ext;
+mod goal;
 mod schema_utils;
 pub mod serde_lenient;
 mod task;
 mod types;
 
-pub use behavior::BehaviorId;
+pub use behavior::{
+    BehaviorAvailability, BehaviorAvailabilityDisposition, BehaviorAvailabilityEntry, BehaviorId,
+};
 pub use ext::Extensions;
+pub use goal::{GoalProgressUpdate, GoalTaskProjection, GoalTaskStatus};
 pub use schema_utils::parse_arguments_from_schema_lossy;
 pub use serde_lenient::{
     deserialize_lenient_bool, deserialize_lenient_option_bool, lenient_bool_from_json,

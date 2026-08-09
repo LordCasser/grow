@@ -4,6 +4,17 @@ use super::support::*;
 use super::turn::should_capture_implicit_goal_objective;
 use super::*;
 
+fn canonical_goal_board(objective: &str, done: bool) -> String {
+    let (checkbox, status) = if done {
+        ("x", "done")
+    } else {
+        (" ", "in_progress")
+    };
+    format!(
+        "# Goal\n\n> {objective}\n\n## Plan\n\n- [{checkbox}] **T1** `{status}` — Implement safely\n  - Scope: runtime\n  - Acceptance: tests pass\n\n## Goal acceptance\n\n- Tests pass\n\n## Verification evidence\n\n- Pending\n\n## Open gaps\n\n- None"
+    )
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn foreground_snapshot_carries_origin_and_kind_without_parsing_its_id() {
     tokio::task::LocalSet::new()
@@ -111,20 +122,26 @@ fn only_a_real_user_message_can_become_the_picker_goal_objective() {
     assert!(should_capture_implicit_goal_objective(
         &crate::session::PromptOrigin::User,
         true,
-        false,
+        None,
         "finish the refactor",
     ));
     assert!(!should_capture_implicit_goal_objective(
         &crate::session::PromptOrigin::NotificationDrain,
         true,
-        false,
+        None,
         "background command completed",
     ));
     assert!(!should_capture_implicit_goal_objective(
         &crate::session::PromptOrigin::User,
         true,
-        true,
+        Some(crate::session::goal_tracker::GoalStatus::Active),
         "additional context",
+    ));
+    assert!(should_capture_implicit_goal_objective(
+        &crate::session::PromptOrigin::User,
+        true,
+        Some(crate::session::goal_tracker::GoalStatus::Complete),
+        "start the next goal",
     ));
 }
 
@@ -188,6 +205,68 @@ async fn delayed_goal_subagent_spawn_keeps_producer_stamped_ownership() {
                     .unwrap()
                     .subagent_tokens_spent,
                 0
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delegated_goal_context_propagates_to_nested_subagent_ownership() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use tools::implementations::grow_build::task::types::{
+                CurrentSubagentOwnerResource, GoalSubagentRole, SubagentOwner,
+            };
+            use tools::implementations::grow_build::update_goal::{
+                GoalContextSnapshot, GoalContextSnapshotResource,
+            };
+
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.goal_tracker.lock().create_goal(
+                "delegated-goal".into(),
+                "preserve ownership".into(),
+                None,
+                0,
+                chrono::Utc::now().to_rfc3339(),
+                None,
+            );
+            let view = super::goal::goal_view_from_snapshot(
+                actor.goal_tracker.lock().snapshot().unwrap(),
+                0,
+            );
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            bridge
+                .update_resource(GoalContextSnapshotResource(Some(GoalContextSnapshot {
+                    role: GoalSubagentRole::Worker,
+                    view: view.clone(),
+                })))
+                .await;
+
+            actor
+                .publish_turn_scope_resources(
+                    "nested-parent-turn".into(),
+                    &crate::session::PromptOrigin::User,
+                    tool_types::BehaviorId::Normal,
+                )
+                .await;
+
+            let owner = bridge
+                .read_resource::<CurrentSubagentOwnerResource>()
+                .await
+                .expect("turn ownership resource");
+            assert_eq!(
+                owner.0,
+                SubagentOwner::goal(
+                    view.goal_id,
+                    view.objective_revision,
+                    view.plan_revision,
+                    view.board_revision,
+                    GoalSubagentRole::Worker,
+                )
             );
         })
         .await;
@@ -315,11 +394,16 @@ async fn user_fifo_wins_over_goal_idle_continuation() {
                     chrono::Utc::now().to_rfc3339(),
                     None,
                 );
-                assert!(goal.replace_plan(
-                    "- [ ] implement".into(),
-                    crate::session::goal_tracker::GoalPlanAuthor::Agent,
-                    None,
-                ));
+                let lease = goal
+                    .claim_stage(crate::session::goal_tracker::GoalPhase::Planning)
+                    .unwrap();
+                assert!(
+                    goal.apply_planner_result(
+                        &lease,
+                        canonical_goal_board("finish the refactor", false)
+                    )
+                    .unwrap()
+                );
             }
             actor
                 .state
@@ -335,140 +419,6 @@ async fn user_fifo_wins_over_goal_idle_continuation() {
             assert!(state.foreground.is_idle());
             assert_eq!(state.pending_inputs.len(), 1);
             assert_eq!(state.pending_inputs[0].prompt_id, "user-1");
-        })
-        .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn plan_revision_cancels_verifier_and_persists_executing_before_next_attempt() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let (gateway_tx, _gateway_rx) =
-                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, mut persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = std::sync::Arc::new(
-                create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
-            );
-            let old_lease = {
-                let mut tracker = actor.goal_tracker.lock();
-                tracker.create_goal(
-                    "goal-replan".into(),
-                    "revise while verifying".into(),
-                    None,
-                    0,
-                    chrono::Utc::now().to_rfc3339(),
-                    None,
-                );
-                assert!(tracker.replace_plan(
-                    "- [x] first attempt".into(),
-                    crate::session::goal_tracker::GoalPlanAuthor::Agent,
-                    None,
-                ));
-                assert!(tracker.candidate_complete("first candidate".into()));
-                tracker
-                    .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
-                    .expect("old verifier lease")
-            };
-            let old_cancel = tokio_util::sync::CancellationToken::new();
-            *actor.goal_stage_cancel.lock() = Some((old_lease.clone(), old_cancel.clone()));
-
-            let (respond_to, response) = tokio::sync::oneshot::channel();
-            actor
-                .handle_goal_command(
-                    tools::implementations::grow_build::update_goal::GoalCommand::ReplacePlan {
-                        input:
-                            tools::implementations::grow_build::update_goal::UpdateGoalPlanInput {
-                                markdown: "- [x] first attempt\n- [ ] address new evidence".into(),
-                                reason: Some("verification exposed a gap".into()),
-                            },
-                        respond_to,
-                    },
-                )
-                .await;
-
-            assert!(response.await.unwrap().is_ok());
-            assert!(old_cancel.is_cancelled(), "the verifier must be terminated");
-            assert!(actor.goal_stage_cancel.lock().is_none());
-            {
-                let tracker = actor.goal_tracker.lock();
-                let goal = tracker.snapshot().unwrap();
-                assert_eq!(
-                    goal.phase,
-                    crate::session::goal_tracker::GoalPhase::Executing
-                );
-                assert_eq!(goal.plan.revision, 2);
-                assert!(goal.in_flight_stage.is_none());
-                assert!(
-                    goal.candidate_summary.is_none(),
-                    "a candidate from the old plan revision must not survive replanning"
-                );
-            }
-
-            let persisted = std::iter::from_fn(|| persistence_rx.try_recv().ok())
-                .find_map(|message| match message {
-                    PersistenceMsg::GoalModeState(goal) => Some(goal),
-                    _ => None,
-                })
-                .expect("the revised Goal state must be persisted");
-            assert_eq!(
-                persisted.phase,
-                crate::session::goal_tracker::GoalPhase::Executing
-            );
-            assert_eq!(persisted.plan.revision, 2);
-            assert!(persisted.candidate_summary.is_none());
-
-            // A late terminal from the cancelled verifier cannot consume the
-            // cancellation handle of a verifier belonging to the next plan.
-            let (new_lease, new_cancel) = {
-                let mut tracker = actor.goal_tracker.lock();
-                assert!(tracker.candidate_complete("second candidate".into()));
-                let lease = tracker
-                    .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
-                    .expect("new verifier lease");
-                let cancel = tokio_util::sync::CancellationToken::new();
-                (lease, cancel)
-            };
-            *actor.goal_stage_cancel.lock() = Some((new_lease.clone(), new_cancel.clone()));
-            actor
-                .handle_goal_stage_completed(crate::session::replay_events::GoalStageCompletion {
-                    lease: old_lease,
-                    kind: crate::session::replay_events::GoalStageKind::Verifier(Err(
-                        "cancelled".into()
-                    )),
-                })
-                .await;
-            assert!(!new_cancel.is_cancelled());
-            assert!(
-                actor
-                    .goal_stage_cancel
-                    .lock()
-                    .as_ref()
-                    .is_some_and(|(lease, _)| lease == &new_lease)
-            );
-
-            let (respond_to, response) = tokio::sync::oneshot::channel();
-            actor
-                .handle_goal_command(
-                    tools::implementations::grow_build::update_goal::GoalCommand::ReplacePlan {
-                        input:
-                            tools::implementations::grow_build::update_goal::UpdateGoalPlanInput {
-                                markdown: "   ".into(),
-                                reason: Some("invalid empty revision".into()),
-                            },
-                        respond_to,
-                    },
-                )
-                .await;
-            assert!(response.await.unwrap().is_err());
-            assert!(
-                !new_cancel.is_cancelled(),
-                "a rejected plan update must not terminate the verifier"
-            );
-            assert!(actor.goal_tracker.lock().lease_is_current(
-                &new_lease,
-                crate::session::goal_tracker::GoalPhase::Verifying,
-            ));
         })
         .await;
 }
@@ -545,16 +495,22 @@ async fn complete_goal_receipt_ignores_late_subagent_accounting() {
                     chrono::Utc::now().to_rfc3339(),
                     None,
                 );
-                assert!(tracker.replace_plan(
-                    "- [x] done".into(),
-                    crate::session::goal_tracker::GoalPlanAuthor::Agent,
-                    None,
-                ));
-                assert!(tracker.candidate_complete("done".into()));
+                let planner = tracker
+                    .claim_stage(crate::session::goal_tracker::GoalPhase::Planning)
+                    .unwrap();
+                assert!(
+                    tracker
+                        .apply_planner_result(
+                            &planner,
+                            canonical_goal_board("freeze accounting", true)
+                        )
+                        .unwrap()
+                );
+                assert!(tracker.candidate_complete(1, 1, "done".into()).unwrap());
                 let lease = tracker
                     .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
                     .unwrap();
-                assert!(tracker.verification_achieved(&lease));
+                assert!(tracker.verification_achieved(&lease).unwrap());
                 assert!(tracker.complete_verified());
             }
             actor.subagent_token_records.lock().insert(
@@ -616,6 +572,88 @@ fn user_turn_infra_failure_does_not_degrade_an_active_goal() {
 }
 
 #[test]
+fn user_turn_terminal_anomalies_do_not_pause_or_suppress_goal_runtime() {
+    let result = |stop_reason, completion_kind| {
+        Ok(crate::session::commands::PromptTurnOk {
+            stop_reason,
+            total_tokens: 0,
+            turn_snapshot: None,
+            completion_kind,
+            structured_output: None,
+            usage: None,
+        })
+    };
+    for outcome in [
+        result(
+            acp::StopReason::Refusal,
+            crate::session::commands::PromptCompletionKind::Completed,
+        ),
+        result(
+            acp::StopReason::EndTurn,
+            crate::session::commands::PromptCompletionKind::StationarityEnded,
+        ),
+        result(
+            acp::StopReason::MaxTokens,
+            crate::session::commands::PromptCompletionKind::MaxTurnsReached { limit: 3 },
+        ),
+    ] {
+        let (_, suppress, pause) = SessionActor::post_turn_goal_degradation_plan(
+            &outcome,
+            Some(&crate::session::PromptOrigin::User),
+        );
+        assert!(!suppress);
+        assert!(pause.is_none());
+    }
+}
+
+#[test]
+fn goal_internal_terminal_anomalies_pause_without_hot_looping() {
+    let origin = crate::session::PromptOrigin::GoalContinuation {
+        goal_id: "goal-1".into(),
+        stage_id: 9,
+    };
+    let result = |stop_reason, completion_kind| {
+        Ok(crate::session::commands::PromptTurnOk {
+            stop_reason,
+            total_tokens: 0,
+            turn_snapshot: None,
+            completion_kind,
+            structured_output: None,
+            usage: None,
+        })
+    };
+    let (_, suppress, pause) = SessionActor::post_turn_goal_degradation_plan(
+        &result(
+            acp::StopReason::Refusal,
+            crate::session::commands::PromptCompletionKind::Completed,
+        ),
+        Some(&origin),
+    );
+    assert!(!suppress);
+    assert!(pause.is_some());
+
+    let (_, suppress, pause) = SessionActor::post_turn_goal_degradation_plan(
+        &result(
+            acp::StopReason::EndTurn,
+            crate::session::commands::PromptCompletionKind::StationarityEnded,
+        ),
+        Some(&origin),
+    );
+    assert!(suppress);
+    assert!(pause.is_some());
+
+    let (_, suppress, pause) = SessionActor::post_turn_goal_degradation_plan(
+        &result(
+            acp::StopReason::MaxTokens,
+            crate::session::commands::PromptCompletionKind::MaxTurnsReached { limit: 3 },
+        ),
+        Some(&origin),
+    );
+    assert!(!suppress);
+    assert!(pause.is_some());
+}
+
+#[test]
 fn goal_finalization_requires_a_real_successful_report_terminal() {
     let result = |stop_reason, completion_kind| {
         Ok(crate::session::commands::PromptTurnOk {
@@ -655,7 +693,7 @@ fn goal_finalization_requires_a_real_successful_report_terminal() {
 }
 
 #[test]
-fn stationarity_suppresses_the_next_goal_idle_continuation() {
+fn goal_internal_stationarity_suppresses_the_next_goal_idle_continuation() {
     let result = Ok(crate::session::commands::PromptTurnOk {
         stop_reason: acp::StopReason::EndTurn,
         total_tokens: 0,
@@ -673,7 +711,7 @@ fn stationarity_suppresses_the_next_goal_idle_continuation() {
     );
     assert!(succeeded);
     assert!(suppress);
-    assert!(pause.is_none());
+    assert!(pause.is_some());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -693,7 +731,7 @@ async fn goal_tool_schema_reaches_the_sampling_spec_as_an_object() {
             actor
                 .behavior
                 .lock()
-                .select_behavior(Some(tool_types::BehaviorId::Goal));
+                .select_behavior(tool_types::BehaviorId::Goal);
 
             let definitions = actor.prepare_tool_definitions_inner().await;
             let definition = definitions
@@ -720,6 +758,77 @@ async fn goal_tool_schema_reaches_the_sampling_spec_as_an_object() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn delegated_goal_worker_keeps_read_only_snapshot_tool_outside_goal_behavior() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::GetGoalTool,
+                >(),
+                tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::UpdateGoalProgressTool,
+                >(),
+                tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::RequestGoalReplanTool,
+                >(),
+                tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::UpdateGoalTool,
+                >(),
+            ])
+            .await;
+            actor
+                .agent
+                .borrow()
+                .tool_bridge()
+                .update_resource(
+                    tools::implementations::grow_build::update_goal::GoalContextSnapshotResource(
+                        Some(
+                            tools::implementations::grow_build::update_goal::GoalContextSnapshot {
+                                role: tools::implementations::grow_build::task::types::GoalSubagentRole::Worker,
+                                view: tools::implementations::grow_build::update_goal::GoalView {
+                                    goal_id: "goal-1".into(),
+                                    objective: "ship".into(),
+                                    objective_revision: 0,
+                                    status: "active".into(),
+                                    phase: "executing".into(),
+                                    token_budget: None,
+                                    tokens_used: 0,
+                                    plan_revision: 0,
+                                    board_revision: 1,
+                                    tasks: Vec::new(),
+                                    plan_markdown: String::new(),
+                                    verifier_feedback: None,
+                                },
+                            },
+                        ),
+                    ),
+                )
+                .await;
+
+            let names: std::collections::HashSet<_> = actor
+                .prepare_tool_definitions_inner()
+                .await
+                .into_iter()
+                .map(|definition| definition.function.name)
+                .collect();
+            assert!(names.contains(tools::implementations::grow_build::GET_GOAL_TOOL_NAME));
+            for mutation in [
+                tools::implementations::grow_build::UPDATE_GOAL_PROGRESS_TOOL_NAME,
+                tools::implementations::grow_build::REQUEST_GOAL_REPLAN_TOOL_NAME,
+                tools::implementations::grow_build::UPDATE_GOAL_TOOL_NAME,
+            ] {
+                assert!(!names.contains(mutation), "delegated worker exposed {mutation}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn active_turn_tool_surface_is_pinned_to_its_captured_behavior() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -737,8 +846,8 @@ async fn active_turn_tool_surface_is_pinned_to_its_captured_behavior() {
             actor
                 .behavior
                 .lock()
-                .select_behavior(Some(tool_types::BehaviorId::Goal));
-            *actor.turn_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
+                .select_behavior(tool_types::BehaviorId::Goal);
+            *actor.turn_behavior.lock() = tool_types::BehaviorId::Normal;
             actor
                 .session_turn_active
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -764,7 +873,7 @@ async fn active_turn_tool_surface_is_pinned_to_its_captured_behavior() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn verified_goal_completion_retags_queued_supplements_before_fifo_promotion() {
+async fn behavior_tool_surfaces_are_filtered_by_taxonomy_even_when_tools_are_renamed() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (gateway_tx, _gateway_rx) =
@@ -772,53 +881,52 @@ async fn verified_goal_completion_retags_queued_supplements_before_fifo_promotio
             let (persistence_tx, _persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let mut goal = tools::registry::types::ToolConfig::for_tool::<
+                tools::implementations::grow_build::GetGoalTool,
+            >();
+            goal.name_override = Some("renamed_goal_reader".into());
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                goal,
+                tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::plan_control::PlanControlTool,
+                >(),
+            ])
+            .await;
+
+            let normal: std::collections::HashSet<_> = actor
+                .prepare_tool_definitions_inner()
+                .await
+                .into_iter()
+                .map(|definition| definition.function.name)
+                .collect();
+            assert!(!normal.contains("renamed_goal_reader"));
+            assert!(!normal.contains("plan_control"));
+
             actor
                 .behavior
                 .lock()
-                .select_behavior(Some(tool_types::BehaviorId::Goal));
-            *actor.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Goal;
-            {
-                let mut tracker = actor.goal_tracker.lock();
-                tracker.create_goal(
-                    "goal-final".into(),
-                    "finish once".into(),
-                    None,
-                    0,
-                    chrono::Utc::now().to_rfc3339(),
-                    None,
-                );
-                assert!(tracker.replace_plan(
-                    "- [x] done".into(),
-                    crate::session::goal_tracker::GoalPlanAuthor::Agent,
-                    None,
-                ));
-                assert!(tracker.candidate_complete("done".into()));
-                let lease = tracker
-                    .claim_stage(crate::session::goal_tracker::GoalPhase::Verifying)
-                    .expect("verifier lease");
-                assert!(tracker.verification_achieved(&lease));
-            }
-            let mut supplement = user_item("queued-after-summary", "pager");
-            supplement.prompt_mode = crate::session::behavior::PromptMode::Goal;
-            actor
-                .state
-                .lock()
+                .select_behavior(tool_types::BehaviorId::Goal);
+            let goal_behavior: std::collections::HashSet<_> = actor
+                .prepare_tool_definitions_inner()
                 .await
-                .pending_inputs
-                .push_back(supplement);
+                .into_iter()
+                .map(|definition| definition.function.name)
+                .collect();
+            assert!(goal_behavior.contains("renamed_goal_reader"));
+            assert!(!goal_behavior.contains("plan_control"));
 
-            actor.finalize_goal_finalization_turn().await;
-
-            assert_eq!(
-                actor.goal_tracker.lock().status(),
-                Some(crate::session::goal_tracker::GoalStatus::Complete)
-            );
-            assert_eq!(actor.behavior.lock().behavior(), None);
-            assert_eq!(
-                actor.state.lock().await.pending_inputs[0].prompt_mode,
-                crate::session::behavior::PromptMode::Agent,
-                "the queued user supplement must not recreate Goal after completion"
-            );
+            actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Plan);
+            let plan: std::collections::HashSet<_> = actor
+                .prepare_tool_definitions_inner()
+                .await
+                .into_iter()
+                .map(|definition| definition.function.name)
+                .collect();
+            assert!(plan.contains("plan_control"));
+            assert!(!plan.contains("renamed_goal_reader"));
         })
         .await;
 }

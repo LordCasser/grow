@@ -33,13 +33,11 @@ fn completed_goal_control_cancel_trigger(
 impl SessionActor {
     async fn queue_host_command(&self, command: String) {
         let prompt_id = format!("host-command-{}", uuid::Uuid::now_v7());
-        let prompt_mode = *self.current_prompt_mode.lock();
         let (respond_to, _) = tokio::sync::oneshot::channel();
         self.state.lock().await.pending_inputs.push_back(InputItem {
             prompt_id,
             turn_kind: crate::session::TurnKind::Internal,
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(command))],
-            prompt_mode,
             client_identifier: None,
             screen_mode: None,
             verbatim: true,
@@ -101,6 +99,7 @@ impl SessionActor {
             action @ (BuiltinAction::GoalSet { .. }
             | BuiltinAction::GoalEdit { .. }
             | BuiltinAction::GoalEnter
+            | BuiltinAction::GoalUsage
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
@@ -113,6 +112,7 @@ impl SessionActor {
                     BuiltinAction::GoalPause => Some("goal_pause"),
                     BuiltinAction::GoalClear => Some("goal_clear"),
                     BuiltinAction::GoalStatus
+                    | BuiltinAction::GoalUsage
                     | BuiltinAction::GoalResume
                     | BuiltinAction::GoalBudget { .. } => None,
                     _ => unreachable!("match arm accepts only Goal controls"),
@@ -122,7 +122,7 @@ impl SessionActor {
                     .lock()
                     .snapshot()
                     .map(|goal| (goal.goal_id.clone(), goal.objective_revision, goal.status));
-                let before_mode = *self.current_prompt_mode.lock();
+                let before_mode = self.behavior.lock().behavior();
                 ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
                     command: "goal".to_string(),
                     args_provided: action.args_provided(),
@@ -135,7 +135,7 @@ impl SessionActor {
                     .lock()
                     .snapshot()
                     .map(|goal| (goal.goal_id.clone(), goal.objective_revision, goal.status));
-                let behavior_changed = before_mode != *self.current_prompt_mode.lock();
+                let behavior_changed = before_mode != self.behavior.lock().behavior();
                 Ok(completed_goal_control_cancel_trigger(
                     control,
                     before_goal,
@@ -161,30 +161,37 @@ impl SessionActor {
         }
     }
 
-    pub(super) fn update_goal_token_budget(&self, token_budget: Option<i64>) -> String {
-        let mut tracker = self.goal_tracker.lock();
-        if tracker.snapshot().is_none() {
-            "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string()
-        } else if let Some(budget) = token_budget {
-            if tracker.status() == Some(crate::session::goal_tracker::GoalStatus::Complete) {
-                "Goal is already complete. Use /goal set <objective> to start a new one."
-                    .to_string()
-            } else {
-                let was_budget_limited = tracker.status()
-                    == Some(crate::session::goal_tracker::GoalStatus::BudgetLimited);
-                let updated = tracker.set_token_budget(Some(budget));
-                debug_assert!(updated);
-                self.goal_notify_sender().persist_goal_state(&tracker);
-                if was_budget_limited {
-                    format!(
-                        "User set current goal budget to {budget} tokens. Use /goal resume to continue."
-                    )
-                } else {
-                    format!("User set current goal budget to {budget} tokens.")
-                }
+    pub(super) async fn update_goal_token_budget(&self, token_budget: Option<i64>) -> String {
+        let previous = self.goal_tracker.lock().snapshot().cloned();
+        let Some(budget) = token_budget else {
+            return "Usage: /goal budget <tokens>".to_string();
+        };
+        let was_budget_limited = {
+            let mut tracker = self.goal_tracker.lock();
+            if tracker.snapshot().is_none() {
+                return "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string();
             }
+            if tracker.status() == Some(crate::session::goal_tracker::GoalStatus::Complete) {
+                return "Goal is already complete. Use /goal set <objective> to start a new one."
+                    .to_string();
+            }
+            let was_budget_limited =
+                tracker.status() == Some(crate::session::goal_tracker::GoalStatus::BudgetLimited);
+            let updated = tracker.set_token_budget(Some(budget));
+            debug_assert!(updated);
+            was_budget_limited
+        };
+        if let Some(previous) = previous
+            && let Err(error) = self.commit_goal_mutation_or_restore(previous).await
+        {
+            return format!("Goal budget was not changed: {error}");
+        }
+        if was_budget_limited {
+            format!(
+                "User set current goal budget to {budget} tokens. Use /goal resume to continue."
+            )
         } else {
-            "Usage: /goal budget <tokens>".to_string()
+            format!("User set current goal budget to {budget} tokens.")
         }
     }
 
@@ -974,7 +981,7 @@ impl SessionActor {
             } => {
                 use crate::session::behavior::BehaviorChangeOutcome;
                 use crate::session::goal_tracker::GoalStatus;
-                if self.behavior.lock().behavior() == Some(tool_types::BehaviorId::Goal) {
+                if self.behavior.lock().behavior() == tool_types::BehaviorId::Goal {
                     let message = if self
                         .goal_tracker
                         .lock()
@@ -1005,7 +1012,11 @@ impl SessionActor {
                     .await
                 {
                     BehaviorChangeOutcome::Applied => {
-                        self.initialize_goal_runtime(&objective, token_budget).await;
+                        if let Err(message) =
+                            self.initialize_goal_runtime(&objective, token_budget).await
+                        {
+                            self.send_host_turn_slash_command_output(&message).await;
+                        }
                     }
                     BehaviorChangeOutcome::ConfirmationRequired { message, .. }
                     | BehaviorChangeOutcome::Rejected { message } => {
@@ -1031,18 +1042,34 @@ impl SessionActor {
                     .await;
                     return ok_end_turn(0, None);
                 }
+                let current = self.chat_state_handle.get_total_tokens().await as i64;
+                let (used, finished) = self.goal_tokens(current);
+                let previous = self.goal_tracker.lock().snapshot().cloned();
                 let revised = self
                     .goal_tracker
                     .lock()
                     .revise_goal(objective.clone(), token_budget);
                 if revised {
+                    let revised_snapshot = self.goal_tracker.lock().snapshot().cloned();
+                    let behavior = self.behavior.lock().snapshot();
+                    if let Err(error) = self
+                        .persist_control_snapshot_durably(behavior, revised_snapshot)
+                        .await
+                    {
+                        if let Some(previous) = previous {
+                            self.goal_tracker.lock().restore_runtime_snapshot(previous);
+                        }
+                        self.send_host_turn_slash_command_output(&format!(
+                            "Goal edit was not applied because control state could not be persisted: {error}"
+                        ))
+                        .await;
+                        return ok_end_turn(0, None);
+                    }
                     if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
                         cancel.cancel();
                     }
-                    let current = self.chat_state_handle.get_total_tokens().await as i64;
-                    let (used, finished) = self.goal_tokens(current);
                     self.goal_notify_sender().emit_goal_updated(
-                        &mut self.goal_tracker.lock(),
+                        &self.goal_tracker.lock(),
                         used,
                         finished,
                     );
@@ -1073,6 +1100,13 @@ impl SessionActor {
                     | BehaviorChangeOutcome::Rejected { message } => message,
                 };
                 self.send_host_turn_slash_command_output(&message).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::GoalUsage => {
+                self.send_host_turn_slash_command_output(
+                    "Usage: /goal set <objective> [--budget <tokens>] | edit <objective> [--budget <tokens>] | budget <tokens> | status | pause | resume | clear",
+                )
+                .await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::DeepResearch { query } => {
@@ -1109,12 +1143,14 @@ impl SessionActor {
             }
             BuiltinAction::WorkflowManage { run_id, op } => {
                 let msg = self.manage_workflow_run(&run_id, &op).await;
+                self.send_available_commands_update().await;
                 self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::WorkflowLaunch { name, input } => {
                 let (registry, _) = self.named_workflow_snapshot();
                 let msg = self.launch_named_workflow(&registry, &name, &input).await;
+                self.send_available_commands_update().await;
                 self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
@@ -1133,7 +1169,7 @@ impl SessionActor {
                             goal_tokens,
                             crate::session::goal_orchestrator::format_elapsed(goal.elapsed_ms),
                         ),
-                        None => "No goal is currently set. Use /goal <objective> to start one."
+                        None => "No goal is currently set. Use /goal set <objective> to start one."
                             .to_string(),
                     }
                 };
@@ -1143,6 +1179,8 @@ impl SessionActor {
             BuiltinAction::GoalPause => {
                 let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                 use crate::session::goal_tracker::{GoalPauseReason, GoalStatus};
+                let (tokens_used, finished) = self.goal_tokens(current_tokens);
+                let previous = self.goal_tracker.lock().snapshot().cloned();
                 let (msg, changed) = {
                     let mut tracker = self.goal_tracker.lock();
                     match tracker.status() {
@@ -1161,12 +1199,20 @@ impl SessionActor {
                     }
                 };
                 if changed {
+                    if let Some(previous) = previous
+                        && let Err(error) = self.commit_goal_mutation_or_restore(previous).await
+                    {
+                        self.send_host_turn_slash_command_output(&format!(
+                            "Goal was not paused: {error}"
+                        ))
+                        .await;
+                        return ok_end_turn(0, None);
+                    }
                     if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
                         cancel.cancel();
                     }
-                    let (tokens_used, finished) = self.goal_tokens(current_tokens);
                     self.goal_notify_sender().emit_goal_updated(
-                        &mut self.goal_tracker.lock(),
+                        &self.goal_tracker.lock(),
                         tokens_used,
                         finished,
                     );
@@ -1192,7 +1238,14 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalClear => {
-                if self.delete_goal_state_durably().await.is_err() {
+                if self
+                    .persist_control_snapshot_durably(
+                        crate::session::behavior::BehaviorSnapshot::normal(),
+                        None,
+                    )
+                    .await
+                    .is_err()
+                {
                     self.send_host_turn_slash_command_output(
                         "Could not durably clear the goal. The goal remains loaded; retry /goal clear.",
                     )
@@ -1205,14 +1258,13 @@ impl SessionActor {
                 self.goal_tracker.lock().clear();
                 self.goal_turn_task_ids.lock().clear();
                 self.subagent_token_records.lock().clear();
-                self.behavior.lock().select_behavior(None);
-                *self.current_prompt_mode.lock() = crate::session::behavior::PromptMode::Agent;
-                self.retag_queued_goal_user_prompts(crate::session::behavior::PromptMode::Agent)
-                    .await;
-                self.persist_behavior_state();
+                self.behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Normal);
                 self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                    tools::types::SessionMode::Default.as_id(),
+                    tools::types::BehaviorId::Normal.as_id(),
                 ));
+                self.send_available_commands_update().await;
                 self.send_grow_notification(crate::session::goal_orchestrator::build_goal_cleared())
                     .await;
                 self.send_host_turn_slash_command_output("Goal cleared.")
@@ -1220,7 +1272,7 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalBudget { token_budget } => {
-                let message = self.update_goal_token_budget(token_budget);
+                let message = self.update_goal_token_budget(token_budget).await;
                 self.send_host_turn_slash_command_output(&message).await;
                 ok_end_turn(0, None)
             }

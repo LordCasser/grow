@@ -169,7 +169,7 @@ mod tests {
             models: &models,
             agents: &agents,
             current_agent: Some("grow"),
-            behavior_mode: tools::types::SessionMode::Default,
+            behavior_mode: tools::types::BehaviorId::Normal,
             deep_research_available: false,
             goal_available: false,
             current_goal_objective: None,

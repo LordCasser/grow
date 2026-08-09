@@ -1028,7 +1028,7 @@ async fn bootstrap_initial_context(
             fork_context_source: Some("resumed".to_string()),
             fork_parent_prompt_id: request.parent_prompt_id.clone(),
             copy_plan_state: false,
-            copy_behavior_state: false,
+            copy_session_control: false,
             copy_signals: false,
             copy_tool_state: true,
             fork_filter: false,
@@ -1139,7 +1139,7 @@ async fn bootstrap_initial_context(
             fork_context_source: Some("forked".to_string()),
             fork_parent_prompt_id: request.parent_prompt_id.clone(),
             copy_plan_state: false,
-            copy_behavior_state: false,
+            copy_session_control: false,
             copy_signals: false,
             copy_tool_state: false,
             fork_filter: true,
@@ -1468,21 +1468,19 @@ pub(crate) fn subagent_harness_flavor_is_representable(agent_type: &str) -> bool
 /// agent definition.
 ///
 /// The child keeps the selected agent definition and inherits any configured
-/// file-tool override. A `/goal` role may also supply a harness definition;
-/// when no alternate harness is compiled in, that value is validation-only.
+/// file-tool override.
 ///
 /// Extracted so both [`run_shell_child`] (real spawn) and
 /// [`describe_subagent_type`] (read-only probe) build the SAME `tool_config`
-/// for a given `(subagent_type, harness_agent_type, parent_name)` — no
+/// for a given `(subagent_type, parent_name)` — no
 /// duplication.
 fn resolve_subagent_toolset(
     subagent_type: &str,
-    harness_agent_type: Option<&str>,
     ctx: &SubagentSpawnContext,
     definition: &mut agent::config::AgentDefinition,
 ) {
     let resolution_context = crate::agent::subagent::resolution::HarnessToolsetContext {
-        harness_override: harness_agent_type,
+        harness_override: None,
         parent_agent_name: ctx.parent_agent_name.as_deref(),
         file_tool_overrides: ctx.file_tool_overrides.as_deref(),
     };
@@ -1491,83 +1489,6 @@ fn resolve_subagent_toolset(
         &resolution_context,
         definition,
     );
-}
-/// Map a resolved `ToolServerConfig` into a [`SubagentTypeSummary`].
-///
-/// Keys on each entry's `ToolConfig.kind` (first tool per kind wins).
-/// Entries with `kind: None` — `from_id`/MCP/custom tools — are SKIPPED, so
-/// this is NOT a byte-for-byte equivalent of the finalize-time `kind_to_name`
-/// map (which keys on the registry `entry.kind`); the two agree for the
-/// builtin goal toolsets, where every tool's kind is populated by
-/// `From<&T: Tool>`, but diverge for `kind: None` tools (which carry no
-/// capability signal anyway). The client-facing name is
-/// `ToolConfig::resolve_client_name(default_id)` where `default_id` is the
-/// unqualified tool id (the `"<namespace>:"` prefix on `tc.id` is stripped),
-/// so a `name_override` is reflected. The read/search/execute flags are what
-/// the per-role capability gates key on.
-fn summarize_tool_config(config: &tools::registry::types::ToolServerConfig) -> SubagentTypeSummary {
-    let mut tool_names: HashMap<ToolKind, String> = HashMap::new();
-    for tc in &config.tools {
-        let Some(kind) = tc.kind else { continue };
-        let default_id = tc.id.rsplit(':').next().unwrap_or(tc.id.as_str());
-        let client_name = tc.resolve_client_name(default_id);
-        tool_names.entry(kind).or_insert(client_name);
-    }
-    SubagentTypeSummary {
-        can_read: tool_names.contains_key(&ToolKind::Read),
-        can_search: tool_names.contains_key(&ToolKind::Search),
-        can_execute: tool_names.contains_key(&ToolKind::Execute),
-        tool_names,
-    }
-}
-/// Describe a subagent type's resolved toolset WITHOUT spawning it.
-///
-/// Runs the same resolution path as [`run_shell_child`] —
-/// [`resolve_agent_definition`] + [`gate_subagent_type`] +
-/// [`resolve_subagent_toolset`] — then summarizes the resulting
-/// `tool_config`. Backs the `SubagentEvent::DescribeType` drain arm; the
-/// parent uses the summary for the per-role capability gate and prompt
-/// rendering before committing a configured `/goal` `{model, agent_type}` pair.
-///
-/// `harness_agent_type` is the `/goal`-only harness override: when set it must
-/// resolve to an `AgentDefinition` via this module's [`resolve_agent_definition`]
-/// (name-based project/plugin/builtin lookup — `by_name_in_cwd_with_plugins` +
-/// `BuiltinAgentName`). That is equivalent to the main session for builtin
-/// harness names but does NOT apply the main session's env / ACP-profile /
-/// strict-harness precedence. An unresolvable harness returns `Unknown` so the
-/// `/goal` caller fails open to the session harness; otherwise it decides the
-/// summarized toolset's flavor. `None` (every non-goal probe) defers the flavor
-/// to the parent agent (unchanged).
-pub(crate) fn describe_subagent_type(
-    subagent_type: &str,
-    harness_agent_type: Option<&str>,
-    ctx: &SubagentSpawnContext,
-) -> SubagentDescribeOutcome {
-    if let Some(harness) = harness_agent_type
-        && resolve_agent_definition(harness, ctx).is_none()
-    {
-        return SubagentDescribeOutcome::Unknown {
-            available: available_agent_names(ctx),
-        };
-    }
-    let Some(mut definition) = resolve_agent_definition(subagent_type, ctx) else {
-        return SubagentDescribeOutcome::Unknown {
-            available: available_agent_names(ctx),
-        };
-    };
-    match gate_subagent_type(subagent_type, ctx) {
-        SubagentValidateTypeOutcome::Disabled => return SubagentDescribeOutcome::Disabled,
-        SubagentValidateTypeOutcome::Unknown { available } => {
-            return SubagentDescribeOutcome::Unknown { available };
-        }
-        SubagentValidateTypeOutcome::ValidationUnavailable => {
-            return SubagentDescribeOutcome::Unavailable;
-        }
-        SubagentValidateTypeOutcome::Ok => {}
-        _ => return SubagentDescribeOutcome::Unavailable,
-    }
-    resolve_subagent_toolset(subagent_type, harness_agent_type, ctx, &mut definition);
-    SubagentDescribeOutcome::Ok(summarize_tool_config(&definition.tool_config))
 }
 /// Resolve a subagent's turn limit: its own `maxTurns` wins, else inherit the parent's.
 fn resolve_subagent_max_turns(
@@ -1755,7 +1676,6 @@ fn inject_subagent_completed_prompt(
                 subagent_id: subagent_id.to_string(),
             },
             turn_kind: crate::session::TurnKind::Internal,
-            prompt_mode: crate::session::behavior::PromptMode::Agent,
             client_identifier: None,
             screen_mode: None,
             verbatim: true,
@@ -1766,11 +1686,9 @@ fn inject_subagent_completed_prompt(
             parsed_prompt_tx: None,
         })
         .is_err()
+        && let Some(reservations) = task_completion_reservations
     {
-        if let Some(reservations) = task_completion_reservations {
-            reservations.release(subagent_id);
-        }
-        return;
+        reservations.release(subagent_id);
     }
 }
 fn failure_result(request: &SubagentRequest, error: &str) -> SubagentResult {

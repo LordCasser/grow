@@ -84,6 +84,7 @@ impl WorkflowRunStore {
                 .unwrap_or("");
             at.cmp(bt).then(ai.cmp(bi))
         });
+        let mut repaired = Vec::new();
         {
             let mut sources = store.sources.lock();
             for (run, _) in restored {
@@ -109,8 +110,21 @@ impl WorkflowRunStore {
                     state.agents_used = 0;
                     state.token_leases.clear();
                     state.agent_usage_incomplete = true;
+                    repaired.push(state.clone());
+                } else if state.status == super::tracker::WorkflowRunStatus::Active {
+                    state.interrupt_after_restore();
+                    repaired.push(state.clone());
                 }
                 states.push(state);
+            }
+        }
+        for state in repaired {
+            if let Err(error) = store.persist_now(&state) {
+                tracing::warn!(
+                    run_id = %state.run_id,
+                    %error,
+                    "failed to persist repaired workflow restore state"
+                );
             }
         }
         (store, states)
@@ -451,6 +465,44 @@ mod tests {
             "disk full"
         );
         writer.await.unwrap();
+    }
+
+    #[test]
+    fn active_manifest_is_interrupted_when_no_live_executor_survives_restore() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let state = WorkflowTracker::default().start_run(
+            "wf_active".into(),
+            "deep-research".into(),
+            "objective".into(),
+            Vec::new(),
+            Some(8),
+            None,
+        );
+        let original_revision = state.revision;
+        let restored = RestoredWorkflowRun {
+            manifest: WorkflowRunManifest {
+                version: WORKFLOW_RUN_MANIFEST_VERSION,
+                state,
+                script_revision: 0,
+            },
+            script: "complete(1);".into(),
+            args: serde_json::json!({}),
+        };
+
+        let (_store, states) = WorkflowRunStore::from_restored(None, tx, vec![restored]);
+        let state = &states[0];
+        assert_eq!(
+            state.status,
+            crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
+        );
+        assert!(state.revision > original_revision);
+        assert!(state.agent_usage_incomplete);
+        assert!(
+            state
+                .pause_message
+                .as_deref()
+                .is_some_and(|message| message.contains("execution ownership was lost"))
+        );
     }
 
     #[test]

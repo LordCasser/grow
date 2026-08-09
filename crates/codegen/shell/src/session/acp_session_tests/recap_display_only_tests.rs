@@ -57,7 +57,6 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
                     "user-next".to_string(),
                     crate::session::PromptOrigin::User,
                     crate::session::TurnKind::User,
-                    crate::session::behavior::PromptMode::Agent,
                     None,
                     None,
                     false,
@@ -97,7 +96,6 @@ async fn queue_input_synthetic_does_not_bump_recap_epoch() {
                         task_id: "bg-1".to_string(),
                     },
                     crate::session::TurnKind::Internal,
-                    crate::session::behavior::PromptMode::Agent,
                     None,
                     None,
                     false,
@@ -187,6 +185,7 @@ async fn drop_recap_after_cancel_auto_silent_manual_unavailable() {
 
             actor.recap_in_flight.set(true);
             actor.drop_recap_after_cancel(true).await;
+            tokio::task::yield_now().await;
             assert!(!actor.recap_in_flight.get());
             assert!(
                 !drained_recap_unavailable(&mut persistence_rx),
@@ -199,6 +198,7 @@ async fn drop_recap_after_cancel_auto_silent_manual_unavailable() {
 
             actor.recap_in_flight.set(true);
             actor.drop_recap_after_cancel(false).await;
+            tokio::task::yield_now().await;
             assert!(!actor.recap_in_flight.get());
             assert!(
                 drained_recap_unavailable(&mut persistence_rx),
@@ -343,6 +343,7 @@ async fn manual_recap_with_no_turns_emits_unavailable() {
             actor.chat_state_handle.replace_conversation(vec![]);
 
             actor.handle_recap(false).await;
+            tokio::task::yield_now().await;
 
             assert!(
                 drained_recap_unavailable(&mut persistence_rx),
@@ -375,6 +376,7 @@ async fn manual_recap_generation_failure_emits_unavailable() {
             ]);
 
             actor.handle_recap(false).await;
+            tokio::task::yield_now().await;
 
             assert!(
                 drained_recap_unavailable(&mut persistence_rx),
@@ -405,6 +407,7 @@ async fn manual_recap_generation_failure_persists_request_artifact() {
             ]);
 
             actor.handle_recap(false).await;
+            tokio::task::yield_now().await;
 
             let mut saw_recap_request = false;
             while let Ok(msg) = persistence_rx.try_recv() {

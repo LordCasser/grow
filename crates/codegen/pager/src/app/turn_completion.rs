@@ -427,7 +427,10 @@ pub(super) fn apply_terminal_notifications(
             is_busy: false,
             focused: true,
         };
-        app.pending_notification_escapes = app.notification_service.build_idle_escapes(&idle_title);
+        let frame = crate::motion::FrameStamp::capture(app.motion_origin);
+        app.pending_notification_escapes = app
+            .notification_service
+            .build_idle_escapes(&idle_title, frame);
     }
 
     if kind != NotificationEventKind::TurnComplete || queue_empty {

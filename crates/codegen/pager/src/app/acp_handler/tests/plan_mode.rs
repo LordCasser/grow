@@ -312,30 +312,29 @@
     }
 
     #[test]
-    fn current_mode_update_default_deactivates_plan_mode() {
+    fn current_mode_update_normal_deactivates_plan_mode() {
         let mut agent = make_agent(Some("s1"));
         agent.plan_mode_active = true;
         agent.plan_mode_pending = Some(true);
 
         let refresh_needed =
-            detect_plan_mode_change(&make_current_mode_update("default"), &mut agent);
+            detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent);
         assert!(refresh_needed);
         assert!(!agent.plan_mode_active);
         assert!(agent.plan_mode_pending.is_none());
     }
 
-    /// Unknown mode ids (e.g. a custom agent definition name like
-    /// `"browser_use"`) parse to `SessionMode::Default` and deactivate
-    /// plan mode.
+    /// Unknown mode ids are invalid control-plane data. They must not silently
+    /// mutate the canonical Behavior into Normal.
     #[test]
-    fn current_mode_update_unknown_id_treated_as_default() {
+    fn current_mode_update_unknown_id_is_ignored() {
         let mut agent = make_agent(Some("s1"));
         agent.plan_mode_active = true;
 
         let refresh_needed =
             detect_plan_mode_change(&make_current_mode_update("browser_use"), &mut agent);
-        assert!(refresh_needed);
-        assert!(!agent.plan_mode_active);
+        assert!(!refresh_needed);
+        assert!(agent.plan_mode_active);
     }
 
     /// Idempotent CurrentModeUpdate still signals refresh because
@@ -357,16 +356,16 @@
 
     /// The `grow/behaviorChange` meta of a `CurrentModeUpdate` mirrors the
     /// shell's `BehaviorChangeOutcome` wire shape.
-    fn behavior_change_update(status: &str, target: &str) -> acp::SessionUpdate {
+    fn behavior_change_update(status: &str, current: &str, target: &str) -> acp::SessionUpdate {
         acp::SessionUpdate::CurrentModeUpdate(
-            acp::CurrentModeUpdate::new(acp::SessionModeId::new("plan")).meta(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new(current)).meta(
                 serde_json::json!({
                     "grow/behaviorChange": {
                         "status": status,
                         "source": "plan",
                         "target": target,
                         "message": format!(
-                            "Switching to {target} will interrupt the active plan work. Press Enter to confirm the switch, or press Esc to cancel."
+                            "Switching to {target} will interrupt the active plan work. Select it again to confirm."
                         ),
                         "remainingMs": 8000,
                     }
@@ -378,103 +377,124 @@
         )
     }
 
-    /// A `confirmation_required` update parks the switch target on the agent
-    /// and pins the warning banner (which must stay visible until Enter/Esc).
+    fn mode_update_message(session_id: &str, update: acp::SessionUpdate) -> AcpClientMessage {
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+            request: acp::SessionNotification::new(acp::SessionId::new(session_id), update),
+            response_tx,
+        })
+    }
+
+    /// A `confirmation_required` update keeps the authoritative source mode
+    /// and renders the Shell-owned window. Pager input owns no confirmation
+    /// latch; only selecting the same target again can confirm it.
     #[test]
-    fn behavior_change_confirmation_required_parks_switch_target() {
+    fn behavior_change_confirmation_required_is_display_only() {
         let mut agent = make_agent(Some("s1"));
+        agent.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.plan_mode_active = true;
 
         let refresh = detect_plan_mode_change(
-            &behavior_change_update("confirmation_required", "default"),
+            &behavior_change_update("confirmation_required", "plan", "normal"),
             &mut agent,
         );
         assert!(refresh);
-        let confirm = agent
-            .behavior_switch_confirm
-            .as_ref()
-            .expect("the interrupting switch must be parked");
-        assert_eq!(confirm.target, tools::types::SessionMode::Default);
-        assert!(confirm.prompt.is_none());
-        assert!(
-            agent.behavior_switch_warning_pending,
-            "the warning must stay pending until Enter/Esc"
-        );
+        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Plan);
+        assert!(agent.plan_mode_active);
+        assert!(agent.behavior_mode_pending.is_none());
         assert!(
             agent.mode_switch_banner.is_some(),
             "the warning banner must be visible"
         );
+        assert!(!behavior_mode_update_applied(&behavior_change_update(
+            "confirmation_required",
+            "plan",
+            "normal"
+        )));
     }
 
-    /// The notification and the `SetModeThenPrompt` task result arrive over
-    /// independent channels in unspecified order. A late notification must
-    /// re-park the target WITHOUT dropping the prompt the task already
-    /// stashed (and vice versa — covered by the dispatch-level replay test).
     #[test]
-    fn behavior_change_confirmation_required_preserves_stashed_prompt() {
-        let mut agent = make_agent(Some("s1"));
-        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
-            target: tools::types::SessionMode::Default,
-            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
-                text: "add auth to the app".into(),
-            }),
-        });
+    fn confirmation_required_does_not_release_held_fifo() {
+        let mut app = make_app_with_agent("s1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.plan_mode_active = true;
+        agent.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
+        agent.session.enqueue_prompt("held until selection repeats".into());
 
-        detect_plan_mode_change(
-            &behavior_change_update("confirmation_required", "default"),
-            &mut agent,
+        let changed = handle(
+            mode_update_message(
+                "s1",
+                behavior_change_update("confirmation_required", "plan", "normal"),
+            ),
+            &mut app,
         );
 
-        let confirm = agent
-            .behavior_switch_confirm
-            .as_ref()
-            .expect("the interrupting switch must stay parked");
-        assert_eq!(confirm.target, tools::types::SessionMode::Default);
-        let prompt = confirm.prompt.as_ref().expect("the stashed prompt must survive");
-        assert_eq!(prompt.text, "add auth to the app");
+        assert!(changed);
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.session.state.is_idle());
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+        assert!(app.pending_effects.is_empty());
     }
 
-    /// `applied` resolves the parked switch: banner pending and stashed
-    /// prompt (and any confirm state) are cleared.
     #[test]
-    fn behavior_change_applied_clears_parked_switch() {
-        let mut agent = make_agent(Some("s1"));
-        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
-            target: tools::types::SessionMode::Default,
-            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
-                text: "add auth to the app".into(),
-            }),
-        });
-        agent.behavior_switch_warning_pending = true;
-        agent.mode_switch_banner = Some((
-            "banner".into(),
-            std::time::Instant::now() + std::time::Duration::from_secs(1),
+    fn applied_behavior_releases_held_fifo_under_new_identity() {
+        let mut app = make_app_with_agent("s1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.plan_mode_active = true;
+        agent.behavior_mode_pending = Some(tools::types::BehaviorId::Normal);
+        agent.session.enqueue_prompt("run after selection applies".into());
+
+        let changed = handle(
+            mode_update_message(
+                "s1",
+                behavior_change_update("applied", "normal", "normal"),
+            ),
+            &mut app,
+        );
+
+        assert!(changed);
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Normal);
+        assert!(agent.session.pending_prompts.is_empty());
+        assert!(matches!(
+            agent.session.state,
+            crate::app::agent::AgentState::TurnSubmitting
         ));
-
-        detect_plan_mode_change(&behavior_change_update("applied", "default"), &mut agent);
-
-        assert!(agent.behavior_switch_confirm.is_none());
-        assert!(!agent.behavior_switch_warning_pending);
-        assert!(
-            agent.mode_switch_banner.is_some(),
-            "the banner text itself fades out via the regular tick once unpinned"
-        );
+        assert!(matches!(
+            app.pending_effects.as_slice(),
+            [Effect::SendPrompt { text, .. }] if text == "run after selection applies"
+        ));
     }
 
-    /// `rejected` also clears the parked switch (nothing left to confirm) and
-    /// surfaces the rejection toast as before.
+    /// Applied mode identity is authoritative and releases held FIFO work.
     #[test]
-    fn behavior_change_rejected_clears_parked_switch() {
+    fn behavior_change_applied_installs_target_identity() {
         let mut agent = make_agent(Some("s1"));
-        agent.behavior_switch_confirm = Some(crate::app::agent_view::BehaviorSwitchConfirm {
-            target: tools::types::SessionMode::Default,
-            prompt: Some(crate::app::agent_view::BehaviorSwitchStashedPrompt {
-                text: "add auth to the app".into(),
-            }),
-        });
-        agent.behavior_switch_warning_pending = true;
+        agent.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.plan_mode_active = true;
 
-        detect_plan_mode_change(&behavior_change_update("rejected", "default"), &mut agent);
+        let update = behavior_change_update("applied", "normal", "normal");
+        detect_plan_mode_change(&update, &mut agent);
 
-        assert!(agent.behavior_switch_confirm.is_none());
-        assert!(!agent.behavior_switch_warning_pending);
+        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Normal);
+        assert!(!agent.plan_mode_active);
+        assert!(behavior_mode_update_applied(&update));
+    }
+
+    /// Rejection retains the source identity and never releases a held FIFO.
+    #[test]
+    fn behavior_change_rejected_retains_source_identity() {
+        let mut agent = make_agent(Some("s1"));
+        agent.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.plan_mode_active = true;
+
+        let update = behavior_change_update("rejected", "plan", "normal");
+        detect_plan_mode_change(&update, &mut agent);
+
+        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Plan);
+        assert!(agent.plan_mode_active);
+        assert!(!behavior_mode_update_applied(&update));
+        assert!(agent.toast.is_some());
     }

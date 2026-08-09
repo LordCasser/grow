@@ -303,7 +303,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                     {
                         let rest = trimmed[4..].trim_start();
                         if rest.trim().is_empty() {
-                            BuiltinAction::GoalEnter
+                            BuiltinAction::GoalUsage
                         } else {
                             let (objective, token_budget) = parse_goal_budget(rest);
                             BuiltinAction::GoalEdit {
@@ -331,13 +331,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                         };
                         BuiltinAction::GoalBudget { token_budget }
                     } else {
-                        // Bare objective form (back-compat): anything that is
-                        // not a keyword or subcommand is the goal text itself.
-                        let (objective, token_budget) = parse_goal_budget(trimmed);
-                        BuiltinAction::GoalSet {
-                            objective,
-                            token_budget,
-                        }
+                        BuiltinAction::GoalUsage
                     }
                 }
             }
@@ -441,7 +435,8 @@ impl CommandAvailability {
     }
 }
 /// Build the JSON value for `AvailableCommandsUpdate.meta` containing the
-/// agent's currently-registered tool names.
+/// agent's currently-registered tool names and Shell-authored Behavior
+/// availability projection.
 ///
 /// Wire format: `{"tools": ["read_file", "scheduler_create", ...]}`.
 /// Pager clients drain this and call `CommandRegistry::set_available_tools`
@@ -450,9 +445,17 @@ impl CommandAvailability {
 /// Takes `&[String]` rather than `&[&str]` because serde_json copies
 /// each entry into the `Value` regardless, so an intermediate
 /// `Vec<&str>` adapter would just waste an allocation.
-pub(crate) fn build_tools_meta(tool_names: &[String]) -> acp::Meta {
+pub(crate) fn build_tools_meta(
+    tool_names: &[String],
+    behavior_availability: &tool_types::BehaviorAvailability,
+) -> acp::Meta {
     let mut meta = acp::Meta::new();
     meta.insert("tools".to_owned(), serde_json::json!(tool_names));
+    meta.insert(
+        "grow/behaviorAvailability".to_owned(),
+        serde_json::to_value(behavior_availability)
+            .expect("BehaviorAvailability is JSON-serializable"),
+    );
     meta
 }
 struct EffectiveCommandCatalog<'a> {
@@ -894,6 +897,7 @@ pub(super) enum BuiltinAction {
         token_budget: Option<i64>,
     },
     GoalEnter,
+    GoalUsage,
     GoalStatus,
     GoalPause,
     GoalResume,
@@ -940,6 +944,7 @@ impl BuiltinAction {
             BuiltinAction::GoalSet { .. }
             | BuiltinAction::GoalEdit { .. }
             | BuiltinAction::GoalEnter
+            | BuiltinAction::GoalUsage
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
@@ -973,7 +978,9 @@ impl BuiltinAction {
             BuiltinAction::PluginsUpdate { name } => name.is_some(),
             BuiltinAction::MemoryBrowse => false,
             BuiltinAction::MemoryToggle { .. } => true,
-            BuiltinAction::GoalSet { .. } | BuiltinAction::GoalEdit { .. } => true,
+            BuiltinAction::GoalSet { .. }
+            | BuiltinAction::GoalEdit { .. }
+            | BuiltinAction::GoalUsage => true,
             BuiltinAction::GoalEnter
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
@@ -1878,10 +1885,19 @@ mod tests {
     #[test]
     fn build_tools_meta_serialises_tool_names() {
         let names = vec!["scheduler_create".to_string(), "web_fetch".to_string()];
-        let v = build_tools_meta(&names);
+        let behavior_availability = tool_types::BehaviorAvailability {
+            current: tool_types::BehaviorId::Normal,
+            choices: Vec::new(),
+        };
+        let v = build_tools_meta(&names, &behavior_availability);
         assert_eq!(
-            serde_json::Value::Object(v),
-            serde_json::json!({"tools": ["scheduler_create", "web_fetch"]})
+            v.get("tools"),
+            Some(&serde_json::json!(["scheduler_create", "web_fetch"]))
+        );
+        assert_eq!(
+            v.get("grow/behaviorAvailability")
+                .and_then(|value| value.get("current")),
+            Some(&serde_json::json!("normal"))
         );
     }
     #[test]
@@ -2652,21 +2668,15 @@ mod tests {
         assert!(matches!(resolve_goal("clear"), BuiltinAction::GoalClear));
     }
     #[test]
-    fn goal_objective_resolves_to_set() {
-        match resolve_goal("implement auth module") {
-            BuiltinAction::GoalSet {
-                objective,
-                token_budget,
-            } => {
-                assert_eq!(objective, "implement auth module");
-                assert_eq!(token_budget, None);
-            }
-            other => panic!("expected GoalSet, got {}", other.command_name()),
-        }
+    fn goal_bare_text_is_usage_not_an_implicit_set() {
+        assert!(matches!(
+            resolve_goal("implement auth module"),
+            BuiltinAction::GoalUsage
+        ));
     }
     #[test]
     fn goal_set_preserves_original_casing() {
-        match resolve_goal("Fix BUG in AuthManager") {
+        match resolve_goal("set Fix BUG in AuthManager") {
             BuiltinAction::GoalSet { objective, .. } => {
                 assert_eq!(objective, "Fix BUG in AuthManager");
             }
@@ -2675,7 +2685,7 @@ mod tests {
     }
     #[test]
     fn goal_set_trailing_budget_flag_parses() {
-        match resolve_goal("implement X --budget 500000") {
+        match resolve_goal("set implement X --budget 500000") {
             BuiltinAction::GoalSet {
                 objective,
                 token_budget,
@@ -2693,7 +2703,7 @@ mod tests {
             ("do x --budget   77", "do x", 77),
             ("do x \t --budget 500000", "do x", 500_000),
         ] {
-            match resolve_goal(text) {
+            match resolve_goal(&format!("set {text}")) {
                 BuiltinAction::GoalSet {
                     objective: o,
                     token_budget,
@@ -2720,7 +2730,7 @@ mod tests {
             "fix the --budget flag parsing bug",
             "--budget 500000",
         ] {
-            match resolve_goal(text) {
+            match resolve_goal(&format!("set {text}")) {
                 BuiltinAction::GoalSet {
                     objective,
                     token_budget,
@@ -2784,19 +2794,17 @@ mod tests {
 
     #[test]
     fn goal_set_word_boundary() {
-        // A word that merely STARTS with "set" is not the subcommand; it
-        // stays a bare objective (back-compat).
+        // A word that merely starts with `set` is not the subcommand and must
+        // never create a Goal implicitly.
         for text in ["setter x", "setX"] {
-            match resolve_goal(text) {
-                BuiltinAction::GoalSet {
-                    objective,
-                    token_budget,
-                } => {
-                    assert_eq!(objective, text, "objective must be preserved verbatim");
-                    assert_eq!(token_budget, None);
-                }
-                other => panic!("expected GoalSet, got {}", other.command_name()),
-            }
+            assert!(matches!(resolve_goal(text), BuiltinAction::GoalUsage));
+        }
+    }
+
+    #[test]
+    fn goal_edit_requires_an_objective() {
+        for text in ["edit", "EDIT ", "edit   "] {
+            assert!(matches!(resolve_goal(text), BuiltinAction::GoalUsage));
         }
     }
 
@@ -2832,18 +2840,10 @@ mod tests {
 
     #[test]
     fn goal_budget_word_boundary() {
-        // "budgetary" starts with "budget" but is not the subcommand; it
-        // stays a bare objective (back-compat).
-        match resolve_goal("budgetary x") {
-            BuiltinAction::GoalSet {
-                objective,
-                token_budget,
-            } => {
-                assert_eq!(objective, "budgetary x");
-                assert_eq!(token_budget, None);
-            }
-            other => panic!("expected GoalSet, got {}", other.command_name()),
-        }
+        assert!(matches!(
+            resolve_goal("budgetary x"),
+            BuiltinAction::GoalUsage
+        ));
     }
 
     #[test]

@@ -147,6 +147,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
     pub persisted_goal_mode_rejected: bool,
+    pub persisted_control_revision: u64,
     pub persisted_workflow_runs: Vec<
         crate::session::workflow::store::RestoredWorkflowRun,
     >,

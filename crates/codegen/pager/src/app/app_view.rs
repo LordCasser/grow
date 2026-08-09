@@ -3509,13 +3509,12 @@ impl AppView {
         let mut completion_effects = Vec::new();
         needs_redraw |= self.maintain_ephemeral_tip_clocks(now);
         needs_redraw |= self.poll_clipboard_focus_tip();
-        if matches!(self.active_view, ActiveView::Welcome) {
-            if let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at) {
-                if now >= expires_at {
-                    self.welcome_toast = None;
-                    needs_redraw = true;
-                }
-            }
+        if matches!(self.active_view, ActiveView::Welcome)
+            && let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at)
+            && now >= expires_at
+        {
+            self.welcome_toast = None;
+            needs_redraw = true;
         }
         // The agent empty-state logo (bare centered wordmark over an empty
         // scrollback) uses the same wall-clock shimmer as the welcome screen,
@@ -3558,13 +3557,23 @@ impl AppView {
                 needs_redraw |= Self::tick_agent_block_viewer(child_view);
             }
             needs_redraw |= agent.drain_blocked();
-            agent.prompt.slash_controller.set_workflows_available(
-                AgentSession::workflows_available(
-                    agent.session.available_tools.as_ref(),
-                    &agent.session.available_commands,
-                    !agent.workflow_runs.is_empty(),
-                ),
-            );
+            let workflows_available = agent
+                .session
+                .tracker
+                .behavior_availability()
+                .and_then(|availability| availability.choice(tools::types::BehaviorId::Workflow))
+                .map(|choice| choice.supported)
+                .unwrap_or_else(|| {
+                    AgentSession::workflows_available(
+                        agent.session.available_tools.as_ref(),
+                        &agent.session.available_commands,
+                        !agent.workflow_runs.is_empty(),
+                    )
+                });
+            agent
+                .prompt
+                .slash_controller
+                .set_workflows_available(workflows_available);
             if agent.acp_synced_generation != agent.session.available_commands_generation {
                 agent.prompt.sync_acp_commands(
                     &agent.session.available_commands,
@@ -3893,9 +3902,7 @@ impl AppView {
         let slow = || Some(configured.max(crate::motion::SLOW_FRAME_INTERVAL));
         match self.active_view {
             ActiveView::Agent(id) => {
-                let Some(agent) = self.agents.get(&id) else {
-                    return None;
-                };
+                let agent = self.agents.get(&id)?;
                 let surface_fast = Self::agent_surface_animating(agent)
                     || agent.mode_banner_animating(now)
                     || agent.scrollback.needs_animation()

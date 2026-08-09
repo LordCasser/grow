@@ -73,9 +73,8 @@ pub struct ToolConfig {
     /// enforcement to filter tools without a hardcoded ID mapping.
     ///
     /// `None` means the tool's kind is unknown (e.g. MCP/custom tools
-    /// created via `ToolConfig::from_id()`). Capability-mode filtering
-    /// preserves tools with `kind: None` — this is intentional to avoid
-    /// breaking extensibility.
+    /// created via `ToolConfig::from_id()`). Restricted Agent capability
+    /// filters reject it; only an unrestricted primary toolset may retain it.
     ///
     /// `ToolKind` is `#[serde(other)]`, so an unknown deserialized `kind` becomes
     /// `Some(Other)` (dropped by restrictive modes) rather than an error — not a
@@ -127,8 +126,9 @@ impl ToolConfig {
     /// Build a `ToolConfig` from a string id (no associated Rust type).
     ///
     /// Use this for MCP/custom tools or anywhere the id is only known at
-    /// runtime. `kind` is left as `None`; capability-mode filtering then
-    /// preserves the tool unconditionally.
+    /// runtime. `kind` is left as `None`; restricted Agent capability modes
+    /// therefore reject the tool unless a trusted registration supplies a
+    /// taxonomy.
     pub fn from_id(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -640,7 +640,8 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::KillTerminalCommandTool>();
         b.register::<grow_build::TodoWriteTool>();
         b.register::<grow_build::GetGoalTool>();
-        b.register::<grow_build::UpdateGoalPlanTool>();
+        b.register::<grow_build::UpdateGoalProgressTool>();
+        b.register::<grow_build::RequestGoalReplanTool>();
         b.register::<grow_build::UpdateGoalTool>();
         b.register::<grow_build::WorkflowTool>();
         b.register::<grow_build::TaskOutputTool>();

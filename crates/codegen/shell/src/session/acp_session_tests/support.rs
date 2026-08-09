@@ -133,6 +133,29 @@ pub(crate) async fn create_test_actor_ex(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    // Production owns a persistence actor that acknowledges durable terminal
+    // appends. Unit tests pass an observation channel instead, so bridge the
+    // durable envelope to the historical `Update` shape while completing the
+    // barrier. Tests that care about ordering still observe the exact record.
+    let (actor_persistence_tx, mut actor_persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(message) = actor_persistence_rx.recv().await {
+            match message {
+                PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to } => {
+                    let _ = persistence_tx.send(PersistenceMsg::Update(update));
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::SessionControlAndAck { state, respond_to } => {
+                    let _ = persistence_tx.send(PersistenceMsg::SessionControl(state));
+                    let _ = respond_to.send(Ok(()));
+                }
+                other => {
+                    let _ = persistence_tx.send(other);
+                }
+            }
+        }
+    });
+    let persistence_tx = actor_persistence_tx;
     let cwd = paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
     let fs = Arc::new(workspace::file_system::MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
@@ -278,14 +301,13 @@ pub(crate) async fn create_test_actor_ex(
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         active_skill: parking_lot::Mutex::new(None),
-        current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
-        turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
-        turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
+        turn_behavior: parking_lot::Mutex::new(tool_types::BehaviorId::Normal),
         behavior: Arc::new(parking_lot::Mutex::new(
-            crate::session::behavior::BehaviorController::new(std::path::PathBuf::from(
+            crate::session::behavior::BehaviorCoordinator::new(std::path::PathBuf::from(
                 "/tmp/test-session",
             )),
         )),
+        control_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         goal_enabled: false,
         background_workflows_enabled: false,
         goal_harness_enabled: std::sync::atomic::AtomicBool::new(false),
@@ -385,7 +407,6 @@ pub(crate) fn user_item_with_rx(
         prompt_id: id.to_string(),
         turn_kind: crate::session::TurnKind::User,
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text.clone()))],
-        prompt_mode: PromptMode::Agent,
         client_identifier: Some(owner.to_string()),
         screen_mode: None,
         verbatim: false,
@@ -428,7 +449,6 @@ pub(crate) fn input_with_origin_rx(
             crate::session::TurnKind::User
         },
         prompt_blocks: vec![],
-        prompt_mode: PromptMode::Agent,
         client_identifier: None,
         screen_mode: None,
         verbatim,

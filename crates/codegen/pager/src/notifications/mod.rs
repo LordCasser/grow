@@ -124,11 +124,15 @@ impl NotificationService {
     /// directly to stderr.  Call before `notify()` so that Ghostty's
     /// notification popup picks up the updated (non-spinning) title
     /// instead of a stale "Responding" subtitle.
-    pub fn flush_idle_state(&mut self, state: &title::TitleState<'_>) {
+    pub fn flush_idle_state(
+        &mut self,
+        state: &title::TitleState<'_>,
+        frame: crate::motion::FrameStamp,
+    ) {
         let mut buf = String::new();
 
         if self.config.title.enabled
-            && let Some(esc) = self.title_manager.update(state)
+            && let Some(esc) = self.title_manager.update_at(state, frame)
         {
             buf.push_str(&esc);
         }
@@ -151,11 +155,15 @@ impl NotificationService {
     /// frame pipeline (`pending_notification_escapes`) so they go through
     /// the writer thread and are ordered correctly relative to previous
     /// frames that may still carry the busy title.
-    pub fn build_idle_escapes(&mut self, state: &title::TitleState<'_>) -> Option<String> {
+    pub fn build_idle_escapes(
+        &mut self,
+        state: &title::TitleState<'_>,
+        frame: crate::motion::FrameStamp,
+    ) -> Option<String> {
         let mut buf = String::new();
 
         if self.config.title.enabled
-            && let Some(esc) = self.title_manager.update(state)
+            && let Some(esc) = self.title_manager.update_at(state, frame)
         {
             buf.push_str(&esc);
         }
@@ -703,7 +711,10 @@ mod tests {
         assert!(svc.progress_last_sent.is_some());
 
         // Flushing with is_busy=false should clear both.
-        svc.flush_idle_state(&make_title_state(false));
+        svc.flush_idle_state(
+            &make_title_state(false),
+            crate::motion::FrameStamp::default(),
+        );
         assert!(!svc.is_progress_active());
         assert!(svc.progress_last_sent.is_none());
     }
@@ -715,7 +726,10 @@ mod tests {
             ..Default::default()
         });
         // Never activated — flush should not panic or change state.
-        svc.flush_idle_state(&make_title_state(false));
+        svc.flush_idle_state(
+            &make_title_state(false),
+            crate::motion::FrameStamp::default(),
+        );
         assert!(!svc.is_progress_active());
     }
 

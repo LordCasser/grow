@@ -474,23 +474,6 @@ impl AgentView {
         prompt_paging: bool,
     ) -> InputOutcome {
         self.sync_command_selection_context();
-        if self.behavior_switch_warning_pending
-            && let Event::Key(key) = ev
-            && key.kind != KeyEventKind::Release
-            && key.modifiers.is_empty()
-            && matches!(key.code, KeyCode::Esc | KeyCode::Enter)
-        {
-            self.behavior_switch_warning_pending = false;
-            self.mode_switch_banner = None;
-            // Enter confirms the parked switch (re-issues the mode request);
-            // Esc cancels it. The stashed confirm state is consumed by the
-            // dispatcher, not here.
-            return InputOutcome::Action(match key.code {
-                KeyCode::Enter => Action::ConfirmBehaviorSwitchWarning,
-                KeyCode::Esc => Action::DismissBehaviorSwitchWarning,
-                _ => unreachable!("the guard above admits only Enter and Esc"),
-            });
-        }
         if self.scrollback_drag_latched() {
             let live_drag_event = matches!(
                 ev,
@@ -1332,10 +1315,9 @@ impl AgentView {
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
+            && let Some(action_id) = registry.lookup(key, When::AgentScreen)
         {
-            if let Some(action_id) = registry.lookup(key, When::AgentScreen) {
-                return self.handle_agent_action(action_id);
-            }
+            return self.handle_agent_action(action_id);
         }
         if let Event::Key(key) = ev
             && self.update_hovered_link(is_link_modifier_for_key(key))
@@ -1386,18 +1368,27 @@ impl AgentView {
 
     pub(super) fn sync_command_selection_context(&mut self) {
         let behavior = self.behavior_mode_pending.unwrap_or(self.behavior_mode);
-        let deep_research = self
-            .prompt
-            .slash_controller
-            .registry()
-            .get("deep-research")
-            .is_some();
-        let goal = self
-            .prompt
-            .slash_controller
-            .registry()
-            .get("goal")
-            .is_some();
+        let published = self.session.tracker.behavior_availability();
+        let deep_research = published
+            .and_then(|availability| availability.choice(tools::types::BehaviorId::DeepResearch))
+            .map(|choice| choice.supported)
+            .unwrap_or_else(|| {
+                self.prompt
+                    .slash_controller
+                    .registry()
+                    .get("deep-research")
+                    .is_some()
+            });
+        let goal = published
+            .and_then(|availability| availability.choice(tools::types::BehaviorId::Goal))
+            .map(|choice| choice.supported)
+            .unwrap_or_else(|| {
+                self.prompt
+                    .slash_controller
+                    .registry()
+                    .get("goal")
+                    .is_some()
+            });
         let auto_permission = self
             .prompt
             .slash_controller
@@ -1941,10 +1932,10 @@ mod leader_key_tests {
     }
 
     #[test]
-    fn behavior_switch_warning_enter_confirms_without_sending_input() {
+    fn behavior_switch_warning_does_not_capture_enter() {
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
-        agent.behavior_switch_warning_pending = true;
+        agent.show_behavior_switch_warning("Select Plan again to confirm", 8_000);
         agent.prompt.set_text("preserve this draft");
 
         let outcome = agent.handle_input(
@@ -1953,29 +1944,8 @@ mod leader_key_tests {
         );
         assert!(matches!(
             outcome,
-            InputOutcome::Action(Action::ConfirmBehaviorSwitchWarning)
+            InputOutcome::Action(Action::SendPrompt(ref text)) if text == "preserve this draft"
         ));
-        assert_eq!(agent.prompt.text(), "preserve this draft");
-        assert!(!agent.behavior_switch_warning_pending);
-    }
-
-    #[test]
-    fn behavior_switch_warning_esc_dismisses_without_sending_input() {
-        let registry = ActionRegistry::defaults();
-        let mut agent = make_agent();
-        agent.behavior_switch_warning_pending = true;
-        agent.prompt.set_text("preserve this draft");
-
-        let outcome = agent.handle_input(
-            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            &registry,
-        );
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::DismissBehaviorSwitchWarning)
-        ));
-        assert_eq!(agent.prompt.text(), "preserve this draft");
-        assert!(!agent.behavior_switch_warning_pending);
     }
 
     #[test]

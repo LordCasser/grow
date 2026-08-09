@@ -99,7 +99,7 @@ impl SlashCommand for AcpSlashCommand {
 
         let has_unfinished_goal = ctx.current_goal_objective.is_some();
         let mut items = Vec::new();
-        if ctx.behavior_mode != tools::types::SessionMode::Goal && !has_unfinished_goal {
+        if ctx.behavior_mode != tools::types::BehaviorId::Goal && !has_unfinished_goal {
             items.push(ArgItem {
                 display: "set".into(),
                 match_text: "set".into(),
@@ -634,7 +634,7 @@ mod tests {
             models,
             agents: &[],
             current_agent: None,
-            behavior_mode: tools::types::SessionMode::Default,
+            behavior_mode: tools::types::BehaviorId::Normal,
             deep_research_available: false,
             goal_available: false,
             current_goal_objective: None,
@@ -689,7 +689,7 @@ mod tests {
     fn goal_edit_tab_offer_fills_current_objective_for_editing() {
         let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
         let mut ctx = make_ctx();
-        ctx.behavior_mode = tools::types::SessionMode::Goal;
+        ctx.behavior_mode = tools::types::BehaviorId::Goal;
         ctx.current_goal_objective = Some("修复登录流程");
 
         for query in ["edit", "edit "] {
@@ -711,7 +711,7 @@ mod tests {
     fn unfinished_goal_hides_set_and_exposes_management_commands() {
         let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
         let mut ctx = make_ctx();
-        ctx.behavior_mode = tools::types::SessionMode::Goal;
+        ctx.behavior_mode = tools::types::BehaviorId::Goal;
         ctx.current_goal_objective = Some("ship safely");
         let items = cmd.suggest_args(&ctx, "").unwrap();
         let display: Vec<&str> = items.iter().map(|item| item.display.as_str()).collect();
@@ -726,7 +726,7 @@ mod tests {
     fn goal_behavior_without_objective_uses_plain_input_not_set() {
         let cmd = AcpSlashCommand::from(&make_cmd("goal", None));
         let mut ctx = make_ctx();
-        ctx.behavior_mode = tools::types::SessionMode::Goal;
+        ctx.behavior_mode = tools::types::BehaviorId::Goal;
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert!(items.is_empty());
     }

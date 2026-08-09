@@ -675,6 +675,7 @@ impl SchedulerActor {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
+            goal_context: None,
             cancel_token: CancellationToken::new(),
         };
 

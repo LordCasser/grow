@@ -1517,7 +1517,7 @@ fn set_plan_mode_no_session_starts_with_deferred_behavior() {
     let mut app = test_app_with_agent();
     app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
     let effects = dispatch(
-        Action::SetBehaviorMode(tools::types::SessionMode::Plan),
+        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
         &mut app,
     );
     assert!(
@@ -1529,7 +1529,7 @@ fn set_plan_mode_no_session_starts_with_deferred_behavior() {
     assert_eq!(agent.plan_mode_pending, Some(true));
     assert_eq!(
         agent.deferred_session_mode,
-        Some(tools::types::SessionMode::Plan)
+        Some(tools::types::BehaviorId::Plan)
     );
     assert!(!agent.plan_mode_active);
 }
@@ -1540,7 +1540,7 @@ fn set_plan_mode_no_session_starts_with_deferred_behavior() {
 fn set_plan_mode_on_from_off_emits_set_session_mode() {
     let mut app = test_app_with_agent();
     let effects = dispatch(
-        Action::SetBehaviorMode(tools::types::SessionMode::Plan),
+        Action::SetBehaviorMode(tools::types::BehaviorId::Plan),
         &mut app,
     );
     assert_eq!(effects.len(), 1);

@@ -305,6 +305,7 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         await_to_completion: false,
         fork_context: false,
         owner: SubagentOwner::Task,
+        goal_context: None,
         cancel_token: CancellationToken::new(),
     }
 }
@@ -1168,6 +1169,7 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         await_to_completion: false,
         fork_context,
         owner: SubagentOwner::Task,
+        goal_context: None,
         cancel_token: CancellationToken::new(),
     }
 }
@@ -1339,7 +1341,7 @@ async fn copy_session_data_preserves_parent_chat_history() {
                 session_kind: Some("subagent_fork".to_string()),
                 fork_context_source: Some("forked".to_string()),
                 copy_plan_state: false,
-                copy_behavior_state: false,
+                copy_session_control: false,
                 copy_signals: false,
                 copy_tool_state: false,
                 fork_filter: true,
@@ -1498,101 +1500,6 @@ fn validate_subagent_type_recognizes_cli_agent_by_name() {
             validate_subagent_type("user-defined", &ctx),
             SubagentValidateTypeOutcome::Ok,
         ));
-}
-#[test]
-fn summarize_tool_config_uses_name_override_and_strips_namespace() {
-    use tools::registry::types::{ToolConfig, ToolServerConfig};
-    use tools::types::tool::ToolKind;
-    let mut read = ToolConfig::from_id("Grow:read_file");
-    read.kind = Some(ToolKind::Read);
-    let mut read_dup = ToolConfig::from_id("GrowConcise:read_file");
-    read_dup.kind = Some(ToolKind::Read);
-    read_dup.name_override = Some("concise_read".to_string());
-    let mut grep = ToolConfig::from_id("Grow:grep");
-    grep.kind = Some(ToolKind::Search);
-    grep.name_override = Some("alt_grep".to_string());
-    let mcp = ToolConfig::from_id("MCP:custom");
-    let config = ToolServerConfig {
-        tools: vec![read, read_dup, grep, mcp],
-        behavior_preset: None,
-    };
-    let summary = summarize_tool_config(&config);
-    assert_eq!(
-            summary.tool_names.get(&ToolKind::Read).unwrap(),
-            "read_file"
-        );
-    assert_eq!(
-            summary.tool_names.get(&ToolKind::Search).unwrap(),
-            "alt_grep"
-        );
-    assert!(summary.can_read && summary.can_search && !summary.can_execute);
-    assert_eq!(summary.tool_names.len(), 2);
-}
-#[test]
-fn describe_subagent_type_unknown_returns_sorted_available() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    match describe_subagent_type("totally-invented-type", None, &ctx) {
-        SubagentDescribeOutcome::Unknown { available } => {
-            let mut sorted = available.clone();
-            sorted.sort();
-            assert_eq!(available, sorted, "available must be sorted");
-            assert!(available.iter().any(|n| n == "general-purpose"));
-        }
-        other => panic!("expected Unknown, got {other:?}"),
-    }
-}
-#[test]
-fn describe_subagent_type_disabled_when_toggled_off() {
-    let ctx = ctx_with_toggle(HashMap::from([("explore".to_string(), false)]));
-    assert!(matches!(
-            describe_subagent_type("explore", None, &ctx),
-            SubagentDescribeOutcome::Disabled
-        ));
-}
-/// Regression: on the DEFAULT grow-build host —
-/// the primary `/goal` host — the `general-purpose` toolset's only
-/// file-mutator is `search_replace` (`ToolKind::Edit`); the `write`
-/// tool (`ToolKind::Write`) is injection-only and absent from the
-/// pre-injection describe probe. The planner gate must therefore key on
-/// the Edit-class capability, which this asserts is present.
-#[test]
-fn describe_default_host_general_purpose_has_edit_not_write() {
-    use tools::types::tool::ToolKind;
-    let ctx = ctx_with_toggle(HashMap::new());
-    let SubagentDescribeOutcome::Ok(summary) = describe_subagent_type(
-        "general-purpose",
-        None,
-        &ctx,
-    ) else {
-        panic!("expected Ok for default-host general-purpose");
-    };
-    assert!(summary.can_read, "default host reads (read_file)");
-    assert!(
-            summary.tool_names.contains_key(&ToolKind::Edit),
-            "default host's file-mutator is search_replace (Edit): {:?}",
-            summary.tool_names,
-        );
-    assert!(
-            !summary.tool_names.contains_key(&ToolKind::Write),
-            "the injection-only `write` tool must NOT be in the pre-injection probe",
-        );
-}
-/// Requirement 3 (fail-open trigger): an `agent_type` that does not resolve
-/// to a harness `AgentDefinition` reports `Unknown`, which the `/goal`
-/// resolver maps to a `ToolsetUnknown` fail-open to the session harness.
-#[test]
-fn goal_harness_override_unresolvable_returns_unknown() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    match describe_subagent_type(
-        "general-purpose",
-        Some("totally-bogus-harness"),
-        &ctx,
-    ) {
-        SubagentDescribeOutcome::Unknown { .. } => {}
-        other => {
-            panic!("an unresolvable harness override must fail open as Unknown: {other:?}")
-        }
-    }
 }
 #[tokio::test]
 async fn cancel_pending_shell_child_presents_one_cancelled_finish() {

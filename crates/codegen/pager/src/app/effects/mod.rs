@@ -1134,9 +1134,9 @@ pub(crate) fn execute(
                             };
                         }
                     };
-                    // An interrupting switch parks on the shell: keep the
-                    // prompt text instead of failing and dropping it. The
-                    // dispatcher stashes it and Enter replays it.
+                    // An interrupting switch parks on the Shell. Return the
+                    // prompt to the ordinary FIFO; only a repeated user
+                    // selection may confirm the Shell-owned latch.
                     let behavior_change = mode_response
                         .meta
                         .as_ref()
@@ -1151,13 +1151,19 @@ pub(crate) fn execute(
                                 .and_then(serde_json::Value::as_str)
                         });
                     if let Some(message) = confirmation_message {
+                        let remaining_ms = behavior_change
+                            .and_then(|change| change.get("remainingMs"))
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(1);
                         return TaskResult::PromptRequiresBehaviorConfirmation {
                             agent_id,
                             session_id,
                             mode_id,
                             text,
                             prompt_id,
+                            skill_token_ranges,
                             message: message.to_string(),
+                            remaining_ms,
                         };
                     }
                     if let Err(message) = behavior_change_applied(mode_response.meta.as_ref()) {

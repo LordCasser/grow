@@ -1,10 +1,8 @@
-# Grow 会话、Turn 与 Behavior 架构
+# Grow Turn、Behavior 与 Runtime 架构
 
-本文描述重构后的权威管线。核心原则只有两个：前台执行只有一个 owner；所有新工作都从同一个 idle gate 进入。Goal 的 planner/verifier 是后台阶段，不是伪装成 turn 的第二套调度器。
+Shell actor 是执行与控制权威，Pager 只消费结构化投影。核心不变量是：一个 foreground owner、一个用户 FIFO、一个 Behavior identity、一个原子 control snapshot。
 
-## 1. 权威状态
-
-Shell actor 是执行权威，Pager 只是按结构化通知绘制镜像。
+## Turn admission
 
 ```rust
 enum ForegroundState {
@@ -14,135 +12,98 @@ enum ForegroundState {
 }
 ```
 
-`ForegroundState` 是唯一前台 owner。Goal planner/verifier、watcher 和后台 task 不占 foreground。`current_prompt_id` 等字段只用于关联或显示，不能反推忙闲状态。
+`InputItem` 只保存 message id、内容、origin 与 turn kind，不保存 Behavior。消息真正获得 foreground 时，`TurnContext` 捕获当前 `BehaviorId`；该 turn 的 prompt、工具面和限制随后保持不变。切换 Behavior 不重标队列，也不改变已经运行的 turn。
 
-每个 regular turn 都显式携带：
-
-- `prompt_id`：turn/message 的稳定身份；
-- `PromptOrigin`：User、GoalContinuation、GoalFinalization、TaskCompleted 等来源；
-- `TurnKind`：User 或 Internal；
-- 一个 completion owner，只能提交一次 durable `TurnCompleted`。
-
-不再通过 prompt-id 前缀、trim 后的文本、零 token 或 Goal status 猜测 origin、owner 和终态。
-
-## 2. 统一调度
+完成顺序固定为：结算 exact foreground owner → 排队持久化唯一 `TurnCompleted` → 提升用户 FIFO → 若仍 idle 再运行专用 runtime hook。Goal continuation 不进入 FIFO，synthetic work必须携带结构化 origin/lease。
 
 ```mermaid
 flowchart LR
-    U["用户输入"] -->|"Idle"| G["try_start_turn_if_idle"]
-    U -->|"Running + Enter"| Q["用户 FIFO"]
-    U -->|"Running + Ctrl+Enter / 双 Enter"| S["Steer 当前 regular turn"]
-    T["唯一 TurnCompleted"] --> A["Idle arbiter"]
-    A -->|"FIFO 非空"| G
-    A -->|"FIFO 空"| H["Goal on_idle"]
-    H --> P["Planning 后台阶段"]
-    H --> E["Executing continuation"]
-    H --> V["Verifying 后台阶段"]
-    H --> F["Summarizing regular turn"]
+    U["User FIFO"] --> A["Turn admission"]
+    C["BehaviorCoordinator"] --> A
+    A --> T["Regular turn captures Behavior"]
+    T --> E["One TurnCompleted"]
+    E --> I["FIFO-first idle arbiter"]
+    I -->|"still idle"| R["Goal / Plan / Research runtime"]
 ```
 
-完成顺序固定：
+输入语义见 [input-routing.md](./input-routing.md)。
 
-1. 核对并结算当前 `ForegroundState::RegularTurn` 的 exact owner；
-2. 持久化这个 turn 唯一的 `TurnCompleted`；
-3. 提升用户 FIFO；
-4. 仍然 idle 时才运行 Goal idle hook。
+## 唯一 Behavior identity
 
-因此用户消息与 Goal continuation 同时就绪时，用户永远先运行。Goal continuation 不进入用户 FIFO，也没有 synthetic prompt hot loop。
+`tool_types::BehaviorId` 是 Shell、Tools 与 Pager 的唯一身份：`Normal | Clarify | Plan | Workflow | DeepResearch | Goal`。代码内部不再保留 Behavior 含义的 `SessionMode` 或 `PromptMode`；ACP 的 `SessionModeId` 只是外部传输字段名。Pager 的 `PromptMode` 仅表示输入框是否正在编辑排队消息，与 Behavior 无关。
 
-## 3. 输入命令
+`BehaviorCoordinator` 是纯决策器：输入当前选择与 `BehaviorSwitchFacts`，输出 `Applied | ConfirmationRequired | Rejected` 及 declarative effects。它不运行模型、不等待子 Agent、不写文件、不触碰 Pager。SessionActor 串行执行 effect，并在取消 owned work 之前先持久化目标 control snapshot。
 
-Shell 命令面只保留两个明确动作：
+专用 Plan、Goal、Deep Research runtime 继续拥有各自状态机；不建立包含所有 phase 的巨型通用状态机。
 
-- `QueuePrompt`：将普通 Enter 加入显式 FIFO；
-- `SteerQueuedPrompt { expected_turn_id, ... }`：把一个已排队的用户消息原子转入指定的当前 turn。
+## Behavior 语义
 
-Pager 语义：
+| Behavior | foreground 对话 | 工具/权限 | owned work 与切换 |
+|---|---|---|---|
+| Normal | 标准 regular turn | 普通 Agent 权限 | 可立即切换 |
+| Clarify | 对抗性问答，逼近目标与决策 | 不额外限制；副作用仍走普通权限 | 无 runtime，可立即切换 |
+| Plan | Drafting/Awaiting/Amending 只规划；Executing 执行批准计划 | 非 Executing 拒绝 workspace mutation；Executing 恢复普通权限 | 离开未结束 Plan 需同目标二次确认并取消 Plan-owned foreground |
+| Static Workflow | 主 Agent正常对话与整合 | 普通权限与 workflow tool | Behavior 不拥有已启动的公共 run |
+| Deep Research | 首条 query 启动私有研究；后续 foreground 正常回答 | foreground 与 worker 都只读 | 普通消息不重启；离开 active run需确认并生成取消报告 |
+| Goal | 所有阶段可正常对话 | 主 Agent 获得 Goal scoped tools | 未 complete/clear 前独占 Behavior；planner/verifier 不占 foreground |
 
-| 输入 | Idle | Regular turn 正在运行 |
-|---|---|---|
-| Enter | 启动/提交 turn | 加入 FIFO |
-| Ctrl+Enter | 无活动 turn，拒绝 | steer 同一个 turn |
-| 双 Enter | 不适用 | 将刚排队的首项原子转换为 steer |
-| queue row “Send now” | 不适用 | 调用同一个 steer 命令 |
+Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Static Workflow run属于公共 workflow runtime。Deep Research 只拥有 control snapshot 中明确记录的 run id。
 
-Steer 是软中断采样并把补充消息注入同一个 user-visible turn。它不创建第二个 terminal，不切换 Behavior，也不推进 Goal revision。`expected_turn_id` 让延迟到达的 UI 操作无法误伤后来的 turn。
+## 切换矩阵
 
-## 4. Behavior 与 Goal 的边界
+| 状态/动作 | 结果 |
+|---|---|
+| 相同 Behavior 重选 | 幂等 Applied，并清 pending confirmation |
+| 普通 Behavior 切换 | 只影响之后 admission；当前 turn 保持捕获的 Behavior |
+| unfinished Goal → 非 Goal | 拒绝 |
+| Plan → 其他、且 Plan 未结束 | 第一次进入 8 秒确认窗；同一 source/target 再选才应用 |
+| active Deep Research → 其他 | 同上；确认后只取消 owned run并输出取消报告 |
+| public Workflow active → Plan/Goal/Deep Research | 拒绝 |
+| Plan/Goal/Deep Research 内启动或恢复 public Workflow | 拒绝；pause/stop/save 等管理操作仍可用 |
+| completed Goal receipt + 任意 Behavior 切换 | receipt 保留；只有显式 `/goal clear` 删除它 |
+| 模型切换、stage terminal、synthetic wake | 不能确认或清除 pending user switch |
 
-通用 `BehaviorController` 继续管理 Normal、Clarify、Plan、Workflow、DeepResearch 等协作模式。Goal 对用户仍是 `BehaviorId::Goal`，但其生命周期状态由独立 `GoalTracker` 管理。
+确认窗是 transient 用户交互状态，不持久化。只有用户的 mode selection/明确 slash control会调用该路径；runtime completion 不通过它“顺手切模式”。
 
-- `/goal` 与 Behavior picker 共用同一个同步 control-plane handler；
-- Goal 未完成且未 clear 时，拒绝切换到其他 Behavior；
-- pause 仍显示 Goal Behavior；complete 或 clear 后回到 Normal；
-- control handler 只改状态并返回，绝不运行模型、等待 stage 或排 hidden prompt；
-- 普通补充消息属于当前 Goal 上下文，但不会自动修改 objective/plan revision；只有 `/goal edit` 修改 objective。
-- live tool bridge 缺少任一 Goal 工具时 fail closed 为 Paused，不允许 idle hook 自治；
-- Goal stage 与 Goal turn 创建的 subagent 在 producer 侧携带 `goal_id`，预算归属不读取事件到达时的当前状态。
-- Goal 故障归属同样读取 regular turn 的结构化 origin；仅仅“当前选中 Goal Behavior”不能把普通用户 turn 的 API 错误归因给 Goal。
+## Agent 权限交集
 
-Goal 的详细状态机见 [goal-continuation.md](./goal-continuation.md)。
+工具必须同时满足：
 
-### 4.1 中断与切换矩阵
+`registered tools ∩ Agent definition ∩ Behavior policy ∩ delegated grant ∩ user permission`
 
-| 当前状态 | 用户动作 | 结果 |
-|---|---|---|
-| 任意 regular turn | Enter | 只进入 FIFO；不改变当前 Behavior |
-| 任意 regular turn | Ctrl+Enter / 双 Enter / prompt queue row “Send now” | 用 `expected_turn_id` steer 当前 turn；不产生新 terminal |
-| 任意 regular turn | Esc / Ctrl+C / Stop Turn Only | 只取消 foreground；Goal 仍 Active，idle arbiter 先提升 FIFO，再决定是否继续 Goal |
-| Active Goal | Goal interrupt panel 的 Pause | 取消 foreground、使 stage lease 失效并进入 Paused；Behavior 仍为 Goal |
-| Active/Paused/Blocked Goal | 切换到其他 Behavior | 拒绝；只有 verified completion 或 `/goal clear` 能离开 Goal |
-| Active/Paused/Blocked Goal | `/goal edit` | 推进 objective revision、清除旧验证证据、回到 Active/Planning；普通补充消息不做这些事 |
-| 非 Goal Behavior、无未完成 Goal | `/goal set <objective>` | 切换到 Goal 并创建 objective；这是 `set` 唯一有效的用户入口 |
-| Goal Behavior、尚无 objective | 普通用户消息 | Shell 直接捕获为 objective；Pager 不生成 hidden `/goal set` |
-| Goal Behavior、已有未完成 Goal | `/goal set` | 拒绝并提示使用 `/goal edit`；补全列表隐藏 `set`、预填 `edit` 的当前 objective |
-| Active Goal / Verifying | `update_goal_plan` 成功 | 推进 plan revision、终止匹配 verifier、清除旧候选并回到 Executing；Goal Behavior 不变 |
-| Plan 或运行中的 Deep Research | 第一次切换 | 进入 8 秒确认窗，不改变状态 |
-| Plan 或运行中的 Deep Research | 确认窗内再次选择同一目标 | 取消该 Behavior 拥有的工作，再应用目标 Behavior |
-| Normal / Clarify / static Workflow | Behavior 切换 | 更新后续 turn 的 Behavior；已开始的 turn 继续使用其捕获的 prompt mode/tool surface |
-| 任意 Behavior | 模型切换、后台 task 完成、synthetic wake | 不解释为 Behavior 切换，也不能确认一个 parked switch |
+工具 taxonomy 必须明确；所有子 Agent（包括 `All` delegated grant）对 `kind: None` fail closed，`All` 只代表所有已分类 capability。permission mode 只决定一个已允许副作用是否需要批准，不能授予 capability。Behavior policy按 admission 捕获的 Behavior过滤工具，因此运行中的 Normal turn不会因 picker 切到 Goal突然获得 Goal工具，Plan turn也不会中途失去 edit gate。
 
-regular turn 在开始时捕获 `PromptMode`。即使 picker 在它运行期间改变了 session Behavior，tool-definition snapshot、verbatim fork 与该 turn 后续采样仍使用捕获值；新 Behavior 只从下一 foreground owner 生效。这样不会出现 Normal turn 中途暴露 Goal 工具、或 Plan turn 中途丢失 Plan 工具的跨 turn 污染。
+Deep Research foreground 只保留明确 `ToolScope::Read` 的工具；未分类工具同样被拒绝。Goal role/object权限见 [goal-continuation.md](./goal-continuation.md)。
 
-## 5. Pager 对账
+## 原子 control snapshot
 
-Pager 不再使用 `skip_next_user_echo`、文本 trim 匹配或 running-adoption stash。所有 optimistic user bubble 与 ACP echo 通过 `messageId` 对账：
+`session-control.json` 包含 architecture version、control revision、Behavior snapshot、Plan phase/approval/artifact revision/hash、Goal state/receipt 与 Deep Research owned run id。
 
-- 相同 `messageId` 只保留一个气泡；
-- echo 可补写 `promptIndex` 等服务端元数据；
-- 重放和乱序重复是幂等的；
-- `QueueChanged.runningPromptId/origin/turnKind` 只镜像 shell 已确认的 foreground。
-- session reload 通过 `grow/foreground = { promptId, origin, turnKind, turnStartMs }` 恢复 regular foreground；缺字段即视为没有可接管的 foreground，不再接受只含 prompt id 的旧协议。
+- 控制命令收到持久化 ack 后才返回 Applied/成功。
+- 先持久化将要到达的控制状态，再取消 exact foreground/owned run并发布 UI projection。
+- Goal finalization 的 `TurnCompleted` 携带结构化 origin/turn kind/goal id/stage id，并与 control ack共享同一有序 persistence actor，确保 terminal先落盘，再写 Complete/Normal。若进程恰在两次写入之间退出，恢复器从 durable terminal 对账并补写 Complete receipt，不重复 final report。
+- Plan 的 submit/approve/reject/abandon 都等待 control ack；持久化失败时恢复内存中的前一 Behavior snapshot，不向模型或 Pager 发布不可恢复的相位。
+- Plan 恢复校验 artifact hash；Deep Research 校验 owned manifest。失败均恢复 Normal且不删除公共 Workflow。
+- current architecture 的 Goal内部冲突 fail closed为 Paused并保持 Goal；旧 architecture 直接清除并 Normal。
+- split `behavior.json`/`goal/state.json` 不迁移，检测后诊断并删除。
+- session fork把 Goal/Deep Research清为 Normal，不复制 runtime ownership。
 
-Goal Planning/Verifying 只更新 Goal chip，不把 Pager session 伪装成 Running，用户仍可提交或 steer 真正的 regular turn。
+## Pager 与 motion
 
-Goal detail 中的 blackboard 是 `GoalPlan.markdown` 的只读 Markdown 投影；运行时的 Agent-only 指令不通过 `GoalUpdated` 发送，也不在看板上展示。默认视图只从 Markdown task-list 派生 checkbox 进度和任务行，完整文档通过二级可滚动视图查看。Markdown parse/wrap、checkbox 计数、投影选择和滚动位置都属于 Pager view state，session reload 后可重建，不能反向修改 Goal。
+Shell 在 `AvailableCommandsUpdate.meta["grow/behaviorAvailability"]` 发布由 `BehaviorCoordinator` 同源生成的结构化选择快照；Pager 只用它显示支持性、临时不可用原因和需确认状态。真正切换仍由 Shell 对最新事实重新校验。连接初始化期间尚未收到该字段时，Pager 只以 Shell 同一消息中的命令/工具目录作短暂降级，不从本地 UI 或动画状态推断 runtime ownership。
 
-## 6. 动画与忙状态
+Pager 同样只消费 Shell 发布的 foreground identity、Goal task projection和 `AgentActivityProjection`，不重复推断 owner。
 
-Pager 使用只读 `AgentActivityProjection` 统一投影 foreground turn、Active Goal 后台阶段、watcher/bg task、workflow、subagent 和 needs-input；Agent 页、Dashboard、状态栏、terminal title 与可见动画 demand 共用这份投影。
+optimistic user bubble 与 ACP echo只按 `messageId` 对账；不用 trim 文本、skip boolean或 adoption stash。Goal Planning/Verifying、Deep Research、公共 Workflow、watcher和 subagent wait都进入统一 activity projection。
 
-- parked 只改变展示，不能把仍在执行的 foreground 伪装为 idle；
-- 每次 draw 只捕获一个 `FrameStamp`，所有 spinner、wave、Goal 计时与 title 使用同一单调时间样本；
-- FPS 只限制重绘频率，动画周期不随 FPS 或 ACP event 数量变化；
-- animation、UI expiry、prompt watchdog、scroll 与真正模拟器的 simulation clock 相互独立；watchdog 不再借动画 frame 获得运行机会；
-- ACP token firehose 每次只 drain 有界 batch，并在每个 batch 前领取到期 deadline，因此动画最多再等一个 batch；
-- 隐藏页面和静态 idle 页面不请求 frame，恢复可见时按当前时间直接追上相位。
-- 搜索、inline media、edit 高亮与 Mermaid 完成走独立 async-view completion edge，Tracing
-  使用自己的 channel arm；它们都不占用 animation 或 UI expiry clock。Goal/session reload
-  不持久化 worker、mailbox 或 frame state。
+spinner、wave、timer、title和任务符号只消费同一 draw的 `FrameStamp`。animation deadline、UI expiry、lifecycle watchdog和scroll deadline互不短路；详见 [pager-motion.md](./pager-motion.md)。
 
-具体契约见 [pager-motion.md](./pager-motion.md)。
+## 静态禁止项
 
-## 7. 必须保持的不变量
-
-1. 同一时刻至多一个 foreground owner。
-2. planner/verifier 永远不占 foreground。
-3. 一个 regular turn 恰好一个 durable terminal。
-4. 用户 FIFO 总是在 Goal idle continuation 之前提升。
-5. steer 只修改当前 turn，不产生新 turn。
-6. identity、origin、kind 都来自结构化字段，不从文本或 ID 格式推断。
-7. Pager 每个 `messageId` 至多一个用户气泡。
-8. pause/clear 使相应 Goal stage lease 失效；异常退出不能永久卡住 latch。
-9. Goal 状态不能作为通知 ownership；只抑制明确归属于 Goal turn 的 task id。
-10. 成功改变 Goal 定义/生命周期的控制会取消旧上下文 turn，被拒绝的控制不会。
+- 队列携带/重标 Behavior；
+- prompt-id前缀或 token/status组合推断 origin；
+- hidden Goal turn、GoalSummary/GoalControl/GoalClassifierNudge；
+- Pager文本 echo/adoption协议；
+- view tick counter或render修改liveness/session；
+- Goal全文写工具、Goal TodoState或Goal `plan.md`；
+- 受限 Agent默认放行未分类工具。

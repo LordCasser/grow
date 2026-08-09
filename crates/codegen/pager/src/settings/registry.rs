@@ -246,7 +246,7 @@ pub struct PagerLocalSnapshot {
     /// self-contained (the modal outlives the borrow on `app.agents`).
     pub available_models: Vec<(String, acp::ModelId)>,
     /// Effective primary-agent Behavior, including optimistic selection.
-    pub behavior_mode: tools::types::SessionMode,
+    pub behavior_mode: tools::types::BehaviorId,
     /// Whether the active session exposes the Workflow tool. Used to hide the
     /// Static Workflow Behavior rather than offering an unavailable mode.
     pub workflows_available: bool,
@@ -287,7 +287,7 @@ impl Default for PagerLocalSnapshot {
             auto_mode: false,
             current_model_id: None,
             available_models: Vec::new(),
-            behavior_mode: tools::types::SessionMode::Default,
+            behavior_mode: tools::types::BehaviorId::Normal,
             workflows_available: false,
             deep_research_available: false,
             goal_available: false,
@@ -464,13 +464,13 @@ pub fn current_value_for(
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
-        // Cache is the send-path source of truth (same pattern as group_tool_verbs).
-        "page_flip_on_send" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_page_flip_on_send(),
-        )),
-        // Cache is the drain-path source of truth (same pattern as page_flip_on_send).
+        // Shared settings are projected from the UiConfig snapshot supplied by
+        // AppView. Runtime send/drain paths keep their fast caches synchronized
+        // in the typed setters, but the modal must not read hidden process-wide
+        // state that can disagree with its atomic settings snapshot.
+        "page_flip_on_send" => Some(SettingValue::Bool(ui.page_flip_on_send_enabled())),
         "combine_queued_prompts" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_combine_queued_prompts(),
+            ui.combine_queued_prompts.unwrap_or(false),
         )),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints — `None` (inherit) reads as the default ON.
