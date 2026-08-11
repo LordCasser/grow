@@ -433,7 +433,17 @@ api_backend = "chat_completions"
 
 [provider.example.options]
 base_url = "https://api.example.com/v1"
-env_key = "LLM_API_KEY"
+
+# Authentication: choose one of the following options.
+#
+# Option 1: store the API key directly in this file.
+# api_key = "sk-your-api-key"
+#
+# Option 2 (recommended): read the API key from an environment variable.
+# env_key is the environment variable name, not the API key itself.
+env_key = "EXAMPLE_API_KEY"
+# Set its value before starting Grow:
+# export EXAMPLE_API_KEY="sk-your-api-key"
 
 [provider.example.models.default]
 name = "Default"
@@ -1514,6 +1524,21 @@ mod tests {
     }
     fn empty_config() -> toml::Value {
         toml::Value::Table(Default::default())
+    }
+    #[test]
+    fn llm_config_template_explains_both_credential_options() {
+        let raw: toml::Value = toml::from_str(LLM_CONFIG_TEMPLATE).unwrap();
+        assert!(validate_llm_config(&raw).is_ok());
+
+        let options = &raw["provider"]["example"]["options"];
+        assert_eq!(options["env_key"].as_str(), Some("EXAMPLE_API_KEY"));
+        assert!(options.get("api_key").is_none());
+        assert!(LLM_CONFIG_TEMPLATE.contains("# api_key = \"sk-your-api-key\""));
+        assert!(
+            LLM_CONFIG_TEMPLATE
+                .contains("# env_key is the environment variable name, not the API key itself.")
+        );
+        assert!(LLM_CONFIG_TEMPLATE.contains("# export EXAMPLE_API_KEY=\"sk-your-api-key\""));
     }
     fn config_with_leader(enabled: bool) -> toml::Value {
         let toml_str = format!("[cli]\nuse_leader = {enabled}");
