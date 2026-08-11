@@ -453,14 +453,16 @@ fn background_work_label(agent: &AgentView) -> Option<String> {
 }
 /// Classify a subagent.
 ///
-/// Subagents never enter `NeedsInput` in v1 — they have no user-prompt
-/// channel. Asserted in tests.
-pub fn classify_subagent(info: &SubagentInfo) -> RowState {
+/// A running subagent enters `NeedsInput` when a permission or question owned
+/// by its child session is pending on the parent view.
+pub fn classify_subagent(info: &SubagentInfo, needs_input: bool) -> RowState {
     if info.finished {
         match info.status.as_deref() {
             Some("failed") | Some("cancelled") | Some("error") => RowState::Failed,
             _ => RowState::Completed,
         }
+    } else if needs_input {
+        RowState::NeedsInput
     } else {
         RowState::Working
     }
@@ -606,7 +608,11 @@ fn subagent_row(
     now: Instant,
     wall_now: SystemTime,
 ) -> DashboardRow {
-    let state = classify_subagent(info);
+    let child_session_id = info.child_session_id.as_ref();
+    let child_view = parent_view.subagent_views.get(child_session_id);
+    let permission_pending = child_view.is_some_and(|child| !child.permission_queue.is_empty());
+    let question_pending = child_view.is_some_and(|child| child.question_view.is_some());
+    let state = classify_subagent(info, permission_pending || question_pending);
     let (label_raw, desc_raw) = format_subagent_label(info);
     let label = {
         let label = sanitize(&label_raw);
@@ -638,7 +644,15 @@ fn subagent_row(
     }
     let parent_label = Some(top_level_label(parent_view));
     let subtitle = subagent_subtitle(info, &cwd);
-    let secondary_line = subagent_secondary_line(info, state, activity.as_deref());
+    let secondary_line = if state == RowState::NeedsInput {
+        child_view
+            .and_then(|child| child.permission_queue.front())
+            .map(|permission| format!("Pending: {}", sanitize(permission.title.trim())))
+            .or_else(|| question_pending.then(|| "Pending: question".to_string()))
+            .or_else(|| activity.as_deref().map(sanitize))
+    } else {
+        subagent_secondary_line(info, state, activity.as_deref())
+    };
     DashboardRow {
         id: DashboardRowId::Subagent {
             parent,
@@ -754,13 +768,19 @@ fn top_level_secondary_line(
 ) -> Option<String> {
     match state {
         RowState::NeedsInput => {
-            if let Some(perm) = agent.permission_queue.front() {
+            let root_session_id = agent.session.session_id.as_ref().map(|id| id.0.as_ref());
+            if let Some(perm) = agent.permission_queue.iter().find(|permission| {
+                Some(permission.request.request.session_id.0.as_ref()) == root_session_id
+            }) {
                 let title = perm.title.trim();
                 if !title.is_empty() {
                     return Some(format!("Pending: {}", sanitize(title)));
                 }
             }
-            if agent.question_view.is_some() {
+            if agent.question_view.as_ref().is_some_and(|question| {
+                question.source_session_id.is_none()
+                    || question.source_session_id.as_deref() == root_session_id
+            }) {
                 return Some("Pending: question".to_string());
             }
             activity.map(sanitize)
@@ -1098,6 +1118,8 @@ mod tests {
             context_source: None,
             resumed_from: None,
             capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
             workflow_run_id: None,
             context_normalized: false,
             child_updates_replayed: false,
@@ -1130,7 +1152,7 @@ mod tests {
     #[test]
     fn classify_subagent_running() {
         let info = make_subagent("a", false, None);
-        assert_eq!(classify_subagent(&info), RowState::Working);
+        assert_eq!(classify_subagent(&info, false), RowState::Working);
     }
     #[test]
     fn full_tree_excludes_workflow_owned_subagent_rows() {
@@ -1159,17 +1181,17 @@ mod tests {
     #[test]
     fn classify_subagent_completed() {
         let info = make_subagent("a", true, Some("completed"));
-        assert_eq!(classify_subagent(&info), RowState::Completed);
+        assert_eq!(classify_subagent(&info, false), RowState::Completed);
     }
     #[test]
     fn classify_subagent_failed() {
         let info = make_subagent("a", true, Some("failed"));
-        assert_eq!(classify_subagent(&info), RowState::Failed);
+        assert_eq!(classify_subagent(&info, false), RowState::Failed);
     }
     #[test]
     fn classify_subagent_cancelled() {
         let info = make_subagent("a", true, Some("cancelled"));
-        assert_eq!(classify_subagent(&info), RowState::Failed);
+        assert_eq!(classify_subagent(&info, false), RowState::Failed);
     }
     #[test]
     fn subagent_activity_prefers_live_label_over_tool_reconstruction() {
@@ -1186,20 +1208,12 @@ mod tests {
             Some("Running: bash")
         );
     }
-    /// Edge case 7: subagent rows never reach `NeedsInput` in v1.
     #[test]
-    fn subagent_classifier_never_emits_needs_input() {
-        for finished in [false, true] {
-            for status in [None, Some("completed"), Some("failed"), Some("cancelled")] {
-                let info = make_subagent("a", finished, status);
-                let state = classify_subagent(&info);
-                assert_ne!(
-                    state,
-                    RowState::NeedsInput,
-                    "finished={finished} status={status:?}"
-                );
-            }
-        }
+    fn running_subagent_with_child_interaction_needs_input() {
+        let running = make_subagent("a", false, None);
+        assert_eq!(classify_subagent(&running, true), RowState::NeedsInput);
+        let finished = make_subagent("a", true, Some("completed"));
+        assert_eq!(classify_subagent(&finished, true), RowState::Completed);
     }
     #[test]
     fn cluster_keeps_subagents_with_parent() {

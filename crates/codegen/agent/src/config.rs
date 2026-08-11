@@ -292,19 +292,22 @@ pub fn grow_build_hashline_toolset(
         behavior_preset: None,
     }
 }
-/// Read-only toolset for the **explore** subagent.
+/// Tool eligibility ceiling for the **explore** subagent.
 ///
-/// Genuinely read-only: `read_file` (Read), `list_dir` (Glob), `grep` (Grep).
-/// `run_terminal_command` (Bash) is intentionally omitted so exploration cannot
-/// mutate the workspace — the read-only guarantee is enforced by the toolset,
-/// not merely by the prompt. With no `BashTool`, the background-task helpers
-/// (`KillTaskTool`/`TaskOutputTool`) are unnecessary and also omitted.
+/// Its initial capability mode is read-only, so execution and MCP dispatch stay
+/// hidden until the child obtains a session-local grant. Keeping them authored
+/// here makes those requests possible without weakening the initial grant.
 fn explore_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
+            // Execution and MCP dispatch are latent capabilities. The child
+            // capability state hides them until explicitly granted.
+            bash_tool_config(),
             (&grow_build::ReadFileTool).into(),
             (&grow_build::ListDirTool).into(),
             (&grow_build::GrepTool).into(),
+            (&search_tool::SearchTool).into(),
+            (&use_tool::UseTool).into(),
         ],
         behavior_preset: None,
     }
@@ -314,9 +317,15 @@ fn explore_toolset() -> ToolServerConfig {
 /// immutable Goal snapshot in its prompt and may re-read it, but has no shell,
 /// mutation, workflow, or delegation surface.
 fn goal_planner_toolset() -> ToolServerConfig {
-    let mut config = explore_toolset();
-    config.tools.push((&grow_build::GetGoalTool).into());
-    config
+    ToolServerConfig {
+        tools: vec![
+            (&grow_build::ReadFileTool).into(),
+            (&grow_build::ListDirTool).into(),
+            (&grow_build::GrepTool).into(),
+            (&grow_build::GetGoalTool).into(),
+        ],
+        behavior_preset: None,
+    }
 }
 
 /// Exact host-only toolset for the Goal verifier. Its workspace is an
@@ -489,9 +498,12 @@ pub struct AgentDefinition {
     pub additional_tools: Vec<ToolConfig>,
     #[serde(skip, default = "default_grow_build_toolset")]
     pub tool_config: ToolServerConfig,
-    /// Runtime capability mode that constrains which tool kinds the agent
-    /// can use. Applied during subagent spawn in `handle_subagent_request`
-    /// by filtering the definition's `tool_config` before session creation.
+    /// Immutable authored/policy-filtered source used to derive a subagent's
+    /// dynamic native capability ceiling. Runtime memory/default injections
+    /// must not enlarge it.
+    #[serde(skip)]
+    pub authored_capability_tools: Option<ToolServerConfig>,
+    /// Initial runtime capability grant for a subagent session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_mode: Option<tool_types::SubagentCapabilityMode>,
     #[serde(default)]
@@ -1242,7 +1254,6 @@ impl AgentDefinition {
     /// eligibility checks. Unknown allowlist entries grant no capability,
     /// matching the runtime builder's fail-closed behavior.
     fn effective_authored_tool_kinds(&self) -> Vec<tools::types::tool::ToolKind> {
-        use tools::implementations::grow_build::task::types::SubagentCapabilityModeExt;
         let mut tools = self.tool_config.tools.clone();
         if self.inject_default_tools
             && !tools.iter().any(|tool| {
@@ -1282,11 +1293,6 @@ impl AgentDefinition {
                         )
                     )
             });
-        }
-
-        if let Some(mode) = self.capability_mode {
-            let allowed = mode.allowed_tool_kinds();
-            tools.retain(|tool| tool.kind.is_some_and(|kind| allowed.contains(&kind)));
         }
 
         tools.into_iter().filter_map(|tool| tool.kind).collect()
@@ -1371,6 +1377,7 @@ impl AgentDefinition {
             tool_preset: default_tool_preset(),
             additional_tools: vec![],
             tool_config: default_grow_build_toolset(),
+            authored_capability_tools: None,
             capability_mode: None,
             permission_mode: PermissionMode::Default,
             skills: vec![],
@@ -1626,8 +1633,8 @@ mod tests {
             BuiltinAgentName::Grow
             | BuiltinAgentName::GrowConcise
             | BuiltinAgentName::GeneralPurpose
-            | BuiltinAgentName::Explore
             | BuiltinAgentName::BrowserUse => false,
+            BuiltinAgentName::Explore => true,
         }
     }
     /// Invariant: structural `is_strict_harness()` must match the
@@ -1748,7 +1755,7 @@ You are a test agent.
         );
     }
     #[test]
-    fn primary_eligibility_requires_read_write_and_execute() {
+    fn primary_eligibility_uses_hard_tool_eligibility_not_subagent_startup_mode() {
         let primary = AgentDefinition::default_grow_build();
         assert!(primary.is_primary_agent_eligible());
 
@@ -1756,10 +1763,7 @@ You are a test agent.
         read_only.subagent_only = false;
         assert_eq!(
             read_only.primary_agent_issues(),
-            vec![
-                PrimaryAgentIssue::MissingWorkspaceWrite,
-                PrimaryAgentIssue::MissingExecution,
-            ]
+            vec![PrimaryAgentIssue::MissingWorkspaceWrite]
         );
 
         let worker = AgentDefinition::general_purpose();

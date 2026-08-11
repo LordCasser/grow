@@ -539,6 +539,8 @@ async fn test_subagent_notifications_round_trip() {
             effective_context_source: None,
             context_normalized: false,
             capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
             persona: None,
             role: None,
             model: None,
@@ -658,6 +660,8 @@ async fn test_subagent_spawned_resumed_roundtrip() {
             effective_context_source: Some("resumed".to_string()),
             context_normalized: false,
             capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
             persona: Some("implementer".to_string()),
             role: None,
             model: None,
@@ -1227,6 +1231,58 @@ async fn test_copy_session_data_transforms_updates() {
         }
         _ => panic!("Expected Grow update"),
     }
+}
+
+#[tokio::test]
+async fn copy_session_data_does_not_clone_live_subagent_routing_ids() {
+    use crate::extensions::notification::{
+        SessionNotification as GrowSessionNotification, SessionUpdate as GrowSessionUpdateType,
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("source-with-child"),
+        cwd: "/source".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    let grow_notification = GrowSessionNotification {
+        session_id: source_info.id.clone(),
+        update: GrowSessionUpdateType::SubagentProgress {
+            subagent_id: "sub-1".into(),
+            parent_session_id: source_info.id.0.to_string(),
+            child_session_id: "live-child-session".into(),
+            duration_ms: 1,
+            turn_count: 1,
+            tool_call_count: 0,
+            tokens_used: 0,
+            context_window_tokens: 1,
+            context_usage_pct: 0,
+            tools_used: Vec::new(),
+            error_count: 0,
+        },
+        meta: None,
+    };
+    adapter
+        .append_update(
+            &source_info,
+            &SessionUpdate::Grow(Box::new(grow_notification)),
+        )
+        .await
+        .unwrap();
+
+    let target_info = Info {
+        id: acp::SessionId::new("fork-without-live-child"),
+        cwd: "/target".to_string(),
+    };
+    let copied = adapter
+        .copy_session_data(&source_info, &target_info, Default::default())
+        .await
+        .unwrap();
+    let loaded = adapter.load_session(&target_info).await.unwrap();
+
+    assert_eq!(copied.updates_copied, 0);
+    assert!(loaded.updates.is_empty());
 }
 fn fork_user_chunk(session_id: &str, text: &str, prompt_index: usize) -> SessionUpdate {
     let chunk = acp::ContentChunk::new(

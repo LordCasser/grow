@@ -11,10 +11,16 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 struct TestControl {
     cancellation: CancellationToken,
+    session_id: String,
 }
 
 impl ChildControl for TestControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
+    type SecurityContext = String;
+
+    fn security_context(&self) -> Self::SecurityContext {
+        self.session_id.clone()
+    }
 
     fn progress(&self) -> Self::ProgressFuture {
         std::future::ready(SubagentProgress {
@@ -40,6 +46,7 @@ struct TestRunner {
     finish: tokio::sync::broadcast::Sender<()>,
     completions: mpsc::UnboundedSender<CompletionDisposition>,
     requests: mpsc::UnboundedSender<SubagentRequest>,
+    security_parents: mpsc::UnboundedSender<Option<String>>,
     started: mpsc::UnboundedSender<String>,
 }
 
@@ -55,14 +62,17 @@ impl ChildRunner for TestRunner {
         let mut start = self.start.subscribe();
         let mut finish = self.finish.subscribe();
         let requests = self.requests.clone();
+        let security_parents = self.security_parents.clone();
         let started = self.started.clone();
         Box::pin(async move {
             let ChildRunRequest {
                 request,
+                security_parent,
                 cancellation,
                 reporter,
             } = run;
             let _ = requests.send(request.clone());
+            let _ = security_parents.send(security_parent);
             if wait_before_start {
                 tokio::select! {
                     _ = cancellation.cancelled() => {
@@ -90,6 +100,7 @@ impl ChildRunner for TestRunner {
                     definition_background: request.subagent_type == "background-default",
                     control: TestControl {
                         cancellation: cancellation.clone(),
+                        session_id: request.id.clone(),
                     },
                 })
                 .await
@@ -177,6 +188,7 @@ struct Harness {
     finish: tokio::sync::broadcast::Sender<()>,
     completions: mpsc::UnboundedReceiver<CompletionDisposition>,
     requests: mpsc::UnboundedReceiver<SubagentRequest>,
+    security_parents: mpsc::UnboundedReceiver<Option<String>>,
     started: mpsc::UnboundedReceiver<String>,
     actor: tokio::task::JoinHandle<()>,
 }
@@ -205,6 +217,7 @@ fn harness_with_options(
     let (finish, _) = tokio::sync::broadcast::channel(4);
     let (completion_tx, completions) = mpsc::unbounded_channel();
     let (request_tx, requests) = mpsc::unbounded_channel();
+    let (security_parent_tx, security_parents) = mpsc::unbounded_channel();
     let (started_tx, started) = mpsc::unbounded_channel();
     let actor = tokio::spawn(
         SubagentCoordinator::new(
@@ -216,6 +229,7 @@ fn harness_with_options(
                 finish: finish.clone(),
                 completions: completion_tx,
                 requests: request_tx,
+                security_parents: security_parent_tx,
                 started: started_tx,
             },
             config,
@@ -231,6 +245,7 @@ fn harness_with_options(
         finish,
         completions,
         requests,
+        security_parents,
         started,
         actor,
     }
@@ -1250,6 +1265,49 @@ async fn cancel_parent_session_spares_nested_workflow_children() {
         wf_spawn.await.unwrap().unwrap().success,
         "workflow parent must survive ParentSession"
     );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn nested_spawn_keeps_immediate_security_parent_after_lifecycle_reparent() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let outer_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("outer-security-parent", true)).await }
+    });
+    let observed_outer = harness.requests.recv().await.unwrap();
+    assert_eq!(observed_outer.parent_session_id, "parent");
+    assert_eq!(harness.security_parents.recv().await.unwrap(), None);
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("outer-security-parent")
+    );
+
+    let nested_spawn = tokio::spawn({
+        let backend =
+            ChannelBackend::for_session(harness.backend.sender(), "outer-security-parent");
+        async move { backend.spawn(request("nested-security-parent", true)).await }
+    });
+    let observed_nested = harness.requests.recv().await.unwrap();
+    assert_eq!(
+        observed_nested.parent_session_id, "parent",
+        "lifecycle ownership remains reparented to the root session"
+    );
+    assert_eq!(
+        harness.security_parents.recv().await.unwrap().as_deref(),
+        Some("outer-security-parent"),
+        "security policy must be inherited from the immediate spawning child"
+    );
+
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("nested-security-parent")
+    );
+    let _ = harness.finish.send(());
+    assert!(outer_spawn.await.unwrap().unwrap().success);
+    assert!(nested_spawn.await.unwrap().unwrap().success);
     harness.actor.abort();
 }
 

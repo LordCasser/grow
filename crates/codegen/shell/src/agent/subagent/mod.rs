@@ -129,6 +129,8 @@ pub(crate) struct SubagentSpawnContext {
     pub inference_idle_timeout_secs: u64,
     /// Permission response deadline inherited from the root session.
     pub permission_prompt_timeout: std::time::Duration,
+    /// Global child permission route resolved from `[subagents]`.
+    pub subagent_permission_mode: workspace::permission::types::RequestPermissionMode,
     /// Tier inputs for resolving `auto_compact_threshold_percent` at
     /// spawn time — once the subagent's actual model id is known.
     /// Lazy because the subagent may be assigned a different model from
@@ -247,18 +249,10 @@ pub(crate) struct SubagentSpawnContext {
     pub workspace_ops: workspace::WorkspaceOps,
     /// Parent session's agent name (e.g. "grow-build").
     pub parent_agent_name: Option<String>,
-    /// Parent's MCP server configs for resolving named references in agent mcpServers.
-    ///
-    /// NOTE: This is a snapshot from `SessionHandle` (populated at spawn_session_actor
-    /// time). Servers added later via `UpdateMcpServers` (managed MCPs, plugin reload)
-    /// will not appear here. Named references only resolve against the initial config.
-    pub parent_mcp_configs: Vec<agent_client_protocol::McpServer>,
     /// Parent's managed MCP state handle (Arc-shared, no re-fetch).
     pub managed_mcp_state: crate::session::managed_mcp::ManagedMcpStateHandle,
     /// Snapshot of the parent session's MCP client pool at spawn time.
     pub parent_mcp_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
-    /// Exact parent tool schema for verbatim non-workflow forks.
-    pub parent_tool_definitions: Option<Vec<sampling_types::ToolSpec>>,
     /// Pre-discovered skills from the parent session, captured at spawn time.
     pub parent_skills: Option<Vec<tools::implementations::skills::types::SkillInfo>>,
     /// Parent's skills config for the child's SkillManager.
@@ -388,6 +382,12 @@ pub(crate) struct ShellChildRuntime {
 }
 impl ChildControl for ShellChildRuntime {
     type ProgressFuture = LocalBoxFuture<SubagentProgress>;
+    type SecurityContext = SessionHandle;
+
+    fn security_context(&self) -> Self::SecurityContext {
+        self.child_handle.clone()
+    }
+
     fn progress(&self) -> Self::ProgressFuture {
         let signals = self.child_handle.signals_handle.clone();
         Box::pin(async move {
@@ -813,9 +813,8 @@ struct InitialContext {
     copy_error: Option<String>,
     prefix_len: Option<usize>,
     conversation: Vec<sampling_types::conversation::ConversationItem>,
-    /// True only for a verbatim mirror-fork (parent items copied byte-for-byte).
-    /// Gates sending the parent tool snapshot so the child's full request prefix
-    /// matches the parent. A summarized-fork fallback leaves this false.
+    /// True only for a verbatim mirror-fork (parent conversation copied
+    /// byte-for-byte before child-only runtime context is applied).
     verbatim_fork: bool,
 }
 /// Resume bootstrap: preserve only the System head (see `resume_inherited_prefix_len`).
@@ -1280,8 +1279,8 @@ fn durable_resume_source_for(
 ///
 /// Inheritance applies to **every** agent source (built-in, user, project,
 /// and plugin). Plugin agents are not excluded: the parent already connected
-/// these servers for the session. Agent-owned `mcpServers` (spawned by the
-/// child itself) are handled separately and remain blocked for plugins.
+/// these servers for the session. Agent-owned `mcpServers` never enter this
+/// path; child sessions may only reuse the parent's live client pool.
 ///
 /// Returns `None` when there is no parent pool or `inheritance` is
 /// [`McpInheritance::None`] (avoids an empty import call downstream).
@@ -1305,7 +1304,7 @@ fn filter_pool_by_inheritance(
         McpInheritance::None => None,
         McpInheritance::Named(names) => {
             let before = pool.server_names().count();
-            pool.retain_clients(|name| names.iter().any(|n| n == name));
+            pool.restrict_to_servers(names.iter().cloned());
             tracing::debug!(
                 before,
                 after = pool.server_names().count(),
@@ -1316,7 +1315,7 @@ fn filter_pool_by_inheritance(
         }
         McpInheritance::Except(names) => {
             let before = pool.server_names().count();
-            pool.retain_clients(|name| !names.iter().any(|n| n == name));
+            pool.exclude_servers(names.iter().cloned());
             tracing::debug!(
                 before,
                 after = pool.server_names().count(),
@@ -1326,14 +1325,6 @@ fn filter_pool_by_inheritance(
             Some(pool)
         }
     }
-}
-/// Whether a subagent may declare its own agent-owned `mcpServers`.
-///
-/// Plugin agents cannot: untrusted packages must not spawn MCP processes or
-/// open network MCP endpoints. Parent-pool inheritance is independent and
-/// always available subject to [`McpInheritance`].
-fn agent_owned_mcp_servers_allowed(is_plugin_agent: bool) -> bool {
-    !is_plugin_agent
 }
 /// Resolve a subagent type name to its `AgentDefinition`, with the parent
 /// session's CLI tool/permission overrides already applied (so the spawn path

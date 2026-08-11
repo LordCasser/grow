@@ -1213,9 +1213,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         } => dispatch_dashboard_permission_followup(app, row, request_id, text),
         Action::DashboardQuestionAnswer {
             row,
+            tool_call_id,
             option_idx,
             freeform,
-        } => dispatch_dashboard_question_answer(app, row, option_idx, freeform),
+        } => dispatch_dashboard_question_answer(app, row, tool_call_id, option_idx, freeform),
         Action::DashboardPeekReply { row, text, attach } => {
             dispatch_dashboard_peek_reply(app, row, text, attach)
         }

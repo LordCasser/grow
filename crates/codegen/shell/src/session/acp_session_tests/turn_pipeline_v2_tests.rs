@@ -178,6 +178,8 @@ async fn delayed_goal_subagent_spawn_keeps_producer_stamped_ownership() {
                         effective_context_source: Some("new".into()),
                         context_normalized: false,
                         capability_mode: None,
+                        permission_mode: None,
+                        effective_permission_mode: None,
                         persona: None,
                         role: None,
                         model: Some("test-model".into()),

@@ -303,13 +303,14 @@ See the [MCP Server Registry](https://github.com/modelcontextprotocol/servers) f
 
 ## Subagents and MCP
 
-Subagents inherit the parent session’s connected MCP servers by default, including plugin-sourced agents. Use agent frontmatter `mcpInheritance` to restrict that set (`all`, `none`, `named`, or `except`). Details are in [Subagents — MCP inheritance](16-subagents.md#mcp-inheritance).
+Subagents inherit the parent session’s enabled, connected MCP server catalog by default, including plugin-sourced agents. Use agent frontmatter `mcpInheritance` to restrict that hard-eligible set (`all`, `none`, `named`, or `except`). Inheritance is not a runtime grant: `search_tool` marks eligible servers as `granted` or `requires_grant`, and `request_tool_access` grants one server for the live child before `use_tool`. The concrete MCP call still passes through permissions. Details are in [Subagents — MCP inheritance](16-subagents.md#mcp-inheritance).
 
 If a child lists `search_tool` / `use_tool` but returns an empty catalog, check that:
 
 1. The parent session actually connected the server (see Extensions / `grow inspect`)
 2. The agent’s `mcpInheritance` is not `none` or a filter that excludes the server
 3. Plugin agents cannot declare their own `mcpServers` in frontmatter — they only see parent-connected servers
+4. The `search_tool` result's `access` field is `granted`; otherwise request that `mcp_server` first
 
 ---
 

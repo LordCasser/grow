@@ -31,7 +31,7 @@ use super::dashboard::{
     dispatch_open_dashboard, ensure_dashboard_state, resolve_location_input,
 };
 use super::modes::{YOLO_ON_UNDER_PLAN_TOAST, permission_mode_toast};
-use super::permissions::drain_permission_queue;
+use super::permissions::drain_root_permission_queue;
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::reanchor_grouped_selection;
@@ -255,6 +255,8 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         context_source: None,
         resumed_from: None,
         capability_mode: None,
+        permission_mode: None,
+        effective_permission_mode: None,
         workflow_run_id: None,
         context_normalized: false,
         parent_prompt_id: None,
@@ -638,7 +640,7 @@ fn enqueue_permission_with_enable_always_approve(
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     let request = acp::RequestPermissionRequest::new(
-        acp::SessionId::new(Arc::from("test-sess")),
+        acp::SessionId::new(Arc::from("test-session")),
         acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from("tc-enable-aa-1")),
             acp::ToolCallUpdateFields::default(),
@@ -771,9 +773,14 @@ fn push_synthetic_permission(
     use crate::views::permission_view::{PermissionFocus, PermissionViewState};
     let (tx, rx) =
         tokio::sync::oneshot::channel::<Result<acp::RequestPermissionResponse, acp::Error>>();
+    let session_id = agent
+        .session
+        .session_id
+        .clone()
+        .expect("synthetic permission requires a session id");
     let request = acp_transport::AcpArgs {
         request: acp::RequestPermissionRequest::new(
-            acp::SessionId::new(std::sync::Arc::from("sess-1")),
+            session_id,
             acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(std::sync::Arc::from("tc-1")),
                 acp::ToolCallUpdateFields::default(),

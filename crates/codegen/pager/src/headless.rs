@@ -1013,6 +1013,7 @@ pub async fn run_single_turn(
                 t_prompt,
                 &mut ttf_logged,
                 options.yolo,
+                &session_id,
                 &mut pending_bg,
                 &mut completed_bg,
             );
@@ -1065,6 +1066,7 @@ pub async fn run_single_turn(
                     t_prompt,
                     &mut ttf_logged,
                     options.yolo,
+                    &session_id,
                     &mut pending_bg,
                     &mut completed_bg,
                 );
@@ -1080,6 +1082,7 @@ pub async fn run_single_turn(
                         t_prompt,
                         &mut ttf_logged,
                         options.yolo,
+                        &session_id,
                         &mut pending_bg,
                         &mut completed_bg,
                     )
@@ -1093,6 +1096,7 @@ pub async fn run_single_turn(
                     t_prompt,
                     &mut ttf_logged,
                     options.yolo,
+                    &session_id,
                     &mut pending_bg,
                     &mut completed_bg,
                 );
@@ -1113,6 +1117,7 @@ pub async fn run_single_turn(
         t_prompt,
         &mut ttf_logged,
         options.yolo,
+        &session_id,
         &mut pending_bg,
         &mut completed_bg,
     );
@@ -1349,6 +1354,7 @@ fn drain_pending_acp_messages(
     t_prompt: Instant,
     ttf_logged: &mut bool,
     yolo: bool,
+    root_session_id: &acp::SessionId,
     pending_bg: &mut HashSet<BackgroundWork>,
     completed_bg: &mut HashSet<BackgroundWork>,
 ) {
@@ -1359,6 +1365,7 @@ fn drain_pending_acp_messages(
             t_prompt,
             ttf_logged,
             yolo,
+            root_session_id,
             pending_bg,
             completed_bg,
         );
@@ -1373,6 +1380,7 @@ async fn drain_acp_with_grace(
     t_prompt: Instant,
     ttf_logged: &mut bool,
     yolo: bool,
+    root_session_id: &acp::SessionId,
     pending_bg: &mut HashSet<BackgroundWork>,
     completed_bg: &mut HashSet<BackgroundWork>,
 ) {
@@ -1385,6 +1393,7 @@ async fn drain_acp_with_grace(
                 t_prompt,
                 ttf_logged,
                 yolo,
+                root_session_id,
                 pending_bg,
                 completed_bg,
             );
@@ -1403,6 +1412,7 @@ async fn drain_acp_with_grace(
                     t_prompt,
                     ttf_logged,
                     yolo,
+                    root_session_id,
                     pending_bg,
                     completed_bg,
                 );
@@ -1422,6 +1432,7 @@ fn handle_headless_acp_message(
     t_prompt: Instant,
     ttf_logged: &mut bool,
     yolo: bool,
+    root_session_id: &acp::SessionId,
     pending_bg: &mut HashSet<BackgroundWork>,
     completed_bg: &mut HashSet<BackgroundWork>,
 ) {
@@ -1469,7 +1480,7 @@ fn handle_headless_acp_message(
             let _ = boxed.response_tx.send(Ok(()));
         }
         AcpClientMessageBox::RequestPermission(req) => {
-            if yolo {
+            if yolo && req.request.session_id == *root_session_id {
                 if let Some(resp) = auto_respond_to_permissions(
                     &req.request,
                     &[

@@ -1033,6 +1033,9 @@ pub struct Config {
     /// [`crate::config::SubagentsConfig::resolve_max_depth`]).
     #[serde(skip)]
     pub subagents_max_depth: u32,
+    /// Independent permission route used by every subagent session.
+    #[serde(skip)]
+    pub subagent_permission_mode: workspace::permission::types::RequestPermissionMode,
     /// Per-subagent model ID overrides from `[subagents.models]` in config.toml.
     /// Keys are agent names, values are model IDs. Set alongside `subagents_enabled`
     /// from `SubagentsConfig::resolve()`.
@@ -1377,6 +1380,7 @@ impl Default for Config {
             cli_agent_overrides: CliAgentOverrides::default(),
             subagents_enabled: true,
             subagents_max_depth: crate::config::SubagentsConfig::DEFAULT_MAX_DEPTH,
+            subagent_permission_mode: Default::default(),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
             subagent_roles: std::collections::HashMap::new(),
@@ -1703,6 +1707,7 @@ impl Config {
     pub fn resolve_subagents(&mut self, cli_flag: bool, raw_config: &toml::Value) {
         let sa = crate::config::SubagentsConfig::resolve(cli_flag, raw_config);
         self.subagents_enabled = sa.enabled;
+        self.subagent_permission_mode = sa.permission_mode;
         self.subagent_model_overrides = sa.models;
         self.subagent_toggle = sa.toggle;
         self.subagent_roles = sa.roles;

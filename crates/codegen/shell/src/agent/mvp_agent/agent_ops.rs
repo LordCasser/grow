@@ -1558,7 +1558,7 @@ impl MvpAgent {
             std::sync::Arc::new(TerminalRunner::new(notifier, session_info.id.clone()))
         };
         let load_envrc = self.cfg.borrow().session.load_envrc.unwrap_or(true);
-        let startup_hints = init
+        let mut startup_hints = init
             .meta
             .as_ref()
             .and_then(|m| m.get("startupHints"))
@@ -1566,6 +1566,8 @@ impl MvpAgent {
                 serde_json::from_value::<crate::session::StartupHints>(v.clone()).ok()
             })
             .unwrap_or_default();
+        startup_hints.subagent_permission_mode =
+            Some(self.cfg.borrow().subagent_permission_mode);
         let hunk_plan = plan_hunk_tracking(
             init
                 .client_capabilities
@@ -2085,7 +2087,6 @@ impl MvpAgent {
                     None,
                     None,
                     max_turns,
-                    None,
                 )
                 .await?
         };

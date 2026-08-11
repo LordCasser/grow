@@ -25,7 +25,7 @@ use agent_client_protocol as acp;
 use super::agent::AgentId;
 use super::agent_view::{AgentView, FinalizedPrMeta};
 use super::app_view::AppView;
-use super::dispatch::drain_permission_queue;
+use super::dispatch::drain_root_permission_queue;
 
 /// Push a turn-terminal marker ("Turn completed/cancelled/failed"), folding
 /// any pending stop/stop_failure hook runs into it so they render inline
@@ -240,7 +240,7 @@ pub(super) fn finalize_prompt_terminal(
 
     // Drain all queued permission requests — the turn is over, so any
     // pending permissions are stale. Send Cancelled to each.
-    drain_permission_queue(agent);
+    drain_root_permission_queue(agent);
 
     // Dismiss any active plan approval or review — the turn that produced
     // it has completed, so the state is stale.

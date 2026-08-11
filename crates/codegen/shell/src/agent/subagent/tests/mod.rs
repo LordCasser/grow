@@ -440,7 +440,7 @@ fn explicit_override_takes_precedence_over_role() {
     assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
     assert_eq!(
             resolved.capability_mode,
-            Some(tool_types::SubagentCapabilityMode::ReadOnly)
+            Some(tool_types::SubagentCapabilityMode::All)
         );
 }
 #[test]

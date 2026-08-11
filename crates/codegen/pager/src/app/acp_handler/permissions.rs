@@ -14,9 +14,9 @@ use super::*;
 /// If no agent owns the `session_id` (e.g. session was just cleaned up), the
 /// request is cancelled rather than left dangling.
 ///
-/// YOLO mode is honored on the owning agent regardless of which agent is
-/// currently active, so background turns aren't blocked waiting for an
-/// always-yes answer the user has already given.
+/// Root-session YOLO is honored regardless of which agent is active. Child
+/// requests never inherit that UI switch: their request-local mode was already
+/// resolved by the permission manager.
 pub(super) fn handle_permission_request(
     perm: acp_transport::AcpArgs<acp::RequestPermissionRequest>,
     app: &mut AppView,
@@ -34,19 +34,20 @@ pub(super) fn handle_permission_request(
         }
     };
     let owning_agent_id = matched.agent_id();
-    let is_active = is_matched_agent_active(app, owning_agent_id);
-    let Some(agent) = app.agents.get_mut(&owning_agent_id) else {
-        cancel_permission(perm);
-        return false;
-    };
+    let session_id = perm.request.session_id.0.to_string();
+    let is_active = is_matched_view_active(app, matched, &session_id);
 
-    // 2. YOLO mode: auto-approve immediately on the owning agent so background
-    //    turns aren't blocked waiting for the user to switch back.
+    // 2. Root YOLO mode: auto-approve immediately on the owning agent so
+    //    background root turns aren't blocked waiting for a view switch.
     //
     //    If no `AllowOnce` option exists, falls through to
     //    `enqueue_permission` even in YOLO mode (won't pick
     //    `AllowAlways` by default).
-    if agent.session.is_yolo()
+    if matches!(matched, SessionMatch::Root(_))
+        && app
+            .agents
+            .get(&owning_agent_id)
+            .is_some_and(|agent| agent.session.is_yolo())
         && let Some(allow) = perm
             .request
             .options
@@ -54,6 +55,10 @@ pub(super) fn handle_permission_request(
             .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
     {
         let option_id = allow.option_id.clone();
+        let Some(agent) = app.agents.get_mut(&owning_agent_id) else {
+            cancel_permission(perm);
+            return false;
+        };
         crate::app::dispatch::respond_permission(
             agent,
             perm,
@@ -81,9 +86,17 @@ pub(super) fn handle_permission_request(
         app.notification_service.mark_permission_notified();
     }
 
-    // 4. Queue on the owning agent's view. Subagent provenance for display
-    //    is still resolved via subagent_sessions in enqueue_permission().
-    //    Redraw is only needed when the owning agent is currently visible.
+    // 4. Queue on the concrete session view. Child state must live on the
+    //    child AgentView so fullscreen input/render and sibling concurrency
+    //    use the same ordinary interaction path as roots.
+    let Some(parent) = app.agents.get_mut(&owning_agent_id) else {
+        cancel_permission(perm);
+        return false;
+    };
+    let Some(agent) = resolve_target_agent_view(parent, matched, &session_id) else {
+        cancel_permission(perm);
+        return false;
+    };
     let needs_redraw = enqueue_permission(perm, agent);
     needs_redraw && is_active
 }
@@ -233,11 +246,12 @@ fn resolve_subagent_label(agent: &AgentView, session_id: &acp::SessionId) -> Opt
 /// Falls back to ACP-level `title`/`kind` fields when deserialization fails.
 ///
 /// Returns `(title, description, bash_command_raw)`.
-fn build_permission_display(
+pub(super) fn build_permission_display(
     req: &acp::RequestPermissionRequest,
     bash_highlights: Option<&BashCommandHighlights>,
 ) -> (String, Vec<String>, Option<String>) {
     let is_bash = bash_highlights.is_some();
+    let capability_grant = capability_grant_meta(req);
 
     let bash_input = req.tool_call.fields.raw_input.as_ref().and_then(|v| {
         serde_json::from_value::<tools::implementations::BashToolInput>(v.clone()).ok()
@@ -259,7 +273,9 @@ fn build_permission_display(
         || req.tool_call.fields.kind == Some(acp::ToolKind::Execute)
         || raw_command.is_some();
 
-    let title = if is_execute {
+    let title = if let Some((target, _)) = capability_grant.as_ref() {
+        format!("Grant subagent access to `{target}`?")
+    } else if is_execute {
         bash_description
             .as_deref()
             .map(str::trim)
@@ -312,12 +328,23 @@ fn build_permission_display(
 /// MCP planned-argument lines (empty for bash/edit).
 fn permission_description_lines(req: &acp::RequestPermissionRequest) -> Vec<String> {
     let mut lines = mcp_args_lines(req);
+    if let Some((_, purpose)) = capability_grant_meta(req) {
+        lines.insert(0, format!("Purpose: {purpose}"));
+    }
     if is_edit_permission(req)
         && let Some(desc) = protected_edit_description(req)
     {
         lines.insert(0, desc);
     }
     lines
+}
+
+fn capability_grant_meta(req: &acp::RequestPermissionRequest) -> Option<(String, String)> {
+    let grant = req.meta.as_ref()?.get("subagentCapabilityGrant")?;
+    Some((
+        grant.get("target")?.as_str()?.to_owned(),
+        grant.get("purpose")?.as_str()?.to_owned(),
+    ))
 }
 
 fn protected_edit_description(req: &acp::RequestPermissionRequest) -> Option<String> {

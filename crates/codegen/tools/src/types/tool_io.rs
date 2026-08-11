@@ -16,6 +16,7 @@ use crate::implementations::grow_build::grep::GrepSearchInput;
 use crate::implementations::grow_build::list_dir::ListDirInput;
 use crate::implementations::grow_build::plan_control::PlanControlInput;
 use crate::implementations::grow_build::read_file::ReadFileInput;
+use crate::implementations::grow_build::request_tool_access::RequestToolAccessInput;
 use crate::implementations::grow_build::search_replace::SearchReplaceInput;
 use crate::implementations::grow_build::todo::TodoWriteInput;
 use crate::implementations::grow_build::update_goal::{
@@ -82,6 +83,7 @@ pub enum ToolInput {
     UpdateGoalProgress(UpdateGoalProgressInput),
     RequestGoalReplan(RequestGoalReplanInput),
     Workflow(crate::implementations::grow_build::workflow::WorkflowToolInput),
+    RequestToolAccess(RequestToolAccessInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
 }

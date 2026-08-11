@@ -21,31 +21,63 @@ impl SessionActor {
     ///
     /// Shared clients are already connected (Arc-shared from parent), so
     /// `get_tool_registrations` reuses the existing transport — no new handshakes.
-    async fn register_shared_client_tools(&self) {
-        let shared_clients: Vec<(
-            String,
-            std::sync::Arc<crate::session::mcp_servers::McpClient>,
-        )> = {
-            let st = self.mcp_state.lock().await;
-            if st.shared_clients.is_empty() {
-                return;
-            }
-            st.shared_clients
+    pub(super) async fn register_shared_client_tools(&self) {
+        let (mut touched_servers, shared_clients, shared_client_ids) = {
+            let mut st = self.mcp_state.lock().await;
+            let touched = st.reconcile_inherited_clients();
+            let clients = st
+                .shared_clients
                 .iter()
-                .map(|(n, c)| (n.clone(), std::sync::Arc::clone(c)))
-                .collect()
+                .map(|(name, client)| (name.clone(), std::sync::Arc::clone(client)))
+                .collect::<std::collections::HashMap<_, _>>();
+            (touched, clients, st.shared_client_ids())
         };
+        if let Some(capabilities) = &self.subagent_capabilities {
+            capabilities.replace_bound_mcp_client_ids(shared_client_ids);
+        }
+        if touched_servers.is_empty() {
+            return;
+        }
+        let mut touched_servers: Vec<_> = touched_servers.drain().collect();
+        touched_servers.sort_unstable();
         tracing::info!(
             session_id = %self.session_info.id.0,
             count = shared_clients.len(),
-            "Registering tools from shared MCP clients"
+            "Reconciling tools from shared MCP clients"
         );
         let mcp_state_arc = std::sync::Arc::clone(&self.mcp_state);
         let mut ui_tools: std::collections::HashMap<
             String,
             Vec<crate::extensions::mcp::McpToolEntry>,
         > = std::collections::HashMap::new();
-        for (server_name, client) in &shared_clients {
+        for server_name in &touched_servers {
+            let eligible = self
+                .subagent_capabilities
+                .as_ref()
+                .is_none_or(|capabilities| capabilities.mcp_server_eligible(server_name));
+            let prefix = format!(
+                "{}{}",
+                server_name,
+                crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+            );
+            // Reconcile in-place on every parent eligibility generation. The
+            // bridge object remains stable, but stale definitions and metadata
+            // are removed before the current qualified list is registered.
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .unregister_tools_by_prefix(&prefix);
+            self.mcp_state
+                .lock()
+                .await
+                .mcp_tool_meta
+                .retain(|qualified, _| !qualified.starts_with(&prefix));
+            let Some(client) = shared_clients.get(server_name) else {
+                continue;
+            };
+            if !eligible {
+                continue;
+            }
             let regs = match client
                 .get_tool_registrations(std::sync::Arc::clone(&mcp_state_arc))
                 .await
@@ -82,6 +114,18 @@ impl SessionActor {
         >,
     ) {
         let qualified_name = reg.name.clone();
+        if self
+            .subagent_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| !capabilities.mcp_tool_eligible(&qualified_name))
+        {
+            tracing::debug!(
+                server = server_name,
+                tool = qualified_name,
+                "Skipping MCP tool outside live parent eligibility"
+            );
+            return;
+        }
         let prefix = format!(
             "{}{}",
             server_name,
@@ -333,6 +377,17 @@ impl SessionActor {
                 .push_str(section);
         }
         if let Some(mut text) = reminder_text {
+            if let Some(capabilities) = &self.subagent_capabilities {
+                text.push_str("\nSubagent MCP grants:\n");
+                for server in &server_summaries {
+                    let status = if capabilities.mcp_server_granted(&server.name) {
+                        "granted"
+                    } else {
+                        "requires request_tool_access"
+                    };
+                    text.push_str(&format!("- {}: {status}\n", server.name));
+                }
+            }
             if let Some(hint) = self.rendered_mcp_hint().await {
                 text.push_str(&hint);
             }
@@ -1368,15 +1423,25 @@ impl SessionActor {
         &self,
     ) -> Vec<tools::types::tool_index::ServerSummary> {
         use tools::types::tool_index::ToolSearchIndex;
-        crate::session::tool_index::Bm25ToolSearchIndex::new(self.tool_metadata_snapshot.clone())
-            .list_server_summaries()
+        let mut summaries = crate::session::tool_index::Bm25ToolSearchIndex::new(
+            self.tool_metadata_snapshot.clone(),
+        )
+        .list_server_summaries();
+        if let Some(capabilities) = &self.subagent_capabilities {
+            summaries.retain(|server| capabilities.mcp_server_eligible(&server.name));
+        }
+        summaries
     }
     /// Render the tool usage hint appended to every injected MCP reminder
     /// body, with the session's tool names substituted. Shared by the
     /// injector and the `/context` estimate. `None` when the template
     /// fails to render.
     async fn rendered_mcp_hint(&self) -> Option<String> {
-        let hint_template = "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`.";
+        let hint_template = if self.subagent_capabilities.is_some() {
+            "\nTo use MCP tools, call `${{ tools.by_kind.search_tool }}` first. If its server has `requires_grant`, call `${{ tools.by_kind.capability_request }}` with target type `mcp_server` and a task-specific purpose, wait for `granted`, then call `${{ tools.by_kind.use_tool }}` with the exact returned schema. The eventual MCP call still requires permission."
+        } else {
+            "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`."
+        };
         self.tool_bridge_handle()
             .render_prompt(hint_template, &serde_json::json!({}))
             .await

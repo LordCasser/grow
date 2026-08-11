@@ -2831,11 +2831,16 @@ impl DashboardState {
                     if let Some(text) = feedback {
                         let row = self.peek.as_ref().map(|p| p.row.clone());
                         let request_id = self.peek.as_ref().and_then(|p| p.request_id);
+                        let question_id = self.peek.as_ref().and_then(|p| p.question_id.clone());
                         if let Some(row) = row {
                             if is_ask {
+                                let Some(tool_call_id) = question_id else {
+                                    return Some(InputOutcome::Changed);
+                                };
                                 return Some(InputOutcome::Action(
                                     Action::DashboardQuestionAnswer {
                                         row,
+                                        tool_call_id,
                                         option_idx: None,
                                         freeform: text,
                                     },
@@ -5754,6 +5759,7 @@ mod tests {
             question: None,
             options: Vec::new(),
             request_id: None,
+            question_id: None,
             reject_option: None,
         }
     }
@@ -6125,6 +6131,7 @@ mod tests {
             p.reject_option = Some(1);
             p.selected_option = Some(1);
             p.request_id = None; // Ask tool (not a permission)
+            p.question_id = Some("ask-image-only".into());
         }
         let reg = crate::actions::ActionRegistry::defaults();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -6788,7 +6795,8 @@ mod tests {
             ("__other__".into(), "Other".into()),
         ];
         f.reject_option = Some(2);
-        f.request_id = None; // ← marks it as an ask question, not a permission
+        f.request_id = None;
+        f.question_id = Some("ask-routing".into());
         state.peek = Some(super::super::peek::PeekPanelState::new(
             DashboardRowId::TopLevel(AgentId(0)),
             f,
@@ -6943,6 +6951,7 @@ mod tests {
             question: None,
             options: vec![],
             request_id: None,
+            question_id: None,
             reject_option: None,
         };
         let changed = state.peek.as_mut().unwrap().apply_fields(other, fields);

@@ -240,7 +240,7 @@ pub(crate) async fn create_test_actor_ex(
         file_state_tracker: Arc::new(FileStateTracker::new()),
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),
-        forked_tool_override: None,
+        subagent_capabilities: None,
         compaction: crate::session::compaction_config::CompactionConfig {
             lease: Default::default(),
             threshold_percent: std::cell::Cell::new(threshold_percent),

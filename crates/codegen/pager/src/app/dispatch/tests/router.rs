@@ -2060,6 +2060,7 @@ fn mouse_click_on_peek_close_rect_clears_peek() {
             question: None,
             options: Vec::new(),
             request_id: None,
+            question_id: None,
             reject_option: None,
         },
     ));

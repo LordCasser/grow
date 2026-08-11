@@ -6,6 +6,7 @@ promptComposition: extend
 toolPreset: explore
 additionalTools: []
 disallowedTools: []
+injectDefaultTools: false
 capabilityMode: read-only
 inheritSkills: false
 subagents:

@@ -27,6 +27,6 @@ pub(crate) use definition::{
     resolve_agent_definition, resolve_goal_stage_definition, resolve_runtime_config,
     subagent_harness_flavor_is_representable, validate_agent_name,
 };
-pub(crate) use overrides::{intersect_capability_modes, resolve_effective_overrides};
+pub(crate) use overrides::resolve_effective_overrides;
 pub(crate) use resume::validate_resume_identity;
 pub(crate) use types::{ResolutionError, ResumeSourceData};

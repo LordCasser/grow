@@ -162,7 +162,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         match command {
             SubagentEvent::Spawn(command) => {
                 let mut request = *command.request;
-                if let Some((root_parent, loop_task_id, spawner_cancelled, spawner_owner)) = self
+                let mut security_parent = None;
+                if let Some((
+                    root_parent,
+                    loop_task_id,
+                    spawner_cancelled,
+                    spawner_owner,
+                    spawner_security_context,
+                )) = self
                     .active
                     .values()
                     .find(|child| child.child_session_id == request.parent_session_id)
@@ -172,6 +179,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                             child.request.runtime_overrides.loop_task_id.clone(),
                             child.cancellation.is_cancelled(),
                             child.request.owner.clone(),
+                            child.control.security_context(),
                         )
                     })
                 {
@@ -189,6 +197,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         });
                         return;
                     }
+                    security_parent = Some(spawner_security_context);
                     request.parent_session_id = root_parent;
                     request.surface_completion = false;
                     // Nested children keep workflow lineage after reparent so
@@ -260,6 +269,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     future: Box::pin(
                         std::panic::AssertUnwindSafe(self.runner.run(ChildRunRequest {
                             request,
+                            security_parent,
                             cancellation,
                             reporter,
                         }))

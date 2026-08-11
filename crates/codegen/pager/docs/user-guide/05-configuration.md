@@ -342,6 +342,8 @@ dimensions = 1024                     # vector dimensions
 ```toml
 [subagents]
 enabled = true
+max_depth = 1
+permission_mode = "auto"              # auto | ask | always-approve | follow
 
 [subagents.toggle]
 explore = true                        # enable/disable specific types
@@ -351,7 +353,7 @@ plan = false
 explore = "deepseek/deepseek-chat"   # route to a configured provider/model
 ```
 
-To pin the model a subagent uses, set its entry under `[subagents.models]`.
+To pin the model a subagent uses, set its entry under `[subagents.models]`. `permission_mode` independently controls both dynamic capability grants and actual child tool calls; it defaults to `auto` and does not inherit the primary mode unless set to `follow`.
 
 ### Goal Behavior and workflow engine
 

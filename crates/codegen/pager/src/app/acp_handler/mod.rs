@@ -48,13 +48,15 @@ mod subagent_activity;
 mod workflow_ingest;
 
 #[cfg(test)]
-use permissions::{MCP_ARGS_MAX_LINE_CHARS, MCP_ARGS_MAX_LINES, mcp_args_lines};
+use permissions::{
+    MCP_ARGS_MAX_LINE_CHARS, MCP_ARGS_MAX_LINES, build_permission_display, mcp_args_lines,
+};
 use permissions::{apply_recap_block, handle_permission_request, should_drop_late_auto_recap};
 
 // Child modules using `super::*` need these sibling symbols in scope.
 use routing::{
-    SessionMatch, find_session_match, interaction_target_agent, is_matched_agent_active,
-    mcp_target_agent, resolve_notif_agent, resolve_target_view,
+    SessionMatch, find_session_match, is_matched_agent_active, is_matched_view_active,
+    mcp_target_agent, resolve_notif_agent, resolve_target_agent_view, resolve_target_view,
 };
 
 pub(crate) use subagent_activity::finalize_killed_subagent;
@@ -64,7 +66,10 @@ use workflow_ingest::ingest_workflow_update;
 
 use session_notification::{
     advance_reconnect_cursor, behavior_mode_update_applied, confirm_context_used,
-    detect_plan_mode_change, drop_unexpected_replay, handle_session_notification,
+    detect_plan_mode_change, drop_unexpected_replay,
+};
+pub(crate) use session_notification::{
+    handle_descendant_lifecycle_replay, handle_session_notification,
 };
 
 use queue::handle_queue_changed;

@@ -404,6 +404,14 @@ pub struct StartupHints {
     /// parent emits (which also key off the task type, not the resolved agent name).
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// Internal-only permission route for child tool requests. The primary
+    /// session also carries the configured value so it can host the child's
+    /// auto-classifier side query before any child exists.
+    #[serde(skip)]
+    pub subagent_permission_mode: Option<workspace::permission::types::RequestPermissionMode>,
+    /// Child assignment shown to the permission classifier and ask UI.
+    #[serde(skip)]
+    pub subagent_description: Option<String>,
     /// Set on a fork spawn so `install_system_prompt` does NOT overwrite the
     /// inherited System at `conversation[0]`: the verbatim parent copy already
     /// holds the parent's System and overwriting it would bust the cache prefix.

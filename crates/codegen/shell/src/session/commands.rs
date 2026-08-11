@@ -443,11 +443,6 @@ pub enum SessionCommand {
     SnapshotClientHooks {
         respond_to: oneshot::Sender<crate::extensions::hooks::ClientHooks>,
     },
-    /// Snapshot the session's resolved tool schema (same list the parent's own turn
-    /// sends) so a verbatim-fork child can present a byte-identical tool prefix.
-    SnapshotToolDefinitions {
-        respond_to: oneshot::Sender<Vec<sampling_types::ToolSpec>>,
-    },
     /// Replace the session's client-registered hooks. Sent on `load_session` reconnect to a
     /// live actor so a client can re-register (or clear) its hooks without a fresh session.
     SetClientHooks {

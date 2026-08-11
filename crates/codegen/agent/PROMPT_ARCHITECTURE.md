@@ -34,7 +34,7 @@ write it, and execute verification; the picker and `/doctor` consume the same
 eligibility result. The Agents settings UI only enables or disables definitions
 and does not rewrite this architectural purpose.
 
-`toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, availability/depth/capability filtering, Agent denies and subagent policy, session clamps, and ToolBridge finalization. `ToolKind`, `ToolMetadata`, registry finalization, template name resolution, and `ToolServerConfig.behavior_preset` retain their existing responsibilities.
+`toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, Agent denies and subagent policy, session clamps, depth/ownership/plugin/MCP eligibility, and ToolBridge finalization. Requestable native Execute/ReadWrite eligibility requires both an authored matching kind from `toolPreset`/`additionalTools` and a surviving implementation in the finalized bridge; runtime injection cannot silently expand that ceiling. For a subagent, `capabilityMode` no longer deletes eligible tools: it seeds the child-local current grant set. Model tool definitions and call dispatch both filter the finalized bridge through that grant set. `ToolKind`, `ToolMetadata`, registry finalization, template name resolution, and `ToolServerConfig.behavior_preset` retain their existing responsibilities.
 
 The built-in Agent, tool, and session surface is Grow-native. External vendor schemas are not exposed as Agent profiles, tool presets, namespaces, ignored frontmatter fields, or session scanners. Agent files use the documented Grow schema and reject unknown keys; source provenance does not create a vendor execution mode.
 
@@ -52,10 +52,15 @@ The effective call rule is:
 ```text
 registered by Tool Preset / Registry
   ∩ Agent tool and subagent policy
-  ∩ subagent capability and depth policy
+  ∩ session clamp, depth, ownership, plugin trust, and MCP inheritance
+  ∩ subagent current capability grants
   ∩ active Behavior gate
   ∩ session permission decision
 ```
+
+The first three lines form the subagent's hard eligibility ceiling. A child sees only an eligible capability catalog, but the catalog is not authorization. `request_tool_access` may add exactly one native capability (`execute` or `read-write`) or one eligible MCP server to the current live child. A successful grant affects the next model sample and cannot restore anything removed by the hard ceiling. The dispatch gate repeats the same check so a forged tool call cannot bypass model-definition filtering. The resulting Shell, edit, or MCP invocation then passes through the ordinary permission manager as a second, independent decision.
+
+The capability catalog is an audience/runtime layer, not role prose. The subagent audience explains the request protocol; a native system reminder lists eligible native groups and current status; MCP reminders list inherited eligible servers and their grant status. `search_tool` searches only the finalized child MCP index and annotates results that still require a server grant. The parent's model-visible MCP allowset is a live, depth-preserving authority: search and dispatch recheck it, while catalog changes reconcile registrations in the existing ToolBridge and continue through system reminders.
 
 Clarify keeps decision authority with the user for material unknowns: the primary Agent asks until the goal is sufficiently specified, then completes it without a mandatory plan or approval step.
 

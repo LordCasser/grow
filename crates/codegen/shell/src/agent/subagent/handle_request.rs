@@ -466,11 +466,10 @@ pub(crate) async fn run_shell_child(
             "Resolved runtime overrides for subagent"
         );
     }
-    effective_runtime.capability_mode =
-        crate::agent::subagent::resolution::intersect_capability_modes(
-            effective_runtime.capability_mode,
-            definition.capability_mode,
-        );
+    // `capabilityMode` is the child's initial grant, not a permanent ceiling.
+    // The resolved spawn override already has precedence over the definition
+    // default; preserve it on the definition for session-state construction.
+    definition.capability_mode = effective_runtime.capability_mode;
     let child_depth = request
         .runtime_overrides
         .spawn_depth
@@ -479,7 +478,6 @@ pub(crate) async fn run_shell_child(
     let allow_nested_subagents = child_depth < ctx.subagents_max_depth;
     crate::agent::subagent::resolution::apply_child_tool_policy(
         &mut definition,
-        effective_runtime.capability_mode,
         allow_nested_subagents,
     );
     if request.owner.goal_role().is_some() {
@@ -489,8 +487,8 @@ pub(crate) async fn run_shell_child(
         tracing::info!(
             subagent_id = %request.id,
             capability_mode = ?mode,
-            tools_remaining = definition.tool_config.tools.len(),
-            "Applied capability mode filter to agent tool config"
+            eligible_tools = definition.tool_config.tools.len(),
+            "Configured subagent initial capability grant"
         );
     }
     if !allow_nested_subagents && definition.tool_config.tools.len() < tools_before_policy {
@@ -669,6 +667,16 @@ pub(crate) async fn run_shell_child(
         effective_model_id: Some(effective_model_id.0.to_string()),
     };
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);
+    let effective_permission_mode = ctx.permission_handle.as_ref().map(|permissions| {
+        match permissions.effective_request_mode(Some(ctx.subagent_permission_mode)) {
+            workspace::permission::types::EffectivePermissionMode::Ask => "ask",
+            workspace::permission::types::EffectivePermissionMode::Auto => "auto",
+            workspace::permission::types::EffectivePermissionMode::AlwaysApprove => {
+                "always-approve"
+            }
+        }
+        .to_owned()
+    });
     emit_subagent_notification(
         gateway,
         &ctx.parent_session_id,
@@ -685,6 +693,10 @@ pub(crate) async fn run_shell_child(
                 .capability_mode
                 .and_then(|m| serde_json::to_value(m).ok())
                 .and_then(|v| v.as_str().map(String::from)),
+            permission_mode: serde_json::to_value(ctx.subagent_permission_mode)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            effective_permission_mode,
             persona: effective_runtime.persona.clone(),
             role: effective_runtime.role_name.clone(),
             model: Some(effective_model_id.0.to_string()),
@@ -781,6 +793,9 @@ pub(crate) async fn run_shell_child(
             "context_window": effective_sampling_config.context_window,
         })),
     );
+    // Freeze the author/policy-derived capability ceiling before agent memory
+    // or any other session convenience injects concrete tools.
+    definition.authored_capability_tools = Some(definition.tool_config.clone());
     let agent_memory_scope = definition.memory;
     let agent_name_for_memory = definition.name.clone();
     if let Some(scope) = agent_memory_scope {
@@ -863,66 +878,14 @@ pub(crate) async fn run_shell_child(
             }
         }
     }
-    let agent_mcp_servers: Vec<_> = if !agent_owned_mcp_servers_allowed(is_plugin_agent) {
-        if !definition.mcp_servers.is_empty() {
-            tracing::warn!(
-                agent = %definition.name,
-                plugin = ?definition.plugin_name,
-                "ignoring mcpServers on plugin agent (not supported for security)"
-            );
-        }
-        vec![]
-    } else {
-        definition
-                .mcp_servers
-                .iter()
-                .filter_map(|entry| match entry {
-                    agent::config::McpServerRef::Named(name) => {
-                        ctx.parent_mcp_configs
-                            .iter()
-                            .find(|s| {
-                                crate::session::mcp_servers::mcp_server_name(s) == name
-                            })
-                            .cloned()
-                            .or_else(|| {
-                                tracing::warn!(agent = %definition.name, server = name, "mcpServers: named ref not found in parent");
-                                None
-                            })
-                    }
-                    agent::config::McpServerRef::Inline { name, config } => {
-                        if let serde_json::Value::Object(obj) = config
-                            && obj.contains_key("type")
-                        {
-                            let mut flat = obj.clone();
-                            flat.insert(
-                                "name".to_string(),
-                                serde_json::Value::String(name.clone()),
-                            );
-                            if let Ok(server) = serde_json::from_value::<
-                                agent_client_protocol::McpServer,
-                            >(serde_json::Value::Object(flat)) {
-                                return Some(server);
-                            }
-                            tracing::debug!(agent = %definition.name, server = name, "ACP wire format parse failed, trying map-keyed");
-                        }
-                        if let Some(inner_obj) = config.as_object() {
-                            let mut flat = inner_obj.clone();
-                            flat.insert(
-                                "name".to_string(),
-                                serde_json::Value::String(name.clone()),
-                            );
-                            if let Ok(server) = serde_json::from_value::<
-                                agent_client_protocol::McpServer,
-                            >(serde_json::Value::Object(flat)) {
-                                return Some(server);
-                            }
-                        }
-                        tracing::warn!(agent = %definition.name, server = name, "mcpServers: inline config could not be parsed");
-                        None
-                    }
-                })
-                .collect()
-    };
+    if !definition.mcp_servers.is_empty() {
+        tracing::warn!(
+            agent = %definition.name,
+            plugin = ?definition.plugin_name,
+            "ignoring child-owned mcpServers; subagents only inherit connected parent servers"
+        );
+    }
+    let agent_mcp_servers: Vec<agent_client_protocol::McpServer> = Vec::new();
     let parent_mcp_pool =
         resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &definition.mcp_inheritance);
     let mcp_inherited_count = parent_mcp_pool
@@ -965,7 +928,7 @@ pub(crate) async fn run_shell_child(
             "Subagent inherited skills from parent"
         );
     }
-    let mcp_owned_count = agent_mcp_servers.len() as u32;
+    let mcp_owned_count = 0;
     ::diagnostics::session_ctx::log_event(::diagnostics::events::SubagentLaunched {
         subagent_id: request.id.clone(),
         parent_session_id: request.parent_session_id.clone(),
@@ -1010,6 +973,8 @@ pub(crate) async fn run_shell_child(
             is_subagent: true,
             parent_session_id: Some(ctx.parent_session_id.clone()),
             subagent_type: Some(request.subagent_type.clone()),
+            subagent_permission_mode: Some(ctx.subagent_permission_mode),
+            subagent_description: Some(request.description.clone()),
             preserve_inherited_system: verbatim_mirror_fork,
             ..Default::default()
         },
@@ -1110,11 +1075,6 @@ pub(crate) async fn run_shell_child(
             ctx.parent_scheduler_handle.clone()
         },
         subagent_max_turns,
-        if verbatim_mirror_fork && !request.owner.is_workflow() {
-            std::mem::take(&mut ctx.parent_tool_definitions)
-        } else {
-            None
-        },
     )
     .await;
     let (child_handle, _permission_rx, _system_prompt, child_thread) = match spawn_result {
@@ -1149,6 +1109,9 @@ pub(crate) async fn run_shell_child(
         })
         .await;
     if !promoted {
+        if let Some(permission_handle) = &ctx.permission_handle {
+            permission_handle.release_child(child_session_id.0.to_string());
+        }
         ctx.workspace_ops
             .end_local_session(child_session_id.0.as_ref());
         let result = cancel_pending_shell_child(
@@ -1548,6 +1511,9 @@ pub(crate) async fn run_shell_child(
         (None, None) => {}
     }
     let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+    if let Some(permission_handle) = &ctx.permission_handle {
+        permission_handle.release_child(child_session_id.0.to_string());
+    }
     ctx.workspace_ops
         .end_local_session(child_session_id.0.as_ref());
     let mut disposed_snapshot_ref: Option<String> = None;

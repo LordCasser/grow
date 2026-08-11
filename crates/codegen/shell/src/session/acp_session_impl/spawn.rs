@@ -45,6 +45,98 @@ fn restored_runtime_conflict_actions(
     }
 }
 
+fn is_subagent_capability_catalog_item(item: &ConversationItem) -> bool {
+    let ConversationItem::User(user) = item else {
+        return false;
+    };
+    user.synthetic_reason == Some(sampling_types::SyntheticReason::SystemReminder)
+        && user.content.iter().any(|part| {
+            matches!(
+                part,
+                sampling_types::conversation::ContentPart::Text { text }
+                    if text.contains("<subagent-capability-catalog>")
+            )
+        })
+}
+
+fn remove_stale_subagent_capability_catalog(
+    conversation: &mut Vec<ConversationItem>,
+    inherited_prefix_len: &mut Option<usize>,
+) {
+    let prefix_len = inherited_prefix_len.unwrap_or_default();
+    let mut index = 0usize;
+    let mut removed_from_prefix = 0usize;
+    conversation.retain(|item| {
+        let remove = is_subagent_capability_catalog_item(item);
+        if remove && index < prefix_len {
+            removed_from_prefix += 1;
+        }
+        index += 1;
+        !remove
+    });
+    if let Some(len) = inherited_prefix_len {
+        *len = len.saturating_sub(removed_from_prefix);
+    }
+}
+
+fn install_subagent_capability_catalog(
+    conversation: &mut Vec<ConversationItem>,
+    inherited_prefix_len: &mut Option<usize>,
+    prompt: String,
+) {
+    remove_stale_subagent_capability_catalog(conversation, inherited_prefix_len);
+    // Capability state is live-session metadata, never inherited conversation.
+    // Insert immediately after the preserved prefix so verbatim forks retain an
+    // exact provider-cache prefix and resumes cannot persist this catalog.
+    let insert_at = inherited_prefix_len
+        .unwrap_or(conversation.len())
+        .min(conversation.len());
+    conversation.insert(insert_at, ConversationItem::system_reminder(prompt));
+}
+
+#[cfg(test)]
+mod capability_catalog_restore_tests {
+    use super::*;
+
+    #[test]
+    fn stale_catalog_is_removed_and_prefix_len_is_repaired() {
+        let mut conversation = vec![
+            ConversationItem::system("system"),
+            ConversationItem::system_reminder(
+                "<subagent-capability-catalog>old</subagent-capability-catalog>",
+            ),
+            ConversationItem::user("continue"),
+        ];
+        let mut prefix_len = Some(2);
+
+        remove_stale_subagent_capability_catalog(&mut conversation, &mut prefix_len);
+
+        assert_eq!(conversation.len(), 2);
+        assert_eq!(prefix_len, Some(1));
+        assert!(!conversation.iter().any(is_subagent_capability_catalog_item));
+    }
+
+    #[test]
+    fn fresh_catalog_is_outside_verbatim_inherited_prefix() {
+        let mut conversation = vec![
+            ConversationItem::system("parent system"),
+            ConversationItem::user("parent turn"),
+        ];
+        let mut prefix_len = Some(conversation.len());
+
+        install_subagent_capability_catalog(
+            &mut conversation,
+            &mut prefix_len,
+            "<subagent-capability-catalog>fresh</subagent-capability-catalog>".to_owned(),
+        );
+
+        assert_eq!(prefix_len, Some(2));
+        assert!(matches!(&conversation[0], ConversationItem::System(_)));
+        assert!(matches!(&conversation[1], ConversationItem::User(_)));
+        assert!(is_subagent_capability_catalog_item(&conversation[2]));
+    }
+}
+
 fn restored_plan_artifact_is_valid(
     session_dir: &std::path::Path,
     snapshot: &crate::session::behavior::BehaviorSnapshot,
@@ -475,7 +567,6 @@ pub(crate) async fn spawn_session_actor(
         tools::implementations::grow_build::scheduler::types::SchedulerHandle,
     >,
     max_turns: Option<usize>,
-    forked_tool_override: Option<Vec<ToolSpec>>,
 ) -> Result<
     (
         SessionHandle,
@@ -1111,6 +1202,9 @@ pub(crate) async fn spawn_session_actor(
             .and_then(|r| r.scheduler_background_loops),
     );
     let managed_gateway_tool_client = None;
+    let inherited_mcp_eligibility = parent_mcp_pool
+        .as_ref()
+        .map(crate::session::mcp_servers::SharedMcpPool::eligibility);
     let mcp_state = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
         if let Some(ref pool) = parent_mcp_pool {
@@ -1135,6 +1229,7 @@ pub(crate) async fn spawn_session_actor(
         }
         Arc::new(TokioMutex::new(state))
     };
+    let tool_metadata_snapshot = Arc::new(std::sync::Mutex::new(Default::default()));
     let rebuild_spec = std::sync::Arc::new(crate::session::agent_rebuild::AgentRebuildSpec {
         working_directory: tool_context.cwd.as_path().to_path_buf(),
         terminal_backend: terminal_backend.clone(),
@@ -1192,6 +1287,8 @@ pub(crate) async fn spawn_session_actor(
             None
         },
     });
+    let pending_interactions: crate::session::pending_interaction::PendingInteractions =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let agent = rebuild_spec
         .build_agent_with_initial_overrides(
             agent_definition,
@@ -1210,6 +1307,49 @@ pub(crate) async fn spawn_session_actor(
             );
             e
         })?;
+    let subagent_capabilities = if startup_hints.is_subagent {
+        let initial_mode = agent
+            .definition()
+            .capability_mode
+            .unwrap_or(tool_types::SubagentCapabilityMode::All);
+        let state = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+            agent.tool_bridge(),
+            agent
+                .definition()
+                .authored_capability_tools
+                .as_ref()
+                .unwrap_or(&agent.definition().tool_config),
+            initial_mode,
+            inherited_mcp_eligibility,
+            mcp_state.lock().await.shared_client_ids(),
+        )
+        .await;
+        let backend = crate::session::subagent_capability::ShellToolAccessGrantBackend {
+            state: state.clone(),
+            permissions: permissions.clone(),
+            request_mode: startup_hints.subagent_permission_mode.unwrap_or_default(),
+            session_id: session_info.id.0.to_string(),
+            acp_session_id: session_info.id.clone(),
+            execution_cwd: std::path::PathBuf::from(session_info.cwd.as_str()),
+            subagent_type: startup_hints.subagent_type.clone(),
+            subagent_description: startup_hints.subagent_description.clone(),
+            mcp_tool_metadata: tool_metadata_snapshot.clone(),
+            pending_interactions: pending_interactions.clone(),
+            gateway: gateway.clone(),
+            followup_messages: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        };
+        agent
+            .tool_bridge()
+            .update_resource(
+                tools::implementations::grow_build::request_tool_access::ToolAccessGrantBackendResource(
+                    Arc::new(backend),
+                ),
+            )
+            .await;
+        Some(state)
+    } else {
+        None
+    };
     let selected_behavior = behavior.lock().behavior();
     let selected_behavior_unavailable = match selected_behavior {
         tool_types::BehaviorId::Plan => agent
@@ -1276,6 +1416,18 @@ pub(crate) async fn spawn_session_actor(
         startup_hints.preserve_inherited_system,
         &system_prompt,
     );
+    if let Some(capabilities) = &subagent_capabilities {
+        install_subagent_capability_catalog(
+            &mut conversation,
+            &mut startup_hints.inherited_prefix_len,
+            format!(
+                "<{}>\n{}\n</{}>",
+                crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
+                capabilities.native_catalog_prompt(),
+                crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
+            ),
+        );
+    }
     if !startup_hints.preserve_inherited_system
         && !conversation_has_project_instructions(&conversation)
         && let Some(agents_md_reminder) = agent.agents_md_user_reminder()
@@ -1336,8 +1488,6 @@ pub(crate) async fn spawn_session_actor(
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| session_info.cwd.clone());
     let current_prompt_id = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let pending_interactions: crate::session::pending_interaction::PendingInteractions =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let permissions_for_handle = permissions.clone();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let mut sampler_config_initial = sampling_config.clone();
@@ -1702,7 +1852,7 @@ pub(crate) async fn spawn_session_actor(
         file_state_tracker,
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints,
-        forked_tool_override,
+        subagent_capabilities,
         compaction: super::compaction_config::CompactionConfig {
             lease: Default::default(),
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
@@ -1806,7 +1956,7 @@ pub(crate) async fn spawn_session_actor(
         workflow_manager: workflow_manager.clone(),
         workflow_launch_tx: workflow_launch_tx.clone(),
         managed_mcp_handle,
-        tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
+        tool_metadata_snapshot,
         mcp_announced_servers: Mutex::new(
             persisted_announcement_state
                 .as_ref()
@@ -1948,9 +2098,10 @@ pub(crate) async fn spawn_session_actor(
             .await;
     }
     session.inject_deny_read_globs().await;
-    if session.permissions.is_auto_mode() {
-        session.wire_permission_auto_llm_classifier().await;
-    }
+    // The primary may be in Ask while globally configured subagents use Auto;
+    // the wiring method resolves both cases and keeps the classifier on the
+    // primary model/config rather than the child's model.
+    session.wire_permission_auto_llm_classifier().await;
     session
         .agent
         .borrow()
@@ -2344,7 +2495,6 @@ pub(crate) async fn spawn_session_on_thread(
         tools::implementations::grow_build::scheduler::types::SchedulerHandle,
     >,
     max_turns: Option<usize>,
-    forked_tool_override: Option<Vec<ToolSpec>>,
 ) -> Result<
     (
         SessionHandle,
@@ -2490,7 +2640,6 @@ pub(crate) async fn spawn_session_on_thread(
                         parent_terminal_backend,
                         parent_scheduler_handle,
                         max_turns,
-                        forked_tool_override,
                     )
                     .await
                     {

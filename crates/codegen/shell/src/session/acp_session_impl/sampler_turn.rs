@@ -47,18 +47,37 @@ impl SessionActor {
     pub(super) async fn prepare_tool_definitions(&self) -> Vec<ToolDefinition> {
         self.prepare_tool_definitions_timed().await.0
     }
-    /// The exact tool specs a turn sends, BEFORE the turn-specific
-    /// structured-output append. Single source of truth shared by the turn
-    /// (`acp_session_impl/turn.rs`) and the `SnapshotToolDefinitions` handler, so
-    /// a verbatim-fork child's tool prefix can never silently drift from what the
-    /// parent turn actually sends. `defs` is the already-resolved tool list
-    /// (`prepare_tool_definitions_*`).
+    /// The exact tool specs a turn sends before the turn-specific
+    /// structured-output append. `defs` is the already-resolved tool list from
+    /// `prepare_tool_definitions_*`.
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
         defs.iter().cloned().map(ToolSpec::from).collect()
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
+        if self
+            .subagent_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.take_mcp_eligibility_change())
+        {
+            self.register_shared_client_tools().await;
+        }
         let bridge = self.agent.borrow().tool_bridge().clone();
+        if let Some(capabilities) = &self.subagent_capabilities {
+            if capabilities.activate_pending() {
+                self.push_system_reminder_with_tag(
+                    &capabilities.native_catalog_prompt(),
+                    crate::session::subagent_capability::CAPABILITY_CATALOG_TAG,
+                );
+            }
+        }
         let mut defs = bridge.tool_definitions_builtins_only().await;
+        if let Some(capabilities) = &self.subagent_capabilities {
+            defs.retain(|definition| {
+                bridge
+                    .tool_kind(&definition.function.name)
+                    .is_some_and(|kind| capabilities.allows_kind(kind))
+            });
+        }
         let delegated_goal_context = bridge
             .read_resource::<tools::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
             .await
@@ -373,22 +392,23 @@ impl SessionActor {
     /// `Send` permission actor). Heuristic runs only when the side-query
     /// errors or returns unparseable text.
     pub(crate) async fn wire_permission_auto_llm_classifier(self: &Arc<Self>) {
-        if !self.permissions.is_auto_mode() {
-            return;
-        }
         if self.permissions.has_llm_side_query() {
             return;
         }
+        if self.startup_hints.is_subagent {
+            tracing::warn!(
+                session_id = %self.session_info.id,
+                "subagent auto permission classifier was not wired by the primary session"
+            );
+            return;
+        }
+        // The shared primary permission actor also classifies independent
+        // child `auto` requests while the primary UI remains in `ask`. Wiring
+        // is cheap; inference only happens when an auto request arrives.
         let auto_cfg = crate::util::config::resolve_auto_mode_config_from_disk();
-        let session_model = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
         let aux_classifier_sampler = match auto_cfg.classifier_model.as_deref() {
-            Some(slug) => self.resolve_auto_classifier_sampler(slug).await,
-            None => None,
+            Some(slug) => self.resolve_auto_classifier_sampler(slug).await.map(Some),
+            None => Ok(None),
         };
         let (prompt_type, classifier_reasoning_effort) =
             crate::util::config::auto_mode_classifier_defaults(&auto_cfg);
@@ -402,8 +422,8 @@ impl SessionActor {
             while let Some((messages, respond_to)) = rx.recv().await {
                 let result = async {
                     let (sampling_client, model) = match &aux_classifier_sampler {
-                        Some((client, model)) => (client.clone(), model.clone()),
-                        None => {
+                        Ok(Some((client, model))) => (client.clone(), model.clone()),
+                        Ok(None) => {
                             let client =
                                 session.prepare_chat_completion(false).await.map_err(|e| {
                                     workspace::permission::ClassifierFailure::TransportError(
@@ -417,6 +437,11 @@ impl SessionActor {
                                 .map(|c| c.model)
                                 .unwrap_or_default();
                             (client, model)
+                        }
+                        Err(reason) => {
+                            return Err(workspace::permission::ClassifierFailure::TransportError(
+                                reason.clone(),
+                            ));
                         }
                     };
                     let session_id = session.session_info.id.to_string();
@@ -489,26 +514,28 @@ impl SessionActor {
     /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,
     /// stamping session-local auth/attribution like image-describe (which relies
     /// on the resolver, not a config override, for `base_url`/`api_backend` so
-    /// credentials stay consistent). `None` ⇒ caller falls back to the session
-    /// client + model.
+    /// credentials stay consistent). Once a classifier model is configured,
+    /// resolution/build failure is terminal for that classifier request; it
+    /// must not silently switch to the session model.
     async fn resolve_auto_classifier_sampler(
         &self,
         slug: &str,
-    ) -> Option<(sampler::SamplingClient, String)> {
+    ) -> Result<(sampler::SamplingClient, String), String> {
         let active_session_config = self.reconstruct_full_config().await;
-        let mut cfg = self.resolve_aux_sampler_config(slug).await?;
+        let mut cfg = self
+            .resolve_aux_sampler_config(slug)
+            .await
+            .ok_or_else(|| format!("configured auto classifier model `{slug}` is unavailable"))?;
         crate::agent::config::stamp_session_local_sampler_fields(
             &mut cfg,
             &active_session_config,
             Some(self.max_retries),
         );
         let model = cfg.model.clone();
-        let client = sampler::SamplingClient::new(cfg)
-            .map_err(|e| {
-                tracing::warn!(error = %e, "auto classifier aux sampler build failed; using session model")
-            })
-            .ok()?;
-        Some((client, model))
+        let client = sampler::SamplingClient::new(cfg).map_err(|error| {
+            format!("configured auto classifier model `{slug}` could not be initialized: {error}")
+        })?;
+        Ok((client, model))
     }
     #[tracing::instrument(
         name = "session.prepare_chat_completion",

@@ -1062,6 +1062,9 @@ fn is_orchestration_projection_update(update: &super::SessionUpdate) -> bool {
                 &notification.update,
                 crate::extensions::notification::SessionUpdate::WorkflowUpdated { .. }
                     | crate::extensions::notification::SessionUpdate::GoalUpdated { .. }
+                    | crate::extensions::notification::SessionUpdate::SubagentSpawned { .. }
+                    | crate::extensions::notification::SessionUpdate::SubagentProgress { .. }
+                    | crate::extensions::notification::SessionUpdate::SubagentFinished { .. }
             )
     )
 }

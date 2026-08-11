@@ -13,11 +13,11 @@
 //!
 //! The tests cover the **inherited-handle** spawn shape, the only production
 //! subagent shape: the mvp-agent coordinator always passes
-//! `parent.permission_handle` (see `subagent_coordinator.rs`), so the ACP
-//! `request_permission` must carry the **parent** session id (that is what
-//! the pager routes on), the `PermissionEvent` must still record the
-//! subagent session id, and after approval the bash tool must actually
-//! execute.
+//! `parent.permission_handle` (see `subagent_coordinator.rs`), while every
+//! ACP `request_permission` carries the **requesting child** session id so
+//! the pager can route independent child interactions. The shared manager
+//! must still attribute the `PermissionEvent` to that child, and after
+//! approval the bash tool must actually execute.
 //!
 //! A second test pins the reject path: `reject-once` must not execute the
 //! command and must surface as `ToolLoop::PermissionReject`.
@@ -36,7 +36,7 @@ use super::{PersistenceMsg, ReplayBuffer, SessionActor, SessionEvent, ToolLoop};
 
 /// Subagent session id used by every test in this file.
 const SUBAGENT_SID: &str = "subagent-bash-perm-repro";
-/// Parent session id used by the inherited-handle test.
+/// Manager session id used by the inherited-handle test.
 const PARENT_SID: &str = "parent-bash-perm-repro";
 /// Bash command that is harmless to really execute in tests, yet must be
 /// prompted for: `sh -c …` is an opaque shell (bash_request_floor), so the
@@ -139,11 +139,10 @@ async fn make_subagent_fixture(
 
     // Real permission manager (ask mode) wired to the same gateway the actor
     // uses. The manager is the shared one the subagent INHERITS from its
-    // parent: `manager_session_id` is the PARENT session id (the id the
-    // pager matches as Root and routes the request on), while the subagent
-    // session id is attributed via `subagent_session_id` in the
-    // PermissionEvent. This is the only production spawn shape — the
-    // coordinator always passes `parent.permission_handle`.
+    // parent: `manager_session_id` is the parent session id, while each
+    // request carries its source child id in `PermissionRequestContext`.
+    // This is the only production spawn shape — the coordinator always
+    // passes `parent.permission_handle`.
     let cwd = AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
         .unwrap_or_else(|_| AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap());
     let (handle, permission_events) = spawn_permission_manager(
@@ -252,10 +251,9 @@ fn drain_permission_events(
     events
 }
 
-/// Suspicious point 1 (inherited-handle shape, the mvp-agent coordinator
-/// path): the ACP request must carry the PARENT session id (the id the pager
-/// matches as Root), the PermissionEvent must still record the subagent id,
-/// and an allow-once approval must execute the bash tool.
+/// In the inherited-handle shape used by the mvp-agent coordinator, the ACP
+/// request and PermissionEvent must both identify the requesting child, and
+/// an allow-once approval must execute the bash tool.
 #[tokio::test(flavor = "current_thread")]
 async fn subagent_inherited_handle_bash_approved_after_prompt_executes() {
     let local = tokio::task::LocalSet::new();
@@ -286,9 +284,8 @@ async fn subagent_inherited_handle_bash_approved_after_prompt_executes() {
                 assert_eq!(log.permission_requests.len(), 1);
                 assert_eq!(
                     log.permission_requests[0].session_id.0.as_ref(),
-                    PARENT_SID,
-                    "the inherited-handle request must carry the PARENT session id \
-                     (the id the pager matches as Root)"
+                    SUBAGENT_SID,
+                    "the inherited-handle request must carry the requesting child session id"
                 );
             }
             assert!(
@@ -317,8 +314,7 @@ async fn subagent_inherited_handle_bash_approved_after_prompt_executes() {
             assert_eq!(
                 event.subagent_session_id.as_deref(),
                 Some(SUBAGENT_SID),
-                "diagnostics must attribute the request to the subagent even though \
-                 the ACP request carries the parent id"
+                "diagnostics must attribute the request to the requesting child"
             );
         })
         .await;

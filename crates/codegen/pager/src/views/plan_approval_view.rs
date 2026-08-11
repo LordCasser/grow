@@ -22,6 +22,7 @@ pub struct PlanComment {
 }
 
 pub struct PlanApprovalViewState {
+    pub source_session_id: String,
     pub tool_call_id: String,
     pub plan_content: String,
     pub stashed_prompt: StashedPrompt,
@@ -43,6 +44,7 @@ impl PlanApprovalViewState {
         response_tx: tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>,
     ) -> Self {
         Self {
+            source_session_id: request.session_id.clone(),
             tool_call_id: request.tool_call_id,
             plan_content: request.plan_content,
             stashed_prompt,

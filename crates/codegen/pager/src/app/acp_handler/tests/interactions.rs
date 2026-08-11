@@ -21,13 +21,62 @@
     }
 
     #[test]
+    fn child_interaction_resolved_dismisses_child_owned_permission() {
+        let mut app = make_app_with_agent("sess-parent");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert("sess-child".into(), Box::new(make_agent(Some("sess-child"))));
+        let (root_msg, _root_rx) = make_permission_message("sess-parent");
+        let (child_msg, _child_rx) = make_permission_message("sess-child");
+        handle(root_msg, &mut app);
+        handle(child_msg, &mut app);
+        assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 1);
+        assert_eq!(
+            app.agents[&AgentId(0)].subagent_views["sess-child"]
+                .permission_queue
+                .len(),
+            1
+        );
+
+        let changed = handle_session_notification(
+            &interaction_resolved_ext("sess-child", "call-perm-1"),
+            &mut app,
+        );
+
+        assert!(changed, "dismissing the child permission must redraw");
+        let parent = &app.agents[&AgentId(0)];
+        let queue = &parent.permission_queue;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.front().unwrap().request.request.session_id.0.as_ref(),
+            "sess-parent",
+            "same tool-call id in the root session must remain queued"
+        );
+        assert!(
+            parent.subagent_views["sess-child"]
+                .permission_queue
+                .is_empty(),
+            "resolved child request must be removed from the child queue"
+        );
+    }
+
+    #[test]
     fn interaction_resolved_dismisses_matching_question() {
         use crate::views::question_view::QuestionViewState;
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             let stashed = agent.prompt.stash();
-            agent.question_view = Some(QuestionViewState::new("call-q".into(), vec![], stashed));
+            agent.question_view = Some(QuestionViewState::with_response_tx(
+                Some("sess-1".into()),
+                "call-q".into(),
+                vec![],
+                stashed,
+                None,
+                tools::implementations::grow_build::ask_user_question::AskUserQuestionMode::Default,
+            ));
         }
 
         let changed =
@@ -152,6 +201,68 @@
     }
 
     #[test]
+    fn sibling_child_questions_are_owned_independently() {
+        let mut app = make_app_with_agent("sess-parent");
+        {
+            let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+            parent
+                .subagent_views
+                .insert("child-a".into(), Box::new(make_agent(Some("child-a"))));
+            parent
+                .subagent_views
+                .insert("child-b".into(), Box::new(make_agent(Some("child-b"))));
+            parent.active_subagent = Some("child-a".into());
+        }
+
+        let ask = |session_id: &str, tool_call_id: &str| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "sessionId": session_id,
+                "toolCallId": tool_call_id,
+                "questions": [],
+                "mode": "default",
+            }))
+            .unwrap();
+            (
+                AcpClientMessage::ExtMethod(acp_transport::AcpArgs {
+                    request: acp::ExtRequest::new("grow/ask_user_question", raw.into()),
+                    response_tx: tx,
+                }),
+                rx,
+            )
+        };
+        let (ask_a, mut rx_a) = ask("child-a", "ask-a");
+        let (ask_b, mut rx_b) = ask("child-b", "ask-b");
+
+        assert!(
+            handle(ask_a, &mut app),
+            "fullscreen child A must redraw for its own question"
+        );
+        assert!(
+            !handle(ask_b, &mut app),
+            "background sibling B does not redraw child A"
+        );
+
+        let parent = &app.agents[&AgentId(0)];
+        assert_eq!(
+            parent.subagent_views["child-a"]
+                .question_view
+                .as_ref()
+                .map(|question| question.tool_call_id.as_str()),
+            Some("ask-a")
+        );
+        assert_eq!(
+            parent.subagent_views["child-b"]
+                .question_view
+                .as_ref()
+                .map(|question| question.tool_call_id.as_str()),
+            Some("ask-b")
+        );
+        assert!(rx_a.try_recv().is_err(), "sibling B must not cancel A");
+        assert!(rx_b.try_recv().is_err(), "both questions remain pending");
+    }
+
+    #[test]
     fn ask_user_question_unknown_session_parks_without_error() {
         // No local view for the session, and the active agent HAS a session_id
         // (so the race-window fallback does not fire). The reverse-request must
@@ -222,6 +333,67 @@
             }
             other => panic!("expected Selected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn child_permission_is_not_auto_approved_by_parent_yolo() {
+        let mut app = make_app_with_agent("sess-parent");
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        parent.session.yolo_mode = true;
+        parent.subagent_views.insert(
+            "sess-child".into(),
+            Box::new(make_agent(Some("sess-child"))),
+        );
+
+        let (msg, mut rx) = make_permission_message("sess-child");
+        let _affected = handle(msg, &mut app);
+
+        assert_eq!(
+            app.agents
+                .get(&AgentId(0))
+                .unwrap()
+                .subagent_views["sess-child"]
+                .permission_queue
+                .len(),
+            1
+        );
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "child ask must remain pending instead of inheriting parent YOLO"
+        );
+    }
+
+    #[test]
+    fn capability_permission_displays_target_and_purpose() {
+        let request = acp::RequestPermissionRequest::new(
+            acp::SessionId::new("sess-child"),
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new("call-capability"),
+                acp::ToolCallUpdateFields::new().kind(Some(acp::ToolKind::Other)),
+            ),
+            vec![],
+        )
+        .meta(
+            serde_json::json!({
+                "subagentCapabilityGrant": {
+                    "target": "native:execute",
+                    "purpose": "Run the focused parser regression tests"
+                }
+            })
+            .as_object()
+            .cloned(),
+        );
+
+        let (title, description, command) = build_permission_display(&request, None);
+        assert_eq!(title, "Grant subagent access to `native:execute`?");
+        assert_eq!(
+            description,
+            vec!["Purpose: Run the focused parser regression tests"]
+        );
+        assert!(command.is_none());
     }
 
     #[test]

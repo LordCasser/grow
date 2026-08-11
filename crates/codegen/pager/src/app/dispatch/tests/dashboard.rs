@@ -4180,6 +4180,7 @@ fn dashboard_permission_select_drops_stale_request() {
                 question: Some("q?".into()),
                 options: vec![("allow".into(), "Allow".into())],
                 request_id: Some(123),
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -4212,6 +4213,7 @@ fn dashboard_permission_select_for_missing_row_clears_peek() {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -4249,6 +4251,7 @@ fn dashboard_peek_reply_to_idle_agent_sends() {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -4299,6 +4302,7 @@ fn dashboard_peek_reply_to_running_agent_queues() {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -4351,6 +4355,7 @@ fn dashboard_peek_reply_with_image_sends_blocks() {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -4406,6 +4411,7 @@ fn dashboard_peek_reply_image_with_whitespace_survives_rewind_restore() {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -4476,6 +4482,7 @@ fn dashboard_peek_reply_with_image_queues_images() {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -4596,6 +4603,7 @@ fn dashboard_question_answer_sends_and_clears() {
     };
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     let qv = QuestionViewState::with_response_tx(
+        Some("test-session".to_owned()),
         "tc-1".to_string(),
         vec![question],
         StashedPrompt::default(),
@@ -4607,6 +4615,7 @@ fn dashboard_question_answer_sends_and_clears() {
     let effects = dispatch_dashboard_question_answer(
         &mut app,
         crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
+        "tc-1".to_string(),
         Some(1),
         String::new(),
     );
@@ -4647,6 +4656,7 @@ fn dashboard_question_answer_walks_multiple_questions() {
     };
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     let qv = QuestionViewState::with_response_tx(
+        Some("test-session".to_owned()),
         "tc-1".to_string(),
         vec![q1, q2],
         StashedPrompt::default(),
@@ -4667,7 +4677,13 @@ fn dashboard_question_answer_walks_multiple_questions() {
         d.peek = Some(p);
         d.peek_reply.set_text("stale draft");
     }
-    let effects = dispatch_dashboard_question_answer(&mut app, row.clone(), Some(1), String::new());
+    let effects = dispatch_dashboard_question_answer(
+        &mut app,
+        row.clone(),
+        "tc-1".to_string(),
+        Some(1),
+        String::new(),
+    );
     assert!(effects.is_empty());
     assert!(
         rx.try_recv().is_err(),
@@ -4678,7 +4694,13 @@ fn dashboard_question_answer_walks_multiple_questions() {
     let d = app.dashboard.as_ref().unwrap();
     assert_eq!(d.peek.as_ref().unwrap().selected_option, None);
     assert!(d.peek_reply.text().is_empty());
-    let effects = dispatch_dashboard_question_answer(&mut app, row, Some(0), String::new());
+    let effects = dispatch_dashboard_question_answer(
+        &mut app,
+        row,
+        "tc-1".to_string(),
+        Some(0),
+        String::new(),
+    );
     assert!(effects.is_empty());
     assert!(rx.try_recv().is_ok(), "ext-response sent after last answer");
     assert!(app.agents[&AgentId(0)].question_view.is_none());

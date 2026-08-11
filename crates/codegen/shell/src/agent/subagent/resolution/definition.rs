@@ -5,9 +5,9 @@ use agent::config::{AgentDefinition, IsolationMode};
 use agent::plugins::PluginRegistry;
 use std::collections::HashMap;
 use std::path::Path;
-use tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
+use tool_types::SubagentIsolationMode;
 use tools::implementations::grow_build::task::types::{
-    SubagentCapabilityModeExt, SubagentRuntimeOverrides, prune_orphaned_background_task_tools,
+    SubagentRuntimeOverrides, prune_orphaned_background_task_tools,
 };
 use tools::registry::types::ToolConfig;
 use tools::types::tool::ToolKind;
@@ -211,14 +211,7 @@ pub fn apply_definition_runtime_defaults(
 }
 /// Apply capability filtering and recursion depth to the exact production
 /// definition toolset.
-pub fn apply_child_tool_policy(
-    definition: &mut AgentDefinition,
-    capability_mode: Option<SubagentCapabilityMode>,
-    allow_nested_subagents: bool,
-) {
-    if let Some(mode) = capability_mode {
-        mode.filter_tool_config(&mut definition.tool_config);
-    }
+pub fn apply_child_tool_policy(definition: &mut AgentDefinition, allow_nested_subagents: bool) {
     if !allow_nested_subagents {
         definition
             .tool_config
@@ -228,9 +221,9 @@ pub fn apply_child_tool_policy(
     }
 }
 
-/// Restrict Goal-owned children to the immutable blackboard view. The
-/// capability-mode intersection runs first, but even `All` cannot grant an
-/// object mutation that the delegated Goal role does not own.
+/// Restrict Goal-owned children to the immutable blackboard view. Even an
+/// initial `All` grant cannot restore an object mutation the delegated Goal
+/// role does not own.
 pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition) {
     definition.tool_config.tools.retain(|tool| {
         tool.kind.is_some_and(|kind| {
@@ -273,12 +266,12 @@ mod tests {
         }
     }
     #[test]
-    fn builtin_explore_uses_production_read_only_toolset() {
+    fn builtin_explore_keeps_execute_latent_but_respects_depth() {
         let cwd = tempfile::tempdir().unwrap();
         let toggles = HashMap::new();
         let mut definition =
             resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
-        apply_child_tool_policy(&mut definition, None, false);
+        apply_child_tool_policy(&mut definition, false);
         let kinds: Vec<Option<ToolKind>> = definition
             .tool_config
             .tools
@@ -287,7 +280,11 @@ mod tests {
             .collect();
         assert!(kinds.contains(&Some(ToolKind::Read)));
         assert!(kinds.contains(&Some(ToolKind::Search)));
-        assert!(!kinds.contains(&Some(ToolKind::Execute)));
+        assert!(kinds.contains(&Some(ToolKind::Execute)));
+        assert!(!kinds.iter().any(|kind| matches!(
+            kind,
+            Some(ToolKind::Edit | ToolKind::Write | ToolKind::Delete | ToolKind::Move)
+        )));
         assert!(!kinds.contains(&Some(ToolKind::Task)));
     }
     #[test]

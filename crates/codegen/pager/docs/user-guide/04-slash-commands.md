@@ -271,13 +271,13 @@ Arguments are `set <objective> [--budget <tokens>]`, `edit <objective> [--budget
 
 ### `/deep-research [query]`
 
-Enter Deep Research Behavior. With no query it waits for the next non-empty message; with a query it immediately starts the private read-only research run. It plans bounded questions, gathers source evidence, cross-checks claims on independent verifier shards, and produces a terminal report for every outcome, including cancellation and runtime failure.
+Enter Deep Research Behavior. With no query it waits for the next non-empty message; with a query it immediately starts the private read-only research run. It plans bounded, domain-adaptive research axes, gathers traceable source evidence, and checks source support, independent corroboration, and material conflicts per finding. Its evidence strategy and report structure follow the research goal instead of a fixed paper template.
 
 ```
 /deep-research Compare the migration risks of PostgreSQL 17 and MySQL 9
 ```
 
-The command returns right away. While it runs, ordinary messages do not start another turn or a second research run. Use `/workflows` for status and `/workflow-run pause|resume|stop` for the owned runtime. The final report includes status, query, verified findings, evidence, limitations, and termination reason; natural completion returns the session to Normal. Deep Research is private and cannot be launched from `/workflow-run`.
+The command returns right away. While it runs, ordinary messages do not start another turn or a second research run. Use `/workflows` for status and `/workflow-run pause|resume|stop` for the owned runtime. Natural completion prints the investigation and verification summary, core conclusions, limitations, and the absolute path to a complete Markdown report. That artifact is coverage-driven rather than length- or section-driven, may use cited tables, Mermaid diagrams, or verified external images when useful, and includes the sources actually used. Cancellation, budget exhaustion, interruption, and runtime failure still produce a terminal report. Natural completion returns the session to Normal. Deep Research is private and cannot be launched from `/workflow-run`.
 
 ### `/workflow [prompt]`
 

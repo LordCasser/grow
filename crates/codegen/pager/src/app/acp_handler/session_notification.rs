@@ -167,7 +167,27 @@ pub(super) fn advance_reconnect_cursor(agent: &mut AgentView, meta: &mut Notific
 /// Routes by `session_id` so events for an inactive agent still mutate that
 /// agent's state. The redraw decision is gated on whether the matched agent
 /// is the currently visible one.
-pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+pub(crate) fn handle_session_notification(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    handle_session_notification_inner(notif, app, None)
+}
+
+/// Apply a descendant lifecycle replay to the root view that owns the durable
+/// parent→child metadata chain. Disk restoration already resolved ownership;
+/// routing it through the global session-id lookup again could select a
+/// separately opened copy of the same hidden child session.
+pub(crate) fn handle_descendant_lifecycle_replay(
+    notif: &acp::ExtNotification,
+    app: &mut AppView,
+    owner_agent_id: AgentId,
+) -> bool {
+    handle_session_notification_inner(notif, app, Some(owner_agent_id))
+}
+
+fn handle_session_notification_inner(
+    notif: &acp::ExtNotification,
+    app: &mut AppView,
+    forced_descendant_owner: Option<AgentId>,
+) -> bool {
     let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
         tracing::warn!("Failed to parse {}", notif.method.as_ref());
         return false;
@@ -187,7 +207,21 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         }
         _ => {}
     }
-    let matched = match find_session_match(app, &session_notif.session_id) {
+    let matched = match forced_descendant_owner
+        .filter(|owner| {
+            app.agents.get(owner).is_some_and(|agent| {
+                agent
+                    .subagent_views
+                    .contains_key(session_notif.session_id.0.as_ref())
+            })
+        })
+        .map(SessionMatch::Child)
+        .or_else(|| {
+            forced_descendant_owner
+                .is_none()
+                .then(|| find_session_match(app, &session_notif.session_id))
+                .flatten()
+        }) {
         Some(m) => m,
         None => {
             tracing::debug!(
@@ -204,25 +238,57 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         .agents
         .get_mut(&parent_id)
         .expect("find_session_match returned an existing AgentId");
-    if matches!(matched, SessionMatch::Child(_)) {
+    // Subagent lifecycle notifications are emitted on the immediate parent
+    // session. A nested spawn therefore arrives with a child envelope, but it
+    // must still update the top-level owner's flat descendant index so later
+    // grandchild permissions and lifecycle events can route by their real
+    // session id.
+    let descendant_lifecycle = matches!(
+        &session_notif.update,
+        GrowSessionUpdate::SubagentSpawned { .. }
+            | GrowSessionUpdate::SubagentProgress { .. }
+            | GrowSessionUpdate::SubagentFinished { .. }
+    );
+    if matches!(matched, SessionMatch::Child(_)) && !descendant_lifecycle {
         let child_sid: &str = session_notif.session_id.0.as_ref();
         let changed = handle_child_session_notification(session_notif.update, child_sid, agent);
         return changed && is_active;
     }
     let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
-    if drop_unexpected_replay(
-        agent,
-        &meta,
-        session_notif.session_id.0.as_ref(),
-        "grow/session/update",
-    ) {
+    let descendant_lifecycle_from_child =
+        matches!(matched, SessionMatch::Child(_)) && descendant_lifecycle;
+    if descendant_lifecycle_from_child
+        && meta.event_seq.is_some_and(|seq| {
+            agent
+                .subagent_views
+                .get(session_notif.session_id.0.as_ref())
+                .and_then(|parent_view| parent_view.last_applied_grow_event_seq)
+                .is_some_and(|last| seq <= last)
+        })
+    {
+        tracing::debug!(
+            session_id = session_notif.session_id.0.as_ref(),
+            event_seq = meta.event_seq,
+            "nested subagent lifecycle update dropped by parent-child highwater"
+        );
+        return false;
+    }
+    if !descendant_lifecycle_from_child
+        && drop_unexpected_replay(
+            agent,
+            &meta,
+            session_notif.session_id.0.as_ref(),
+            "grow/session/update",
+        )
+    {
         return false;
     }
     let is_workflow_update = matches!(
         session_notif.update,
         GrowSessionUpdate::WorkflowUpdated { .. }
     );
-    if !is_workflow_update
+    if !descendant_lifecycle_from_child
+        && !is_workflow_update
         && !meta.is_replay
         && meta.event_seq.is_some_and(|seq| {
             agent
@@ -301,6 +367,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             effective_context_source,
             resumed_from,
             capability_mode,
+            permission_mode,
+            effective_permission_mode,
             context_normalized,
             parent_prompt_id,
             workflow_run_id,
@@ -333,6 +401,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     context_source: effective_context_source.map(Arc::from),
                     resumed_from: resumed_from.map(Arc::from),
                     capability_mode: capability_mode.map(Arc::from),
+                    permission_mode: permission_mode.clone().map(Arc::from),
+                    effective_permission_mode: effective_permission_mode.clone().map(Arc::from),
                     workflow_run_id: workflow_run_id.clone().map(Arc::from),
                     context_normalized,
                     parent_prompt_id: parent_prompt_id.map(Arc::from),
@@ -383,8 +453,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 forked_from: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
-                yolo_mode: true,
-                auto_mode: false,
+                yolo_mode: effective_permission_mode.as_deref() == Some("always-approve"),
+                auto_mode: effective_permission_mode.as_deref() == Some("auto"),
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -975,7 +1045,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             }
         }
         GrowSessionUpdate::InteractionResolved { tool_call_id } => {
-            agent.dismiss_resolved_interaction(&tool_call_id)
+            agent.dismiss_resolved_interaction(root_session_id, &tool_call_id)
         }
         _ => {
             tracing::trace!(
@@ -1004,14 +1074,28 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         }
     }
     if let Some(agent) = app.agents.get_mut(&parent_id) {
-        if let Some(seq) = meta.event_seq
-            && !meta.is_replay
-            && !is_workflow_update
-        {
-            agent.last_applied_grow_event_seq = Some(seq);
-        }
-        if let Some(id) = meta.event_id {
-            agent.last_seen_event_id = Some(id);
+        if descendant_lifecycle_from_child {
+            if let Some(parent_view) = agent
+                .subagent_views
+                .get_mut(session_notif.session_id.0.as_ref())
+            {
+                if let Some(seq) = meta.event_seq {
+                    parent_view.last_applied_grow_event_seq = Some(seq);
+                }
+                if let Some(id) = meta.event_id {
+                    parent_view.last_seen_event_id = Some(id);
+                }
+            }
+        } else {
+            if let Some(seq) = meta.event_seq
+                && !meta.is_replay
+                && !is_workflow_update
+            {
+                agent.last_applied_grow_event_seq = Some(seq);
+            }
+            if let Some(id) = meta.event_id {
+                agent.last_seen_event_id = Some(id);
+            }
         }
     }
     if let Some(outcome) = terminal_outcome {
@@ -1032,6 +1116,14 @@ pub(super) fn handle_child_session_notification(
     agent: &mut AgentView,
 ) -> bool {
     match update {
+        GrowSessionUpdate::InteractionResolved { tool_call_id } => {
+            // Interactive state is owned by the concrete child AgentView so
+            // fullscreen input and sibling sessions remain independent.
+            agent
+                .subagent_views
+                .get_mut(child_sid)
+                .is_some_and(|child| child.dismiss_resolved_interaction(child_sid, &tool_call_id))
+        }
         GrowSessionUpdate::AutoCompactStarted { .. }
         | GrowSessionUpdate::AutoCompactCompleted { .. }
         | GrowSessionUpdate::AutoCompactFailed { .. }

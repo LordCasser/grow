@@ -1692,6 +1692,8 @@ fn notification_subagent_spawned_includes_resumed_from() {
         effective_context_source: Some("resumed".into()),
         context_normalized: false,
         capability_mode: None,
+        permission_mode: None,
+        effective_permission_mode: None,
         persona: Some("implementer".into()),
         role: None,
         model: None,
@@ -1714,6 +1716,8 @@ fn notification_subagent_spawned_includes_resumed_from() {
         effective_context_source: Some("new".into()),
         context_normalized: false,
         capability_mode: None,
+        permission_mode: None,
+        effective_permission_mode: None,
         persona: None,
         role: None,
         model: None,
@@ -2430,19 +2434,10 @@ fn resolve_inherited_pool_missing_parent_returns_none() {
     );
     assert!(result.is_none());
 }
-/// Plugin agents must still inherit the parent pool under default
-/// `mcpInheritance: all`. The product rule is: plugins cannot *declare*
-/// mcpServers, but they do inherit already-connected parent servers.
+/// Plugin agents inherit the same parent-qualified pool as every other child.
+/// Child-owned mcpServers are ignored for all subagent sources.
 #[test]
 fn plugin_agents_inherit_parent_mcp_pool_by_default() {
-    assert!(
-            !super::agent_owned_mcp_servers_allowed(true),
-            "plugin agents must not declare agent-owned mcpServers"
-        );
-    assert!(
-            super::agent_owned_mcp_servers_allowed(false),
-            "non-plugin agents may declare agent-owned mcpServers"
-        );
     let pool = make_pool(&["atlassian", "github"]);
     let inherited = super::resolve_inherited_mcp_pool(
             Some(pool),

@@ -1010,6 +1010,37 @@ fn subagents_config_default_enabled() {
     });
 }
 #[test]
+fn subagents_permission_mode_defaults_to_auto() {
+    let config: SubagentsConfig = toml::from_str("").unwrap();
+    assert_eq!(
+        config.permission_mode,
+        workspace::permission::types::RequestPermissionMode::Auto
+    );
+}
+#[test]
+fn subagents_permission_modes_parse() {
+    use workspace::permission::types::RequestPermissionMode;
+    for (raw, expected) in [
+        ("ask", RequestPermissionMode::Ask),
+        ("auto", RequestPermissionMode::Auto),
+        ("always-approve", RequestPermissionMode::AlwaysApprove),
+        ("follow", RequestPermissionMode::Follow),
+    ] {
+        let config: SubagentsConfig =
+            toml::from_str(&format!("permission_mode = \"{raw}\"\n")).unwrap();
+        assert_eq!(config.permission_mode, expected, "mode={raw}");
+    }
+}
+#[test]
+fn subagents_invalid_permission_mode_fails_fast() {
+    let error = toml::from_str::<SubagentsConfig>("permission_mode = \"silent\"\n")
+        .expect_err("unknown permission modes must be rejected");
+    assert!(error.to_string().contains("unknown variant"));
+    let raw: toml::Value =
+        toml::from_str("[subagents]\npermission_mode = \"silent\"\n").unwrap();
+    assert!(crate::agent::config::Config::new_from_toml_cfg(&raw).is_err());
+}
+#[test]
 fn subagents_max_depth_defaults_to_one() {
     assert_eq!(
             SubagentsConfig::resolve_max_depth(None, None, None),

@@ -60,7 +60,7 @@ fn set_yolo_mode_on_drains_permission_queue_with_allow_once() {
     // option for the test to exercise the happy path.
     let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
     let request = acp::RequestPermissionRequest::new(
-        acp::SessionId::new(Arc::from("test-sess")),
+        acp::SessionId::new(Arc::from("test-session")),
         acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from("tc-1")),
             acp::ToolCallUpdateFields::default(),
@@ -172,20 +172,92 @@ fn permission_select_clears_double_click_tracker_for_next_prompt() {
 }
 
 #[test]
-fn drain_permission_queue_clears_double_click_tracker() {
+fn drain_root_permission_queue_clears_double_click_tracker() {
     let mut app = test_app_with_agent();
     let _rx = enqueue_permission_with_enable_always_approve(&mut app);
 
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.last_permission_click = Some((Instant::now(), 1));
 
-    drain_permission_queue(agent);
+    drain_root_permission_queue(agent);
 
     assert!(agent.permission_queue.is_empty());
     assert!(
         agent.last_permission_click.is_none(),
         "turn-end/turn-cancel drain must invalidate the armed click"
     );
+}
+
+#[test]
+fn root_turn_drain_preserves_child_permission() {
+    let mut app = test_app_with_agent();
+    let mut response_rx = enqueue_permission_with_enable_always_approve(&mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent
+        .permission_queue
+        .front_mut()
+        .unwrap()
+        .request
+        .request
+        .session_id = acp::SessionId::new("child-session");
+
+    drain_root_permission_queue(agent);
+
+    assert_eq!(agent.permission_queue.len(), 1);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+}
+
+#[test]
+fn draining_root_request_behind_child_preserves_front_followup_state() {
+    let mut app = test_app_with_agent();
+    let _child_rx = enqueue_permission_with_enable_always_approve(&mut app);
+    let _root_rx = enqueue_permission_with_enable_always_approve(&mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let child = agent.permission_queue.front_mut().unwrap();
+    child.request.request.session_id = acp::SessionId::new("child-session");
+    child.focus = crate::views::permission_view::PermissionFocus::FollowupInput;
+    agent.prompt.set_text("child feedback draft");
+    agent.last_permission_click = Some((Instant::now(), child.id));
+
+    drain_root_permission_queue(agent);
+
+    assert_eq!(agent.permission_queue.len(), 1);
+    assert_eq!(
+        agent.permission_queue.front().unwrap().focus,
+        crate::views::permission_view::PermissionFocus::FollowupInput
+    );
+    assert_eq!(agent.prompt.text(), "child feedback draft");
+    assert!(agent.last_permission_click.is_some());
+}
+
+#[test]
+fn enabling_parent_yolo_preserves_queued_child_ask() {
+    let mut app = test_app_with_agent();
+    let mut response_rx = enqueue_permission_with_enable_always_approve(&mut app);
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .permission_queue
+        .front_mut()
+        .unwrap()
+        .request
+        .request
+        .session_id = acp::SessionId::new("child-session");
+
+    let _ = dispatch(
+        Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
+        &mut app,
+    );
+
+    assert!(app.agents[&AgentId(0)].session.is_yolo());
+    assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 1);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
 }
 
 /// Regression: answering a permission whose requester has already

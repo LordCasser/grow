@@ -497,12 +497,25 @@ impl AcpPrompter {
         &self,
         access: &AccessKind,
     ) -> IndexMap<acp::PermissionOptionId, acp::PermissionOption> {
+        self.build_options_for_request(access, true)
+    }
+
+    fn build_options_for_request(
+        &self,
+        access: &AccessKind,
+        allow_global_mode_toggle: bool,
+    ) -> IndexMap<acp::PermissionOptionId, acp::PermissionOption> {
         let mut base = self.build_options_inner(access);
         // Gate off: strip the granular always-allow rows (order-preserving).
         if !self.remember_tool_approvals {
             for id in REMEMBER_TOOL_APPROVALS_GATED_IDS {
                 base.shift_remove(&acp::PermissionOptionId::new(*id));
             }
+        }
+        // Capability grants are child-local and ephemeral. Do not offer the
+        // primary-session "enable always-approve" control from this prompt.
+        if !allow_global_mode_toggle || matches!(access, AccessKind::CapabilityGrant { .. }) {
+            return base;
         }
         // Prepend the "enable always-approve mode" option as position 0
         // for client types that wire the option id through to their YOLO
@@ -532,7 +545,7 @@ impl AcpPrompter {
         }
     }
 
-    /// Request `_meta`: bash selection scope, or protected-edit description for Edit.
+    /// Request `_meta`: access-specific context rendered by capable clients.
     fn permission_request_meta(
         &self,
         access: &AccessKind,
@@ -540,6 +553,16 @@ impl AcpPrompter {
     ) -> Option<acp::Meta> {
         if let Some(bash) = self.bash_selection_meta(access) {
             return Some(bash);
+        }
+        if let AccessKind::CapabilityGrant { target, purpose } = access {
+            return serde_json::json!({
+                "subagentCapabilityGrant": {
+                    "target": target,
+                    "purpose": purpose,
+                }
+            })
+            .as_object()
+            .cloned();
         }
         let reason = protected_edit?;
         let payload = crate::permission::ProtectedEditPermission::from_reason(reason);
@@ -694,6 +717,26 @@ impl AcpPrompter {
                     | ClientType::Extension => self.fallback_options.clone(),
                 }
             }
+            AccessKind::CapabilityGrant { .. } => {
+                let mut options = IndexMap::new();
+                options.insert(
+                    acp::PermissionOptionId::new("allow-once"),
+                    acp::PermissionOption::new(
+                        "allow-once",
+                        "Grant for this subagent session".to_owned(),
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                );
+                options.insert(
+                    acp::PermissionOptionId::new("reject-once"),
+                    acp::PermissionOption::new(
+                        "reject-once",
+                        REJECT_ONCE_LABEL.to_owned(),
+                        acp::PermissionOptionKind::RejectOnce,
+                    ),
+                );
+                options
+            }
             _ => self.fallback_options.clone(),
         }
     }
@@ -704,11 +747,26 @@ impl AcpPrompter {
         tool_call_update: &acp::ToolCallUpdate,
         protected_edit: Option<crate::permission::ProtectedEditReason>,
     ) -> PromptOutcome {
-        let tool_name = tool_name_for_access(access);
+        self.request_for_session(access, tool_call_update, protected_edit, None)
+            .await
+    }
 
-        let permission_options = self.build_options(access);
+    pub async fn request_for_session(
+        &self,
+        access: &AccessKind,
+        tool_call_update: &acp::ToolCallUpdate,
+        protected_edit: Option<crate::permission::ProtectedEditReason>,
+        request_session_id: Option<&str>,
+    ) -> PromptOutcome {
+        let tool_name = tool_name_for_access(access);
+        let session_id = request_session_id
+            .map(|id| acp::SessionId::new(id.to_owned()))
+            .unwrap_or_else(|| self.session_id.clone());
+
+        let child_request = request_session_id.is_some_and(|id| id != self.session_id.0.as_ref());
+        let permission_options = self.build_options_for_request(access, !child_request);
         let req = acp::RequestPermissionRequest::new(
-            self.session_id.clone(),
+            session_id.clone(),
             tool_call_update.clone(),
             permission_options.values().cloned().collect(),
         )
@@ -731,7 +789,7 @@ impl AcpPrompter {
             }
             Err(_) => {
                 tracing::warn!(
-                    session_id = %self.session_id.0,
+                    session_id = %session_id.0,
                     tool = %tool_name,
                     timeout_secs = self.prompt_timeout.as_secs(),
                     "permission request timed out"
@@ -754,6 +812,7 @@ pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::Bash(_) => "run_terminal_command".to_owned(),
         AccessKind::MCPTool { name, .. } => format!("mcp:{name}"),
         AccessKind::WebFetch(_) => "web_fetch".to_owned(),
+        AccessKind::CapabilityGrant { .. } => "request_tool_access".to_owned(),
     }
 }
 
@@ -1499,6 +1558,49 @@ mod tests {
         );
         let outcome = prompter.request(&access, &tool_call_update, None).await;
         assert!(matches!(outcome, PromptOutcome::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn capability_request_routes_to_child_session_with_context() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let prompter = AcpPrompter::new(
+            acp::SessionId::new(Arc::from("parent-session")),
+            GatewaySender::new(tx),
+            ClientType::Generic,
+            Duration::from_secs(5),
+        );
+        let access = AccessKind::CapabilityGrant {
+            target: "native:Execute".to_owned(),
+            purpose: "Run focused tests".to_owned(),
+        };
+        let update = acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc-capability")),
+            acp::ToolCallUpdateFields::default(),
+        );
+        let mut request =
+            Box::pin(prompter.request_for_session(&access, &update, None, Some("child-session")));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let acp_transport::AcpClientMessage::RequestPermission(args) =
+            rx.try_recv().expect("permission request must be sent")
+        else {
+            panic!("expected permission request");
+        };
+        assert_eq!(args.session_id.0.as_ref(), "child-session");
+        let meta = args.meta.as_ref().expect("capability context metadata");
+        assert_eq!(
+            meta.get("subagentCapabilityGrant")
+                .and_then(|value| value.get("purpose"))
+                .and_then(|value| value.as_str()),
+            Some("Run focused tests")
+        );
+        args.response_tx
+            .send(Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    "allow-once",
+                )),
+            )))
+            .unwrap();
+        assert!(matches!(request.await, PromptOutcome::AllowOnce));
     }
 
     fn timeout_test_request() -> (AccessKind, acp::ToolCallUpdate) {

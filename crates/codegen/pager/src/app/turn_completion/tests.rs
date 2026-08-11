@@ -409,7 +409,11 @@ fn push_synthetic_permission(
         tokio::sync::oneshot::channel::<Result<acp::RequestPermissionResponse, acp::Error>>();
     let request = acp_transport::AcpArgs {
         request: acp::RequestPermissionRequest::new(
-            acp::SessionId::new(std::sync::Arc::from("sess-1")),
+            agent
+                .session
+                .session_id
+                .clone()
+                .expect("synthetic permission requires a session id"),
             acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(std::sync::Arc::from("tc-1")),
                 acp::ToolCallUpdateFields::default(),

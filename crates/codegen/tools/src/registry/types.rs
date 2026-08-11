@@ -651,6 +651,7 @@ impl ToolRegistryBuilder {
         b.register_with_params::<grow_build::WebFetchTool, grow_build::web_fetch::WebFetchParams>();
         b.register::<grow_build::LspTool>();
         b.register::<grow_build::PlanControlTool>();
+        b.register::<grow_build::RequestToolAccessTool>();
         b.register_with_params::<
                 grow_build::AskUserQuestionTool,
                 grow_build::ask_user_question::AskUserQuestionParams,

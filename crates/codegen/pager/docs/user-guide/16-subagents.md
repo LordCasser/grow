@@ -46,7 +46,8 @@ enabled = false
 When the main agent identifies work to delegate, it calls the `spawn_subagent` tool to start a child session. The child runs with:
 
 - Its own context window, independent of the parent
-- A toolset determined by its agent type and optional capability mode
+- A hard-eligible toolset determined by its authored preset/additional tools, session policy, depth, and MCP inheritance; runtime-injected native tools do not enlarge requestable Execute/ReadWrite eligibility
+- A child-local current grant set seeded by its capability mode
 - Optional persona instructions applied during resolution
 
 The parent receives the child's output -- usually a summary -- when the child finishes.
@@ -60,7 +61,7 @@ The `spawn_subagent` tool accepts a `subagent_type` parameter that selects the c
 | Type              | Description                                          |
 | ----------------- | ---------------------------------------------------- |
 | `general-purpose` | Default type. Full-capability agent for any task.    |
-| `explore`         | Research agent. Searches, reads, greps, and runs shell commands, but does not edit files. Use it for codebase investigation. |
+| `explore`         | Research agent. Starts with search/read/grep and can request shell execution when needed, but cannot request edits. Use it for codebase investigation. |
 | `plan`            | Planning agent. Explores the codebase and produces a structured implementation plan; does not edit files. |
 
 Project- or user-defined agents can add new types or shadow these built-ins by name.
@@ -148,7 +149,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `description`     | A short label for the task (3-5 words).                          |
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
 | `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `false`. |
-| `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
+| `capability_mode` | Initial capability grant: `read-only`, `read-write`, `execute`, or `all`. An explicit spawn value overrides the Agent definition default. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
 | `resume_from`     | Continue a completed subagent's conversation. Pass its subagent ID. |
 | `cwd`             | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed child inherits its source's directory). |
@@ -159,16 +160,36 @@ When you run a subagent in the background, retrieve its result later with `get_c
 
 ## Capability Modes
 
-A capability mode is an optional, coarse filter on a subagent's tools:
+A capability mode is the subagent's initial grant inside its hard-eligible toolset:
 
 | Mode         | Read | Write | Execute | Description                                  |
 | ------------ | ---- | ----- | ------- | -------------------------------------------- |
-| `read-only`  | Yes  | No    | No      | Read, search, and inspect (including inherited MCP and LSP tools); no file edits or shell. |
+| `read-only`  | Yes  | No    | No      | Read, search, inspect, and discover eligible MCP tools; no file edits, shell, or MCP server grant. |
 | `read-write` | Yes  | Yes   | No      | Read, plus create, edit, delete, and move files. No shell. |
 | `execute`    | Yes  | No    | Yes     | Read, plus run shell commands and background tasks. No file edits. |
-| `all`        | Yes  | Yes   | Yes     | Unrestricted tool access.                    |
+| `all`        | Yes  | Yes   | Yes     | Every capability remaining inside the hard eligibility ceiling. |
 
-If you omit `capability_mode`, the subagent uses its agent type's toolset. The built-in `explore` and `plan` types read, search, and run shell commands but cannot edit files; `general-purpose` ships the full toolset.
+If you omit `capability_mode`, the Agent definition supplies the initial mode. The built-in `explore` starts read-only but is eligible to request shell execution when its assigned investigation requires it; `general-purpose` starts with its definition's full toolset.
+
+Restricted capabilities are hidden from model tool definitions. A child can call `request_tool_access` for one eligible target at a time:
+
+```json
+{
+  "target": { "type": "native", "capability": "execute" },
+  "purpose": "Run the repository's focused parser tests to validate the finding"
+}
+```
+
+Native targets are `execute` (shell execution and its lifecycle controls) and `read-write` (edit, write, delete, and move). MCP access is requested by server:
+
+```json
+{
+  "target": { "type": "mcp_server", "server": "github" },
+  "purpose": "Inspect the issue referenced by the assigned review"
+}
+```
+
+The result is `granted`, `already_granted`, `denied`, or `unavailable`. `unavailable` means the target is outside the Agent's hard ceiling and does not open an approval prompt. A grant lasts only for that live child: it is not persisted, inherited by descendants, copied to siblings, or restored by recreating/resuming a child. Granting a capability only makes its tools visible on the next model sample; every actual Shell, edit, or MCP call is authorized again by the permission manager.
 
 ---
 
@@ -185,7 +206,9 @@ The new subagent inherits the source's transcript, tool state, and model; its sy
 
 ### MCP inheritance
 
-Subagents inherit the parent session’s **already-connected** MCP servers by default. That includes local stdio/HTTP servers and plugin-sourced agents (for example `my-plugin:reviewer`). The child discovers and calls those tools with `search_tool` / `use_tool` the same way the parent does.
+Subagents inherit the parent session’s **already-connected and enabled** MCP server catalog by default. That includes local stdio/HTTP servers and plugin-sourced agents (for example `my-plugin:reviewer`). Inheritance establishes eligibility, not authorization: `search_tool` shows each eligible result's server and whether it is `granted` or `requires_grant`; the child requests one server and then calls its tools through `use_tool`. The concrete MCP call still receives a second permission decision.
+
+The inherited ceiling stays live. If the parent disables/removes a server or hides a concrete tool, every descendant immediately fails the search/use eligibility check even if it previously received a server grant. Directory changes are reconciled into the existing child bridge at the next sampling boundary and surfaced through the normal MCP reminder update.
 
 Control inheritance with agent frontmatter `mcpInheritance`:
 
@@ -232,6 +255,22 @@ Grow manages worktrees through the `grow/git/worktree/*` extension methods, incl
 ---
 
 ## Configuration
+
+### Permission Mode
+
+All subagent levels use one global decision route for both capability grants and eventual tool calls:
+
+```toml
+[subagents]
+permission_mode = "auto" # auto | ask | always-approve | follow
+```
+
+- `auto` (default) uses the primary session's permission classifier chain. `[auto_mode].classifier_model` wins when configured; otherwise Grow uses the primary session's current model, never the child's model. Capability grants always require an LLM verdict rather than the ordinary safe-command fast path. A timeout or unavailable classifier falls back to user approval.
+- `ask` routes approval to the real child session UI and shows its Agent type, task, target, and purpose.
+- `always-approve` uses the same managed-policy clamps as the primary Always Approve mode.
+- `follow` reads the primary session's current mode for every request. It follows only the decision mode, not the primary session's remembered grants.
+
+An “Always allow” choice made for an actual child tool call is child-session memory only. It does not write project permission state or affect the parent, siblings, descendants, or a newly created child. Static permission rules and managed policy still apply globally.
 
 ### Per-Type Toggles and Model Overrides
 
@@ -320,7 +359,7 @@ Use `q`, `Esc`, or click the close button to pop back to the parent view. The pa
 
 ## Depth Limits
 
-Only the top-level session spawns subagents. A subagent cannot spawn its own subagents: the maximum nesting depth is one. If a subagent calls `spawn_subagent`, the call fails with a depth-limit error. This keeps the agent tree flat and prevents runaway spawning.
+`[subagents].max_depth` controls recursive spawning (`1` keeps the tree flat; larger values permit descendants). The Task tool is removed at the configured boundary. Dynamic capability grants cannot restore it or bypass Goal/Workflow ownership rules.
 
 ---
 

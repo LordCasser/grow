@@ -340,8 +340,13 @@ pub struct McpState {
     pub meta_config_map: McpMetaConfigMap,
     /// Clients owned by this session; cleared on config changes.
     pub owned_clients: HashMap<McpServerName, Arc<McpClient>>,
-    /// Clients inherited from parent via `SharedMcpPool`; never cleared by config changes.
+    /// Clients inherited from parent via `SharedMcpPool`; rebound in-place when
+    /// the live parent transport authority changes.
     pub shared_clients: HashMap<McpServerName, Arc<McpClient>>,
+    /// Parent-authority incarnation for each inherited client. A name match is
+    /// insufficient: replacing an MCP config under the same server name must
+    /// invalidate the old transport held by a child.
+    pub shared_client_ids: HashMap<McpServerName, u64>,
     /// The session's in-process SDK MCP servers + their shared invoker/overrides; `None`
     /// when the session has none. See [`AcpMcpRegistry`]. Kept out of `configs` (the closed
     /// `acp::McpServer` enum) so it survives `update_configs` clears.
@@ -403,6 +408,226 @@ pub struct McpState {
     /// dropping `tools/list_changed`, `Ready`, and `HandshakeFailed`
     /// emits for them. Read access is via [`Self::client_event_tx`].
     client_event_tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>,
+    /// Live parent-session transport and eligibility authority published to
+    /// inherited subagents. Both membership and client incarnation are checked
+    /// at discovery and dispatch boundaries.
+    eligibility: McpEligibilityAuthority,
+    /// Upstream hard ceiling when this session itself inherited MCP clients.
+    /// Descendants retain the whole chain, so a root revocation reaches every
+    /// depth without waiting for intermediate agents to sample.
+    inherited_eligibility: Option<Arc<SharedMcpEligibility>>,
+}
+
+#[derive(Default)]
+struct McpEligibilitySnapshot {
+    generation: u64,
+    clients: HashMap<McpServerName, Arc<McpClient>>,
+    qualified_tools: std::collections::HashSet<String>,
+}
+
+impl std::fmt::Debug for McpEligibilitySnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let client_ids: std::collections::BTreeMap<_, _> = self
+            .clients
+            .iter()
+            .map(|(name, client)| (name, client.client_id()))
+            .collect();
+        f.debug_struct("McpEligibilitySnapshot")
+            .field("generation", &self.generation)
+            .field("client_ids", &client_ids)
+            .field("qualified_tools", &self.qualified_tools)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+enum McpServerScope {
+    #[default]
+    All,
+    Only(Arc<std::collections::HashSet<McpServerName>>),
+    Except(Arc<std::collections::HashSet<McpServerName>>),
+}
+
+impl McpServerScope {
+    fn allows(&self, server: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(servers) => servers.contains(server),
+            Self::Except(servers) => !servers.contains(server),
+        }
+    }
+
+    fn restrict_to(&mut self, servers: std::collections::HashSet<McpServerName>) {
+        let allowed = match self {
+            Self::All => servers,
+            Self::Only(current) => current.intersection(&servers).cloned().collect(),
+            Self::Except(excluded) => servers.difference(excluded).cloned().collect(),
+        };
+        *self = Self::Only(Arc::new(allowed));
+    }
+
+    fn exclude(&mut self, servers: std::collections::HashSet<McpServerName>) {
+        match self {
+            Self::All => *self = Self::Except(Arc::new(servers)),
+            Self::Only(current) => {
+                *self = Self::Only(Arc::new(current.difference(&servers).cloned().collect()));
+            }
+            Self::Except(current) => {
+                *self = Self::Except(Arc::new(current.union(&servers).cloned().collect()));
+            }
+        }
+    }
+}
+
+/// Live, non-persisted MCP hard-eligibility authority owned by a session.
+#[derive(Debug, Clone, Default)]
+pub struct McpEligibilityAuthority(Arc<std::sync::RwLock<McpEligibilitySnapshot>>);
+
+impl McpEligibilityAuthority {
+    pub fn replace(
+        &self,
+        clients: HashMap<McpServerName, Arc<McpClient>>,
+        qualified_tools: std::collections::HashSet<String>,
+    ) {
+        let mut snapshot = self.0.write().expect("MCP eligibility lock poisoned");
+        let same_clients = snapshot.clients.len() == clients.len()
+            && clients.iter().all(|(name, client)| {
+                snapshot
+                    .clients
+                    .get(name)
+                    .is_some_and(|current| current.client_id() == client.client_id())
+            });
+        if same_clients && snapshot.qualified_tools == qualified_tools {
+            return;
+        }
+        snapshot.generation = snapshot.generation.wrapping_add(1);
+        snapshot.clients = clients;
+        snapshot.qualified_tools = qualified_tools;
+    }
+
+    fn replace_clients(&self, clients: HashMap<McpServerName, Arc<McpClient>>) {
+        let qualified_tools = self
+            .0
+            .read()
+            .expect("MCP eligibility lock poisoned")
+            .qualified_tools
+            .clone();
+        self.replace(clients, qualified_tools);
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.0
+            .read()
+            .expect("MCP eligibility lock poisoned")
+            .generation
+    }
+
+    pub fn contains_server(&self, server: &str) -> bool {
+        self.0
+            .read()
+            .expect("MCP eligibility lock poisoned")
+            .clients
+            .contains_key(server)
+    }
+
+    pub fn contains_tool(&self, qualified_tool: &str) -> bool {
+        self.0
+            .read()
+            .expect("MCP eligibility lock poisoned")
+            .qualified_tools
+            .contains(qualified_tool)
+    }
+
+    fn client(&self, server: &str) -> Option<Arc<McpClient>> {
+        self.0
+            .read()
+            .expect("MCP eligibility lock poisoned")
+            .clients
+            .get(server)
+            .cloned()
+    }
+
+    fn clients(&self) -> Vec<(McpServerName, Arc<McpClient>)> {
+        self.0
+            .read()
+            .expect("MCP eligibility lock poisoned")
+            .clients
+            .iter()
+            .map(|(name, client)| (name.clone(), Arc::clone(client)))
+            .collect()
+    }
+}
+
+/// Child-specific view of a parent's live authority, narrowed by the
+/// inheritance filter fixed at spawn.
+#[derive(Debug, Clone)]
+pub struct SharedMcpEligibility {
+    authority: McpEligibilityAuthority,
+    scope: McpServerScope,
+    upstream: Option<Arc<SharedMcpEligibility>>,
+}
+
+impl SharedMcpEligibility {
+    pub fn generation(&self) -> u64 {
+        self.authority.generation().wrapping_add(
+            self.upstream
+                .as_deref()
+                .map_or(0, SharedMcpEligibility::generation),
+        )
+    }
+
+    pub fn contains_server(&self, server: &str) -> bool {
+        self.current_client(server).is_some()
+    }
+
+    pub fn contains_tool(&self, qualified_tool: &str) -> bool {
+        let Some((_, server, _)) = parse_mcp_qualified_name(qualified_tool) else {
+            return false;
+        };
+        self.current_client(server).is_some()
+            && self.authority.contains_tool(qualified_tool)
+            && self
+                .upstream
+                .as_deref()
+                .is_none_or(|upstream| upstream.contains_tool(qualified_tool))
+    }
+
+    /// Current transport visible through the entire inheritance chain. An
+    /// immediate parent's stale client is rejected when an upstream parent has
+    /// replaced the same server name with a different client incarnation.
+    pub fn current_client(&self, server: &str) -> Option<Arc<McpClient>> {
+        if !self.scope.allows(server) {
+            return None;
+        }
+        let client = self.authority.client(server)?;
+        if let Some(upstream) = self.upstream.as_deref() {
+            let upstream_client = upstream.current_client(server)?;
+            if upstream_client.client_id() != client.client_id() {
+                return None;
+            }
+        }
+        Some(client)
+    }
+
+    pub fn current_clients(&self) -> Vec<(McpServerName, Arc<McpClient>, u64)> {
+        self.authority
+            .clients()
+            .into_iter()
+            .filter_map(|(server, client)| {
+                let current = self.current_client(&server)?;
+                (current.client_id() == client.client_id()).then_some((
+                    server,
+                    client.clone(),
+                    client.client_id(),
+                ))
+            })
+            .collect()
+    }
+
+    pub fn binding_is_current(&self, server: &str, client_id: u64) -> bool {
+        self.current_client(server)
+            .is_some_and(|client| client.client_id() == client_id)
+    }
 }
 
 impl McpState {
@@ -416,6 +641,7 @@ impl McpState {
             meta_config_map,
             owned_clients: HashMap::new(),
             shared_clients: HashMap::new(),
+            shared_client_ids: HashMap::new(),
             acp_mcp: None,
             init_progress: InitProgress::default(),
             generation: 0,
@@ -425,6 +651,8 @@ impl McpState {
             mcp_server_scopes: std::collections::HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
             client_event_tx: None,
+            eligibility: McpEligibilityAuthority::default(),
+            inherited_eligibility: None,
         }
     }
 
@@ -871,37 +1099,85 @@ impl McpState {
         )
     }
 
+    fn current_client_map(&self) -> HashMap<McpServerName, Arc<McpClient>> {
+        self.all_clients()
+            .map(|(name, client)| (name.clone(), Arc::clone(client)))
+            .collect()
+    }
+
+    pub fn publish_eligibility(&self, qualified_tools: std::collections::HashSet<String>) {
+        self.eligibility
+            .replace(self.current_client_map(), qualified_tools);
+    }
+
+    fn publish_transports(&self) {
+        self.eligibility.replace_clients(self.current_client_map());
+    }
+
     /// Import shared clients from a parent pool snapshot.
     /// Clients whose name collides with an agent-definition-owned server
     /// are skipped (the owned server takes priority).
     pub fn import_shared_clients(&mut self, pool: &SharedMcpPool) {
+        self.inherited_eligibility = Some(Arc::new(pool.eligibility()));
+        self.reconcile_inherited_clients();
+    }
+
+    /// Rebind inherited clients to the immediate parent's current transport
+    /// incarnations. Returns the server names present before or after the
+    /// reconciliation so callers can unregister stale bridge definitions.
+    pub fn reconcile_inherited_clients(&mut self) -> std::collections::HashSet<McpServerName> {
+        let mut touched: std::collections::HashSet<_> =
+            self.shared_clients.keys().cloned().collect();
+        let desired = self
+            .inherited_eligibility
+            .as_deref()
+            .map(SharedMcpEligibility::current_clients)
+            .unwrap_or_default();
         let config_names: std::collections::HashSet<&str> =
             self.configs.iter().map(mcp_server_name).collect();
-        for (name, client) in &pool.clients {
-            if !config_names.contains(name.as_str()) {
-                self.shared_clients.insert(name.clone(), Arc::clone(client));
+
+        self.shared_clients.clear();
+        self.shared_client_ids.clear();
+        for (name, client, client_id) in desired {
+            if config_names.contains(name.as_str()) {
+                continue;
             }
+            touched.insert(name.clone());
+            self.shared_client_ids.insert(name.clone(), client_id);
+            self.shared_clients.insert(name, client);
         }
+        touched
+    }
+
+    pub fn shared_client_ids(&self) -> HashMap<McpServerName, u64> {
+        self.shared_client_ids.clone()
     }
 }
 
-/// Snapshot of an MCP connection pool, taken at subagent spawn time.
+/// Snapshot of MCP transports, paired with a live parent eligibility authority.
 ///
 /// The HashMap is cloned (cheap — values are `Arc<McpClient>`), so the
 /// subagent's map is independent of the parent's. The `Arc<McpClient>`
 /// entries are shared — both parent and child use the same transport.
-/// This is intentionally snapshot-based, not live-updating.
+/// The client `Arc`s are snapshot-based; authorization membership/tool
+/// visibility remains live through `eligibility`.
 #[derive(Clone)]
 pub struct SharedMcpPool {
     clients: HashMap<McpServerName, Arc<McpClient>>,
     configs: Vec<acp::McpServer>,
     meta_config_map: McpMetaConfigMap,
+    eligibility: McpEligibilityAuthority,
+    scope: McpServerScope,
+    upstream_eligibility: Option<Arc<SharedMcpEligibility>>,
 }
 
 impl SharedMcpPool {
     /// Create a snapshot from an existing `McpState`.
     /// Captures both owned and shared clients (deduped — owned wins).
     pub fn from_state(state: &McpState) -> Self {
+        // Snapshot construction is also a publication boundary. This keeps
+        // transport identity current even when a server has zero visible tools.
+        state.publish_transports();
         Self {
             clients: state
                 .all_clients()
@@ -909,6 +1185,9 @@ impl SharedMcpPool {
                 .collect(),
             configs: state.configs.clone(),
             meta_config_map: state.meta_config_map.clone(),
+            eligibility: state.eligibility.clone(),
+            scope: McpServerScope::All,
+            upstream_eligibility: state.inherited_eligibility.clone(),
         }
     }
 
@@ -936,6 +1215,26 @@ impl SharedMcpPool {
         &self.meta_config_map
     }
 
+    pub fn eligibility(&self) -> SharedMcpEligibility {
+        SharedMcpEligibility {
+            authority: self.eligibility.clone(),
+            scope: self.scope.clone(),
+            upstream: self.upstream_eligibility.clone(),
+        }
+    }
+
+    pub fn restrict_to_servers(&mut self, servers: impl IntoIterator<Item = McpServerName>) {
+        let servers: std::collections::HashSet<_> = servers.into_iter().collect();
+        self.scope.restrict_to(servers.clone());
+        self.clients.retain(|name, _| servers.contains(name));
+    }
+
+    pub fn exclude_servers(&mut self, servers: impl IntoIterator<Item = McpServerName>) {
+        let servers: std::collections::HashSet<_> = servers.into_iter().collect();
+        self.scope.exclude(servers.clone());
+        self.clients.retain(|name, _| !servers.contains(name));
+    }
+
     /// Retain only clients whose name satisfies `predicate`.
     ///
     /// Only filters the `clients` map. `configs` and `meta_config_map` are
@@ -943,7 +1242,13 @@ impl SharedMcpPool {
     /// filter those separately. In the subagent inheritance path this is
     /// fine because `import_shared_clients` only iterates `clients`.
     pub fn retain_clients(&mut self, predicate: impl Fn(&str) -> bool) {
-        self.clients.retain(|name, _| predicate(name));
+        let retained: std::collections::HashSet<_> = self
+            .clients
+            .keys()
+            .filter(|name| predicate(name))
+            .cloned()
+            .collect();
+        self.restrict_to_servers(retained);
     }
 }
 
@@ -1307,10 +1612,13 @@ impl tool_runtime::Tool for McpErasedTool {
 
     async fn run(
         &self,
-        _ctx: tool_runtime::ToolCallContext,
+        ctx: tool_runtime::ToolCallContext,
         raw: serde_json::Value,
     ) -> Result<ToolOutput, tool_runtime::ToolError> {
         let mcp_call_start = std::time::Instant::now();
+        let server = &self.tool.server_name;
+        let tool = &self.tool.name;
+        let qualified_name = format!("{}{}{}", server, MCP_TOOL_NAME_DELIMITER, tool);
         let client = {
             let state = self.tool.mcp_state.lock().await;
             let c = Arc::clone(state.get_client(&self.tool.server_name).ok_or_else(|| {
@@ -1321,10 +1629,11 @@ impl tool_runtime::Tool for McpErasedTool {
             })?);
             c
         };
-
-        let server = &self.tool.server_name;
-        let tool = &self.tool.name;
-        let qualified_name = format!("{}{}{}", server, MCP_TOOL_NAME_DELIMITER, tool);
+        tools::implementations::grow_build::request_tool_access::ensure_mcp_tool_granted(
+            &ctx,
+            &qualified_name,
+        )
+        .await?;
 
         let mut reconnect_attempted = false;
         let mut is_timeout = false;
@@ -4982,10 +5291,15 @@ mod tests {
         let mut pool_clients = HashMap::new();
         pool_clients.insert("github".to_string(), make_test_client("github"));
         pool_clients.insert("linear".to_string(), make_test_client("linear"));
+        let eligibility = McpEligibilityAuthority::default();
+        eligibility.replace_clients(pool_clients.clone());
         let pool = SharedMcpPool {
             clients: pool_clients,
             configs: vec![],
             meta_config_map: McpMetaConfigMap::new(),
+            eligibility,
+            scope: McpServerScope::All,
+            upstream_eligibility: None,
         };
 
         state.import_shared_clients(&pool);
@@ -4998,6 +5312,160 @@ mod tests {
             state.shared_clients.contains_key("linear"),
             "linear should be imported — no collision"
         );
+    }
+
+    #[test]
+    fn shared_pool_eligibility_is_live_and_tool_scoped() {
+        let mut state = McpState::new(vec![]);
+        state
+            .owned_clients
+            .insert("github".to_owned(), make_test_client("github"));
+        state.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned()
+        ]));
+        let pool = SharedMcpPool::from_state(&state);
+        let eligibility = pool.eligibility();
+        let mut child = McpState::new(vec![]);
+        child.import_shared_clients(&pool);
+        child.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned()
+        ]));
+        let descendant_eligibility = SharedMcpPool::from_state(&child).eligibility();
+        let generation = eligibility.generation();
+        assert!(eligibility.contains_server("github"));
+        assert!(eligibility.contains_tool("github__search"));
+        assert!(descendant_eligibility.contains_tool("github__search"));
+        assert!(!eligibility.contains_tool("github__write"));
+
+        state.publish_eligibility(std::collections::HashSet::new());
+        assert!(eligibility.generation() > generation);
+        assert!(eligibility.contains_server("github"));
+        assert!(!eligibility.contains_tool("github__search"));
+        assert!(!descendant_eligibility.contains_tool("github__search"));
+
+        state.owned_clients.clear();
+        state.publish_eligibility(std::collections::HashSet::new());
+        assert!(!eligibility.contains_server("github"));
+    }
+
+    #[test]
+    fn inherited_clients_rebind_by_incarnation_and_admit_live_additions() {
+        let mut parent = McpState::new(vec![]);
+        let original = make_test_client("github");
+        parent
+            .owned_clients
+            .insert("github".to_owned(), Arc::clone(&original));
+        parent.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned()
+        ]));
+
+        let pool = SharedMcpPool::from_state(&parent);
+        let mut child = McpState::new(vec![]);
+        child.import_shared_clients(&pool);
+        assert_eq!(
+            child.shared_client_ids.get("github").copied(),
+            Some(original.client_id())
+        );
+
+        let replacement = make_test_client("github");
+        parent
+            .owned_clients
+            .insert("github".to_owned(), Arc::clone(&replacement));
+        let linear = make_test_client("linear");
+        parent
+            .owned_clients
+            .insert("linear".to_owned(), Arc::clone(&linear));
+        parent.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned(),
+            "linear__list".to_owned(),
+        ]));
+
+        let inherited = child
+            .inherited_eligibility
+            .as_deref()
+            .expect("child has inherited authority");
+        assert_eq!(
+            inherited.current_client("github").unwrap().client_id(),
+            replacement.client_id()
+        );
+        assert!(inherited.contains_server("linear"));
+
+        child.reconcile_inherited_clients();
+        assert_eq!(
+            child.shared_client_ids.get("github").copied(),
+            Some(replacement.client_id())
+        );
+        assert_eq!(
+            child.shared_client_ids.get("linear").copied(),
+            Some(linear.client_id())
+        );
+        assert!(Arc::ptr_eq(
+            child.shared_clients.get("github").unwrap(),
+            &replacement
+        ));
+    }
+
+    #[test]
+    fn inheritance_scope_applies_to_servers_added_after_spawn() {
+        let mut parent = McpState::new(vec![]);
+        parent
+            .owned_clients
+            .insert("github".to_owned(), make_test_client("github"));
+        parent.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned()
+        ]));
+
+        let mut pool = SharedMcpPool::from_state(&parent);
+        pool.restrict_to_servers(["linear".to_owned()]);
+        let eligibility = pool.eligibility();
+        assert!(!eligibility.contains_server("github"));
+
+        parent
+            .owned_clients
+            .insert("linear".to_owned(), make_test_client("linear"));
+        parent.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned(),
+            "linear__list".to_owned(),
+        ]));
+
+        assert!(eligibility.contains_server("linear"));
+        assert!(eligibility.contains_tool("linear__list"));
+        assert!(!eligibility.contains_server("github"));
+    }
+
+    #[test]
+    fn descendant_fails_closed_until_immediate_parent_rebinds() {
+        let mut root = McpState::new(vec![]);
+        let original = make_test_client("github");
+        root.owned_clients
+            .insert("github".to_owned(), Arc::clone(&original));
+        root.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned()
+        ]));
+
+        let mut child = McpState::new(vec![]);
+        child.import_shared_clients(&SharedMcpPool::from_state(&root));
+        child.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned()
+        ]));
+        let descendant = SharedMcpPool::from_state(&child).eligibility();
+        assert!(descendant.contains_tool("github__search"));
+
+        let replacement = make_test_client("github");
+        root.owned_clients.insert("github".to_owned(), replacement);
+        root.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned()
+        ]));
+        assert!(
+            !descendant.contains_tool("github__search"),
+            "upstream incarnation mismatch must revoke descendants immediately"
+        );
+
+        child.reconcile_inherited_clients();
+        child.publish_eligibility(std::collections::HashSet::from([
+            "github__search".to_owned()
+        ]));
+        assert!(descendant.contains_tool("github__search"));
     }
 
     #[test]

@@ -67,6 +67,16 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
             }
         })
         .collect();
+    // Publish only classic MCP tools here. Managed gateway connectors have a
+    // separate transport and are not part of a child's inherited parent pool.
+    let parent_qualified_tools = mcp_tools
+        .iter()
+        .map(|tool| tool.qualified_name.clone())
+        .collect();
+    mcp_state
+        .lock()
+        .await
+        .publish_eligibility(parent_qualified_tools);
 
     let (gateway_catalog, mut gateway_connectors) = {
         let state = managed_mcp_handle.lock().await;

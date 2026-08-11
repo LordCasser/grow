@@ -253,6 +253,7 @@ system_prompt_label = "Grow"
 [subagents]
 enabled = true
 max_depth = 2                       # 1=仅主 Agent 可派生；2=允许一级子 Agent 再派生
+permission_mode = "auto"           # auto | ask | always-approve | follow
 
 [subagents.toggle]
 explore = true

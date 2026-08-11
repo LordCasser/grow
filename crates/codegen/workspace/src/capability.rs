@@ -101,6 +101,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::GoalReplanRequest,
     ToolKind::GoalLifecycleUpdate,
     ToolKind::Workflow,
+    ToolKind::CapabilityRequest,
     ToolKind::Other,
 ];
 
@@ -125,7 +126,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
 
     match kind {
         // Meta tools: always allowed.
-        Plan | PlanControl | AskUser | Skill | SearchTool => true,
+        Plan | PlanControl | AskUser | Skill | SearchTool | CapabilityRequest => true,
 
         GoalRead => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
         GoalProgressUpdate | GoalReplanRequest | GoalLifecycleUpdate => {

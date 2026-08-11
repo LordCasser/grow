@@ -1924,23 +1924,16 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::SnapshotMcpPool { respond_to } => {
                         let mcp_state = session.mcp_state.lock().await;
-                        let pool = if mcp_state.owned_clients.is_empty() && mcp_state.shared_clients.is_empty() {
-                            None
-                        } else {
-                            Some(crate::session::mcp_servers::SharedMcpPool::from_state(&mcp_state))
-                        };
-                        let _ = respond_to.send(pool);
+                        // Preserve the live authority even when the catalog is
+                        // empty at spawn. Otherwise a child created before a
+                        // parent server connects can never observe that later
+                        // eligible addition.
+                        let _ = respond_to.send(Some(
+                            crate::session::mcp_servers::SharedMcpPool::from_state(&mcp_state),
+                        ));
                     }
                     SessionCommand::SnapshotClientHooks { respond_to } => {
                         let _ = respond_to.send(session.client_hooks.borrow().clone());
-                    }
-                    SessionCommand::SnapshotToolDefinitions { respond_to } => {
-                        // Use the SAME helper the turn uses so the snapshot can
-                        // never drift from the parent turn's tool list. Excludes
-                        // the structured-output tool (the turn appends that later).
-                        let defs = session.prepare_tool_definitions_inner().await;
-                        let specs = session.turn_base_tool_specs(&defs);
-                        let _ = respond_to.send(specs);
                     }
                     SessionCommand::SetClientHooks { hooks } => {
                         *session.client_hooks.borrow_mut() = hooks;

@@ -177,12 +177,17 @@ impl SessionActor {
     /// The session's current permission mode. Behavior is intentionally
     /// independent and never masquerades as an approval policy.
     pub(super) fn permission_mode_label(&self) -> &'static str {
-        if self.permissions.is_yolo_mode() {
-            "bypassPermissions"
-        } else if self.permissions.is_auto_mode() {
-            "auto"
-        } else {
-            "default"
+        let request_mode = self
+            .startup_hints
+            .is_subagent
+            .then_some(self.startup_hints.subagent_permission_mode)
+            .flatten();
+        match self.permissions.effective_request_mode(request_mode) {
+            workspace::permission::types::EffectivePermissionMode::AlwaysApprove => {
+                "bypassPermissions"
+            }
+            workspace::permission::types::EffectivePermissionMode::Auto => "auto",
+            workspace::permission::types::EffectivePermissionMode::Ask => "default",
         }
     }
 

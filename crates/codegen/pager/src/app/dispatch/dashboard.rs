@@ -2222,6 +2222,24 @@ fn dispatch_dashboard_persist(app: &mut AppView) -> Vec<Effect> {
     vec![Effect::PersistDashboard(persisted)]
 }
 
+fn dashboard_row_view_mut<'a>(
+    agents: &'a mut indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    row: &crate::views::dashboard::DashboardRowId,
+) -> Option<&'a mut AgentView> {
+    match row {
+        crate::views::dashboard::DashboardRowId::TopLevel(id) => agents.get_mut(id),
+        crate::views::dashboard::DashboardRowId::Subagent {
+            parent,
+            child_session_id,
+        } => agents
+            .get_mut(parent)?
+            .subagent_views
+            .get_mut(child_session_id)
+            .map(|child| &mut **child),
+        crate::views::dashboard::DashboardRowId::Roster { .. } => None,
+    }
+}
+
 /// Answer a permission request from the
 /// dashboard peek panel without going through `PermissionSelect`,
 /// which only works when `active_view == Agent(_)`. Routes directly
@@ -2233,32 +2251,29 @@ pub(super) fn dispatch_dashboard_permission_select(
     request_id: usize,
     option_id: acp::PermissionOptionId,
 ) -> Vec<Effect> {
-    // Determine the owning AgentId.
-    let target_id = match &row {
-        crate::views::dashboard::DashboardRowId::TopLevel(id) => *id,
-        crate::views::dashboard::DashboardRowId::Subagent { parent, .. } => *parent,
-        crate::views::dashboard::DashboardRowId::Roster { .. } => return vec![],
-    };
-    let Some(agent) = app.agents.get_mut(&target_id) else {
+    let Some(agent) = dashboard_row_view_mut(&mut app.agents, &row) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
             d.set_error_toast("Row no longer exists");
         }
         return vec![];
     };
-    // Stale-snapshot guard.
-    let front_matches = agent
-        .permission_queue
-        .front()
-        .is_some_and(|p| p.id == request_id);
-    if !front_matches {
+    let row_session_id = agent.session.session_id.as_ref();
+    // Stale-snapshot guard. Each session owns its own queue, so request IDs
+    // cannot be consumed through a sibling/root row.
+    let permission_pos = agent.permission_queue.iter().position(|permission| {
+        permission.id == request_id
+            && row_session_id == Some(&permission.request.request.session_id)
+    });
+    let Some(permission_pos) = permission_pos else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
             d.set_error_toast("Permission has changed — re-open peek");
         }
         return vec![];
-    }
-    let Some(perm) = agent.permission_queue.pop_front() else {
+    };
+    let was_front = permission_pos == 0;
+    let Some(perm) = agent.permission_queue.remove(permission_pos) else {
         return vec![];
     };
 
@@ -2307,7 +2322,9 @@ pub(super) fn dispatch_dashboard_permission_select(
         .meta(meta),
     );
 
-    resolve_permission_queue_transition(agent);
+    if was_front {
+        resolve_permission_queue_transition(agent);
+    }
 
     // Refresh the peek (it likely no longer has a question).
     if let Some(d) = app.dashboard.as_mut() {
@@ -2329,31 +2346,27 @@ pub(super) fn dispatch_dashboard_permission_followup(
     request_id: usize,
     text: String,
 ) -> Vec<Effect> {
-    let target_id = match &row {
-        crate::views::dashboard::DashboardRowId::TopLevel(id) => *id,
-        crate::views::dashboard::DashboardRowId::Subagent { parent, .. } => *parent,
-        crate::views::dashboard::DashboardRowId::Roster { .. } => return vec![],
-    };
-    let Some(agent) = app.agents.get_mut(&target_id) else {
+    let Some(agent) = dashboard_row_view_mut(&mut app.agents, &row) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
             d.set_error_toast("Row no longer exists");
         }
         return vec![];
     };
-    // Stale-snapshot guard — the front request must still match.
-    let front_matches = agent
-        .permission_queue
-        .front()
-        .is_some_and(|p| p.id == request_id);
-    if !front_matches {
+    let row_session_id = agent.session.session_id.as_ref();
+    let permission_pos = agent.permission_queue.iter().position(|permission| {
+        permission.id == request_id
+            && row_session_id == Some(&permission.request.request.session_id)
+    });
+    let Some(permission_pos) = permission_pos else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
             d.set_error_toast("Permission has changed — re-open peek");
         }
         return vec![];
-    }
-    let Some(perm) = agent.permission_queue.pop_front() else {
+    };
+    let was_front = permission_pos == 0;
+    let Some(perm) = agent.permission_queue.remove(permission_pos) else {
         return vec![];
     };
     // Resolve with the RejectOnce option + feedback; cancel if the
@@ -2381,7 +2394,9 @@ pub(super) fn dispatch_dashboard_permission_followup(
         perm.request,
         acp::RequestPermissionResponse::new(outcome).meta(meta),
     );
-    resolve_permission_queue_transition(agent);
+    if was_front {
+        resolve_permission_queue_transition(agent);
+    }
     if let Some(d) = app.dashboard.as_mut() {
         d.set_peek(None);
     }
@@ -2396,21 +2411,31 @@ pub(super) fn dispatch_dashboard_permission_followup(
 pub(super) fn dispatch_dashboard_question_answer(
     app: &mut AppView,
     row: crate::views::dashboard::DashboardRowId,
+    tool_call_id: String,
     option_idx: Option<usize>,
     freeform: String,
 ) -> Vec<Effect> {
-    let target_id = match &row {
-        crate::views::dashboard::DashboardRowId::TopLevel(id) => *id,
-        crate::views::dashboard::DashboardRowId::Subagent { parent, .. } => *parent,
-        crate::views::dashboard::DashboardRowId::Roster { .. } => return vec![],
-    };
-    let Some(agent) = app.agents.get_mut(&target_id) else {
+    let Some(agent) = dashboard_row_view_mut(&mut app.agents, &row) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
             d.set_error_toast("Row no longer exists");
         }
         return vec![];
     };
+    let row_session_id = agent.session.session_id.as_ref().map(|id| id.0.as_ref());
+    let question_matches = agent.question_view.as_ref().is_some_and(|question| {
+        question.tool_call_id == tool_call_id
+            && (question.source_session_id.as_deref() == row_session_id
+                || (matches!(row, crate::views::dashboard::DashboardRowId::TopLevel(_))
+                    && question.source_session_id.is_none()))
+    });
+    if !question_matches {
+        if let Some(dashboard) = app.dashboard.as_mut() {
+            dashboard.set_peek(None);
+            dashboard.set_error_toast("Question has changed — re-open peek");
+        }
+        return vec![];
+    }
     match agent.dashboard_answer_question(option_idx, freeform) {
         // Whole form answered → close the peek.
         crate::app::agent_view::PeekAnswerOutcome::Submitted => {

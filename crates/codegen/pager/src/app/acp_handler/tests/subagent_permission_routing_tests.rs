@@ -4,11 +4,9 @@
 //! Task C contract tests for suspicious points 2 & 3 of the "subagent bash
 //! permission approved but tool does not execute" investigation:
 //!
-//! 1. A `request_permission` carrying the **child** session id (the shape a
-//!    subagent with its own permission manager emits) must be routed via
-//!    `subagent_views` to the PARENT agent's permission queue, carry the
-//!    subagent provenance label, and approving it must resolve that
-//!    request's response channel with the selected option.
+//! 1. A `request_permission` carrying the **child** session id is routed to
+//!    that child AgentView. This makes fullscreen render/input work and keeps
+//!    sibling child queues independent.
 //! 2. A request whose session id is neither a root agent nor a registered
 //!    child view is cancelled (never left dangling in a queue nobody can
 //!    answer).
@@ -21,11 +19,10 @@
 
 use super::*;
 
-/// A child-session permission request must queue on the PARENT agent (Child
-/// match through `subagent_views`), show subagent provenance, and the
-/// standard approval path must resolve the child's response channel.
+/// A child-session permission request must queue on the child view and the
+/// ordinary fullscreen approval path must resolve its response channel.
 #[test]
-fn child_permission_queues_on_parent_and_approval_resolves() {
+fn child_permission_queues_on_child_and_fullscreen_approval_resolves() {
     let mut app = make_app_with_agent("sess-parent");
     // Register the child view exactly as the SubagentSpawned notification
     // does (leader forwards it to the pager before any child activity).
@@ -44,6 +41,7 @@ fn child_permission_queues_on_parent_and_approval_resolves() {
             .contains_key("child-1"),
         "SubagentSpawned must register the child view"
     );
+    app.agents.get_mut(&AgentId(0)).unwrap().active_subagent = Some("child-1".into());
 
     let (msg, mut rx) = make_permission_message("child-1");
     let affected = handle(msg, &mut app);
@@ -52,25 +50,19 @@ fn child_permission_queues_on_parent_and_approval_resolves() {
         "a child permission for the active parent must request a redraw"
     );
 
-    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let parent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(parent.permission_queue.is_empty());
+    let agent = parent.subagent_views.get("child-1").unwrap();
     assert_eq!(
         agent.permission_queue.len(),
         1,
-        "the child request must queue on the PARENT agent's queue"
+        "the child request must queue on the child AgentView"
     );
     let queued = agent.permission_queue.front().unwrap();
     assert_eq!(
         queued.request.request.session_id.0.as_ref(),
         "child-1",
         "the queued request must be the child's (routing must not swap requests)"
-    );
-    let label = queued
-        .subagent_label
-        .as_deref()
-        .expect("a child permission must carry subagent provenance");
-    assert!(
-        label.contains("explore") && label.contains("scan src/"),
-        "provenance label must render tracked SubagentSpawned info, got {label:?}"
     );
     assert!(
         rx.try_recv().is_err(),
@@ -99,7 +91,9 @@ fn child_permission_queues_on_parent_and_approval_resolves() {
         ),
     }
     assert!(
-        app.agents.get(&AgentId(0)).unwrap().permission_queue.is_empty(),
+        app.agents[&AgentId(0)].subagent_views["child-1"]
+            .permission_queue
+            .is_empty(),
         "approval must pop the queue"
     );
 }

@@ -201,6 +201,10 @@ pub async fn dispatch_mcp_tool(
     tool_input: serde_json::Value,
     caller: &str,
 ) -> Result<ToolOutput, tool_runtime::ToolError> {
+    crate::implementations::grow_build::request_tool_access::ensure_mcp_tool_granted(
+        ctx, tool_name,
+    )
+    .await?;
     let tool_input = normalize_mcp_arguments(tool_input);
     let (gateway_source, gateway_client) = gateway_lookup(ctx, tool_name).await;
     let dispatch = ctx
@@ -480,6 +484,30 @@ mod tests {
         error: String,
     }
 
+    struct MutableGrantBackend {
+        granted: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::implementations::grow_build::request_tool_access::ToolAccessGrantBackend
+        for MutableGrantBackend
+    {
+        async fn request(
+            &self,
+            _input: crate::implementations::grow_build::request_tool_access::RequestToolAccessInput,
+            _tool_call_id: &str,
+        ) -> Result<
+            crate::implementations::grow_build::request_tool_access::RequestToolAccessOutput,
+            tool_runtime::ToolError,
+        > {
+            unreachable!("use_tool only reads grant state")
+        }
+
+        fn is_mcp_server_granted(&self, _server: &str) -> bool {
+            self.granted.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
     #[async_trait::async_trait]
     impl tool_runtime::ToolDispatch for ErrorToolDispatch {
         async fn call(
@@ -596,6 +624,43 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(err.detail.contains("bad__tool"));
+    }
+
+    #[tokio::test]
+    async fn rechecks_child_mcp_grant_immediately_before_dispatch() {
+        use crate::implementations::grow_build::request_tool_access::ToolAccessGrantBackendResource;
+        use crate::types::resources::Resources;
+
+        let granted = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut resources = Resources::new();
+        resources.insert(ToolAccessGrantBackendResource(Arc::new(
+            MutableGrantBackend {
+                granted: Arc::clone(&granted),
+            },
+        )));
+        let (ctx, captured_args) = ctx_capturing_with_resources(resources.into_shared());
+
+        // Models the inherited binding/grant being revoked while the ordinary
+        // MCP permission request was awaiting its decision.
+        granted.store(false, std::sync::atomic::Ordering::SeqCst);
+        let result = tool_runtime::Tool::run(
+            &UseTool,
+            ctx,
+            UseToolInput {
+                tool_name: "linear__save_issue".into(),
+                tool_input: serde_json::json!({"title": "must not dispatch"}),
+            },
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.details
+                .as_ref()
+                .and_then(|details| details["code"].as_str()),
+            Some("subagent_capability_revoked")
+        );
+        assert!(captured_args.lock().unwrap().is_none());
     }
 
     #[derive(Clone)]

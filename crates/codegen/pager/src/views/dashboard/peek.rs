@@ -75,6 +75,9 @@ pub struct PeekFields {
     pub question: Option<String>,
     pub options: Vec<(String, String)>,
     pub request_id: Option<usize>,
+    /// Stable AskUserQuestion interaction identity. The row identifies the
+    /// source session; this identifies the concrete tool call within it.
+    pub question_id: Option<String>,
     /// Index into `options` of the `RejectOnce` ("No") option, when the
     /// request has one. Selecting it lets the user type a free-text
     /// feedback message (mirrors the chat permission panel).
@@ -120,6 +123,7 @@ pub struct PeekPanelState {
     /// detect a stale answer when the front of the
     /// permission queue rotates between snapshot and key-press.
     pub request_id: Option<usize>,
+    pub question_id: Option<String>,
     /// Index into `options` of the `RejectOnce` ("No") option, when the
     /// pending request has one. When that option is highlighted the
     /// user can type a free-text feedback message (reusing the
@@ -172,6 +176,7 @@ impl PeekPanelState {
             question: fields.question,
             options: fields.options,
             request_id: fields.request_id,
+            question_id: fields.question_id,
             reject_option: fields.reject_option,
             // Vim: unfocused so row nav isn't stolen by the reply; non-vim: focused to type.
             focused: !crate::appearance::cache::load_vim_mode(),
@@ -187,12 +192,14 @@ impl PeekPanelState {
     }
 
     /// Refresh the display fields from a fresh [`compute_peek_fields`]
-    /// snapshot. Returns `true` when the peeked `row` CHANGED (the user
-    /// moved the selection cursor while the panel was open) so the
-    /// caller can clear the dashboard's `peek_reply` draft — a
-    /// half-typed reply must not be sent to the wrong agent.
+    /// snapshot. Returns `true` when either the row or the concrete pending
+    /// interaction changed so the caller can clear the dashboard's
+    /// `peek_reply` draft. A half-typed reply must never carry across to a
+    /// different request, even when it comes from the same session row.
     pub fn apply_fields(&mut self, row: DashboardRowId, fields: PeekFields) -> bool {
         let row_changed = row != self.row;
+        let interaction_changed =
+            self.request_id != fields.request_id || self.question_id != fields.question_id;
         if row_changed {
             self.row = row;
             // Vim: drop reply focus on row change so continued j/k isn't typed into the reply.
@@ -207,11 +214,12 @@ impl PeekPanelState {
         self.question = fields.question;
         // Reset the selected option when the pending request changes
         // (a new/rotated permission); otherwise keep the user's selection.
-        if self.request_id != fields.request_id {
+        if interaction_changed {
             self.selected_option = None;
         }
         self.options = fields.options;
         self.request_id = fields.request_id;
+        self.question_id = fields.question_id;
         self.reject_option = fields.reject_option;
         // Drop a stale selection that's now out of range.
         if let Some(i) = self.selected_option
@@ -220,7 +228,7 @@ impl PeekPanelState {
             self.selected_option = None;
         }
         // Focus/draft preserved on same-row live refreshes (row changes handled above).
-        row_changed
+        row_changed || interaction_changed
     }
 
     /// Whether the pending question is an agent `AskUserQuestion` (the Ask
@@ -228,7 +236,7 @@ impl PeekPanelState {
     /// `request_id` (their stale-guard id); ask questions don't. Drives
     /// the freeform placeholder and which answer action is emitted.
     pub fn is_ask_question(&self) -> bool {
-        self.question.is_some() && self.request_id.is_none()
+        self.question.is_some() && self.question_id.is_some()
     }
 }
 
@@ -238,6 +246,111 @@ impl PeekPanelState {
 /// exists, signalling the caller to close the peek. Extracted from the
 /// dashboard dispatcher so both the initial open and the per-frame
 /// refresh share one source of truth.
+fn pending_interaction_peek(
+    agent: &AgentView,
+    session_id: &str,
+    include_local_question: bool,
+) -> (
+    Option<String>,
+    Vec<(String, String)>,
+    Option<usize>,
+    Option<String>,
+    Option<usize>,
+) {
+    use crate::views::session_title::sanitize_display_text;
+
+    if let Some(p) = agent
+        .permission_queue
+        .iter()
+        .find(|p| p.request.request.session_id.0.as_ref() == session_id)
+    {
+        let mut q = sanitize_display_text(&p.title).into_owned();
+        let detail = p
+            .description
+            .iter()
+            .map(|line| sanitize_display_text(line).into_owned())
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if !detail.is_empty() {
+            q.push_str(" — ");
+            q.push_str(&detail);
+        }
+        let selected_words: Option<String> = p
+            .bash_highlights
+            .as_ref()
+            .filter(|_| p.bash_selection_count > 0)
+            .map(|h| h.highlighted_words[..p.bash_selection_count].join(" "));
+        let options = p
+            .options
+            .iter()
+            .map(|option| {
+                let name = crate::views::permission_view::option_label_for_selection(
+                    option,
+                    selected_words.as_deref(),
+                    p.mcp_scope.as_ref(),
+                );
+                (
+                    option.option_id.0.to_string(),
+                    sanitize_display_text(&name).into_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let reject = p.options.iter().position(|option| {
+            option.kind == agent_client_protocol::PermissionOptionKind::RejectOnce
+        });
+        return (Some(q), options, Some(p.id), None, reject);
+    }
+
+    let Some((qv, question)) = agent.question_view.as_ref().and_then(|qv| {
+        let belongs_to_session = qv.source_session_id.as_deref() == Some(session_id)
+            || (include_local_question && qv.source_session_id.is_none());
+        let supported = belongs_to_session
+            && qv.local_kind.is_none()
+            && !qv.questions.is_empty()
+            && qv
+                .questions
+                .iter()
+                .all(|question| !question.multi_select.unwrap_or(false));
+        supported
+            .then(|| {
+                qv.questions
+                    .get(qv.active_tab)
+                    .map(|question| (qv, question))
+            })
+            .flatten()
+    }) else {
+        return (None, Vec::new(), None, None, None);
+    };
+    let mut options: Vec<(String, String)> = question
+        .options
+        .iter()
+        .map(|option| {
+            let label = sanitize_display_text(&option.label).into_owned();
+            (label.clone(), label)
+        })
+        .collect();
+    let reject = if qv.no_freeform {
+        None
+    } else {
+        options.push(("__other__".to_string(), "Other".to_string()));
+        Some(options.len() - 1)
+    };
+    let n = qv.questions.len();
+    let text = if n > 1 {
+        format!("({}/{}) {}", qv.active_tab + 1, n, question.question)
+    } else {
+        question.question.clone()
+    };
+    (
+        Some(sanitize_display_text(&text).into_owned()),
+        options,
+        None,
+        Some(qv.tool_call_id.clone()),
+        reject,
+    )
+}
+
 pub fn compute_peek_fields(
     row: &DashboardRowId,
     agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
@@ -254,84 +367,9 @@ pub fn compute_peek_fields(
                 .last_active_at
                 .map(|t| crate::util::format_time_ago(now.saturating_duration_since(t)))
                 .unwrap_or_default();
-            // A pending permission takes the question slot; otherwise a
-            // single-question, single-select agent `AskUserQuestion`
-            // (ext, not a local pager dialog) is surfaced the same way —
-            // options + an "Other" free-text row. `request_id == Some`
-            // distinguishes a permission (with its stale-guard id) from
-            // an ask question (`None`).
-            let (question, options, request_id, reject_option) =
-                if let Some(p) = agent.permission_queue.front() {
-                    let q = sanitize_display_text(&p.title).into_owned();
-                    // Live scope-aware labels: the peek's answer path attaches
-                    // the same selection meta, so the label must match it.
-                    let selected_words: Option<String> = p
-                        .bash_highlights
-                        .as_ref()
-                        .filter(|_| p.bash_selection_count > 0)
-                        .map(|h| h.highlighted_words[..p.bash_selection_count].join(" "));
-                    let opts = p
-                        .options
-                        .iter()
-                        .map(|opt| {
-                            let name = crate::views::permission_view::option_label_for_selection(
-                                opt,
-                                selected_words.as_deref(),
-                                p.mcp_scope.as_ref(),
-                            );
-                            (
-                                opt.option_id.0.to_string(),
-                                sanitize_display_text(&name).into_owned(),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    // The `RejectOnce` option accepts free-text feedback.
-                    let reject = p.options.iter().position(|o| {
-                        o.kind == agent_client_protocol::PermissionOptionKind::RejectOnce
-                    });
-                    (Some(q), opts, Some(p.id), reject)
-                } else if let Some((qv, q)) = agent.question_view.as_ref().and_then(|qv| {
-                    // Ext (agent) ask whose questions are all
-                    // single-select. The peek walks through them one at
-                    // a time, surfacing the active question.
-                    let ok = qv.local_kind.is_none()
-                        && !qv.questions.is_empty()
-                        && qv
-                            .questions
-                            .iter()
-                            .all(|q| !q.multi_select.unwrap_or(false));
-                    ok.then(|| qv.questions.get(qv.active_tab).map(|q| (qv, q)))
-                        .flatten()
-                }) {
-                    let mut opts: Vec<(String, String)> = q
-                        .options
-                        .iter()
-                        .map(|o| {
-                            let label = sanitize_display_text(&o.label).into_owned();
-                            (label.clone(), label)
-                        })
-                        .collect();
-                    // The freeform "Other" row (unless suppressed) is the
-                    // free-text option, rendered like the permission reject row.
-                    let reject = if qv.no_freeform {
-                        None
-                    } else {
-                        opts.push(("__other__".to_string(), "Other".to_string()));
-                        Some(opts.len() - 1)
-                    };
-                    // Prefix a `(i/N)` position marker for multi-question
-                    // forms so the user knows how many remain.
-                    let n = qv.questions.len();
-                    let question = if n > 1 {
-                        format!("({}/{}) {}", qv.active_tab + 1, n, q.question)
-                    } else {
-                        q.question.clone()
-                    };
-                    let question = sanitize_display_text(&question).into_owned();
-                    (Some(question), opts, None, reject)
-                } else {
-                    (None, Vec::new(), None, None)
-                };
+            let root_session_id = agent.session.session_id.as_ref()?.0.as_ref();
+            let (question, options, request_id, question_id, reject_option) =
+                pending_interaction_peek(agent, root_session_id, true);
             Some(PeekFields {
                 label,
                 time_ago,
@@ -340,6 +378,7 @@ pub fn compute_peek_fields(
                 question,
                 options,
                 request_id,
+                question_id,
                 reject_option,
             })
         }
@@ -362,17 +401,19 @@ pub fn compute_peek_fields(
             let last_user_message = child.and_then(|c| extract_last_user_message(c));
             let time_ago =
                 crate::util::format_time_ago(now.saturating_duration_since(info.last_progress_at));
+            let (question, options, request_id, question_id, reject_option) = child
+                .map(|child| pending_interaction_peek(child, child_session_id, false))
+                .unwrap_or_else(|| (None, Vec::new(), None, None, None));
             Some(PeekFields {
                 label,
                 time_ago,
                 response_type,
                 last_user_message,
-                // Subagents are driven by their parent — no direct
-                // permission prompts surface here.
-                question: None,
-                options: Vec::new(),
-                request_id: None,
-                reject_option: None,
+                question,
+                options,
+                request_id,
+                question_id,
+                reject_option,
             })
         }
         // Roster-only rows are not locally hosted — there is no local
@@ -394,9 +435,9 @@ pub struct PeekModeBadge {
 
 /// The peeked row's current config-badge state. Sourced live (not via
 /// [`PeekFields`]) so it always reflects session configuration changes. A
-/// subagent shows its own model when its view is loaded, else the
-/// parent's; always-approve and auto follow the parent (subagents run under the
-/// parent's permission mode) and subagents have no plan mode of their own.
+/// subagent shows its own model when its view is loaded, else the parent's.
+/// Its permission badge uses the child's effective mode; only an explicit
+/// `follow` route projects the live parent mode. Subagents have no plan mode.
 /// All-default for a vanished agent or a roster-only row.
 pub fn peek_model_and_mode(
     row: &DashboardRowId,
@@ -436,6 +477,7 @@ pub fn peek_model_and_mode(
         } => match agents.get(parent) {
             Some(parent_agent) => {
                 let child = parent_agent.subagent_views.get(child_session_id);
+                let info = parent_agent.subagent_sessions.get(child_session_id);
                 let model = child
                     .and_then(|c| c.session.models.current_model_name())
                     .or_else(|| parent_agent.session.models.current_model_name());
@@ -443,14 +485,32 @@ pub fn peek_model_and_mode(
                     .and_then(|c| c.session_agent_name.clone())
                     .or_else(|| parent_agent.session_agent_name.clone())
                     .or_else(|| Some("grow".into()));
-                // Auto (like always-approve) follows the parent: subagents run
-                // under the parent's permission mode. Plan stays false (subagents
-                // have no plan mode of their own).
+                let follows_parent =
+                    info.and_then(|info| info.permission_mode.as_deref()) == Some("follow");
+                let (yolo, auto) = if follows_parent {
+                    (
+                        parent_agent.session.yolo_mode,
+                        parent_agent.session.is_auto(),
+                    )
+                } else {
+                    child
+                        .map(|child| (child.session.yolo_mode, child.session.is_auto()))
+                        .or_else(|| {
+                            info.map(|info| {
+                                (
+                                    info.effective_permission_mode.as_deref()
+                                        == Some("always-approve"),
+                                    info.effective_permission_mode.as_deref() == Some("auto"),
+                                )
+                            })
+                        })
+                        .unwrap_or((false, false))
+                };
                 PeekModeBadge {
                     agent,
                     model,
-                    yolo: parent_agent.session.yolo_mode,
-                    auto: parent_agent.session.is_auto(),
+                    yolo,
+                    auto,
                     plan: false,
                 }
             }
@@ -1186,12 +1246,14 @@ pub fn peek_number_key(state: &super::state::DashboardState, n: usize) -> Option
         if panel.reject_option == Some(idx) {
             return Some(Action::DashboardQuestionAnswer {
                 row: panel.row.clone(),
+                tool_call_id: panel.question_id.clone()?,
                 option_idx: None,
                 freeform: state.peek_reply.text_without_image_chips(),
             });
         }
         return Some(Action::DashboardQuestionAnswer {
             row: panel.row.clone(),
+            tool_call_id: panel.question_id.clone()?,
             option_idx: Some(idx),
             freeform: String::new(),
         });
@@ -1223,6 +1285,7 @@ mod tests {
             question: None,
             options: Vec::new(),
             request_id: None,
+            question_id: None,
             reject_option: None,
         }
     }
@@ -1449,10 +1512,8 @@ mod tests {
         assert_eq!(state.last_user_message.as_deref(), Some("hello?"));
     }
 
-    /// `apply_fields` reports whether the peeked row CHANGED so the
-    /// caller (the render-time refresh) can clear the dashboard's
-    /// `peek_reply` draft — a half-typed reply can never be sent to the
-    /// wrong agent after the selection cursor moves.
+    /// `apply_fields` reports whether the row or pending interaction changed
+    /// so the render-time refresh can clear the dashboard reply draft.
     #[test]
     fn apply_fields_reports_row_change() {
         let mut state = PeekPanelState::new(DashboardRowId::TopLevel(AgentId(0)), fields("Idle"));
@@ -1467,6 +1528,27 @@ mod tests {
         let changed = state.apply_fields(DashboardRowId::TopLevel(AgentId(1)), fields("Idle"));
         assert!(changed, "row change must be reported");
         assert_eq!(state.row, DashboardRowId::TopLevel(AgentId(1)));
+    }
+
+    #[test]
+    fn apply_fields_reports_same_row_question_replacement() {
+        let mut initial = fields("Awaiting your input");
+        initial.question = Some("First?".into());
+        initial.question_id = Some("ask-1".into());
+        let mut state = PeekPanelState::new(DashboardRowId::TopLevel(AgentId(0)), initial);
+        state.selected_option = Some(0);
+
+        let mut replacement = fields("Awaiting your input");
+        replacement.question = Some("Second?".into());
+        replacement.question_id = Some("ask-2".into());
+        let changed = state.apply_fields(DashboardRowId::TopLevel(AgentId(0)), replacement);
+
+        assert!(
+            changed,
+            "new tool call on the same row must clear its draft"
+        );
+        assert_eq!(state.question_id.as_deref(), Some("ask-2"));
+        assert_eq!(state.selected_option, None);
     }
 
     /// `render_peek_panel` paints a single rounded box
@@ -1732,6 +1814,7 @@ mod tests {
                     ("deny".into(), "Deny".into()),
                 ],
                 request_id: Some(42),
+                question_id: None,
                 // No RejectOnce option here — both render as plain rows.
                 reject_option: None,
             },
@@ -1784,6 +1867,7 @@ mod tests {
                     ("deny".into(), "Deny".into()),
                 ],
                 request_id: Some(1),
+                question_id: None,
                 reject_option: None,
             },
         );
@@ -1835,6 +1919,7 @@ mod tests {
                     ("deny".into(), "Deny".into()),
                 ],
                 request_id: Some(1),
+                question_id: None,
                 reject_option: None,
             },
         );
@@ -1890,6 +1975,7 @@ mod tests {
                     ("reject".into(), "No".into()),
                 ],
                 request_id: Some(1),
+                question_id: None,
                 reject_option: Some(1),
             },
         );
@@ -1931,8 +2017,8 @@ mod tests {
         );
     }
 
-    /// An ask-tool question (no `request_id`) shows the "Other" free-text
-    /// row with the ask placeholder rather than the permission one.
+    /// An ask-tool question (identified by `question_id`) shows the "Other"
+    /// free-text row with the ask placeholder rather than the permission one.
     #[test]
     fn render_peek_ask_other_uses_ask_placeholder() {
         use ratatui::buffer::Buffer;
@@ -1951,8 +2037,9 @@ mod tests {
                     ("Redis".into(), "Redis".into()),
                     ("__other__".into(), "Other".into()),
                 ],
-                // No request_id → this is an ask question, not a permission.
+                // Ask questions carry their source tool-call identity.
                 request_id: None,
+                question_id: Some("ask-1".into()),
                 reject_option: Some(1),
             },
         );
@@ -2006,6 +2093,7 @@ mod tests {
                     ("reject".into(), "No".into()),
                 ],
                 request_id: Some(1),
+                question_id: None,
                 reject_option: Some(1),
             },
         );
@@ -2203,6 +2291,7 @@ mod tests {
                 question,
                 options,
                 request_id,
+                question_id: None,
                 reject_option: None,
             },
         ));

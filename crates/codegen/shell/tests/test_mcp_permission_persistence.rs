@@ -159,9 +159,7 @@ async fn request(handle: &PermissionHandle, access: AccessKind, id: &str) -> Dec
         tool_call_update: tool_call_update(id, "mcp"),
         edit_path_context: None,
         respond_to: tx,
-        session_id: None,
-        subagent_type: None,
-        subagent_description: None,
+        context: workspace::permission::types::PermissionRequestContext::default(),
     };
     let PermissionHandle::Actor { cmd_tx, .. } = handle else {
         panic!("expected actor handle");

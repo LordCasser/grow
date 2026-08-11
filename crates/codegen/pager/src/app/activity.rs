@@ -24,11 +24,22 @@ pub struct AgentActivityProjection {
 
 impl AgentActivityProjection {
     pub fn from_agent(agent: &AgentView) -> Self {
+        let root_session_id = agent.session.session_id.as_ref().map(|id| id.0.as_ref());
+        let root_permission_pending = root_session_id.is_some_and(|root| {
+            agent
+                .permission_queue
+                .iter()
+                .any(|permission| permission.request.request.session_id.0.as_ref() == root)
+        });
+        let root_question_pending = agent.question_view.as_ref().is_some_and(|question| {
+            question.source_session_id.is_none()
+                || question.source_session_id.as_deref() == root_session_id
+        });
         Self {
             foreground_busy: !agent.session.state.is_idle()
                 || agent.session.turn_activity().is_some(),
             queued_prompts: !agent.session.pending_prompts.is_empty(),
-            needs_input: !agent.permission_queue.is_empty() || agent.question_view.is_some(),
+            needs_input: root_permission_pending || root_question_pending,
             replaying: agent.session.loading_replay,
             background_tasks: agent
                 .session

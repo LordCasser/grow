@@ -219,37 +219,65 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
     fn list_server_summaries(&self) -> Vec<ServerSummary> {
         let (tools_snapshot, servers) = {
             let snapshot = self.snapshot.lock().unwrap();
-            let tools: Vec<(String, String)> = snapshot
+            let tools: Vec<(String, String, String)> = snapshot
                 .tools
                 .iter()
-                .map(|t| (t.server_name.clone(), t.tool_name.clone()))
+                .map(|t| {
+                    (
+                        t.server_name.clone(),
+                        t.tool_name.clone(),
+                        t.description.clone(),
+                    )
+                })
                 .collect();
             let srvs: Vec<ServerMetadata> = snapshot.servers.clone();
             (tools, srvs)
         };
 
-        let mut map: std::collections::BTreeMap<String, (usize, Option<String>, Vec<String>)> =
-            std::collections::BTreeMap::new();
-        for (server, tool) in tools_snapshot {
-            let (count, _desc, names) = map.entry(server).or_insert((0, None, Vec::new()));
+        let mut map: std::collections::BTreeMap<
+            String,
+            (usize, Option<String>, Vec<String>, Vec<(String, String)>),
+        > = std::collections::BTreeMap::new();
+        for (server, tool, tool_description) in tools_snapshot {
+            let (count, _desc, names, descriptions) =
+                map.entry(server)
+                    .or_insert((0, None, Vec::new(), Vec::new()));
             *count += 1;
-            names.push(tool);
+            names.push(tool.clone());
+            descriptions.push((tool, tool_description));
         }
         for s in servers {
-            let (_count, desc, _names) = map.entry(s.name).or_insert((0, None, Vec::new()));
+            let (_count, desc, _names, _descriptions) =
+                map.entry(s.name)
+                    .or_insert((0, None, Vec::new(), Vec::new()));
             *desc = s.description;
         }
 
         map.into_iter()
-            .map(|(name, (tool_count, description, mut tool_names))| {
-                tool_names.sort_unstable();
-                ServerSummary {
-                    name,
-                    description,
-                    tool_count,
-                    tool_names,
-                }
-            })
+            .map(
+                |(name, (tool_count, description, mut tool_names, mut tool_descriptions))| {
+                    tool_names.sort_unstable();
+                    tool_descriptions.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    let description = description.or_else(|| {
+                        let summaries = tool_descriptions
+                            .iter()
+                            .filter_map(|(tool, description)| {
+                                let description =
+                                    description.split_whitespace().collect::<Vec<_>>().join(" ");
+                                (!description.is_empty()).then(|| format!("{tool}: {description}"))
+                            })
+                            .take(3)
+                            .collect::<Vec<_>>();
+                        (!summaries.is_empty()).then(|| summaries.join("; "))
+                    });
+                    ServerSummary {
+                        name,
+                        description,
+                        tool_count,
+                        tool_names,
+                    }
+                },
+            )
             .collect()
     }
 }
@@ -596,6 +624,10 @@ mod tests {
         assert_eq!(summaries[0].name, "grafana");
         assert_eq!(summaries[0].tool_count, 1);
         assert_eq!(summaries[0].tool_names, vec!["search_dashboards"]);
+        assert_eq!(
+            summaries[0].description.as_deref(),
+            Some("search_dashboards: Search Grafana dashboards")
+        );
     }
 
     #[test]
@@ -629,7 +661,11 @@ mod tests {
             .iter()
             .find(|s| s.name == "demo-mcp")
             .expect("demo-mcp summary");
-        assert_eq!(demo.description, None);
+        assert!(
+            demo.description
+                .as_deref()
+                .is_some_and(|description| description.contains("readSlackThread:"))
+        );
         assert_eq!(demo.tool_count, 2);
         assert_eq!(demo.tool_names, vec!["readSlackThread", "sendMessage"]);
     }

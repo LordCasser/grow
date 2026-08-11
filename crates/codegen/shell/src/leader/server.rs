@@ -500,27 +500,37 @@ fn backfill_child_routes(
     retired_sessions: &mut HashSet<String>,
 ) {
     let parent_driver = session_driver.get(parent).copied();
-    let mut stack: Vec<&str> = vec![parent];
+    for child in live_descendant_sessions(parent, child_sessions) {
+        session_subscribers
+            .entry(child.clone())
+            .or_default()
+            .insert(client);
+        retired_sessions.remove(&child);
+        if let Some(driver) = parent_driver {
+            session_driver.entry(child).or_insert(driver);
+        }
+    }
+}
+
+fn live_descendant_sessions(
+    parent: &str,
+    child_sessions: &HashMap<String, HashSet<String>>,
+) -> Vec<String> {
+    let mut descendants = Vec::new();
+    let mut stack = vec![parent];
     let mut visited: HashSet<&str> = HashSet::new();
-    while let Some(sid) = stack.pop() {
-        let Some(children) = child_sessions.get(sid) else {
+    while let Some(session_id) = stack.pop() {
+        let Some(children) = child_sessions.get(session_id) else {
             continue;
         };
         for child in children {
-            if !visited.insert(child.as_str()) {
-                continue;
+            if visited.insert(child.as_str()) {
+                descendants.push(child.clone());
+                stack.push(child);
             }
-            session_subscribers
-                .entry(child.clone())
-                .or_default()
-                .insert(client);
-            retired_sessions.remove(child);
-            if let Some(driver) = parent_driver {
-                session_driver.entry(child.clone()).or_insert(driver);
-            }
-            stack.push(child);
         }
     }
+    descendants
 }
 /// Inject client capabilities into a session/new request, **in place**.
 ///
@@ -1628,23 +1638,34 @@ pub async fn run_leader_server(
                                 );
                             }
                         }
-                        if let Some(cached) = interaction_requests.get(buf_sid.as_str())
-                            && let Some(target) = clients.get(&buf_client)
-                        {
-                            let count = cached.len();
-                            for req in cached.values() {
-                                if let Err(e) = target.tx.try_send(ClientOutbound::Acp(req.clone()))
-                                {
-                                    warn!(client_id = buf_client.0, error = %e, "Failed to replay interaction request after load (channel closed)");
-                                    break;
+                        if let Some(target) = clients.get(&buf_client) {
+                            let mut replay_sessions = vec![buf_sid.clone()];
+                            replay_sessions.extend(live_descendant_sessions(
+                                buf_sid.as_str(),
+                                &child_sessions,
+                            ));
+                            let mut count = 0usize;
+                            'sessions: for session_id in replay_sessions {
+                                let Some(cached) = interaction_requests.get(session_id.as_str())
+                                else {
+                                    continue;
+                                };
+                                for req in cached.values() {
+                                    if let Err(e) =
+                                        target.tx.try_send(ClientOutbound::Acp(req.clone()))
+                                    {
+                                        warn!(client_id = buf_client.0, error = %e, "Failed to replay interaction request after load (channel closed)");
+                                        break 'sessions;
+                                    }
+                                    count += 1;
                                 }
                             }
                             if count > 0 {
                                 trace!(
                                     client_id = buf_client.0,
                                     count,
-                                    session_id = buf_sid.as_str(),
-                                    "Replayed pending interaction modals to newly-attached client"
+                                    root_session_id = buf_sid.as_str(),
+                                    "Replayed root and descendant pending interactions to newly-attached client"
                                 );
                             }
                         }
@@ -1835,12 +1856,48 @@ pub async fn run_leader_server(
                         }
                     } else if let Some(subs) = session_subscribers.get(sid.as_str()) {
                         for &cid in subs.iter() {
-                            if let Some(buf) = load_live_buffer.get_mut(&(cid, sid.clone())) {
-                                if buf.len() < MAX_BUFFERED_LIVE_PER_LOAD {
-                                    buf.push((payload.clone(), event_seq));
+                            let direct_load_key = (cid, sid.clone());
+                            let load_key = if load_live_buffer.contains_key(&direct_load_key) {
+                                Some(direct_load_key)
+                            } else {
+                                load_live_buffer.keys().find_map(|(client, root)| {
+                                    (*client == cid
+                                        && live_descendant_sessions(root, &child_sessions)
+                                            .iter()
+                                            .any(|descendant| descendant == sid))
+                                    .then(|| (*client, root.clone()))
+                                })
+                            };
+                            if let Some(load_key) = load_key {
+                                // Pending interactions are already cached by
+                                // their real child session and replayed after
+                                // the parent load establishes descendant
+                                // routes. Sending them before replay would make
+                                // the pager reject an as-yet unknown child.
+                                if is_interaction {
                                     trace!(
                                         client_id = cid.0,
                                         session_id = sid.as_str(),
+                                        load_root = load_key.1,
+                                        "Deferred interaction during in-flight ancestor load"
+                                    );
+                                    continue;
+                                }
+                                let load_root = load_key.1.clone();
+                                let Some(buf) = load_live_buffer.get_mut(&load_key) else {
+                                    continue;
+                                };
+                                if buf.len() < MAX_BUFFERED_LIVE_PER_LOAD {
+                                    // A root replay cutoff is meaningful only
+                                    // for that root's event sequence. Child
+                                    // session sequences are independent.
+                                    let replay_seq =
+                                        (load_root == *sid).then_some(event_seq).flatten();
+                                    buf.push((payload.clone(), replay_seq));
+                                    trace!(
+                                        client_id = cid.0,
+                                        session_id = sid.as_str(),
+                                        load_root,
                                         "Buffered live notification during in-flight load"
                                     );
                                     continue;
@@ -5038,6 +5095,34 @@ mod tests {
         assert!(
             replayed.is_some(),
             "a late-joiner must receive the replayed still-pending interaction"
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn pending_child_interaction_replayed_when_attaching_to_parent() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+        load_session(&mut writer_a, "sess-sub").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let _ = next_acp_payload(&mut reader_a).await;
+
+        let spawned = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sess-sub","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-sub"}}}"#;
+        response_tx.send(spawned.to_owned()).unwrap();
+        let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
+        let child_request = r#"{"jsonrpc":"2.0","id":602,"method":"_grow/ask_user_question","params":{"method":"grow/ask_user_question","params":{"sessionId":"child-sub","toolCallId":"tc-child-late","questions":[]}}}"#;
+        response_tx.send(child_request.to_owned()).unwrap();
+        let _ = next_acp_payload_matching(&mut reader_a, "tc-child-late").await;
+
+        let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+        load_session(&mut writer_b, "sess-sub").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let replayed = next_acp_payload_matching(&mut reader_b, "tc-child-late").await;
+        assert!(
+            replayed.is_some(),
+            "attaching to a parent must replay pending descendant interactions"
         );
         cancel.cancel();
     }

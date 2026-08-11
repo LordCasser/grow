@@ -239,9 +239,10 @@ pub(super) fn plan_mode_edit_gate(
                 PlanEditGate::RejectEdit
             }
         }
-        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebFetch(_) => {
-            PlanEditGate::Allow
-        }
+        AccessKind::Read(_)
+        | AccessKind::Grep { .. }
+        | AccessKind::WebFetch(_)
+        | AccessKind::CapabilityGrant { .. } => PlanEditGate::Allow,
     }
 }
 
@@ -707,7 +708,25 @@ impl SessionActor {
                         self.last_search_prompt_index
                             .store(pi, std::sync::atomic::Ordering::Relaxed);
                     }
-                    ToolLoop::Continue
+                    let capability_followup = if self
+                        .agent
+                        .borrow()
+                        .tool_bridge()
+                        .tool_kind(&prepared.tool_name)
+                        == Some(tools::types::tool::ToolKind::CapabilityRequest)
+                    {
+                        let bridge = self.agent.borrow().tool_bridge().clone();
+                        let toolset = bridge.toolset();
+                        let resources = toolset.resources.lock().await;
+                        resources
+                            .get::<tools::implementations::grow_build::request_tool_access::ToolAccessGrantBackendResource>()
+                            .and_then(|backend| backend.0.take_followup(&prepared.call_id))
+                    } else {
+                        None
+                    };
+                    capability_followup
+                        .map(ToolLoop::FollowupMessage)
+                        .unwrap_or(ToolLoop::Continue)
                 }
                 Err(err) => {
                     let err: anyhow::Error = err.into();
@@ -1005,6 +1024,29 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
+        let tool_kind = self
+            .agent
+            .borrow()
+            .tool_bridge()
+            .tool_kind(&call.function.name);
+        if let Some(capabilities) = &self.subagent_capabilities {
+            let kind_allowed = tool_kind.is_some_and(|kind| capabilities.allows_kind(kind));
+            let mcp_allowed = match &tool_input {
+                ToolInput::UseTool(input) => capabilities.mcp_tool_granted(&input.tool_name),
+                ToolInput::MCPTool(input) => capabilities.mcp_tool_granted(&input.tool_name),
+                _ => true,
+            };
+            if !kind_allowed || !mcp_allowed {
+                let message = if !mcp_allowed {
+                    "Rejected: this MCP server has not been granted to the subagent. Use request_tool_access with target type `mcp_server` first."
+                } else {
+                    "Rejected: this native capability has not been granted to the subagent. Use request_tool_access first."
+                };
+                self.handle_tool_not_executed(&call.id, &tool_call_id, message.to_owned())
+                    .await?;
+                return Ok(Err(ToolLoop::Continue));
+            }
+        }
         let admitted_behavior = *self.turn_behavior.lock();
         let declared_scope = self
             .agent
@@ -1125,7 +1167,10 @@ impl SessionActor {
                 return Ok(Err(denied));
             }
         }
-        {
+        // request_tool_access owns its permission interaction in the grant
+        // backend. Running the generic preflight as well would emit a spurious
+        // Read/Allow event before the real capability-grant decision.
+        if tool_kind != Some(tools::types::tool::ToolKind::CapabilityRequest) {
             let (perm_title, perm_kind, perm_raw_input) = tool_call_display
                 .as_ref()
                 .map(|(t, k, r)| (Some(t.clone()), Some(*k), Some(r.clone())))
@@ -1159,32 +1204,50 @@ impl SessionActor {
                 workspace::permission::AccessKind::WebFetch(u) => {
                     (::diagnostics::events::AccessKind::Web, u.clone())
                 }
+                workspace::permission::AccessKind::CapabilityGrant { target, .. } => {
+                    (::diagnostics::events::AccessKind::Mcp, target.clone())
+                }
             };
             let subagent_session_id = if self.startup_hints.is_subagent {
                 Some(self.session_id_string())
             } else {
                 None
             };
-            let perm_mode = if self.permissions.is_yolo_mode() {
-                ::diagnostics::enums::PermissionMode::AlwaysApprove
-            } else if self.permissions.is_auto_mode() {
-                ::diagnostics::enums::PermissionMode::Auto
-            } else {
-                ::diagnostics::enums::PermissionMode::Ask
+            let diagnostic_subagent_type = self.subagent_type_label();
+            let child_permission_mode = self
+                .startup_hints
+                .is_subagent
+                .then_some(self.startup_hints.subagent_permission_mode)
+                .flatten();
+            let effective_mode = self
+                .permissions
+                .effective_request_mode(child_permission_mode);
+            let perm_mode = match effective_mode {
+                workspace::permission::types::EffectivePermissionMode::AlwaysApprove => {
+                    ::diagnostics::enums::PermissionMode::AlwaysApprove
+                }
+                workspace::permission::types::EffectivePermissionMode::Auto => {
+                    ::diagnostics::enums::PermissionMode::Auto
+                }
+                workspace::permission::types::EffectivePermissionMode::Ask => {
+                    ::diagnostics::enums::PermissionMode::Ask
+                }
             };
             ::diagnostics::session_ctx::log_event(::diagnostics::events::PermissionPrompted {
                 tool_name: call.function.name.clone(),
                 access_kind: diagnostics_access_kind,
                 permission_mode: perm_mode,
                 subagent_session_id: subagent_session_id.clone(),
-                subagent_type: None,
+                subagent_type: diagnostic_subagent_type.clone(),
             });
             let perm_start = self.events.permission_requested(&call.function.name);
             debug_assert!(
                 !self.session_info.id.0.is_empty(),
                 "permission reverse-request must carry a non-empty sessionId (design §5.4)"
             );
-            if !self.permissions.is_yolo_mode() {
+            if effective_mode
+                != workspace::permission::types::EffectivePermissionMode::AlwaysApprove
+            {
                 self.dispatch_notification_hook(
                     "permission_prompt",
                     Some("Tool permission requested".into()),
@@ -1193,13 +1256,15 @@ impl SessionActor {
                 )
                 .await;
             }
-            if self.permissions.is_auto_mode() {
+            let classifier_turns = if effective_mode
+                == workspace::permission::types::EffectivePermissionMode::Auto
+            {
                 let conv = self.chat_state_handle.get_conversation().await;
                 let turns = super::build_classifier_turns(&conv, super::CLASSIFIER_REFRESH_TURNS);
-                if !turns.is_empty() {
-                    self.permissions.set_classifier_transcript(turns);
-                }
-            }
+                Some(turns)
+            } else {
+                None
+            };
             let edit_path_context = matches!(&access_kind, AccessKind::Edit(_)).then(|| {
                 workspace::permission::types::EditPathContext {
                     real_cwd: std::path::PathBuf::from(self.session_info.cwd.as_str()),
@@ -1219,13 +1284,31 @@ impl SessionActor {
                         crate::session::pending_interaction::PendingKind::Permission,
                     );
                 self.permissions
-                    .request_with_edit_path_context(
+                    .request_with_context(
                         access_kind.clone(),
                         tool_call_update,
                         edit_path_context,
-                        Some(self.session_info.id.0.to_string()),
-                        None,
-                        None,
+                        workspace::permission::types::PermissionRequestContext {
+                            source: if self.startup_hints.is_subagent {
+                                workspace::permission::types::PermissionRequestSource::Child {
+                                    session_id: self.session_info.id.0.to_string(),
+                                    subagent_type: self.subagent_type_label(),
+                                    subagent_description: self
+                                        .startup_hints
+                                        .subagent_description
+                                        .clone(),
+                                }
+                            } else {
+                                workspace::permission::types::PermissionRequestSource::Primary {
+                                    session_id: Some(self.session_info.id.0.to_string()),
+                                }
+                            },
+                            request_mode: child_permission_mode,
+                            execution_cwd: Some(std::path::PathBuf::from(
+                                self.session_info.cwd.as_str(),
+                            )),
+                            classifier_turns,
+                        },
                     )
                     .await
             };
@@ -1265,7 +1348,8 @@ impl SessionActor {
                 decision = decision_outcome.as_str(),
                 source = crate::session::diagnostics::permission_decision_source(
                     &decision,
-                    self.permissions.is_yolo_mode(),
+                    effective_mode
+                        == workspace::permission::types::EffectivePermissionMode::AlwaysApprove,
                 ),
                 wait_ms = wait_ms as i64,
             )
@@ -1280,12 +1364,13 @@ impl SessionActor {
                     source: Some(
                         crate::session::diagnostics::permission_decision_source(
                             &decision,
-                            self.permissions.is_yolo_mode(),
+                            effective_mode
+                                == workspace::permission::types::EffectivePermissionMode::AlwaysApprove,
                         )
                         .to_owned(),
                     ),
                     subagent_session_id: subagent_session_id.clone(),
-                    subagent_type: None,
+                    subagent_type: diagnostic_subagent_type,
                 },
             );
             match decision {

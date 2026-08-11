@@ -5,6 +5,7 @@ use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::session::lifecycle::skip_picker_and_create_session;
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 
@@ -231,6 +232,7 @@ pub(crate) fn downgrade_displayed_auto_if_gated(app: &mut AppView) {
     }
     for agent in app.agents.values_mut() {
         agent.session.auto_mode = false;
+        sync_follow_subagent_permission_modes(agent);
     }
     if app.current_ui.permission_mode.as_deref() == Some("auto") {
         app.current_ui.permission_mode = Some("ask".into());
@@ -277,30 +279,56 @@ fn set_yolo_mode_inner_scoped(app: &mut AppView, new: bool, update_default: bool
     // doc-comment). Do NOT reorder these without re-reading the
     // contract.
     agent.session.yolo_mode = new;
+    sync_follow_subagent_permission_modes(agent);
 
     if new {
-        // YOLO ON: auto-approve all queued permissions. Drain runs
-        // even on idempotent re-dispatch. Prefers `AllowOnce`; falls
-        // back to `Cancelled` (never `AllowAlways`).
-        agent.last_permission_click = None;
-        // `pop_front` (not `drain`) so each iteration can re-borrow `agent`
-        // for `respond_permission`; order is unchanged. The response is
-        // built before `perm.request` is moved (option lookup borrows it).
+        // YOLO ON: auto-approve only permissions owned by this root session.
+        // Child asks share the visual queue but follow an independent mode and
+        // must survive a later parent mode switch. The root drain runs even on
+        // idempotent re-dispatch, prefers `AllowOnce`, and never selects
+        // `AllowAlways`.
+        let original_front = agent.permission_queue.front().map(|permission| {
+            (
+                permission.request.request.session_id.clone(),
+                permission.request.request.tool_call.tool_call_id.clone(),
+            )
+        });
+        let root_session_id = agent.session.session_id.clone();
+        let mut retained = std::collections::VecDeque::new();
+        let mut approved_any = false;
         while let Some(perm) = agent.permission_queue.pop_front() {
-            let response = if let Some(allow) = perm
-                .options
-                .iter()
-                .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
+            if root_session_id
+                .as_ref()
+                .is_some_and(|session_id| perm.request.request.session_id == *session_id)
             {
-                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
-                    acp::SelectedPermissionOutcome::new(allow.option_id.clone()),
-                ))
+                approved_any = true;
+                let response = if let Some(allow) = perm
+                    .options
+                    .iter()
+                    .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
+                {
+                    acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
+                        acp::SelectedPermissionOutcome::new(allow.option_id.clone()),
+                    ))
+                } else {
+                    acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
+                };
+                super::permissions::respond_permission(agent, perm.request, response);
             } else {
-                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
-            };
-            super::permissions::respond_permission(agent, perm.request, response);
+                retained.push_back(perm);
+            }
         }
-        super::permissions::restore_permission_stashes(agent);
+        agent.permission_queue = retained;
+        let front_removed = approved_any
+            && original_front.is_some_and(|(session_id, tool_call_id)| {
+                agent.permission_queue.front().is_none_or(|permission| {
+                    permission.request.request.session_id != session_id
+                        || permission.request.request.tool_call.tool_call_id != tool_call_id
+                })
+            });
+        if front_removed {
+            super::permissions::resolve_permission_queue_transition(agent);
+        }
     }
 
     // Diagnostic + tracing guarded on real state change only.
@@ -378,6 +406,7 @@ pub(super) fn set_permission_mode(
     set_yolo_mode_inner_scoped(app, kind.is_always_approve(), false);
     if let Some(agent) = app.agents.get_mut(&id) {
         agent.session.auto_mode = matches!(kind, crate::app::actions::PermissionModeKind::Auto);
+        sync_follow_subagent_permission_modes(agent);
     }
 
     // Toast on every save (plan-aware for AlwaysApprove, mirroring
@@ -392,6 +421,24 @@ pub(super) fn set_permission_mode(
         canonical: kind.as_canonical(),
         session_id,
     }]
+}
+
+pub(crate) fn sync_follow_subagent_permission_modes(agent: &mut AgentView) {
+    let parent_yolo = agent.session.yolo_mode;
+    let parent_auto = agent.session.is_auto();
+    let follow_children = agent
+        .subagent_sessions
+        .iter()
+        .filter_map(|(session_id, info)| {
+            (info.permission_mode.as_deref() == Some("follow")).then_some(session_id.clone())
+        })
+        .collect::<Vec<_>>();
+    for session_id in follow_children {
+        if let Some(child) = agent.subagent_views.get_mut(&session_id) {
+            child.session.yolo_mode = parent_yolo;
+            child.session.auto_mode = parent_auto;
+        }
+    }
 }
 
 /// Persist the default permission for future sessions. This deliberately does

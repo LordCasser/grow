@@ -9,24 +9,20 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
     type Control = crate::agent::subagent::ShellChildRuntime;
     type CompletionData = crate::agent::subagent::ShellCompletionData;
     type RunFuture = tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
-        tools::implementations::grow_build::task::coordinator::ChildRunOutput<
-            Self::CompletionData,
-        >,
+        tools::implementations::grow_build::task::coordinator::ChildRunOutput<Self::CompletionData>,
     >;
-    type ValidateFuture =
-        tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
-            tools::implementations::grow_build::task::types::SubagentValidateTypeOutcome,
-        >;
+    type ValidateFuture = tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
+        tools::implementations::grow_build::task::types::SubagentValidateTypeOutcome,
+    >;
     fn run(
         &self,
-        run: tools::implementations::grow_build::task::coordinator::ChildRunRequest<
-            Self::Control,
-        >,
+        run: tools::implementations::grow_build::task::coordinator::ChildRunRequest<Self::Control>,
     ) -> Self::RunFuture {
         let agent_ref = self.agent_ref.clone();
         Box::pin(async move {
             let tools::implementations::grow_build::task::coordinator::ChildRunRequest {
                 request,
+                security_parent,
                 cancellation,
                 reporter,
             } = run;
@@ -57,11 +53,12 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                 let parent_sid = acp::SessionId::new(parent_sid);
                 this.sessions.borrow().get(&parent_sid).cloned()
             };
-            if let Some(handle) = parent_handle {
+            // Nested lifecycle is reparented to the root coordinator session,
+            // but security inheritance must follow the immediate spawning
+            // child's live authority.
+            if let Some(handle) = security_parent.or(parent_handle) {
                 ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
                 ctx.client_hooks = handle.snapshot_client_hooks().await;
-                let definitions = handle.snapshot_tool_definitions().await;
-                ctx.parent_tool_definitions = (!definitions.is_empty()).then_some(definitions);
             }
             crate::agent::subagent::run_shell_child(
                 request,
@@ -131,16 +128,14 @@ impl MvpAgent {
         let runner = ShellChildRunner {
             agent_ref: agent_ref.clone(),
         };
-        let config =
-            tools::implementations::grow_build::task::coordinator::CoordinatorConfig {
-                foreground_budget:
-                    tools::implementations::grow_build::task::backend::env_duration_or(
-                        "GROW_SUBAGENT_AWAIT_BUDGET_MS",
-                        std::time::Duration::from_secs(600),
-                    ),
-                buffer_completions: true,
-                buffered_completion_output_cap: None,
-            };
+        let config = tools::implementations::grow_build::task::coordinator::CoordinatorConfig {
+            foreground_budget: tools::implementations::grow_build::task::backend::env_duration_or(
+                "GROW_SUBAGENT_AWAIT_BUDGET_MS",
+                std::time::Duration::from_secs(600),
+            ),
+            buffer_completions: true,
+            buffered_completion_output_cap: None,
+        };
         tokio::task::spawn_local(
             tools::implementations::grow_build::task::coordinator::SubagentCoordinator::new(
                 rx, runner, config,
@@ -355,6 +350,7 @@ impl MvpAgent {
             subagents_max_depth: self.cfg.borrow().subagents_max_depth,
             inference_idle_timeout_secs,
             permission_prompt_timeout,
+            subagent_permission_mode: self.cfg.borrow().subagent_permission_mode,
             auto_compact_threshold_tiers:
                 crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),
             hunk_tracker_handle,
@@ -417,16 +413,8 @@ impl MvpAgent {
             image_description_model: self.resolve_image_description_model(),
             workspace_ops: parent_workspace_ops.clone(),
             parent_agent_name,
-            parent_mcp_configs: {
-                let sessions = self.sessions.borrow();
-                sessions
-                    .get(&parent_sid)
-                    .map(|h| h.mcp_servers.clone())
-                    .unwrap_or_default()
-            },
             managed_mcp_state: self.managed_mcp_cache.clone(),
             parent_mcp_pool: None,
-            parent_tool_definitions: None,
             parent_skills: None,
             parent_skills_config: self.cfg.borrow().skills.clone(),
             parent_compat: self.cfg.borrow().compat_resolved,

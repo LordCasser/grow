@@ -464,11 +464,9 @@ pub(crate) struct SessionActor {
     pub(crate) rewind_pending_prompt: std::sync::Mutex<Option<String>>,
     /// Startup hints for the session: currently responsible for customizing the user message prefix and the git status mode (fast no untracked for non-interactive mode)
     pub(crate) startup_hints: StartupHints,
-    /// Verbatim mirror-fork override: when `Some`, every turn sends this exact
-    /// parent tool schema instead of the locally-built toolset, keeping the
-    /// child's request prefix byte-identical to the parent for radix cache reuse.
-    /// `None` for all non-fork (and summarized-fork) sessions.
-    pub(crate) forked_tool_override: Option<Vec<ToolSpec>>,
+    /// Live, non-persisted grant state for a subagent session.
+    pub(crate) subagent_capabilities:
+        Option<crate::session::subagent_capability::SubagentCapabilityState>,
     /// Compaction configuration and runtime state.
     pub(crate) compaction: super::compaction_config::CompactionConfig,
     /// Memory subsystem: storage, flush config, injection state, diagnostics.

@@ -1796,7 +1796,7 @@ impl SessionActor {
         }
         let mut prompt_timing = Some(crate::session::prompt_timing::PromptTiming::start());
         let tool_prep_start = std::time::Instant::now();
-        let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
+        let (mut tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
         if let Some(ref mut pt) = prompt_timing {
             pt.record_tool_prep(mcp_wait_ms, total_prep_ms);
@@ -1851,6 +1851,14 @@ impl SessionActor {
         loop {
             self.emit_event(crate::session::events::Event::LoopStarted { loop_index });
             loop_index += 1;
+            if loop_index > 1 {
+                // Capability grants become visible at the next model sample, not
+                // at the next outer user turn. Refresh only after the previous
+                // tool batch has fully completed, so a model response cannot
+                // request a capability and forge a newly exposed call in the
+                // same batch.
+                tool_definitions = self.prepare_tool_definitions_inner().await;
+            }
             if identical_tool_calls.run_len >= identical_tool_calls.hard_stop_threshold() {
                 let run_len = identical_tool_calls.run_len;
                 let tool_name = identical_tool_calls.tool_name.clone();
@@ -1961,12 +1969,7 @@ impl SessionActor {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
             }
-            let mut effective_tools: Vec<ToolSpec> =
-                if let Some(ref override_tools) = self.forked_tool_override {
-                    override_tools.clone()
-                } else {
-                    self.turn_base_tool_specs(&tool_definitions)
-                };
+            let mut effective_tools: Vec<ToolSpec> = self.turn_base_tool_specs(&tool_definitions);
             if structured_output_tool && let Some(schema) = json_schema.clone() {
                 effective_tools.push(ToolSpec {
                     name: STRUCTURED_OUTPUT_TOOL.to_string(),

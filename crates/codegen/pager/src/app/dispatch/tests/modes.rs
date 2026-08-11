@@ -749,7 +749,7 @@ fn set_yolo_mode_on_with_no_allow_once_option_sends_cancelled() {
     // the safety contract.
     let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
     let request = acp::RequestPermissionRequest::new(
-        acp::SessionId::new(Arc::from("test-sess")),
+        acp::SessionId::new(Arc::from("test-session")),
         acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from("tc-noallow-1")),
             acp::ToolCallUpdateFields::default(),
@@ -842,7 +842,7 @@ fn set_yolo_mode_on_drains_multi_item_queue() {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         response_rxs.push(response_rx);
         let request = acp::RequestPermissionRequest::new(
-            acp::SessionId::new(Arc::from("test-sess")),
+            acp::SessionId::new(Arc::from("test-session")),
             acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(format!("tc-multi-{i}"))),
                 acp::ToolCallUpdateFields::default(),
@@ -924,7 +924,7 @@ fn set_yolo_mode_on_duplicate_dispatch_still_drains_queue() {
     // Now inject a permission AFTER the first dispatch.
     let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
     let request = acp::RequestPermissionRequest::new(
-        acp::SessionId::new(Arc::from("test-sess")),
+        acp::SessionId::new(Arc::from("test-session")),
         acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from("tc-dup-1")),
             acp::ToolCallUpdateFields::default(),

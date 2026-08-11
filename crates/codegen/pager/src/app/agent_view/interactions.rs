@@ -1151,20 +1151,20 @@ impl AgentView {
     /// answered, which already cleared its own modal locally. Dropping a
     /// dismissed modal's `response_tx` is harmless: the agent has already
     /// resolved, so any late response for that id is ignored by its gateway.
-    pub(crate) fn dismiss_resolved_interaction(&mut self, tool_call_id: &str) -> bool {
-        if self
-            .question_view
-            .as_ref()
-            .is_some_and(|qv| qv.tool_call_id == tool_call_id)
-        {
+    pub(crate) fn dismiss_resolved_interaction(
+        &mut self,
+        session_id: &str,
+        tool_call_id: &str,
+    ) -> bool {
+        if self.question_view.as_ref().is_some_and(|qv| {
+            qv.source_session_id.as_deref() == Some(session_id) && qv.tool_call_id == tool_call_id
+        }) {
             let _ = self.dismiss_question_view();
             return true;
         }
-        if self
-            .plan_approval_view
-            .as_ref()
-            .is_some_and(|pav| pav.tool_call_id == tool_call_id)
-        {
+        if self.plan_approval_view.as_ref().is_some_and(|pav| {
+            pav.source_session_id == session_id && pav.tool_call_id == tool_call_id
+        }) {
             let mut pav = self
                 .plan_approval_view
                 .take()
@@ -1177,11 +1177,10 @@ impl AgentView {
             self.casual_editing_comment_id = None;
             return true;
         }
-        if let Some(pos) = self
-            .permission_queue
-            .iter()
-            .position(|p| p.request.request.tool_call.tool_call_id.0.as_ref() == tool_call_id)
-        {
+        if let Some(pos) = self.permission_queue.iter().position(|p| {
+            p.request.request.session_id.0.as_ref() == session_id
+                && p.request.request.tool_call.tool_call_id.0.as_ref() == tool_call_id
+        }) {
             let was_front = pos == 0;
             let _ = self.permission_queue.remove(pos);
             if was_front {

@@ -1,7 +1,7 @@
 //! Turn cancellation, task/subagent kills, and prompt-admission recovery.
 
 use super::ctx::find_agent_by_session_id;
-use super::permissions::drain_permission_queue;
+use super::permissions::drain_root_permission_queue;
 use crate::app::actions::Effect;
 use crate::app::agent::InterruptIntent;
 use crate::app::agent_view::ActivePane;
@@ -305,7 +305,7 @@ pub(super) fn do_cancel_turn_with_pause(
         agent.session.cancel_compact_command();
         agent.cancel_turn_view = None;
         agent.cancel_turn_buttons.clear();
-        drain_permission_queue(agent);
+        drain_root_permission_queue(agent);
         let Some(session_id) = agent.session.session_id.clone() else {
             return vec![];
         };
@@ -388,7 +388,7 @@ pub(super) fn do_cancel_turn_with_pause(
     }
     agent.cancel_turn_view = None;
     agent.cancel_turn_buttons.clear();
-    drain_permission_queue(agent);
+    drain_root_permission_queue(agent);
     if let Some(mut pav) = agent.plan_approval_view.take() {
         pav.send_stale_cancel();
         agent.plan_next_comment_id = pav.next_comment_id;

@@ -2191,6 +2191,8 @@ pub(crate) mod test_fixtures {
             context_source: None,
             resumed_from: None,
             capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
             workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,

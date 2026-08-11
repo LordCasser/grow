@@ -35,8 +35,12 @@ pub struct SubagentProgress {
 /// Runtime handle retained while a child is active.
 pub trait ChildControl: 'static {
     type ProgressFuture: Future<Output = SubagentProgress> + 'static;
+    /// Runtime-owned security context for the immediate spawning child.
+    /// Lifecycle ownership may be reparented independently.
+    type SecurityContext: Clone + 'static;
 
     fn progress(&self) -> Self::ProgressFuture;
+    fn security_context(&self) -> Self::SecurityContext;
     fn cancel(&self);
 }
 
@@ -57,8 +61,10 @@ pub struct StartedChild<C> {
 }
 
 /// Input to one runtime-specific child run.
-pub struct ChildRunRequest<C> {
+pub struct ChildRunRequest<C: ChildControl> {
     pub request: SubagentRequest,
+    /// Immediate spawning child's context, independent of lifecycle reparent.
+    pub security_parent: Option<<C as ChildControl>::SecurityContext>,
     pub cancellation: CancellationToken,
     pub reporter: ChildReporter<C>,
 }

@@ -46,6 +46,16 @@ pub struct PermissionEvent {
     /// `config.ui.permission_mode` in the same trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Request-local route before resolving `follow` against the primary
+    /// session: "ask" | "auto" | "always-approve" | "follow".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_permission_mode: Option<String>,
+    /// Structured capability target for capability-grant events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_target: Option<String>,
+    /// Child-provided task purpose for capability-grant events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_purpose: Option<String>,
     /// The trigger that produced this decision, distinct from `prompt_outcome`
     /// (which records the user's choice when prompted). Lets a trace show *why*
     /// a request reached a prompt even when `user_prompted=true`. Values:
@@ -167,7 +177,100 @@ pub enum AccessKind {
         input: serde_json::Value,
     },
     WebFetch(String),
+    /// A subagent request to expose a capability that is already inside its
+    /// hard eligibility ceiling. The eventual tool call is authorized again.
+    CapabilityGrant {
+        target: String,
+        purpose: String,
+    },
 }
+
+/// Request-local permission mode used by subagent sessions.
+///
+/// The permission actor remains shared with the primary session so policy,
+/// prompting, and the auto classifier have one implementation. A child may
+/// nevertheless choose an independent decision route for each request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RequestPermissionMode {
+    Ask,
+    #[default]
+    Auto,
+    AlwaysApprove,
+    /// Resolve against the shared primary session's live mode.
+    Follow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectivePermissionMode {
+    Ask,
+    Auto,
+    AlwaysApprove,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionRequestSource {
+    Primary {
+        session_id: Option<String>,
+    },
+    Child {
+        session_id: String,
+        subagent_type: Option<String>,
+        subagent_description: Option<String>,
+    },
+}
+
+impl Default for PermissionRequestSource {
+    fn default() -> Self {
+        Self::Primary { session_id: None }
+    }
+}
+
+impl PermissionRequestSource {
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Primary { session_id } => session_id.as_deref(),
+            Self::Child { session_id, .. } => Some(session_id),
+        }
+    }
+
+    pub fn child_session_id(&self) -> Option<&str> {
+        match self {
+            Self::Primary { .. } => None,
+            Self::Child { session_id, .. } => Some(session_id),
+        }
+    }
+
+    pub fn subagent_type(&self) -> Option<&str> {
+        match self {
+            Self::Primary { .. } => None,
+            Self::Child { subagent_type, .. } => subagent_type.as_deref(),
+        }
+    }
+
+    pub fn subagent_description(&self) -> Option<&str> {
+        match self {
+            Self::Primary { .. } => None,
+            Self::Child {
+                subagent_description,
+                ..
+            } => subagent_description.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PermissionRequestContext {
+    pub source: PermissionRequestSource,
+    pub request_mode: Option<RequestPermissionMode>,
+    /// Filesystem base used by the eventual tool call. Child sessions may run
+    /// in a worktree or explicit cwd that differs from the shared manager's.
+    pub execution_cwd: Option<std::path::PathBuf>,
+    /// Request-local transcript. `Some(empty)` deliberately clears stale
+    /// context for this source; `None` retains the last source-local snapshot.
+    pub classifier_turns: Option<Vec<super::auto_mode::ClassifierTurn>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
@@ -235,13 +338,7 @@ pub enum PermissionCommand {
         tool_call_update: acp::ToolCallUpdate,
         edit_path_context: Option<EditPathContext>,
         respond_to: oneshot::Sender<Decision>,
-        /// Session ID originating this request. Used to attribute
-        /// permission events to child subagents.
-        session_id: Option<String>,
-        /// Subagent type if this request is from a child (e.g. "explore").
-        subagent_type: Option<String>,
-        /// Subagent description if this request is from a child.
-        subagent_description: Option<String>,
+        context: PermissionRequestContext,
     },
     /// Set the YOLO mode (auto-approve all permissions)
     SetYoloMode(bool),
@@ -255,6 +352,11 @@ pub enum PermissionCommand {
     SetClassifierTranscript(Vec<super::auto_mode::ClassifierTurn>),
     /// Project AGENTS.md instructions for classifier context (None clears).
     SetProjectInstructions(Option<String>),
+    /// Drop every child-local permission and classifier state when the live
+    /// child session ends.
+    ReleaseChild {
+        session_id: String,
+    },
     /// Reset per-tool permission state back to defaults.
     ResetState,
     Shutdown,
@@ -438,6 +540,9 @@ mod tests {
         assert!(event.subagent_type.is_none());
         assert!(event.subagent_description.is_none());
         assert!(event.permission_mode.is_none());
+        assert!(event.requested_permission_mode.is_none());
+        assert!(event.capability_target.is_none());
+        assert!(event.capability_purpose.is_none());
         assert!(event.decision_reason.is_none());
         assert!(event.classifier_source.is_none());
         assert!(event.classifier_latency_ms.is_none());
@@ -464,6 +569,9 @@ mod tests {
             subagent_type: Some("explore".into()),
             subagent_description: Some("Find endpoints".into()),
             permission_mode: Some("ask".into()),
+            requested_permission_mode: Some("follow".into()),
+            capability_target: None,
+            capability_purpose: None,
             decision_reason: Some("needs_user".into()),
             classifier_source: Some("llm".into()),
             classifier_latency_ms: Some(42),
@@ -477,6 +585,7 @@ mod tests {
         assert_eq!(json["subagent_type"], "explore");
         assert_eq!(json["subagent_description"], "Find endpoints");
         assert_eq!(json["permission_mode"], "ask");
+        assert_eq!(json["requested_permission_mode"], "follow");
         assert_eq!(json["decision_reason"], "needs_user");
         assert_eq!(json["classifier_source"], "llm");
         assert_eq!(json["classifier_latency_ms"], 42);
@@ -503,6 +612,9 @@ mod tests {
             subagent_type: None,
             subagent_description: None,
             permission_mode: None,
+            requested_permission_mode: None,
+            capability_target: None,
+            capability_purpose: None,
             decision_reason: None,
             classifier_source: None,
             classifier_latency_ms: None,

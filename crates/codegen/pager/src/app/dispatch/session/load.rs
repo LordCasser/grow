@@ -639,6 +639,10 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         notify_session_ready(&app.notification_service, agent);
         crate::memory_release::release_retained_memory_with("session-load-replay");
         note_peek_page_flip(app, agent_id, page_flip_entry);
+        crate::app::subagent::restore_descendant_lifecycle(app, agent_id);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            crate::app::dispatch::sync_follow_subagent_permission_modes(agent);
+        }
         return effects;
     }
     vec![]

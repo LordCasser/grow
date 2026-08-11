@@ -145,6 +145,18 @@ fn ensure_plan_tools(tool_config: &mut tools::registry::types::ToolServerConfig)
             .push((&grow_build::AskUserQuestionTool).into());
     }
 }
+
+/// Install the host-owned capability request control plane for child sessions.
+fn ensure_subagent_capability_tool(tool_config: &mut tools::registry::types::ToolServerConfig) {
+    use tools::implementations::grow_build::RequestToolAccessTool;
+    if !tool_config
+        .tools
+        .iter()
+        .any(|tool| tool.id == "Grow:request_tool_access")
+    {
+        tool_config.tools.push((&RequestToolAccessTool).into());
+    }
+}
 /// Merge a shell-resolved params map into every matching tool's
 /// `ToolConfig.params` (single copy of the loop the per-tool injections share).
 fn merge_tool_params(
@@ -665,6 +677,9 @@ impl AgentBuilder {
             tool_config.tools.retain(|tc| tc.id != ask_user_id);
         }
         apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
+        if self.prompt_audience == crate::prompt::context::PromptAudience::Subagent {
+            ensure_subagent_capability_tool(&mut tool_config);
+        }
         let task_tool_id = format!("{}:{}", tools::types::tool::ToolNamespace::Grow, "task");
         let mut task_stripped = false;
         if !self.subagents_enabled {
@@ -794,7 +809,12 @@ impl AgentBuilder {
             tool_config.tools.retain(|tc| {
                 tool_config_matches(&definition.tools, tc)
                     || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
-                    || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
+                    || matches!(
+                        tc.kind,
+                        Some(
+                            ToolKind::SearchTool | ToolKind::UseTool | ToolKind::CapabilityRequest
+                        )
+                    )
             });
             tracing::debug!(agent = %definition.name, allowed = ?definition.tools, "tools allowlist applied");
             if !unresolved.is_empty() {

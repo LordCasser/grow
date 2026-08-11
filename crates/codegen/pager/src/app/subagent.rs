@@ -26,6 +26,11 @@ pub struct SubagentInfo {
     pub resumed_from: Option<Arc<str>>,
     /// "read-only", "read-write", "execute", or "all".
     pub capability_mode: Option<Arc<str>>,
+    /// Requested child decision route (`ask`, `auto`, `always-approve`, or
+    /// `follow`). `follow` is projected against the live parent mode.
+    pub permission_mode: Option<Arc<str>>,
+    /// Effective mode at spawn after managed-policy clamping.
+    pub effective_permission_mode: Option<Arc<str>>,
     pub workflow_run_id: Option<Arc<str>>,
     /// Whether the context was normalized into `<background_context>`.
     pub context_normalized: bool,
@@ -112,11 +117,90 @@ impl SubagentInfo {
 #[derive(Debug, Deserialize)]
 struct SubagentMetaSlice {
     #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    child_session_id: Option<String>,
+    #[serde(default)]
     prompt: Option<String>,
     #[serde(default)]
     child_cwd: Option<String>,
     #[serde(default)]
     worktree_path: Option<String>,
+}
+
+fn session_dir_at(
+    grow_home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+) -> std::path::PathBuf {
+    grow_home
+        .join("sessions")
+        .join(shell::util::grow_home::encode_cwd_dirname(
+            cwd.to_string_lossy().as_ref(),
+        ))
+        .join(session_id)
+}
+
+/// Resolve the immediate durable children owned by `parent_session_id`.
+/// Ownership lives under the parent's `subagents/<subagent_id>/meta.json`;
+/// child transcripts themselves live in their normal cwd/session directory.
+/// Reading this mapping prevents a global child-session lookup from attaching
+/// a copied or otherwise unrelated lifecycle log to the wrong root view.
+fn durable_child_session_dirs(
+    grow_home: &std::path::Path,
+    parent_session_id: &str,
+    parent_session_dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, std::path::PathBuf> {
+    let subagents_dir = parent_session_dir.join("subagents");
+    let Ok(entries) = std::fs::read_dir(&subagents_dir) else {
+        return std::collections::BTreeMap::new();
+    };
+    let mut meta_paths = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            (file_type.is_dir() && !file_type.is_symlink()).then(|| entry.path().join("meta.json"))
+        })
+        .collect::<Vec<_>>();
+    meta_paths.sort();
+
+    let mut children = std::collections::BTreeMap::new();
+    for meta_path in meta_paths {
+        let meta = match std::fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<SubagentMetaSlice>(&content).ok())
+        {
+            Some(meta) => meta,
+            None => {
+                tracing::debug!(path = %meta_path.display(), "skipping unreadable subagent ownership metadata");
+                continue;
+            }
+        };
+        if meta.parent_session_id.as_deref() != Some(parent_session_id) {
+            tracing::debug!(
+                path = %meta_path.display(),
+                expected_parent = parent_session_id,
+                actual_parent = meta.parent_session_id.as_deref(),
+                "skipping subagent metadata owned by another parent"
+            );
+            continue;
+        }
+        let (Some(child_session_id), Some(child_cwd)) = (meta.child_session_id, meta.child_cwd)
+        else {
+            tracing::debug!(path = %meta_path.display(), "skipping incomplete subagent ownership metadata");
+            continue;
+        };
+        if child_session_id.is_empty() || child_cwd.is_empty() {
+            continue;
+        }
+        let child_dir = session_dir_at(
+            grow_home,
+            std::path::Path::new(&child_cwd),
+            &child_session_id,
+        );
+        children.insert(child_session_id, child_dir);
+    }
+    children
 }
 /// Grow home for the replay path. In production this is just `grow_home()`; the
 /// whole test override below is `#[cfg(test)]`, so no thread-local or dead
@@ -156,10 +240,7 @@ fn enrich_from_meta_with_home(
     parent_cwd: &std::path::Path,
     parent_session_id: &str,
 ) {
-    let meta_path = grow_home
-        .join("sessions")
-        .join(urlencoding::encode(&parent_cwd.to_string_lossy()).as_ref())
-        .join(parent_session_id)
+    let meta_path = session_dir_at(grow_home, parent_cwd, parent_session_id)
         .join("subagents")
         .join(info.subagent_id.as_ref())
         .join("meta.json");
@@ -207,6 +288,110 @@ pub(crate) fn replay_inherited_updates(
     };
     if outcome == ReplayEmission::Emitted {
         crate::memory_release::release_retained_memory_with("subagent-replay");
+    }
+}
+
+/// Rebuild the flat descendant index after a root session load. Root replay
+/// contains direct-child lifecycle records, while each nested spawn is durable
+/// in its immediate parent's session. Walk those child logs breadth-first and
+/// feed only lifecycle records through the normal notification projection so
+/// pending grandchild interactions can route immediately after load.
+pub(crate) fn restore_descendant_lifecycle(
+    app: &mut crate::app::app_view::AppView,
+    root_agent_id: crate::app::agent::AgentId,
+) {
+    use shell::extensions::notification::SessionUpdate;
+
+    let Some(root) = app.agents.get(&root_agent_id) else {
+        return;
+    };
+    let grow_home = effective_grow_home();
+    let Some(root_session_id) = root.session.session_id.as_ref().map(|id| id.0.to_string()) else {
+        return;
+    };
+    let root_session_dir = session_dir_at(&grow_home, &root.session.cwd, &root_session_id);
+    let replayed_direct_children = root
+        .subagent_sessions
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut queue = durable_child_session_dirs(&grow_home, &root_session_id, &root_session_dir)
+        .into_iter()
+        .filter(|(child_session_id, _)| replayed_direct_children.contains(child_session_id))
+        .collect::<std::collections::VecDeque<_>>();
+    let mut visited = std::collections::HashSet::new();
+    let previous_loading_replay = root.session.loading_replay;
+    if let Some(root) = app.agents.get_mut(&root_agent_id) {
+        // Reuse the lifecycle projection's restoration semantics: spawn does
+        // not eagerly replay a whole child transcript and finish does not add
+        // a second live footer. The descendant-specific handler bypasses the
+        // network "unexpected replay" gate while retaining source-local
+        // highwaters.
+        root.session.loading_replay = true;
+    }
+
+    while let Some((parent_session_id, parent_session_dir)) = queue.pop_front() {
+        if !visited.insert(parent_session_id.clone()) {
+            continue;
+        }
+        let mut durable_children =
+            durable_child_session_dirs(&grow_home, &parent_session_id, &parent_session_dir);
+        let mut lifecycle = Vec::new();
+        if let Err(error) = shell::session::storage::stream_replay_grow_notifications_in_dir(
+            &parent_session_dir,
+            |notification| {
+                if matches!(
+                    &notification.update,
+                    SessionUpdate::SubagentSpawned { .. }
+                        | SessionUpdate::SubagentProgress { .. }
+                        | SessionUpdate::SubagentFinished { .. }
+                ) {
+                    lifecycle.push(notification);
+                }
+            },
+        ) {
+            tracing::debug!(
+                session_id = parent_session_id,
+                session_dir = %parent_session_dir.display(),
+                ?error,
+                "failed to replay descendant lifecycle"
+            );
+            continue;
+        }
+
+        for mut notification in lifecycle {
+            let discovered_child = match &notification.update {
+                SessionUpdate::SubagentSpawned {
+                    child_session_id, ..
+                } => Some(child_session_id.clone()),
+                _ => None,
+            };
+            notification.session_id =
+                agent_client_protocol::SessionId::new(parent_session_id.clone());
+            let mut meta = notification
+                .meta
+                .take()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            meta.insert("isReplay".into(), serde_json::Value::Bool(true));
+            notification.meta = Some(serde_json::Value::Object(meta));
+            let Ok(raw) = serde_json::value::to_raw_value(&notification) else {
+                continue;
+            };
+            let ext = agent_client_protocol::ExtNotification::new(
+                "grow/session_notification",
+                std::sync::Arc::from(raw),
+            );
+            crate::app::acp_handler::handle_descendant_lifecycle_replay(&ext, app, root_agent_id);
+            if let Some(child) = discovered_child
+                && let Some(child_dir) = durable_children.remove(&child)
+            {
+                queue.push_back((child, child_dir));
+            }
+        }
+    }
+    if let Some(root) = app.agents.get_mut(&root_agent_id) {
+        root.session.loading_replay = previous_loading_replay;
     }
 }
 /// True when the child scrollback has no substantive replay content yet.
@@ -487,6 +672,8 @@ mod tests {
             context_source: None,
             resumed_from: None,
             capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
             workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,

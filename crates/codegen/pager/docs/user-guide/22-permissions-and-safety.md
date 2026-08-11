@@ -112,10 +112,11 @@ prompt_type = "full"
 classify_timeout_ms = 30000
 ```
 
-The model must exist in the configured provider catalog. If resolution or credentials fail, Auto
-mode falls back to the current session model. Because an explicit `reasoning_effort` is also used on
-that fallback path, leave it unset unless both models accept the value. With no explicit effort,
-Grow uses model configuration when present and otherwise omits the field for the upstream service.
+The model must exist in the configured provider catalog. Once `classifier_model` is set, Grow never
+silently substitutes the session model: resolution, credential, or initialization failure marks the
+classifier unavailable and uses the normal user-approval fallback. If `classifier_model` is omitted,
+the current primary-session model is used. With no explicit effort, Grow uses model configuration
+when present and otherwise omits the field for the upstream service.
 
 For automation that must run tools without interactive approval, use always-approve (and deny rules if you need hard blocks) rather than auto alone.
 
@@ -135,6 +136,14 @@ Grow can still load Claude-style permission **rules** from managed settings; alw
 ---
 
 ## How a tool call is authorized
+
+For a subagent, authorization has one additional boundary before this per-call pipeline:
+
+```text
+hard eligibility ∩ current child grant ∩ permission decision
+```
+
+Hard eligibility comes from the registered host tools, the Agent's authored preset/additional tools and allow/deny configuration, session clamps, Behavior/Goal/depth/plugin rules, and MCP inheritance. Runtime-injected native tools cannot enlarge requestable Execute/ReadWrite eligibility. `capability_mode` seeds the current child grant rather than deleting tools. `request_tool_access` can expose one eligible native capability or MCP server for that live child, but cannot cross the hard ceiling. The eventual Shell, edit, or MCP call then follows the normal checks below. Child remembered approvals stay in that child session and are never persisted or shared.
 
 When the model requests a tool, the following checks happen in order:
 

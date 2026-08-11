@@ -1,5 +1,6 @@
 //! Permission request selection, follow-up, cancellation, and queue draining.
 
+use super::ctx::get_active_agent_mut;
 use super::modes::set_permission_mode;
 use crate::app::actions::Effect;
 use crate::app::agent_view::AgentView;
@@ -50,7 +51,13 @@ pub(super) fn dispatch_permission_select(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let Some(agent) = app.agents.get_mut(&id) else {
+    let active_session_is_root = app.agents.get(&id).is_some_and(|agent| {
+        agent
+            .active_subagent
+            .as_ref()
+            .is_none_or(|session_id| !agent.subagent_views.contains_key(session_id))
+    });
+    let Some(agent) = get_active_agent_mut(app) else {
         return vec![];
     };
     let Some(perm) = agent.permission_queue.pop_front() else {
@@ -150,7 +157,7 @@ pub(super) fn dispatch_permission_select(
     // user couldn't have selected this option. The `is_yolo()` guard
     // is defensive — a redundant call would re-emit the toast and session
     // notification, but is otherwise safe.
-    if enable_always_approve {
+    if enable_always_approve && active_session_is_root {
         let already_on = app
             .agents
             .get(&id)
@@ -169,10 +176,7 @@ pub(super) fn dispatch_permission_select(
 
 /// Handle permission followup message (RejectOnce with user-typed text).
 pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
+    let Some(agent) = get_active_agent_mut(app) else {
         return vec![];
     };
     let Some(perm) = agent.permission_queue.pop_front() else {
@@ -223,10 +227,7 @@ pub(super) fn dispatch_permission_followup(app: &mut AppView, text: String) -> V
 
 /// Handle permission cancel (Ctrl-C / Esc — cancels front request only).
 pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
+    let Some(agent) = get_active_agent_mut(app) else {
         return vec![];
     };
     let Some(perm) = agent.permission_queue.pop_front() else {
@@ -243,25 +244,44 @@ pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Drain all queued permission requests, sending `Cancelled` to each.
-///
-/// Called on turn-end and turn-cancel. After draining, restores stashed
-/// prompt/pane. Distinct from `dispatch_permission_cancel` (front only).
-pub(crate) fn drain_permission_queue(agent: &mut AgentView) {
-    agent.last_permission_click = None;
-    if agent.permission_queue.is_empty() {
+/// Cancel permission requests owned by the root session whose turn ended.
+/// Child asks share the parent view's queue but have an independent lifetime;
+/// their own session teardown resolves them through `InteractionResolved`.
+pub(crate) fn drain_root_permission_queue(agent: &mut AgentView) {
+    let Some(root_session_id) = agent.session.session_id.clone() else {
         return;
-    }
-    // `pop_front` (not `drain`) so each iteration can re-borrow `agent`
-    // for `respond_permission`; order is unchanged.
+    };
+    let original_front = agent.permission_queue.front().map(|permission| {
+        (
+            permission.request.request.session_id.clone(),
+            permission.request.request.tool_call.tool_call_id.clone(),
+        )
+    });
+    let mut retained = std::collections::VecDeque::new();
+    let mut cancelled_any = false;
     while let Some(perm) = agent.permission_queue.pop_front() {
-        respond_permission(
-            agent,
-            perm.request,
-            acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
-        );
+        if perm.request.request.session_id == root_session_id {
+            cancelled_any = true;
+            respond_permission(
+                agent,
+                perm.request,
+                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
+            );
+        } else {
+            retained.push_back(perm);
+        }
     }
-    restore_permission_stashes(agent);
+    agent.permission_queue = retained;
+    let front_removed = cancelled_any
+        && original_front.is_some_and(|(session_id, tool_call_id)| {
+            agent.permission_queue.front().is_none_or(|permission| {
+                permission.request.request.session_id != session_id
+                    || permission.request.request.tool_call.tool_call_id != tool_call_id
+            })
+        });
+    if front_removed {
+        resolve_permission_queue_transition(agent);
+    }
 }
 
 /// Handle queue transition after resolving (select/followup/cancel) the front

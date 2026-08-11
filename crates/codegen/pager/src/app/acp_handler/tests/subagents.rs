@@ -1,6 +1,163 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    #[test]
+    fn nested_subagent_lifecycle_registers_flat_descendant_route() {
+        let mut app = make_app_with_agent("root-session");
+        handle(
+            make_ext_session_notification(
+                "root-session",
+                test_subagent_spawned("root-session", "child-session"),
+            ),
+            &mut app,
+        );
+        handle(
+            make_ext_session_notification(
+                "child-session",
+                test_subagent_spawned("child-session", "grandchild-session"),
+            ),
+            &mut app,
+        );
+
+        let root = &app.agents[&AgentId(0)];
+        assert!(root.subagent_sessions.contains_key("grandchild-session"));
+        assert!(root.subagent_views.contains_key("grandchild-session"));
+        assert!(matches!(
+            find_session_match(&app, &acp::SessionId::new("grandchild-session")),
+            Some(SessionMatch::Child(AgentId(0)))
+        ));
+
+        handle(
+            make_ext_session_notification(
+                "child-session",
+                GrowSessionUpdate::SubagentFinished {
+                    subagent_id: "grandchild-session".into(),
+                    child_session_id: "grandchild-session".into(),
+                    status: "completed".into(),
+                    error: None,
+                    tool_calls: 1,
+                    turns: 1,
+                    duration_ms: 10,
+                    tokens_used: 1,
+                    output: None,
+                    will_wake: false,
+                },
+            ),
+            &mut app,
+        );
+        assert!(app.agents[&AgentId(0)].subagent_sessions["grandchild-session"].finished);
+    }
+
+    /// Fresh root restore discovers the direct child's durable transcript via
+    /// the parent's real `subagents/<subagent_id>/meta.json` ownership record.
+    /// The persisted eventId seeds the immediate-parent highwater, so the same
+    /// lifecycle event flushed from the leader's ancestor-load live buffer is
+    /// not projected a second time.
+    #[test]
+    fn descendant_restore_uses_owned_disk_layout_and_dedups_live_overlap() {
+        with_replay_disk_home(|home| {
+            let root_sid = "restore-root-owned";
+            let child_sid = "restore-child-owned";
+            let grandchild_sid = "restore-grandchild-owned";
+            let root_dir = home
+                .join("sessions")
+                .join(shell::util::grow_home::encode_cwd_dirname("/tmp"))
+                .join(root_sid);
+            let meta_dir = root_dir.join("subagents").join(child_sid);
+            std::fs::create_dir_all(&meta_dir).unwrap();
+            std::fs::write(
+                meta_dir.join("meta.json"),
+                serde_json::json!({
+                    "parent_session_id": root_sid,
+                    "child_session_id": child_sid,
+                    "child_cwd": "/tmp",
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let mut nested = SessionNotification {
+                session_id: acp::SessionId::new(child_sid),
+                update: test_subagent_spawned(child_sid, grandchild_sid),
+                meta: Some(serde_json::json!({ "eventId": format!("{child_sid}-10") })),
+            };
+            let persisted = serde_json::json!({
+                "timestamp": 1,
+                "method": "_grow/session/update",
+                "params": serde_json::to_value(&nested).unwrap(),
+            });
+            write_child_updates_jsonl(home, child_sid, &persisted.to_string());
+
+            let mut app = make_app_with_agent(root_sid);
+            handle(
+                make_ext_session_notification(
+                    root_sid,
+                    test_subagent_spawned(root_sid, child_sid),
+                ),
+                &mut app,
+            );
+            let before_restore = app.agents[&AgentId(0)].scrollback.len();
+
+            crate::app::subagent::restore_descendant_lifecycle(&mut app, AgentId(0));
+
+            let root = &app.agents[&AgentId(0)];
+            assert!(root.subagent_sessions.contains_key(grandchild_sid));
+            assert!(root.subagent_views.contains_key(grandchild_sid));
+            assert_eq!(root.scrollback.len(), before_restore + 1);
+            assert_eq!(
+                root.subagent_views[child_sid].last_applied_grow_event_seq,
+                Some(10),
+                "the persisted child eventId must seed the child-source highwater"
+            );
+            assert!(matches!(
+                find_session_match(&app, &acp::SessionId::new(grandchild_sid)),
+                Some(SessionMatch::Child(AgentId(0)))
+            ));
+
+            let after_restore = root.scrollback.len();
+            nested.meta = Some(serde_json::json!({ "eventId": format!("{child_sid}-10") }));
+            let raw = serde_json::value::to_raw_value(&nested).unwrap();
+            let live = acp::ExtNotification::new(
+                "grow/session_notification",
+                std::sync::Arc::from(raw),
+            );
+            handle_ext_notification(&live, &mut app);
+            assert_eq!(
+                app.agents[&AgentId(0)].scrollback.len(),
+                after_restore,
+                "the replay/live overlap must project the nested spawn exactly once"
+            );
+        });
+    }
+
+    #[test]
+    fn child_view_uses_independent_permission_mode_from_spawn_event() {
+        let mut app = make_app_with_agent("sess-1");
+        let mut update = test_subagent_spawned("sess-1", "child-auto");
+        let GrowSessionUpdate::SubagentSpawned {
+            permission_mode,
+            effective_permission_mode,
+            ..
+        } = &mut update
+        else {
+            unreachable!("test helper must return SubagentSpawned");
+        };
+        *permission_mode = Some("auto".into());
+        *effective_permission_mode = Some("auto".into());
+
+        handle(
+            make_ext_session_notification("sess-1", update),
+            &mut app,
+        );
+
+        let child = app.agents[&AgentId(0)]
+            .subagent_views
+            .get("child-auto")
+            .expect("child view created");
+        assert!(child.session.auto_mode);
+        assert!(!child.session.yolo_mode);
+    }
+
     /// On resume, a replayed spawn+finish pair leaves the subagent terminal.
     #[test]
     fn replayed_subagent_finished_marks_orphan_terminal() {

@@ -34,7 +34,8 @@ pub(crate) fn handle_ask_user_question(
     // raised by a BACKGROUND session lands on its own view even when the user is
     // on the dashboard or another session — rather than failing because the
     // user hasn't entered the session yet.
-    let Some(id) = interaction_target_agent(app, &ext_req.session_id) else {
+    let session_id = acp::SessionId::new(ext_req.session_id.clone());
+    let Some(matched) = find_session_match(app, &session_id) else {
         // No local view for this session. Do NOT send an error — that would FAIL
         // the tool (rendered red). Leave the reverse-request unanswered: the
         // agent keeps awaiting and the leader replays it when a client attaches
@@ -46,10 +47,18 @@ pub(crate) fn handle_ask_user_question(
         drop(ext.response_tx);
         return false;
     };
-    let is_active = is_matched_agent_active(app, id);
-    let Some(agent) = app.agents.get_mut(&id) else {
-        // `interaction_target_agent` only returns ids that exist; defensive.
-        tracing::warn!("ask_user_question: agent {id:?} not found");
+    let id = matched.agent_id();
+    let is_active = is_matched_view_active(app, matched, &ext_req.session_id);
+    let Some(parent) = app.agents.get_mut(&id) else {
+        tracing::warn!("ask_user_question: parent agent {id:?} not found");
+        drop(ext.response_tx);
+        return false;
+    };
+    let Some(agent) = resolve_target_agent_view(parent, matched, &ext_req.session_id) else {
+        tracing::warn!(
+            "ask_user_question: session view {} not found",
+            ext_req.session_id
+        );
         drop(ext.response_tx);
         return false;
     };
@@ -95,6 +104,7 @@ pub(crate) fn handle_ask_user_question(
 
     // Stash the current prompt and create the question view.
     agent.question_view = Some(QuestionViewState::with_response_tx(
+        Some(ext_req.session_id.clone()),
         ext_req.tool_call_id,
         ext_req.questions,
         agent.prompt.stash(),
@@ -162,7 +172,8 @@ pub(super) fn handle_plan_approval(
     // 2. Route by the request's session id (like `session/update`), so a
     // plan-approval raised by a BACKGROUND session lands on its own view even
     // when the user isn't currently focused on it — rather than failing.
-    let Some(id) = interaction_target_agent(app, &params.session_id) else {
+    let session_id = acp::SessionId::new(params.session_id.clone());
+    let Some(matched) = find_session_match(app, &session_id) else {
         // No local view for this session. Do NOT error (that fails the tool):
         // leave the reverse-request unanswered and rely on the leader's
         // replay-on-attach.
@@ -173,10 +184,18 @@ pub(super) fn handle_plan_approval(
         drop(ext.response_tx);
         return false;
     };
-    let is_active = is_matched_agent_active(app, id);
-    let Some(agent) = app.agents.get_mut(&id) else {
-        // `interaction_target_agent` only returns ids that exist; defensive.
-        tracing::warn!("plan approval: agent {id:?} not found");
+    let id = matched.agent_id();
+    let is_active = is_matched_view_active(app, matched, &params.session_id);
+    let Some(parent) = app.agents.get_mut(&id) else {
+        tracing::warn!("plan approval: parent agent {id:?} not found");
+        drop(ext.response_tx);
+        return false;
+    };
+    let Some(agent) = resolve_target_agent_view(parent, matched, &params.session_id) else {
+        tracing::warn!(
+            "plan approval: session view {} not found",
+            params.session_id
+        );
         drop(ext.response_tx);
         return false;
     };

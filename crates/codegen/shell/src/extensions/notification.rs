@@ -655,6 +655,14 @@ pub enum SessionUpdate {
         /// Capability mode applied to this subagent (e.g. "read-only").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capability_mode: Option<String>,
+        /// Independent permission decision route used by this child.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<String>,
+        /// Effective permission mode after resolving `follow` and applying
+        /// managed-policy clamps at spawn time. Each request still resolves
+        /// `follow` again against the live parent mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_permission_mode: Option<String>,
         /// Named persona applied to this subagent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         persona: Option<String>,
@@ -1472,6 +1480,8 @@ mod tests {
             effective_context_source: None,
             context_normalized: false,
             capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
             persona: None,
             role: None,
             model: None,

@@ -282,6 +282,9 @@ struct SoakControl {
 
 impl ChildControl for SoakControl {
     type ProgressFuture = std::future::Ready<SubagentProgress>;
+    type SecurityContext = ();
+
+    fn security_context(&self) -> Self::SecurityContext {}
 
     fn progress(&self) -> Self::ProgressFuture {
         std::future::ready(SubagentProgress::default())
@@ -307,6 +310,7 @@ impl ChildRunner for SoakRunner {
         Box::pin(async move {
             let ChildRunRequest {
                 request,
+                security_parent: _,
                 cancellation,
                 reporter,
             } = run;

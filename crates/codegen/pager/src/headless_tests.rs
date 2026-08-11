@@ -191,6 +191,7 @@ fn drain_records_task_backgrounded_delivered_at_exit() {
         std::time::Instant::now(),
         &mut ttf_logged,
         false,
+        &acp::SessionId::new("sess-1"),
         &mut pending,
         &mut completed,
     );
@@ -198,6 +199,52 @@ fn drain_records_task_backgrounded_delivered_at_exit() {
         pending.contains(&super::BackgroundWork::Task("late-1".into())),
         "drain-to-empty records a task_backgrounded buffered at exit"
     );
+}
+
+#[test]
+fn headless_parent_yolo_does_not_approve_child_ask() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    let request = acp::RequestPermissionRequest::new(
+        acp::SessionId::new("child-session"),
+        acp::ToolCallUpdate::new(
+            acp::ToolCallId::new("capability-call"),
+            acp::ToolCallUpdateFields::default(),
+        ),
+        vec![acp::PermissionOption::new(
+            acp::PermissionOptionId::new("allow-once"),
+            "Allow once",
+            acp::PermissionOptionKind::AllowOnce,
+        )],
+    );
+    tx.send(acp_transport::AcpClientMessage::RequestPermission(
+        acp_transport::AcpArgs {
+            request,
+            response_tx,
+        },
+    ))
+    .unwrap();
+
+    let mut emitter = HeadlessEmitter::new(OutputFormat::Json, false);
+    let mut pending = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    let mut ttf_logged = false;
+    super::drain_pending_acp_messages(
+        &mut rx,
+        &mut emitter,
+        std::time::Instant::now(),
+        &mut ttf_logged,
+        true,
+        &acp::SessionId::new("root-session"),
+        &mut pending,
+        &mut completed,
+    );
+
+    let response = response_rx.blocking_recv().unwrap().unwrap();
+    assert!(matches!(
+        response.outcome,
+        acp::RequestPermissionOutcome::Cancelled
+    ));
 }
 
 /// `begin_session` before the model/effort apply lets a post-open error carry the real context.

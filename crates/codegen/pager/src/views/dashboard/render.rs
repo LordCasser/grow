@@ -8142,6 +8142,7 @@ mod tests {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -8183,6 +8184,7 @@ mod tests {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         ));
@@ -8233,6 +8235,7 @@ mod tests {
                 question: None,
                 options: Vec::new(),
                 request_id: None,
+                question_id: None,
                 reject_option: None,
             },
         );
@@ -8285,6 +8288,7 @@ mod tests {
                         ("deny".into(), "Deny".into()),
                     ],
                     request_id: None,
+                    question_id: None,
                     reject_option: None,
                 },
             );
@@ -8367,6 +8371,7 @@ mod tests {
                         ("deny".into(), "Deny".into()),
                     ],
                     request_id: None,
+                    question_id: None,
                     reject_option: None,
                 },
             );

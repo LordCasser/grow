@@ -287,6 +287,7 @@ impl SessionActor {
                 super::workflow_run::deep_research_terminal_report(
                     &query,
                     &workflow::WorkflowOutcome::Cancelled,
+                    None,
                 )
             })
         } else {

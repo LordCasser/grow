@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -24,8 +24,9 @@ use crate::permission::shell_access::{
 };
 use crate::permission::state::{PermissionState, load_state_from_disk, persist_state};
 use crate::permission::types::{
-    AccessKind, ClientType, Decision, EditPathContext, EditPolicy, PermissionCommand,
-    PermissionEvent, PromptPolicy,
+    AccessKind, ClientType, Decision, EditPathContext, EditPolicy, EffectivePermissionMode,
+    PermissionCommand, PermissionEvent, PermissionRequestContext, PermissionRequestSource,
+    PromptPolicy, RequestPermissionMode,
 };
 use mcp::servers::parse_mcp_qualified_name;
 use paths::AbsPathBuf;
@@ -65,6 +66,14 @@ pub(crate) mod reasons {
 
 pub const AUTO_DENY_CONSECUTIVE_LIMIT: u32 = 3;
 pub const AUTO_DENY_TOTAL_LIMIT: u32 = 20;
+
+#[derive(Default)]
+struct AutoRuntimeState {
+    classifier_turns: Vec<crate::permission::auto_mode::ClassifierTurn>,
+    recorded_permission_decisions: Vec<crate::permission::auto_mode::ClassifierTurn>,
+    consecutive_denials: u32,
+    total_denials: u32,
+}
 
 const AUTO_DENY_GUIDANCE: &str = "Take a safer approach that stays within what the user asked \
      for; do not retry this exact action or attempt to work around the denial. If no safer \
@@ -878,6 +887,45 @@ impl PermissionHandle {
         }
     }
 
+    /// Resolve the request-local mode with the same live primary-mode and
+    /// managed-policy clamp used by the permission actor.
+    pub fn effective_request_mode(
+        &self,
+        request_mode: Option<RequestPermissionMode>,
+    ) -> EffectivePermissionMode {
+        match self {
+            PermissionHandle::AllowAll => EffectivePermissionMode::AlwaysApprove,
+            PermissionHandle::Actor {
+                yolo_state,
+                auto_state,
+                yolo_pin,
+                ..
+            } => {
+                let (yolo, auto) = resolve_request_modes(
+                    request_mode,
+                    yolo_state.load(Ordering::Relaxed),
+                    auto_state.load(Ordering::Relaxed),
+                    *yolo_pin,
+                );
+                if yolo {
+                    EffectivePermissionMode::AlwaysApprove
+                } else if auto {
+                    EffectivePermissionMode::Auto
+                } else {
+                    EffectivePermissionMode::Ask
+                }
+            }
+        }
+    }
+
+    pub fn release_child(&self, session_id: String) {
+        if let PermissionHandle::Actor { cmd_tx, .. } = self
+            && let Err(error) = cmd_tx.send(PermissionCommand::ReleaseChild { session_id })
+        {
+            tracing::error!(?error, "failed to release child permission state");
+        }
+    }
+
     /// Whether the installed auto classifier has a live LLM `ClassifyTextFn`
     /// (session sampling). False when only the heuristic fallback is active.
     pub fn has_llm_side_query(&self) -> bool {
@@ -908,13 +956,34 @@ impl PermissionHandle {
         subagent_type: Option<String>,
         subagent_description: Option<String>,
     ) -> Decision {
-        self.request_with_edit_path_context(
+        self.request_with_mode(
+            access,
+            tool_call_update,
+            session_id,
+            subagent_type,
+            subagent_description,
+            None,
+        )
+        .await
+    }
+
+    pub async fn request_with_mode(
+        &self,
+        access: AccessKind,
+        tool_call_update: acp::ToolCallUpdate,
+        session_id: Option<String>,
+        subagent_type: Option<String>,
+        subagent_description: Option<String>,
+        request_mode: Option<crate::permission::types::RequestPermissionMode>,
+    ) -> Decision {
+        self.request_with_edit_path_context_mode(
             access,
             tool_call_update,
             None,
             session_id,
             subagent_type,
             subagent_description,
+            request_mode,
         )
         .await
     }
@@ -930,6 +999,57 @@ impl PermissionHandle {
         subagent_type: Option<String>,
         subagent_description: Option<String>,
     ) -> Decision {
+        self.request_with_edit_path_context_mode(
+            access,
+            tool_call_update,
+            edit_path_context,
+            session_id,
+            subagent_type,
+            subagent_description,
+            None,
+        )
+        .await
+    }
+
+    pub async fn request_with_edit_path_context_mode(
+        &self,
+        access: AccessKind,
+        tool_call_update: acp::ToolCallUpdate,
+        edit_path_context: Option<EditPathContext>,
+        session_id: Option<String>,
+        subagent_type: Option<String>,
+        subagent_description: Option<String>,
+        request_mode: Option<crate::permission::types::RequestPermissionMode>,
+    ) -> Decision {
+        let source = match (session_id, subagent_type) {
+            (Some(session_id), Some(subagent_type)) => PermissionRequestSource::Child {
+                session_id,
+                subagent_type: Some(subagent_type),
+                subagent_description,
+            },
+            (session_id, _) => PermissionRequestSource::Primary { session_id },
+        };
+        self.request_with_context(
+            access,
+            tool_call_update,
+            edit_path_context,
+            PermissionRequestContext {
+                source,
+                request_mode,
+                execution_cwd: None,
+                classifier_turns: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn request_with_context(
+        &self,
+        access: AccessKind,
+        tool_call_update: acp::ToolCallUpdate,
+        edit_path_context: Option<EditPathContext>,
+        context: PermissionRequestContext,
+    ) -> Decision {
         match self {
             PermissionHandle::AllowAll => Decision::Allow,
             PermissionHandle::Actor {
@@ -944,9 +1064,7 @@ impl PermissionHandle {
                     tool_call_update,
                     edit_path_context,
                     respond_to: tx,
-                    session_id,
-                    subagent_type,
-                    subagent_description,
+                    context,
                 };
                 if let Err(e) = cmd_tx.send(msg) {
                     tracing::error!(?e, "failed to send permission request");
@@ -969,6 +1087,43 @@ impl PermissionHandle {
 /// enable always-approve while it is set.
 fn clamp_yolo(requested: bool, yolo_pin: Option<&'static str>) -> bool {
     requested && yolo_pin.is_none()
+}
+
+fn resolve_request_modes(
+    request_mode: Option<crate::permission::types::RequestPermissionMode>,
+    primary_yolo: bool,
+    primary_auto: bool,
+    yolo_pin: Option<&'static str>,
+) -> (bool, bool) {
+    use crate::permission::types::RequestPermissionMode;
+    match request_mode {
+        Some(RequestPermissionMode::AlwaysApprove) => (clamp_yolo(true, yolo_pin), false),
+        Some(RequestPermissionMode::Auto) => (false, true),
+        Some(RequestPermissionMode::Ask) => (false, false),
+        Some(RequestPermissionMode::Follow) | None => (primary_yolo, primary_auto),
+    }
+}
+
+fn permission_state_for_request<'a>(
+    root: &'a mut PermissionState,
+    children: &'a mut HashMap<String, PermissionState>,
+    child_session: Option<&str>,
+) -> &'a mut PermissionState {
+    match child_session {
+        Some(session) => children.entry(session.to_owned()).or_default(),
+        None => root,
+    }
+}
+
+fn edit_session_grant_for_request<'a>(
+    root: &'a mut bool,
+    children: &'a mut HashMap<String, bool>,
+    child_session: Option<&str>,
+) -> &'a mut bool {
+    match child_session {
+        Some(session) => children.entry(session.to_owned()).or_default(),
+        None => root,
+    }
 }
 
 const MAX_RECORDED_PERMISSION_DECISIONS: usize = 12;
@@ -1160,7 +1315,10 @@ fn session_grant_pre_decision(
             yolo_pin,
             BashGrantOpts::PRE_CLASSIFIER,
         ),
-        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::Edit(_) => None,
+        AccessKind::Read(_)
+        | AccessKind::Grep { .. }
+        | AccessKind::Edit(_)
+        | AccessKind::CapabilityGrant { .. } => None,
     }
 }
 
@@ -1288,16 +1446,20 @@ fn spawn_permission_manager_with_pin(
         // fallback always uses the actor's transcript turns).
         let mut auto_classifier: Option<crate::permission::auto_mode::SharedClassifier> =
             Some(crate::permission::auto_mode::default_auto_mode_classifier());
-        let mut auto_consecutive_denials: u32 = 0;
-        let mut auto_total_denials: u32 = 0;
-        // Recent turns + project AGENTS.md for classifier context (set by session).
-        let mut classifier_turns: Vec<crate::permission::auto_mode::ClassifierTurn> = Vec::new();
-        let mut recorded_permission_decisions: Vec<crate::permission::auto_mode::ClassifierTurn> =
-            Vec::new();
+        // Auto classifier context, history, and denial budgets are isolated by
+        // source session. The primary session owns the root state; every child
+        // gets a short-lived entry removed at teardown.
+        let mut root_auto_runtime = AutoRuntimeState::default();
+        let mut child_auto_runtimes: HashMap<String, AutoRuntimeState> = HashMap::new();
         let mut project_instructions: Option<String> = None;
         // Log a refused yolo-enable once per session, not per SetYoloMode.
         let mut pin_refusal_logged = false;
         let mut allow_edits_for_session = false;
+        // Child remembered grants are intentionally actor-local. They are keyed by the
+        // concrete child session, never initialized from the parent's persisted state,
+        // and never written to disk. A recreated child therefore starts clean.
+        let mut child_permission_states: HashMap<String, PermissionState> = HashMap::new();
+        let mut child_edit_session_grants: HashMap<String, bool> = HashMap::new();
         let prompt_policy = permission_config
             .as_ref()
             .map(|c| c.prompt_policy)
@@ -1351,8 +1513,9 @@ fn spawn_permission_manager_with_pin(
                     auto_classifier = classifier;
                 }
                 PermissionCommand::SetClassifierTranscript(turns) => {
-                    // Caller compacts the transcript; store the recent turns as-is.
-                    classifier_turns = turns;
+                    // Legacy primary-session path. Child requests carry their
+                    // transcript atomically in PermissionRequestContext.
+                    root_auto_runtime.classifier_turns = turns;
                 }
                 PermissionCommand::SetProjectInstructions(instructions) => {
                     project_instructions = instructions;
@@ -1361,31 +1524,66 @@ fn spawn_permission_manager_with_pin(
                     state = PermissionState::default();
                     persist_state(&cwd, &state, client_id_ref).await;
                     allow_edits_for_session = false;
+                    child_permission_states.clear();
+                    child_edit_session_grants.clear();
+                    root_auto_runtime = AutoRuntimeState::default();
+                    child_auto_runtimes.clear();
                     tracing::info!(
                         "Permission state reset to defaults (including session edit allow)"
                     );
+                }
+                PermissionCommand::ReleaseChild { session_id } => {
+                    child_permission_states.remove(&session_id);
+                    child_edit_session_grants.remove(&session_id);
+                    child_auto_runtimes.remove(&session_id);
                 }
                 PermissionCommand::Request {
                     access,
                     tool_call_update,
                     edit_path_context,
                     mut respond_to,
-                    session_id: request_session_id,
-                    subagent_type: request_subagent_type,
-                    subagent_description: request_subagent_description,
+                    context,
                 } => {
                     // wait_ms timer; starts at dequeue so it excludes time queued behind others.
                     let request_received = tokio::time::Instant::now();
                     // Effective mode (yolo wins); stable for the arm (single-threaded actor).
-                    let permission_mode = if yolo_mode {
+                    let request_mode = context.request_mode;
+                    let request_session_id = context.source.session_id().map(str::to_owned);
+                    let request_subagent_type = context.source.subagent_type().map(str::to_owned);
+                    let request_subagent_description =
+                        context.source.subagent_description().map(str::to_owned);
+                    let child_permission_key = context.source.child_session_id().map(str::to_owned);
+                    let request_cwd = context.execution_cwd.as_deref().unwrap_or(cwd.as_path());
+                    let (effective_yolo_mode, effective_auto_mode) =
+                        resolve_request_modes(request_mode, yolo_mode, auto_mode, yolo_pin);
+                    let permission_mode = if effective_yolo_mode {
                         diagnostics::enums::PermissionMode::AlwaysApprove
-                    } else if auto_mode {
+                    } else if effective_auto_mode {
                         diagnostics::enums::PermissionMode::Auto
                     } else {
                         diagnostics::enums::PermissionMode::Ask
                     };
                     // Extract tool info for diagnostics
                     let tool_id = tool_call_update.tool_call_id.to_string();
+                    let request_state = permission_state_for_request(
+                        &mut state,
+                        &mut child_permission_states,
+                        child_permission_key.as_deref(),
+                    );
+                    let request_allow_edits_for_session = edit_session_grant_for_request(
+                        &mut allow_edits_for_session,
+                        &mut child_edit_session_grants,
+                        child_permission_key.as_deref(),
+                    );
+                    let auto_runtime = match child_permission_key.as_deref() {
+                        Some(session_id) => child_auto_runtimes
+                            .entry(session_id.to_owned())
+                            .or_default(),
+                        None => &mut root_auto_runtime,
+                    };
+                    if let Some(turns) = context.classifier_turns {
+                        auto_runtime.classifier_turns = turns;
+                    }
                     // Tool name is the single source of truth shared with the
                     // prompter's `events.jsonl` Permission* events (so the two
                     // can never drift). access_kind / access_detail feed BOTH the
@@ -1405,12 +1603,22 @@ fn spawn_permission_manager_with_pin(
                             Some(crate::permission::auto_mode::mcp_access_detail(name, input)),
                         ),
                         AccessKind::WebFetch(url) => ("web_fetch".to_owned(), Some(url.clone())),
+                        AccessKind::CapabilityGrant { target, purpose } => (
+                            "capability_grant".to_owned(),
+                            Some(format!("target: {target}\npurpose: {purpose}")),
+                        ),
+                    };
+                    let (capability_target, capability_purpose) = match &access {
+                        AccessKind::CapabilityGrant { target, purpose } => {
+                            (Some(target.clone()), Some(purpose.clone()))
+                        }
+                        _ => (None, None),
                     };
 
                     let diagnostics = std::cell::Cell::new(PermissionDiagnosticSnapshot {
                         classifier: None,
-                        auto_denials_consecutive: auto_consecutive_denials,
-                        auto_denials_total: auto_total_denials,
+                        auto_denials_consecutive: auto_runtime.consecutive_denials,
+                        auto_denials_total: auto_runtime.total_denials,
                     });
                     // `decision_reason` is the trigger (always set); `prompt_outcome` is
                     // the user's choice, so it is None on auto/non-prompt decisions.
@@ -1437,19 +1645,30 @@ fn spawn_permission_manager_with_pin(
                                 tool_name: tool_name.clone(),
                                 access_kind: access_kind_str.clone(),
                                 access_detail: access_detail.clone(),
-                                yolo_mode,
+                                yolo_mode: effective_yolo_mode,
                                 auto_approved,
                                 user_prompted,
                                 decision: decision_str,
                                 prompt_outcome: prompt_outcome.map(|s| s.to_string()),
                                 reject_reason,
                                 timestamp: Utc::now(),
-                                subagent_session_id: request_session_id.clone(),
+                                subagent_session_id: child_permission_key.clone(),
                                 subagent_type: request_subagent_type.clone(),
                                 subagent_description: request_subagent_description.clone(),
                                 permission_mode: Some(
                                     permission_mode_artifact_str(permission_mode).to_string(),
                                 ),
+                                requested_permission_mode: request_mode.map(|mode| {
+                                    match mode {
+                                        RequestPermissionMode::Ask => "ask",
+                                        RequestPermissionMode::Auto => "auto",
+                                        RequestPermissionMode::AlwaysApprove => "always-approve",
+                                        RequestPermissionMode::Follow => "follow",
+                                    }
+                                    .to_owned()
+                                }),
+                                capability_target: capability_target.clone(),
+                                capability_purpose: capability_purpose.clone(),
                                 decision_reason: decision_reason.map(|s| s.to_string()),
                                 classifier_source: diagnostics
                                     .classifier
@@ -1457,9 +1676,9 @@ fn spawn_permission_manager_with_pin(
                                 classifier_latency_ms: diagnostics
                                     .classifier
                                     .and_then(ClassifierDiagnosticSnapshot::latency_ms),
-                                auto_denials_consecutive: auto_mode
+                                auto_denials_consecutive: effective_auto_mode
                                     .then_some(diagnostics.auto_denials_consecutive),
-                                auto_denials_total: auto_mode
+                                auto_denials_total: effective_auto_mode
                                     .then_some(diagnostics.auto_denials_total),
                                 wait_ms: Some(request_received.elapsed().as_millis() as u64),
                                 // Live count at emit, this request included.
@@ -1482,9 +1701,9 @@ fn spawn_permission_manager_with_pin(
 
                     let bash_evaluation = match &access {
                         AccessKind::Bash(cmd) => {
-                            let mut evaluation = evaluate_bash(cmd, &state, true);
+                            let mut evaluation = evaluate_bash(cmd, request_state, true);
                             if let Some(raw) = evaluation.ambient_segments.take() {
-                                let session_cwd = cwd.as_path().to_path_buf();
+                                let session_cwd = request_cwd.to_path_buf();
                                 let plan = ambient_scan_plan_from_segments(&raw, &session_cwd);
                                 // FailClosed needs no git2; CheckDirs is blocking.
                                 let ambient_risk = match plan {
@@ -1545,8 +1764,8 @@ fn spawn_permission_manager_with_pin(
                     let preflight = GatePreflight::evaluate(
                         compiled_policy.as_ref(),
                         &access,
-                        cwd.as_path(),
-                        auto_mode,
+                        request_cwd,
+                        effective_auto_mode,
                     );
                     let policy_decision = preflight.policy_decision();
                     let policy_forced_prompt = preflight.policy_forced_prompt();
@@ -1572,7 +1791,7 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
-                    if yolo_mode && !shell_forced_prompt {
+                    if effective_yolo_mode && !shell_forced_prompt {
                         tracing::debug!("YOLO mode: auto-approving permission request");
                         let decision = Decision::Allow;
                         emit_event(&decision, true, false, None, Some(reasons::YOLO));
@@ -1588,10 +1807,10 @@ fn spawn_permission_manager_with_pin(
                         && let Some((decision, reason)) = session_grant_pre_decision(
                             &access,
                             bash_evaluation.as_ref(),
-                            &state,
-                            allow_edits_for_session,
+                            request_state,
+                            *request_allow_edits_for_session,
                             &static_domain_matcher,
-                            !(auto_mode && web_fetch_allowlist_is_default),
+                            !(effective_auto_mode && web_fetch_allowlist_is_default),
                             yolo_pin,
                         )
                     {
@@ -1605,7 +1824,8 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
-                    if auto_mode
+                    if effective_auto_mode
+                        && !matches!(access, AccessKind::CapabilityGrant { .. })
                         && !policy_forced_prompt
                         && !shell_forced_prompt
                         && protected_edit.is_none()
@@ -1629,8 +1849,11 @@ fn spawn_permission_manager_with_pin(
                     // unless auto fast-path/classifier decides first for non-forced
                     // paths; policy Asks and Bash request floors skip auto entirely
                     // unless they defer (fail-closed gate Ask / unvetted-env floor).
-                    if auto_mode
-                        && preflight.admits_auto_classifier()
+                    if effective_auto_mode
+                        && (preflight.admits_auto_classifier()
+                            || matches!(access, AccessKind::CapabilityGrant { .. })
+                                && !policy_forced_prompt
+                                && !shell_forced_prompt)
                         && (!bash_request_floor_requires_prompt(bash_evaluation.as_ref())
                             || bash_request_floor_defers_to_classifier(bash_evaluation.as_ref()))
                     {
@@ -1640,7 +1863,13 @@ fn spawn_permission_manager_with_pin(
                         };
                         let needs_user = protected_edit.is_some()
                             || access_requires_user_interaction(&tool_name, &access);
-                        let fast = auto_mode_fast_path(&access, &tool_name, needs_user);
+                        // Capability exposure always needs an explicit LLM verdict.
+                        // It must not inherit command/edit safety fast paths.
+                        let fast = if matches!(access, AccessKind::CapabilityGrant { .. }) {
+                            AutoFastPath::Classify
+                        } else {
+                            auto_mode_fast_path(&access, &tool_name, needs_user)
+                        };
                         match fast {
                             AutoFastPath::Allow => {
                                 diagnostics.set(
@@ -1672,8 +1901,10 @@ fn spawn_permission_manager_with_pin(
                                 let classify_started = std::time::Instant::now();
                                 let outcome = if let Some(ref clf) = auto_classifier {
                                     use crate::permission::auto_mode::ClassifierContext;
-                                    let mut turns = classifier_turns.clone();
-                                    turns.extend(recorded_permission_decisions.iter().cloned());
+                                    let mut turns = auto_runtime.classifier_turns.clone();
+                                    turns.extend(
+                                        auto_runtime.recorded_permission_decisions.iter().cloned(),
+                                    );
                                     let classify = clf.classify(
                                         &tool_name,
                                         &access,
@@ -1681,6 +1912,7 @@ fn spawn_permission_manager_with_pin(
                                         ClassifierContext {
                                             turns,
                                             project_instructions: project_instructions.clone(),
+                                            subagent_task: request_subagent_description.clone(),
                                         },
                                     );
                                     tokio::select! {
@@ -1723,10 +1955,10 @@ fn spawn_permission_manager_with_pin(
                                             tool = %tool_name,
                                             "auto mode: classifier allow"
                                         );
-                                        auto_consecutive_denials = 0;
+                                        auto_runtime.consecutive_denials = 0;
                                         diagnostics.set(diagnostics.get().with_auto_denials(
-                                            auto_consecutive_denials,
-                                            auto_total_denials,
+                                            auto_runtime.consecutive_denials,
+                                            auto_runtime.total_denials,
                                         ));
                                         let decision = Decision::Allow;
                                         emit_event(
@@ -1756,20 +1988,47 @@ fn spawn_permission_manager_with_pin(
                                         auto_prompt_reason = Some(reasons::AUTO_CLASSIFIER_BLOCK);
                                     }
                                     ClassifierVerdict::Block
-                                        if auto_consecutive_denials
-                                            < AUTO_DENY_CONSECUTIVE_LIMIT
-                                            && auto_total_denials < AUTO_DENY_TOTAL_LIMIT =>
+                                        if matches!(access, AccessKind::CapabilityGrant { .. }) =>
                                     {
-                                        auto_consecutive_denials += 1;
-                                        auto_total_denials += 1;
+                                        tracing::info!(
+                                            tool = %tool_name,
+                                            "auto mode: classifier blocked capability grant"
+                                        );
+                                        let reason = match outcome.reason() {
+                                            Some(r) => format!(
+                                                "Auto mode blocked this capability request ({}).",
+                                                r.trim_end_matches('.')
+                                            ),
+                                            None => "Auto mode blocked this capability request."
+                                                .to_owned(),
+                                        };
+                                        let decision = Decision::PolicyDeny(reason);
+                                        emit_event(
+                                            &decision,
+                                            false,
+                                            false,
+                                            None,
+                                            Some(reasons::AUTO_CLASSIFIER_DENY),
+                                        );
+                                        let _ = respond_to.send(decision);
+                                        continue;
+                                    }
+                                    ClassifierVerdict::Block
+                                        if auto_runtime.consecutive_denials
+                                            < AUTO_DENY_CONSECUTIVE_LIMIT
+                                            && auto_runtime.total_denials
+                                                < AUTO_DENY_TOTAL_LIMIT =>
+                                    {
+                                        auto_runtime.consecutive_denials += 1;
+                                        auto_runtime.total_denials += 1;
                                         diagnostics.set(diagnostics.get().with_auto_denials(
-                                            auto_consecutive_denials,
-                                            auto_total_denials,
+                                            auto_runtime.consecutive_denials,
+                                            auto_runtime.total_denials,
                                         ));
                                         tracing::info!(
                                             tool = %tool_name,
-                                            consecutive = auto_consecutive_denials,
-                                            total = auto_total_denials,
+                                            consecutive = auto_runtime.consecutive_denials,
+                                            total = auto_runtime.total_denials,
                                             "auto mode: classifier blocked — denying and continuing"
                                         );
                                         let reason = match outcome.reason() {
@@ -1797,8 +2056,8 @@ fn spawn_permission_manager_with_pin(
                                     ClassifierVerdict::Block => {
                                         tracing::info!(
                                             tool = %tool_name,
-                                            consecutive = auto_consecutive_denials,
-                                            total = auto_total_denials,
+                                            consecutive = auto_runtime.consecutive_denials,
+                                            total = auto_runtime.total_denials,
                                             "auto mode: denial limit reached — prompting user"
                                         );
                                         auto_forced_prompt = true;
@@ -1858,7 +2117,8 @@ fn spawn_permission_manager_with_pin(
                             );
                         }
                         Some(Decision::Allow)
-                            if protected_edit.is_some()
+                            if matches!(access, AccessKind::CapabilityGrant { .. })
+                                || protected_edit.is_some()
                                 || bash_request_floor_requires_prompt(bash_evaluation.as_ref()) =>
                         {
                             tracing::info!(
@@ -1911,16 +2171,16 @@ fn spawn_permission_manager_with_pin(
                         // existing grant satisfies the rule (ask once, remember).
                         AccessKind::MCPTool { name, .. } => mcp_pre_decision(
                             name,
-                            &state,
+                            request_state,
                             policy_forced_prompt,
                             remember_tool_approvals,
                         )
                         .map(|d| (d, reasons::PERSISTED_GRANT)),
                         AccessKind::Edit(_) => {
-                            if allow_edits_for_session && protected_edit.is_none() {
+                            if *request_allow_edits_for_session && protected_edit.is_none() {
                                 Some((Decision::Allow, reasons::PERSISTED_GRANT))
                             } else {
-                                match state.edit_policy {
+                                match request_state.edit_policy {
                                     EditPolicy::Reject => Some((
                                         Decision::Reject("edits prohibited".to_owned()),
                                         reasons::SESSION_DENY,
@@ -1949,7 +2209,7 @@ fn spawn_permission_manager_with_pin(
                                         bash_evaluation
                                             .as_ref()
                                             .expect("Bash access has evaluation"),
-                                        &state,
+                                        request_state,
                                         yolo_pin,
                                         BashGrantOpts::ASK_FLOOR_REMEMBER,
                                     )
@@ -1962,7 +2222,7 @@ fn spawn_permission_manager_with_pin(
                                     bash_evaluation
                                         .as_ref()
                                         .expect("Bash access has evaluation"),
-                                    &state,
+                                    request_state,
                                     yolo_pin,
                                     BashGrantOpts::post_classify(auto_forced_prompt),
                                 )
@@ -1981,7 +2241,8 @@ fn spawn_permission_manager_with_pin(
                                         Some((Decision::Allow, reasons::STATIC_ALLOWLIST))
                                     } else if let Some(host) = parsed_url.host_str() {
                                         let domain = normalize_domain(host);
-                                        if state.allowed_web_fetch_domains.contains(&domain) {
+                                        if request_state.allowed_web_fetch_domains.contains(&domain)
+                                        {
                                             tracing::debug!(
                                                 url = %url,
                                                 %domain,
@@ -2013,6 +2274,7 @@ fn spawn_permission_manager_with_pin(
                                 }
                             }
                         }
+                        AccessKind::CapabilityGrant { .. } => None,
                     };
                     // Auto forced a prompt: neutralize leftover non-bash Allows.
                     // Session grants already short-circuited; bash grants stay gated
@@ -2073,7 +2335,7 @@ fn spawn_permission_manager_with_pin(
                             // (e.g. `curl … && sh` must not become two separate
                             // prompts for `curl …` then `sh`).
                             let prompt_outcome = tokio::select! {
-                                outcome = prompter.request(&access, &tool_call_update, protected_edit) => outcome,
+                                outcome = prompter.request_for_session(&access, &tool_call_update, protected_edit, request_session_id.as_deref()) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
 
@@ -2082,13 +2344,17 @@ fn spawn_permission_manager_with_pin(
                             let (decision, outcome_str) = match prompt_outcome {
                                 PromptOutcome::AllowOnce => (Decision::Allow, "allow_once"),
                                 PromptOutcome::AllowAlways => {
-                                    state.allowed_bash_commands.insert(cmd.clone());
-                                    persist_state(&cwd, &state, client_id_ref).await;
+                                    request_state.allowed_bash_commands.insert(cmd.clone());
+                                    if child_permission_key.is_none() {
+                                        persist_state(&cwd, request_state, client_id_ref).await;
+                                    }
                                     (Decision::Allow, "allow_always")
                                 }
                                 PromptOutcome::AllowAlwaysBashCommand(prefix) => {
-                                    state.allowed_bash_commands.insert(prefix.clone());
-                                    persist_state(&cwd, &state, client_id_ref).await;
+                                    request_state.allowed_bash_commands.insert(prefix.clone());
+                                    if child_permission_key.is_none() {
+                                        persist_state(&cwd, request_state, client_id_ref).await;
+                                    }
                                     (Decision::Allow, "allow_always_bash")
                                 }
                                 PromptOutcome::AllowAlwaysDomain(_)
@@ -2103,8 +2369,12 @@ fn spawn_permission_manager_with_pin(
                                     "reject_once",
                                 ),
                                 PromptOutcome::RejectAlwaysBashCommand(prefix) => {
-                                    state.disallowed_bash_commands.insert(prefix.clone());
-                                    persist_state(&cwd, &state, client_id_ref).await;
+                                    request_state
+                                        .disallowed_bash_commands
+                                        .insert(prefix.clone());
+                                    if child_permission_key.is_none() {
+                                        persist_state(&cwd, request_state, client_id_ref).await;
+                                    }
                                     (
                                         Decision::Reject(format!(
                                             "User rejected the execution and excluded {prefix} from this session"
@@ -2130,7 +2400,7 @@ fn spawn_permission_manager_with_pin(
                         _ => {
                             // Non-bash access kinds keep the single-prompt flow.
                             let prompt_outcome = tokio::select! {
-                                outcome = prompter.request(&access, &tool_call_update, protected_edit) => outcome,
+                                outcome = prompter.request_for_session(&access, &tool_call_update, protected_edit, request_session_id.as_deref()) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
                             let (decision, outcome_str) = match &prompt_outcome {
@@ -2138,7 +2408,7 @@ fn spawn_permission_manager_with_pin(
                                 PromptOutcome::AllowEditsForSession => {
                                     // Session-scoped only (in-memory). Do not persist edit_policy.
                                     // This matches the label "during this session".
-                                    allow_edits_for_session = true;
+                                    *request_allow_edits_for_session = true;
                                     (Decision::Allow, "allow_edits_for_session")
                                 }
                                 PromptOutcome::AllowAlways => {
@@ -2150,9 +2420,11 @@ fn spawn_permission_manager_with_pin(
                                     // `AllowAlways` (the edit "allow for this session"
                                     // option maps to `AllowEditsForSession` above).
                                     if let AccessKind::MCPTool { name, .. } = &access {
-                                        state.allowed_mcp_tools.insert(name.clone());
+                                        request_state.allowed_mcp_tools.insert(name.clone());
                                     }
-                                    persist_state(&cwd, &state, client_id_ref).await;
+                                    if child_permission_key.is_none() {
+                                        persist_state(&cwd, request_state, client_id_ref).await;
+                                    }
                                     (Decision::Allow, "allow_always")
                                 }
                                 PromptOutcome::AllowAlwaysBashCommand(_) => {
@@ -2161,8 +2433,12 @@ fn spawn_permission_manager_with_pin(
                                 }
                                 PromptOutcome::AllowAlwaysDomain(domain) => {
                                     if let AccessKind::WebFetch(_) = &access {
-                                        state.allowed_web_fetch_domains.insert(domain.clone());
-                                        persist_state(&cwd, &state, client_id_ref).await;
+                                        request_state
+                                            .allowed_web_fetch_domains
+                                            .insert(domain.clone());
+                                        if child_permission_key.is_none() {
+                                            persist_state(&cwd, request_state, client_id_ref).await;
+                                        }
                                     }
                                     (Decision::Allow, "allow_always_domain")
                                 }
@@ -2184,8 +2460,10 @@ fn spawn_permission_manager_with_pin(
                                                 "AllowAlwaysMcpTool tool_name mismatch; persisting access-kind name"
                                             );
                                         }
-                                        state.allowed_mcp_tools.insert(access_name.clone());
-                                        persist_state(&cwd, &state, client_id_ref).await;
+                                        request_state.allowed_mcp_tools.insert(access_name.clone());
+                                        if child_permission_key.is_none() {
+                                            persist_state(&cwd, request_state, client_id_ref).await;
+                                        }
                                     }
                                     (Decision::Allow, "allow_always_mcp_tool")
                                 }
@@ -2202,15 +2480,22 @@ fn spawn_permission_manager_with_pin(
                                             .map(|(_, server, _)| server);
                                         match canonical {
                                             Some(canonical) if canonical == server_prefix => {
-                                                state
+                                                request_state
                                                     .allowed_mcp_servers
                                                     .insert(canonical.to_owned());
                                                 tracing::info!(
                                                     server = %canonical,
-                                                    count = state.allowed_mcp_servers.len(),
+                                                    count = request_state.allowed_mcp_servers.len(),
                                                     "added MCP server to session allowlist"
                                                 );
-                                                persist_state(&cwd, &state, client_id_ref).await;
+                                                if child_permission_key.is_none() {
+                                                    persist_state(
+                                                        &cwd,
+                                                        request_state,
+                                                        client_id_ref,
+                                                    )
+                                                    .await;
+                                                }
                                             }
                                             _ => {
                                                 // Mismatch or malformed access name. Defensively
@@ -2223,8 +2508,17 @@ fn spawn_permission_manager_with_pin(
                                                     access_name = %access_name,
                                                     "AllowAlwaysMcpServer prefix mismatch; downgrading to tool-scope"
                                                 );
-                                                state.allowed_mcp_tools.insert(access_name.clone());
-                                                persist_state(&cwd, &state, client_id_ref).await;
+                                                request_state
+                                                    .allowed_mcp_tools
+                                                    .insert(access_name.clone());
+                                                if child_permission_key.is_none() {
+                                                    persist_state(
+                                                        &cwd,
+                                                        request_state,
+                                                        client_id_ref,
+                                                    )
+                                                    .await;
+                                                }
                                             }
                                         }
                                     }
@@ -2260,7 +2554,7 @@ fn spawn_permission_manager_with_pin(
                     if user_prompted
                         && let Some(approved) = prompted_decision_approved(&decision, outcome_str)
                     {
-                        recorded_permission_decisions.push(
+                        auto_runtime.recorded_permission_decisions.push(
                             crate::permission::auto_mode::ClassifierTurn::PermissionDecision {
                                 tool: tool_name.clone(),
                                 args: crate::permission::auto_mode::permission_decision_args(
@@ -2270,9 +2564,10 @@ fn spawn_permission_manager_with_pin(
                                 approved,
                             },
                         );
-                        let len = recorded_permission_decisions.len();
+                        let len = auto_runtime.recorded_permission_decisions.len();
                         if len > MAX_RECORDED_PERMISSION_DECISIONS {
-                            recorded_permission_decisions
+                            auto_runtime
+                                .recorded_permission_decisions
                                 .drain(..len - MAX_RECORDED_PERMISSION_DECISIONS);
                         }
                     }
@@ -2282,12 +2577,11 @@ fn spawn_permission_manager_with_pin(
                         && !matches!(outcome_str, "error" | "timed_out")
                         && !requester_gone
                     {
-                        auto_consecutive_denials = 0;
-                        diagnostics.set(
-                            diagnostics
-                                .get()
-                                .with_auto_denials(auto_consecutive_denials, auto_total_denials),
-                        );
+                        auto_runtime.consecutive_denials = 0;
+                        diagnostics.set(diagnostics.get().with_auto_denials(
+                            auto_runtime.consecutive_denials,
+                            auto_runtime.total_denials,
+                        ));
                     }
                     let trigger = if matches!(decision, Decision::TimedOut) {
                         reasons::PERMISSION_TIMEOUT
@@ -2346,6 +2640,60 @@ mod tests {
         assert!(!clamp_yolo(false, Some(PIN)));
         assert!(clamp_yolo(true, None));
         assert!(!clamp_yolo(false, None));
+    }
+
+    #[test]
+    fn request_modes_are_independent_and_follow_is_live() {
+        use crate::permission::types::RequestPermissionMode;
+        assert_eq!(
+            resolve_request_modes(Some(RequestPermissionMode::Auto), true, false, None),
+            (false, true)
+        );
+        assert_eq!(
+            resolve_request_modes(Some(RequestPermissionMode::Ask), false, true, None),
+            (false, false)
+        );
+        assert_eq!(
+            resolve_request_modes(Some(RequestPermissionMode::Follow), false, true, None),
+            (false, true)
+        );
+        assert_eq!(
+            resolve_request_modes(Some(RequestPermissionMode::Follow), true, false, None),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn child_always_approve_is_clamped_by_managed_policy() {
+        use crate::permission::types::RequestPermissionMode;
+        assert_eq!(
+            resolve_request_modes(
+                Some(RequestPermissionMode::AlwaysApprove),
+                false,
+                false,
+                Some(PIN),
+            ),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn child_remembered_grants_are_isolated_from_parent_and_siblings() {
+        let mut root = PermissionState::default();
+        root.allowed_bash_commands.insert("parent-only".to_owned());
+        let mut children = HashMap::new();
+
+        permission_state_for_request(&mut root, &mut children, Some("child-a"))
+            .allowed_bash_commands
+            .insert("child-only".to_owned());
+
+        assert!(root.allowed_bash_commands.contains("parent-only"));
+        assert!(!root.allowed_bash_commands.contains("child-only"));
+        let child_a = permission_state_for_request(&mut root, &mut children, Some("child-a"));
+        assert!(child_a.allowed_bash_commands.contains("child-only"));
+        assert!(!child_a.allowed_bash_commands.contains("parent-only"));
+        let child_b = permission_state_for_request(&mut root, &mut children, Some("child-b"));
+        assert!(child_b.allowed_bash_commands.is_empty());
     }
 
     #[test]
@@ -3243,6 +3591,62 @@ mod tests {
             }),
             seen,
         )
+    }
+
+    #[tokio::test]
+    async fn child_auto_context_is_atomic_and_source_local() {
+        use crate::permission::auto_mode::{ClassifierTurn, ClassifierVerdict};
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (manager, _events) = test_manager(&cwd, false, None);
+                let (classifier, seen) = capturing_classifier(ClassifierVerdict::Allow);
+                manager.set_classifier(Some(classifier));
+
+                for (session_id, task) in [("child-a", "task-a"), ("child-b", "task-b")] {
+                    let decision = manager
+                        .request_with_context(
+                            AccessKind::CapabilityGrant {
+                                target: "native:execute".to_owned(),
+                                purpose: format!("purpose-{session_id}"),
+                            },
+                            tool_call(),
+                            None,
+                            PermissionRequestContext {
+                                source: PermissionRequestSource::Child {
+                                    session_id: session_id.to_owned(),
+                                    // Security identity is the child session,
+                                    // even when optional display metadata is absent.
+                                    subagent_type: None,
+                                    subagent_description: Some(task.to_owned()),
+                                },
+                                request_mode: Some(RequestPermissionMode::Auto),
+                                execution_cwd: Some(cwd.as_path().to_path_buf()),
+                                classifier_turns: Some(vec![ClassifierTurn::UserText(
+                                    session_id.to_owned(),
+                                )]),
+                            },
+                        )
+                        .await;
+                    assert!(matches!(decision, Decision::Allow));
+                }
+
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.len(), 2);
+                assert_eq!(seen[0].subagent_task.as_deref(), Some("task-a"));
+                assert_eq!(seen[1].subagent_task.as_deref(), Some("task-b"));
+                assert!(matches!(
+                    seen[0].turns.as_slice(),
+                    [ClassifierTurn::UserText(text)] if text == "child-a"
+                ));
+                assert!(matches!(
+                    seen[1].turns.as_slice(),
+                    [ClassifierTurn::UserText(text)] if text == "child-b"
+                ));
+            })
+            .await;
     }
 
     #[test]
@@ -4901,9 +5305,7 @@ mod tests {
                         tool_call_update: tool_call(),
                         edit_path_context: None,
                         respond_to: tx,
-                        session_id: None,
-                        subagent_type: None,
-                        subagent_description: None,
+                        context: PermissionRequestContext::default(),
                     })
                     .expect("actor alive");
 
@@ -4999,9 +5401,7 @@ mod tests {
                         tool_call_update: tool_call(),
                         edit_path_context: None,
                         respond_to,
-                        session_id: None,
-                        subagent_type: None,
-                        subagent_description: None,
+                        context: PermissionRequestContext::default(),
                     })
                     .expect("actor alive");
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -5065,9 +5465,7 @@ mod tests {
                         tool_call_update: tool_call(),
                         edit_path_context: None,
                         respond_to: tx,
-                        session_id: None,
-                        subagent_type: None,
-                        subagent_description: None,
+                        context: PermissionRequestContext::default(),
                     })
                     .expect("actor alive");
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -7890,9 +8288,7 @@ mod tests {
                         tool_call_update: tool_call(),
                         edit_path_context: None,
                         respond_to,
-                        session_id: None,
-                        subagent_type: None,
-                        subagent_description: None,
+                        context: PermissionRequestContext::default(),
                     })
                     .expect("actor alive");
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -8046,6 +8442,54 @@ mod tests {
                         matches!(d, Decision::Allow),
                         "policy allow must beat classifier deny (request #{}), got {d:?}",
                         i + 1
+                    );
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn child_auto_capability_policy_allow_still_requires_classifier_block() {
+        use crate::permission::auto_mode::{ClassifierVerdict, FixedClassifier};
+        use crate::permission::types::{
+            PatternMode, PermissionConfig, PermissionRule, RequestPermissionMode, RuleAction,
+            ToolFilter,
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let config = PermissionConfig::new(vec![PermissionRule {
+                    action: RuleAction::Allow,
+                    tool: ToolFilter::Any,
+                    pattern: Some("native:execute".to_owned()),
+                    pattern_mode: PatternMode::Glob,
+                }]);
+                let (mgr, _events) = test_manager_with_config(&cwd, config, false);
+                // The primary remains in Ask; only this child request selects Auto.
+                mgr.set_classifier(Some(std::sync::Arc::new(FixedClassifier(
+                    ClassifierVerdict::Block,
+                ))));
+
+                for index in 0..(AUTO_DENY_CONSECUTIVE_LIMIT + 2) {
+                    let decision = mgr
+                        .request_with_mode(
+                            AccessKind::CapabilityGrant {
+                                target: "native:execute".to_owned(),
+                                purpose: "Run focused tests".to_owned(),
+                            },
+                            tool_call(),
+                            Some("child-session".to_owned()),
+                            Some("explore".to_owned()),
+                            Some("Inspect the failing subsystem".to_owned()),
+                            Some(RequestPermissionMode::Auto),
+                        )
+                        .await;
+                    assert!(
+                        matches!(decision, Decision::PolicyDeny(_)),
+                        "explicit classifier block must remain a denial even past the ordinary auto denial budget (request #{})",
+                        index + 1
                     );
                 }
             })

@@ -1643,6 +1643,51 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     })
 }
 
+/// Stream durable Grow extension notifications from one already-resolved
+/// session directory. This is separate from conversation replay because the
+/// pager normally applies only ACP chunks to a child view; reconnect
+/// reconstruction additionally needs nested subagent lifecycle records to
+/// rebuild descendant routing before pending interactions are replayed.
+///
+/// The full notification is retained deliberately: its `_meta.eventId` is the
+/// source-session dedup identity shared by the persisted record and a live
+/// event buffered during an ancestor `session/load`.
+pub fn stream_replay_grow_notifications_in_dir<
+    F: FnMut(crate::extensions::notification::SessionNotification),
+>(
+    session_dir: &std::path::Path,
+    mut f: F,
+) -> std::io::Result<ReplayEmission> {
+    let Some(updates_path) = replay_updates_path_in_dir(session_dir) else {
+        return Ok(ReplayEmission::Empty);
+    };
+    let raw_contents = std::fs::read_to_string(updates_path)?;
+    let live = filter_rewind_lines(
+        raw_contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect(),
+    );
+    let mut emitted = false;
+    for line in live {
+        match SessionUpdateEnvelope::from_str(line) {
+            Ok(SessionUpdate::Grow(notification)) => {
+                emitted = true;
+                f(*notification);
+            }
+            Ok(SessionUpdate::Acp(_)) => {}
+            Err(error) => {
+                tracing::debug!(?error, "skipping unparseable Grow replay line");
+            }
+        }
+    }
+    Ok(if emitted {
+        ReplayEmission::Emitted
+    } else {
+        ReplayEmission::Empty
+    })
+}
+
 // Rewind can drop earlier lines, so surviving lines are held until the end of
 // the file; one `String` plus `&str` slices keeps that minimal. Output matches
 // the typed load. Returns whether any ACP update was forwarded.

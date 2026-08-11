@@ -67,6 +67,7 @@ impl ToolKind {
             ToolKind::GoalReplanRequest => "Request Goal Replan",
             ToolKind::GoalLifecycleUpdate => "Update Goal Lifecycle",
             ToolKind::Workflow => "Workflow",
+            ToolKind::CapabilityRequest => "Request Tool Access",
             ToolKind::Other => "Tool",
         }
     }
@@ -86,6 +87,7 @@ impl ToolKind {
             | ToolKind::GoalRead
             | ToolKind::WebFetch
             | ToolKind::PlanControl
+            | ToolKind::CapabilityRequest
             | ToolKind::AskUser => ToolScope::Read,
             ToolKind::Edit
             | ToolKind::Delete

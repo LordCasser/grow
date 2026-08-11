@@ -375,7 +375,9 @@ impl tool_runtime::Tool for TaskTool {
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
                 completion_output_cap: None,
-                spawn_depth: None,
+                // Preserve logical depth even when the shell coordinator
+                // re-parents nested requests onto the root session handle.
+                spawn_depth: Some(depth + 1),
                 output_token_budget: None,
                 output_schema: None,
                 loop_task_id: None,
@@ -668,7 +670,8 @@ mod tests {
             result.is_ok(),
             "expected Ok at depth 1 with max 2: {result:?}"
         );
-        let _ = rx.try_recv();
+        let spawn = unwrap_spawn(rx.recv().await.expect("nested spawn event"));
+        assert_eq!(spawn.runtime_overrides.spawn_depth, Some(2));
     }
 
     #[tokio::test]

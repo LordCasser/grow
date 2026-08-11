@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::super::acp_session::SessionActor;
@@ -18,14 +19,28 @@ impl SessionActor {
             return;
         };
         let outcome = match state.status {
-            WorkflowRunStatus::Complete => workflow::WorkflowOutcome::Completed {
-                result: serde_json::json!({
-                    "report": state.result_summary.unwrap_or_else(|| {
-                        "The process ended after completion, but no persisted report body was available."
-                            .to_string()
-                    })
-                }),
-            },
+            WorkflowRunStatus::Complete => {
+                let summary = state.result_summary.unwrap_or_else(|| {
+                    "The process ended after completion, but no persisted report body was available."
+                        .to_string()
+                });
+                let report = summary
+                    .split_once("\n\n_Full report: ")
+                    .map_or(summary.as_str(), |(report, _)| report)
+                    .to_string();
+                let status = if report.contains("**Status: Partial**") {
+                    "partial"
+                } else {
+                    "verified"
+                };
+                workflow::WorkflowOutcome::Completed {
+                    result: serde_json::json!({
+                        "report": report,
+                        "status": status,
+                        "path": "scratch/report.md",
+                    }),
+                }
+            }
             WorkflowRunStatus::Cancelled => workflow::WorkflowOutcome::Cancelled,
             WorkflowRunStatus::BudgetLimited => workflow::WorkflowOutcome::BudgetExceeded {
                 message: state
@@ -98,6 +113,19 @@ impl SessionActor {
         Ok(run_id)
     }
 
+    fn deep_research_report_artifact_path(&self, run_id: &str) -> Option<PathBuf> {
+        let path = crate::session::persistence::session_dir(&self.session_info)
+            .join("workflows")
+            .join(run_id)
+            .join("scratch")
+            .join("report.md");
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return None;
+        }
+        std::fs::canonicalize(path).ok()
+    }
+
     pub(super) async fn finish_deep_research_run(
         &self,
         run_id: &str,
@@ -117,7 +145,8 @@ impl SessionActor {
             .get(run_id)
             .map(|run| run.objective.clone())
             .unwrap_or_default();
-        let report = deep_research_terminal_report(&query, &outcome);
+        let artifact_path = self.deep_research_report_artifact_path(run_id);
+        let report = deep_research_terminal_report(&query, &outcome, artifact_path.as_deref());
         let goal = self.goal_tracker.lock().snapshot().cloned();
         if self
             .persist_control_snapshot_durably(
@@ -155,7 +184,8 @@ impl SessionActor {
             .unwrap_or_default();
         self.workflow_manager.lock().await.cancel(run_id);
         self.behavior.lock().clear_deep_research_run();
-        let report = deep_research_terminal_report(&query, &workflow::WorkflowOutcome::Cancelled);
+        let report =
+            deep_research_terminal_report(&query, &workflow::WorkflowOutcome::Cancelled, None);
         self.send_host_turn_slash_command_output(&report).await;
     }
     pub(crate) fn named_workflow_snapshot(
@@ -465,8 +495,13 @@ impl SessionActor {
 pub(super) fn deep_research_terminal_report(
     query: &str,
     outcome: &workflow::WorkflowOutcome,
+    artifact_path: Option<&Path>,
 ) -> String {
     use workflow::WorkflowOutcome;
+    let artifact = artifact_path.map_or_else(
+        || "No complete report artifact was produced for this outcome.".to_string(),
+        |path| format!("`{}`", path.display()),
+    );
     if let WorkflowOutcome::Completed { result } = outcome
         && let Some(report) = result.get("report").and_then(serde_json::Value::as_str)
         && !report.trim().is_empty()
@@ -481,7 +516,7 @@ pub(super) fn deep_research_terminal_report(
             None => "completed",
         };
         return format!(
-            "# Deep Research Report\n\n## Status\n\n{status}\n\n## Query\n\n{query}\n\n## Verified findings\n\n{report}\n\n## Evidence\n\nSee the cited sources and verification notes in the findings above.\n\n## Limitations\n\nAny coverage gaps and uncertainty are recorded in the report body.\n\n## Termination reason\n\nThe research workflow reached a terminal result."
+            "# Deep Research Report\n\n## Status\n\n{status}\n\n## Query\n\n{query}\n\n{report}\n\n## Full report\n\n{artifact}\n\n## Termination reason\n\nThe research workflow reached a terminal result."
         );
     }
     let (status, reason, findings) = match outcome {
@@ -520,7 +555,7 @@ pub(super) fn deep_research_terminal_report(
         ),
     };
     format!(
-        "# Deep Research Report\n\n## Status\n\n{status}\n\n## Query\n\n{query}\n\n## Verified findings\n\n{findings}\n\n## Evidence\n\nNo additional independently verified evidence was available at termination.\n\n## Limitations\n\nThis is a terminal fallback report generated from the workflow outcome.\n\n## Termination reason\n\n{reason}"
+        "# Deep Research Report\n\n## Status\n\n{status}\n\n## Query\n\n{query}\n\n## Investigation and verification\n\n{findings}\n\n## Limitations\n\nThis is a terminal fallback report generated from the workflow outcome; no additional independently verified evidence was available at termination.\n\n## Full report\n\n{artifact}\n\n## Termination reason\n\n{reason}"
     )
 }
 
@@ -655,8 +690,10 @@ mod run_match_tests {
                     "report": "Some verified material with coverage gaps."
                 }),
             },
+            Some(std::path::Path::new("/tmp/report.md")),
         );
         assert!(partial.contains("## Status\n\npartial"));
+        assert!(partial.contains("## Full report\n\n`/tmp/report.md`"));
 
         let failed = deep_research_terminal_report(
             "query",
@@ -666,6 +703,7 @@ mod run_match_tests {
                     "report": "None of the candidate claims survived independent source verification."
                 }),
             },
+            None,
         );
         assert!(failed.contains("## Status\n\nverification failed"));
     }
@@ -685,13 +723,13 @@ mod run_match_tests {
             },
         ];
         for outcome in outcomes {
-            let report = deep_research_terminal_report("query", &outcome);
+            let report = deep_research_terminal_report("query", &outcome, None);
             for heading in [
                 "## Status",
                 "## Query",
-                "## Verified findings",
-                "## Evidence",
+                "## Investigation and verification",
                 "## Limitations",
+                "## Full report",
                 "## Termination reason",
             ] {
                 assert!(report.contains(heading), "missing {heading} in {report}");

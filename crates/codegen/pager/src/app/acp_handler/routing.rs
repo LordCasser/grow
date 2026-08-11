@@ -168,22 +168,41 @@ pub(super) fn is_matched_agent_active(app: &AppView, matched_agent: AgentId) -> 
     matches!(app.active_view, ActiveView::Agent(id) if id == matched_agent)
 }
 
-/// Resolve the `AgentId` that should own an interactive modal
-/// (`ask_user_question` / Plan approval) for `session_id`.
-///
-/// Routes by the request's session id via [`find_session_match`] — exactly like
-/// `session/update` notifications — so a modal raised by a **background**
-/// session lands on its own view even when the user is on the dashboard or a
-/// different session, instead of being gated on `app.active_view`. A child
-/// (subagent) match resolves to its parent agent, which owns the overlay.
-///
-/// Returns `None` when no local view exists for that session; the caller must
-/// then leave the reverse-request unanswered (drop, do NOT error) and rely on
-/// the leader's replay-on-attach.
-pub(super) fn interaction_target_agent(app: &AppView, session_id: &str) -> Option<AgentId> {
-    let sid = acp::SessionId::new(session_id.to_owned());
-    match find_session_match(app, &sid) {
-        Some(SessionMatch::Root(id) | SessionMatch::Child(id)) => Some(id),
-        None => None,
+/// Whether the concrete root/child view addressed by `matched` is currently
+/// visible. A child session is visible only while its parent has that child in
+/// fullscreen; the parent root is visible only when no child is attached.
+pub(super) fn is_matched_view_active(
+    app: &AppView,
+    matched: SessionMatch,
+    session_id: &str,
+) -> bool {
+    let parent_id = matched.agent_id();
+    let Some(parent) = app.agents.get(&parent_id) else {
+        return false;
+    };
+    if !matches!(app.active_view, ActiveView::Agent(id) if id == parent_id) {
+        return false;
+    }
+    match matched {
+        SessionMatch::Root(_) => parent.active_subagent.is_none(),
+        SessionMatch::Child(_) => parent.active_subagent.as_deref() == Some(session_id),
+    }
+}
+
+/// Borrow the concrete view addressed by a session match. Interactive state
+/// belongs to this view, not to the top-level container: this keeps sibling
+/// child questions independent and makes fullscreen child input/render paths
+/// work without a parallel overlay routing layer.
+pub(super) fn resolve_target_agent_view<'a>(
+    parent: &'a mut AgentView,
+    matched: SessionMatch,
+    child_sid: &str,
+) -> Option<&'a mut AgentView> {
+    match matched {
+        SessionMatch::Root(_) => Some(parent),
+        SessionMatch::Child(_) => parent
+            .subagent_views
+            .get_mut(child_sid)
+            .map(|child| &mut **child),
     }
 }

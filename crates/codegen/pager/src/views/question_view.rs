@@ -122,6 +122,10 @@ pub enum LocalQuestionKind {
 /// Not `Clone` because it owns a `oneshot::Sender` for the ACP response.
 #[derive(Debug)]
 pub struct QuestionViewState {
+    /// Session that owns this reverse request. Local pager questions have no
+    /// source session; ACP questions use this together with `tool_call_id` as
+    /// the interaction identity.
+    pub source_session_id: Option<String>,
     /// The tool call ID of the `AskUserQuestion` invocation.
     pub tool_call_id: String,
     /// The questions to present.
@@ -203,6 +207,7 @@ impl QuestionViewState {
         stashed_prompt: StashedPrompt,
     ) -> Self {
         Self::with_response_tx(
+            None,
             tool_call_id,
             questions,
             stashed_prompt,
@@ -216,6 +221,7 @@ impl QuestionViewState {
     /// Called by the `ExtMethod` handler when a blocking `grow/ask_user_question`
     /// request arrives from the shell coordinator.
     pub fn with_response_tx(
+        source_session_id: Option<String>,
         tool_call_id: String,
         questions: Vec<Question>,
         stashed_prompt: StashedPrompt,
@@ -237,6 +243,7 @@ impl QuestionViewState {
             .collect();
 
         Self {
+            source_session_id,
             tool_call_id,
             questions,
             active_tab: 0,

@@ -227,6 +227,11 @@ pub struct SubagentsConfig {
     /// Raw `[subagents] max_depth` (i64 so out-of-range parses; clamped ≥1 at resolve).
     #[serde(default)]
     pub max_depth: Option<i64>,
+    /// Permission route for all subagent capability requests and tool calls.
+    /// This is intentionally independent of the primary session unless set
+    /// to `follow`.
+    #[serde(default)]
+    pub permission_mode: workspace::permission::types::RequestPermissionMode,
     /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
     /// available models registry. Parsed from `[subagents.models]` in config.toml.

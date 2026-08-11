@@ -859,6 +859,7 @@ pub enum Action {
     /// answer. Only valid for a single-question, single-select ext ask.
     DashboardQuestionAnswer {
         row: crate::views::dashboard::DashboardRowId,
+        tool_call_id: String,
         option_idx: Option<usize>,
         freeform: String,
     },
