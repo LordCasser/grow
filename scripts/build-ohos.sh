@@ -30,7 +30,12 @@
 #   docker run -itd --name grow-ohos-ci \
 #     --mount type=bind,source="$PWD",target=/workspace/grow \
 #     swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner:latest sh
-#   docker exec grow-ohos-ci /workspace/grow/scripts/build-ohos.sh [--smoke]
+#   docker exec grow-ohos-ci /workspace/grow/scripts/build-ohos.sh
+#   docker exec grow-ohos-ci /workspace/grow/scripts/build-ohos.sh --smoke
+#
+# `--smoke` only exercises an existing artifact. It never invokes cargo, so a
+# release can strip the binary before smoke-testing it without rebuilding and
+# silently restoring debug sections.
 #
 # Env overrides:
 #   OHOS_SDK_ROOT            SDK root (default /opt/ohos-sdk/ohos)
@@ -64,6 +69,73 @@ export RUSTUP_HOME CARGO_HOME CARGO_TARGET_DIR
 
 log() { printf '\n=== %s ===\n' "$*"; }
 
+MODE="${1:-build}"
+case "$MODE" in
+  build)
+    if [ "$#" -ne 0 ]; then
+      echo "usage: $0 [--smoke]" >&2
+      exit 1
+    fi
+    ;;
+  --smoke)
+    if [ "$#" -ne 1 ]; then
+      echo "usage: $0 [--smoke]" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "usage: $0 [--smoke]" >&2
+    exit 1
+    ;;
+esac
+
+BIN="$CARGO_TARGET_DIR/$CARGO_PROFILE/grow"
+
+# ----------------------------------------------------------- SDK env -------
+log "OHOS SDK environment ($OHOS_SDK_ROOT)"
+for d in \
+  "$OHOS_SDK_ROOT/native/llvm/bin" \
+  "$OHOS_SDK_ROOT/native/build-tools/cmake/bin" \
+  "$OHOS_SDK_ROOT/native/sysroot/usr"; do
+  if [ ! -d "$d" ]; then
+    echo "error: OHOS SDK layout not found at $OHOS_SDK_ROOT (missing $d)" >&2
+    exit 1
+  fi
+done
+export OHOS_NDK_HOME="$OHOS_SDK_ROOT"
+export PATH="$OHOS_SDK_ROOT/native/llvm/bin:$OHOS_SDK_ROOT/native/build-tools/cmake/bin:$PATH"
+export CC_aarch64_unknown_linux_ohos=aarch64-unknown-linux-ohos-clang
+export CXX_aarch64_unknown_linux_ohos=aarch64-unknown-linux-ohos-clang++
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER=aarch64-unknown-linux-ohos-clang
+
+smoke_existing_artifact() {
+  if [ ! -x "$BIN" ]; then
+    echo "error: binary not found at $BIN" >&2
+    exit 1
+  fi
+
+  log "Smoke (container): runtime libs + --version + sessions + doctor"
+  SYSROOT_LIB="$OHOS_SDK_ROOT/native/sysroot/usr/lib/aarch64-linux-ohos"
+  for lib in libz.so libtime_service_ndk.so; do
+    if [ ! -e "/lib64/$lib" ] && [ -e "$SYSROOT_LIB/$lib" ]; then
+      cp "$SYSROOT_LIB/$lib" "/lib64/$lib"
+      chmod 755 "/lib64/$lib"
+      echo "installed runtime lib: /lib64/$lib (from SDK sysroot)"
+    fi
+  done
+  export TERM=xterm-256color
+  export HOME="${HOME:-/storage/Users/currentUser}"
+  "$BIN" --version
+  GROW_HOME="$HOME/.grow-smoke" "$BIN" sessions list
+  GROW_HOME="$HOME/.grow-smoke" "$BIN" doctor 2>&1 | head -10 || true
+}
+
+if [ "$MODE" = "--smoke" ]; then
+  smoke_existing_artifact
+  log "Smoke complete. Binary: $BIN"
+  exit 0
+fi
+
 # -------------------------------------------------- toolchain bootstrap ----
 log "Toolchain bootstrap (idempotent)"
 if ! command -v brew >/dev/null 2>&1; then
@@ -93,23 +165,6 @@ rustup toolchain link system "$RUST_PREFIX"
 export RUSTUP_TOOLCHAIN=system
 cargo --version
 rustc --version
-
-# ----------------------------------------------------------- SDK env -------
-log "OHOS SDK environment ($OHOS_SDK_ROOT)"
-for d in \
-  "$OHOS_SDK_ROOT/native/llvm/bin" \
-  "$OHOS_SDK_ROOT/native/build-tools/cmake/bin" \
-  "$OHOS_SDK_ROOT/native/sysroot/usr"; do
-  if [ ! -d "$d" ]; then
-    echo "error: OHOS SDK layout not found at $OHOS_SDK_ROOT (missing $d)" >&2
-    exit 1
-  fi
-done
-export OHOS_NDK_HOME="$OHOS_SDK_ROOT"
-export PATH="$OHOS_SDK_ROOT/native/llvm/bin:$OHOS_SDK_ROOT/native/build-tools/cmake/bin:$PATH"
-export CC_aarch64_unknown_linux_ohos=aarch64-unknown-linux-ohos-clang
-export CXX_aarch64_unknown_linux_ohos=aarch64-unknown-linux-ohos-clang++
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER=aarch64-unknown-linux-ohos-clang
 
 # ----------------------------------------------------- cargo mirror -------
 # crates.io / USTC TLS is flaky from this environment; rsproxy verified stable.
@@ -162,32 +217,27 @@ fi
 # build without it (docs/ohos-porting.md §3.7). sandbox-enforce stays on.
 FEATURE_FLAGS=(--no-default-features --features sandbox-enforce)
 LOG=/tmp/build-ohos.log
+ATTEMPT_LOG=/tmp/build-ohos-attempt.log
 
 log "cargo build (profile=$CARGO_PROFILE, target=aarch64-unknown-linux-ohos)"
 echo "log: $LOG"
-# First pass without --locked: refresh Cargo.lock if [patch.crates-io] entries
-# (third_party/nix-ohos) are newer than the lockfile.
-if cargo build --profile "$CARGO_PROFILE" --locked -p cli --bin grow \
-    "${FEATURE_FLAGS[@]}" >"$LOG" 2>&1; then
-  :
-else
-  echo "locked build failed (refreshing lock once, then retrying): $(grep -E '^error' "$LOG" | head -2)"
-  cargo build --profile "$CARGO_PROFILE" -p cli --bin grow \
-      "${FEATURE_FLAGS[@]}" >"$LOG" 2>&1 || true
-fi
-
+: >"$LOG"
 ok=0
 for attempt in 1 2 3 4 5; do
   echo "--- attempt $attempt ---"
+  : >"$ATTEMPT_LOG"
   if cargo build --profile "$CARGO_PROFILE" --locked -p cli --bin grow \
-      "${FEATURE_FLAGS[@]}" >>"$LOG" 2>&1; then
+      "${FEATURE_FLAGS[@]}" 2>&1 | tee -a "$LOG" "$ATTEMPT_LOG"; then
     ok=1
     break
   fi
-  err="$(grep -E '^error' "$LOG" | head -3)"
+  err="$(grep -E '^error' "$ATTEMPT_LOG" | tail -3 || true)"
   echo "attempt $attempt failed: $err"
-  if grep -q "SSL connect\|spurious network" "$LOG"; then
-    echo "  (network error; mirror/retry handles it)"
+  if grep -Eq "SSL connect|spurious network|failed to download|failed to fetch|Timeout was reached|unexpected eof" "$ATTEMPT_LOG"; then
+    echo "  transient network failure; retrying"
+  else
+    echo "  non-network build failure; not retrying" >&2
+    break
   fi
 done
 if [ "$ok" -ne 1 ]; then
@@ -196,7 +246,6 @@ if [ "$ok" -ne 1 ]; then
   exit 1
 fi
 
-BIN="$CARGO_TARGET_DIR/$CARGO_PROFILE/grow"
 if [ ! -x "$BIN" ]; then
   echo "error: binary not found at $BIN" >&2
   exit 1
@@ -206,24 +255,6 @@ log "Artifact"
 ls -lh "$BIN"
 readelf -l "$BIN" 2>/dev/null | grep -E "interpreter" | head -1 || true
 readelf -d "$BIN" 2>/dev/null | grep NEEDED | head -8 || true
-
-# ------------------------------------------------------------ smoke --------
-if [ "${1:-}" = "--smoke" ]; then
-  log "Smoke (container): runtime libs + --version + sessions + doctor"
-  SYSROOT_LIB="$OHOS_SDK_ROOT/native/sysroot/usr/lib/aarch64-linux-ohos"
-  for lib in libz.so libtime_service_ndk.so; do
-    if [ ! -e "/lib64/$lib" ] && [ -e "$SYSROOT_LIB/$lib" ]; then
-      cp "$SYSROOT_LIB/$lib" "/lib64/$lib"
-      chmod 755 "/lib64/$lib"
-      echo "installed runtime lib: /lib64/$lib (from SDK sysroot)"
-    fi
-  done
-  export TERM=xterm-256color
-  export HOME="${HOME:-/storage/Users/currentUser}"
-  "$BIN" --version
-  GROW_HOME="$HOME/.grow-smoke" "$BIN" sessions list
-  GROW_HOME="$HOME/.grow-smoke" "$BIN" doctor 2>&1 | head -10 || true
-fi
 
 log "Done. Binary: $BIN"
 echo "Next: commit third_party/nix-ohos + Cargo.toml/Cargo.lock (if not yet),"

@@ -387,9 +387,12 @@ release commit 完成且工作区干净后，可以用 `scripts/act-release.sh v
 正式发布流程：
 
 1. 提交版本、lockfile、release notes 和文档。
-2. 创建并推送 annotated tag `v1.1.6`，不要提前创建公开 Release。
-3. [release workflow](.github/workflows/release.yml) 通过 matrix 构建 10 个目标；除 OHOS 外均嵌入
-   固定版本 `rg`。
+2. 创建并推送 annotated tag `v1.1.6`，不要提前创建公开 Release；然后从默认分支手动运行
+   [release workflow](.github/workflows/release.yml)，传入这个已有 tag。workflow checkout 精确 tag，
+   但让 Cargo 缓存保留在默认分支作用域以供后续版本复用。
+3. workflow 通过 matrix 构建 10 个目标；除 OHOS 外均嵌入
+   固定版本 `rg`。OHOS 产物按 build → strip → smoke → self-sign 顺序处理，并对 stripped
+   状态、`.codesign` 段和最终资产大小执行两阶段门禁。
 4. workflow 先创建隐藏 draft Release，验证 10 个 updater 约定资产均已上传后再一次性公开。
 
 Release 页面只包含 10 个最终 `.tar.gz`，不会公开构建中间物或单独 checksum 资产。稳定版与带

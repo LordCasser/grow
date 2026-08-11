@@ -4,20 +4,17 @@
 #   release.yml    — entry: validate tag, select platform matrix, publish
 #   build-one.yml  — reusable workflow: build + package ONE asset platform
 #
-# Triggers:
-#   - Tag push (v*): builds and publishes all 10 updater assets.
-#   - workflow_dispatch: pick platform groups via boolean inputs. `publish`
-#     is only allowed when every group is selected (the updater contract
-#     requires the full asset set on the GitHub Release).
+# Triggered explicitly from the default branch with an existing release tag.
+# The build still checks out the exact tag, while GitHub Actions caches remain
+# in the default-branch scope and can be reused by later releases. `publish`
+# is only allowed when every group is selected (the updater contract requires
+# the full asset set on the GitHub Release).
 #
 # Updater-visible assets use grow-{version}-{asset_platform}.tar.gz and
 # contain exactly one executable: `grow` on Unix, `grow.exe` on Windows.
 name: Build release assets
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -49,12 +46,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
   RELEASE_REPO: LordCasser/grow
-  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  RELEASE_TAG: ${{ inputs.tag }}
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
 jobs:
   validate:
@@ -72,6 +70,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${ACT:-}" != "true" && "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+            echo "official releases must be dispatched from the default branch (${DEFAULT_BRANCH}); current ref: ${GITHUB_REF}" >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git rev-parse -q --verify "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null || {
+            echo "release tag does not exist: $RELEASE_TAG" >&2
+            exit 1
+          }
           if [[ "${ACT:-}" == "true" ]]; then
             updater_repo="$(
               git show "${RELEASE_TAG}:crates/codegen/update/src/version.rs" \
@@ -132,20 +142,19 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   # Platform catalog: single source of truth for every release asset.
-  # On tag push all platforms are selected; on workflow_dispatch the
-  # boolean inputs filter by group. The resulting JSON array drives the
-  # build job's matrix (matrix.include = fromJson(...)), so an empty
-  # selection expands to zero build combinations.
+  # Boolean inputs filter by group. The resulting JSON array drives the build
+  # job's matrix (matrix.include = fromJson(...)), so an empty selection
+  # expands to zero build combinations.
   select:
     name: Select platform matrix
     runs-on: ubuntu-24.04
     outputs:
       platforms: ${{ steps.filter.outputs.platforms }}
     env:
-      BUILD_LINUX: ${{ github.event_name == 'workflow_dispatch' && inputs.build_linux }}
-      BUILD_MACOS: ${{ github.event_name == 'workflow_dispatch' && inputs.build_macos }}
-      BUILD_WINDOWS: ${{ github.event_name == 'workflow_dispatch' && inputs.build_windows }}
-      BUILD_OHOS: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ohos }}
+      BUILD_LINUX: ${{ inputs.build_linux }}
+      BUILD_MACOS: ${{ inputs.build_macos }}
+      BUILD_WINDOWS: ${{ inputs.build_windows }}
+      BUILD_OHOS: ${{ inputs.build_ohos }}
     steps:
       - id: filter
         name: Filter platforms by selected groups
@@ -305,30 +314,24 @@ jobs:
           ]
           JSONEOF
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            jq -c \
-              --argjson linux "${BUILD_LINUX}" \
-              --argjson macos "${BUILD_MACOS}" \
-              --argjson windows "${BUILD_WINDOWS}" \
-              --argjson ohos "${BUILD_OHOS}" \
-              '[.[] | select((.group == "linux" and $linux) or (.group == "macos" and $macos) or (.group == "windows" and $windows) or (.group == "ohos" and $ohos))]' \
-              "${RUNNER_TEMP}/release-platforms.json" > "${RUNNER_TEMP}/selected.json"
-          else
-            cp "${RUNNER_TEMP}/release-platforms.json" "${RUNNER_TEMP}/selected.json"
-          fi
+          jq -c \
+            --argjson linux "${BUILD_LINUX}" \
+            --argjson macos "${BUILD_MACOS}" \
+            --argjson windows "${BUILD_WINDOWS}" \
+            --argjson ohos "${BUILD_OHOS}" \
+            '[.[] | select((.group == "linux" and $linux) or (.group == "macos" and $macos) or (.group == "windows" and $windows) or (.group == "ohos" and $ohos))]' \
+            "${RUNNER_TEMP}/release-platforms.json" > "${RUNNER_TEMP}/selected.json"
           selected="$(jq -c . "${RUNNER_TEMP}/selected.json")"
           echo "selected $(jq 'length' <<<"$selected") platform(s)"
           echo "platforms=${selected}" >> "$GITHUB_OUTPUT"
 
   # Manual dispatch sanity checks. Must stay a plain (never skipped) job so
-  # publish can depend on it on every trigger: the check itself is gated to
-  # workflow_dispatch, and on tag push this job is a trivial no-op success.
+  # publish can depend on it even for partial, non-publishing builds.
   dispatch-guard:
     name: Validate dispatch inputs
     runs-on: ubuntu-24.04
     steps:
       - name: Require at least one platform group; publish requires all four
-        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -375,7 +378,7 @@ jobs:
       rg_sha256: ${{ matrix.rg_sha256 }}
       rg_strip_components: ${{ matrix.rg_strip_components }}
       rg_runnable: ${{ matrix.rg_runnable }}
-      release_tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      release_tag: ${{ inputs.tag }}
       grow_version: ${{ needs.validate.outputs.version }}
 
   publish:
@@ -384,7 +387,7 @@ jobs:
       - validate
       - build
       - dispatch-guard
-    if: ${{ github.event_name == 'push' || inputs.publish }}
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
@@ -444,6 +447,25 @@ jobs:
             fi
             echo "release asset: $name ($(wc -c <"$name") bytes)"
           done
+
+          ohos_asset="grow-${version}-ohos-aarch64.tar.gz"
+          if [[ -f "$ohos_asset" ]]; then
+            ohos_asset_size="$(wc -c <"$ohos_asset")"
+            if (( ohos_asset_size >= 80000000 )); then
+              echo "$ohos_asset is unexpectedly large: ${ohos_asset_size} bytes" >&2
+              exit 1
+            fi
+            ohos_verify_dir="$(mktemp -d "${RUNNER_TEMP}/grow-ohos-verify.XXXXXX")"
+            tar -xzf "$ohos_asset" -C "$ohos_verify_dir"
+            file "$ohos_verify_dir/grow" | grep -F 'stripped'
+            readelf -SW "$ohos_verify_dir/grow" | awk '
+              $2 == ".codesign" {
+                found = 1
+                if ($3 != "PROGBITS" || $6 != "001000" || $NF != "4096") exit 2
+              }
+              END { if (!found) exit 1 }
+            '
+          fi
           sha256sum grow-*
 
       - name: Prepare hidden GitHub Release

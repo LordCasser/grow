@@ -112,6 +112,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-${{ inputs.asset_platform }}
+          # Official releases are dispatched from the default branch while
+          # checking out an immutable tag, so these per-target caches remain
+          # reusable across versions. Ad-hoc tag runs restore but never write
+          # the roughly 1 GB/platform single-use tag cache.
+          save-if: ${{ github.ref_type != 'tag' }}
 
       - name: Install cross
         if: ${{ inputs.builder == 'cross' }}
@@ -243,9 +248,9 @@ jobs:
       # (its configure does not know the ohos triplet) and WITHOUT a bundled
       # ripgrep (runtime resolves `rg` from PATH; search tools error with an
       # install hint when missing). CARGO_TARGET_DIR lives under the mounted
-      # workspace so the runner can package the artifact. The binary is
-      # stripped with the SDK's llvm-strip and smoke-tested inside the
-      # container (it cannot run on the ubuntu runner).
+      # workspace so the runner can package the artifact. The binary is built
+      # exactly once, stripped with the SDK's llvm-strip, smoke-tested without
+      # rebuilding, then self-signed on the Ubuntu host in the next step.
       - name: Build Grow (OHOS container)
         if: ${{ inputs.builder == 'ohos' }}
         shell: bash
@@ -264,8 +269,70 @@ jobs:
               BIN="${CARGO_TARGET_DIR}/${CARGO_PROFILE}/grow"
               test -x "$BIN"
               /opt/ohos-sdk/ohos/native/llvm/bin/llvm-strip --strip-all "$BIN"
+              if readelf -SW "$BIN" | grep -Eq "\\.debug_(info|str|line|ranges|loc)([[:space:]]|$)"; then
+                echo "large DWARF sections remain after llvm-strip" >&2
+                exit 1
+              fi
+              binary_size="$(stat -c %s "$BIN")"
+              if [ "$binary_size" -ge 150000000 ]; then
+                echo "stripped OHOS binary is unexpectedly large: $binary_size bytes" >&2
+                exit 1
+              fi
               scripts/build-ohos.sh --smoke
             '
+
+      # OHOS self-signing is a deterministic integrity marker, not an identity
+      # signature: it uses no key or certificate. Pin both independent
+      # ohos-bst-light implementations and require byte-identical output so a
+      # signing regression cannot silently enter a release.
+      - name: Self-sign Grow (OHOS)
+        if: ${{ inputs.builder == 'ohos' }}
+        shell: bash
+        env:
+          BST_COMMIT: c4dfd71c869a0ca055d8b5ce4c3a9bf53735b2e1
+          BST_PY_SHA256: 764cc74a7a05c2840561bb3b715bf32d16eec921e451423bbd8828e204dae30a
+          BST_C_SHA256: 0c63982720f9430f9bc70176849382471cad6a247d02a829c049f42f8896c26f
+        run: |
+          set -euo pipefail
+          bin="target-ohos/release-dist/grow"
+          signer_py="${RUNNER_TEMP}/ohos-self-sign.py"
+          signer_c_src="${RUNNER_TEMP}/ohos-self-sign.c"
+          signer_c_bin="${RUNNER_TEMP}/ohos-self-sign"
+          c_signed="${RUNNER_TEMP}/grow-ohos-c-signed"
+          base_url="https://raw.githubusercontent.com/hqzing/ohos-bst-light/${BST_COMMIT}"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 120 \
+            --output "$signer_py" "$base_url/self-sign.py"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 120 \
+            --output "$signer_c_src" "$base_url/self-sign.c"
+          echo "${BST_PY_SHA256}  ${signer_py}" | sha256sum --check
+          echo "${BST_C_SHA256}  ${signer_c_src}" | sha256sum --check
+
+          test -x "$bin"
+          file "$bin" | grep -F 'stripped'
+          unsigned_size="$(stat -c %s "$bin")"
+          cp "$bin" "$c_signed"
+          python3 "$signer_py" "$bin"
+          cc -O2 "$signer_c_src" -o "$signer_c_bin"
+          "$signer_c_bin" "$c_signed"
+          cmp "$bin" "$c_signed"
+
+          signed_size="$(stat -c %s "$bin")"
+          signature_growth=$((signed_size - unsigned_size))
+          if (( signature_growth < 4096 || signature_growth > 65536 )); then
+            echo "unexpected OHOS signature growth: ${signature_growth} bytes" >&2
+            exit 1
+          fi
+          readelf -SW "$bin" | awk '
+            $2 == ".codesign" {
+              found = 1
+              if ($3 != "PROGBITS" || $6 != "001000" || $NF != "4096") exit 2
+            }
+            END { if (!found) exit 1 }
+          '
+          sha256sum "$bin"
 
       - name: Smoke-test native binary
         if: ${{ inputs.smoke && inputs.builder != 'windows' }}
@@ -323,6 +390,13 @@ jobs:
           asset="dist/grow-${GROW_VERSION}-${ASSET_PLATFORM}.tar.gz"
           COPYFILE_DISABLE=1 tar -C "$stage_dir" -czf "$asset" grow
           test "$(tar -tzf "$asset")" = "grow"
+          if [[ "${{ inputs.builder }}" == "ohos" ]]; then
+            asset_size="$(wc -c <"$asset")"
+            if (( asset_size >= 80000000 )); then
+              echo "signed OHOS archive is unexpectedly large: ${asset_size} bytes" >&2
+              exit 1
+            fi
+          fi
           ls -la "$asset"
 
       - name: Package Windows release asset

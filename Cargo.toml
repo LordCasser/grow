@@ -285,16 +285,17 @@ panic = "abort"
 #
 # Hardening: thin LTO for cross-crate optimization with reasonable link times,
 # codegen-units=1 maximizes optimization (whole-program analysis, no CGU boundaries).
-# debug=1 emits line tables during linking; strip=false leaves platform-specific
-# stripping to the release workflow. The final archives contain only the stripped
-# Unix executable or the Windows executable without its separate PDB.
-# Linker flags (RELRO, NX stack) are set per-target in .cargo/config.toml.
+# Distribution archives never include debug companions: Unix executables are
+# stripped by the workflow and Windows PDBs are not shipped. Disable debug-info
+# generation up front to avoid paying LLVM and MSVC linker/PDB I/O for data that
+# the release then discards. Linker flags (RELRO, NX stack) are set per-target in
+# .cargo/config.toml.
 [profile.release-dist]
 inherits = "release"
 lto = "thin"
 codegen-units = 1
 strip = false
-debug = 1
+debug = 0
 split-debuginfo = "off"
 
 # Production profile for latency-sensitive x-product services (VF, home-mixer).
