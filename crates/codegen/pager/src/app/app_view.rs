@@ -8275,6 +8275,9 @@ pub(crate) mod tests {
             .workflow_runs
             .push(crate::views::workflows::WorkflowRunSnapshot {
                 run_id: "wf_run".to_owned(),
+                definition_id: None,
+                definition_scope: None,
+                definition_hash: None,
                 name: "deep-research".to_owned(),
                 objective: "obj".to_owned(),
                 status: "active".to_owned(),

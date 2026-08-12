@@ -28,7 +28,7 @@ fn normalize_for_exec_risk(words: &[String]) -> NormalizedArgv<'_> {
     for _ in 0..MAX_NORMALIZE_ROUNDS {
         let before = current;
         let checked = unwrap_wrappers_checked(current);
-        if checked.exhausted || checked.has_split_string || checked.has_chdir {
+        if checked.exhausted || checked.has_split_string || !checked.chdir_targets.is_empty() {
             return NormalizedArgv::FailClosed;
         }
         let after_wrap = checked.words;

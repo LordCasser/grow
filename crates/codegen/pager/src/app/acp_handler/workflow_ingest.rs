@@ -84,6 +84,10 @@ fn upsert_workflow_block(
 pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: GrowSessionUpdate) -> bool {
     let GrowSessionUpdate::WorkflowUpdated {
         run_id,
+        private,
+        definition_id,
+        definition_scope,
+        definition_hash,
         revision,
         name,
         objective,
@@ -110,6 +114,9 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: GrowSessionU
     else {
         return false;
     };
+    if private {
+        return true;
+    }
     if status != "cleared" {
         match agent.workflow_run_revisions.get(&run_id).copied() {
             Some(last) if revision == 0 && last > 0 => return false,
@@ -132,13 +139,16 @@ pub(super) fn ingest_workflow_update(agent: &mut AgentView, update: GrowSessionU
         .session
         .available_commands
         .iter()
-        .any(|c| c.name == "workflow");
+        .any(|c| c.name == "workflow-run");
     let builtin = super::is_builtin_workflow_handle(&agent.session.available_commands, &name);
     if status == "cleared" {
         agent.workflow_runs.retain(|run| run.run_id != run_id);
     } else {
         let snapshot = crate::views::workflows::WorkflowRunSnapshot {
             run_id: run_id.clone(),
+            definition_id,
+            definition_scope,
+            definition_hash,
             name: name.clone(),
             objective: objective.clone(),
             status: status.clone(),

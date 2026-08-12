@@ -32,7 +32,10 @@ pub use prompter::{
     PromptOutcome, is_enable_always_approve_option, mcp_pretty_name_if_qualified,
     mcp_titleize_segment, mcp_tool_action, mcp_tool_display_name,
 };
-pub use shell_access::{ProtectedEditPermission, ProtectedEditReason};
+pub use shell_access::{
+    ProtectedEditPermission, ProtectedEditReason, command_write_paths_in_tree,
+    command_write_paths_with_cwd_in_tree,
+};
 pub use state::PermissionState;
 pub use state::cleanup_stale_permission_state;
 pub use types::{AccessKind, ClientType, Decision, PermissionCommand, PermissionEvent};

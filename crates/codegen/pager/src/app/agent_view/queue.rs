@@ -556,6 +556,9 @@ mod watcher_tests {
     fn active_workflow(run_id: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
             run_id: run_id.to_owned(),
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
             name: "workflow".to_owned(),
             objective: "objective".to_owned(),
             status: "active".to_owned(),

@@ -117,6 +117,10 @@ impl WorkflowManager {
             return Err(LaunchError::TooManyActiveRuns);
         }
 
+        let definition_id = resolved.definition_id.clone();
+        let definition_scope = resolved.scope;
+        let definition_hash = resolved.content_hash.clone();
+        let definition_private = resolved.private;
         let allow_fork_context = resolved.source == WorkflowSource::Builtin;
         let mut execution_script = resolved.script;
         let (run_id, journal, state) = match &spec.resume_run_id {
@@ -220,11 +224,19 @@ impl WorkflowManager {
                     Some(agent_budget),
                     self.session_dir.as_ref().map(|_| journal_rel),
                 );
-                let state = self
-                    .tracker
-                    .lock()
-                    .set_max_concurrency(&run_id, max_concurrency)
-                    .expect("new workflow run must exist");
+                let state = {
+                    let mut tracker = self.tracker.lock();
+                    tracker.set_definition_provenance(
+                        &run_id,
+                        definition_id,
+                        definition_scope,
+                        definition_hash,
+                        definition_private,
+                    );
+                    tracker
+                        .set_max_concurrency(&run_id, max_concurrency)
+                        .expect("new workflow run must exist")
+                };
                 (run_id, journal, state)
             }
         };
@@ -306,6 +318,8 @@ impl WorkflowManager {
         let store = self.store.clone();
         let notify = self.notify.clone();
         let session_cmd_tx = self.session_cmd_tx.clone();
+        let completion_session_dir = self.session_dir.clone();
+        let completion_cwd = self.cwd.clone();
         let watcher_run_id = run_id.clone();
         let watcher_cancel = cancel.clone();
         let execution_epoch = self.tracker.lock().execution_epoch(&run_id).unwrap_or(0);
@@ -378,6 +392,31 @@ impl WorkflowManager {
                     let _ = done_tx.send(());
                     let _ = outcome_tx.send(outcome);
                     return;
+                }
+                // Consume the once-per-hash save hint only after the successful
+                // terminal state is durable. A persistence failure turns the
+                // Run into Interrupted and must not suppress a later successful
+                // Run's prompt for the same draft hash.
+                if state.status == crate::session::workflow::tracker::WorkflowRunStatus::Complete
+                    && !state.private
+                    && let (Some(session_dir), Some(definition_id), Some(definition_hash)) = (
+                        completion_session_dir.as_deref(),
+                        state.definition_id.as_ref(),
+                        state.definition_hash.as_deref(),
+                    )
+                    && let Ok(mut workspace) =
+                        super::workspace::WorkflowWorkspace::open(session_dir, &completion_cwd)
+                    && workspace
+                        .take_save_prompt(definition_id, definition_hash)
+                        .unwrap_or(false)
+                {
+                    state = tracker
+                        .lock()
+                        .set_save_prompt(&watcher_run_id, true)
+                        .unwrap_or(state);
+                    if let Err(error) = store.persist_ack(&state).await {
+                        tracing::warn!(run_id = %watcher_run_id, %error, "workflow save prompt marker was not durably written");
+                    }
                 }
                 let elapsed = tracker.lock().elapsed_ms(&watcher_run_id);
                 notify.broadcast(&state, elapsed, 0, true);

@@ -715,11 +715,11 @@ pub struct ChipElement {
     pub kind: ratatui_textarea::ElementKind,
     pub display: Option<ratatui::text::Line<'static>>,
 }
-/// Name of the shell's built-in `/workflow-run` slash command (see
-/// `shell`'s `BUILTIN_COMMANDS`; the shell does not export the name as a
-/// constant). Mirrors the shell-side gate for the workflow capability, which
-/// advertises `workflow-run` in the pre-session command list.
+/// Names of Shell-owned Workflow runtime commands used as capability signals.
+/// Public management is Behavior-gated, while private Deep Research remains a
+/// stable bootstrap signal that the workflow runtime is configured.
 const WORKFLOW_RUN_COMMAND_NAME: &str = "workflow-run";
+const DEEP_RESEARCH_COMMAND_NAME: &str = "deep-research";
 impl AgentSession {
     /// Whether YOLO mode is active. Prefer this over direct field access.
     pub fn is_yolo(&self) -> bool {
@@ -751,10 +751,9 @@ impl AgentSession {
     ///    the authoritative tool-level signal from
     ///    `AvailableCommandsUpdate.meta.tools` once the bootstrap window has
     ///    closed.
-    /// 2. A `workflow` or `workflow-run` slash command is advertised. During
-    ///    bootstrap (`available_tools` is still `None`) the shell's pre-session
-    ///    command list contains `workflow-run`, so this covers the startup
-    ///    window without flicker.
+    /// 2. A Workflow runtime slash command is advertised. During bootstrap
+    ///    (`available_tools` is still `None`) private `deep-research` is the
+    ///    stable signal; public `workflow-run` appears only in Workflow Behavior.
     /// 3. `has_workflow_runs` — workflows stay selectable while a run is known
     ///    to the pager (running or history).
     ///
@@ -766,9 +765,11 @@ impl AgentSession {
     ) -> bool {
         let has_workflow_tool =
             available_tools.is_some_and(|tools| tools.contains(WORKFLOW_TOOL_NAME));
-        let has_workflow_command = available_commands
-            .iter()
-            .any(|c| c.name == WORKFLOW_TOOL_NAME || c.name == WORKFLOW_RUN_COMMAND_NAME);
+        let has_workflow_command = available_commands.iter().any(|c| {
+            c.name == WORKFLOW_TOOL_NAME
+                || c.name == WORKFLOW_RUN_COMMAND_NAME
+                || c.name == DEEP_RESEARCH_COMMAND_NAME
+        });
         has_workflow_tool || has_workflow_command || has_workflow_runs
     }
     /// Process an ACP session update. Returns true if scrollback was modified.
@@ -1104,12 +1105,20 @@ mod tests {
     }
 
     #[test]
-    fn workflows_available_true_via_workflow_run_command_in_bootstrap() {
-        // (b) Bootstrap window: `available_tools` not yet advertised (None),
-        // but the shell's pre-session command list contains `workflow-run`.
+    fn workflows_available_true_via_behavior_gated_workflow_run_command() {
+        // A live Workflow Behavior snapshot advertises its management command.
         let cmds = [acp::AvailableCommand::new(
             WORKFLOW_RUN_COMMAND_NAME.to_string(),
             "run a workflow".to_string(),
+        )];
+        assert!(AgentSession::workflows_available(None, &cmds, false));
+    }
+
+    #[test]
+    fn workflows_available_true_via_private_runtime_bootstrap_signal() {
+        let cmds = [acp::AvailableCommand::new(
+            DEEP_RESEARCH_COMMAND_NAME.to_string(),
+            "private research runtime".to_string(),
         )];
         assert!(AgentSession::workflows_available(None, &cmds, false));
     }

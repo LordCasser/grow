@@ -873,6 +873,7 @@ pub(crate) async fn spawn_session_actor(
                         == crate::session::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
                         && run.manifest.state.run_id == *run_id
                         && run.manifest.state.name == "deep-research"
+                        && run.manifest.state.private
                 }),
                 _ => true,
             };
@@ -1561,10 +1562,8 @@ pub(crate) async fn spawn_session_actor(
             persisted_workflow_runs,
         );
     let restored_behavior = behavior.lock().behavior();
-    let restored_deep_research_run = behavior.lock().deep_research_run_id().map(str::to_owned);
     let public_workflow_active = workflow_snapshots.iter().any(|run| {
-        !run.status.is_terminal()
-            && restored_deep_research_run.as_deref() != Some(run.run_id.as_str())
+        run.status == crate::session::workflow::tracker::WorkflowRunStatus::Active && !run.private
     });
     let unfinished_goal = goal_tracker
         .lock()
@@ -1623,20 +1622,23 @@ pub(crate) async fn spawn_session_actor(
             std::collections::HashMap::new(),
         ),
     ));
-    let (workflow_launch_tx, mut workflow_launch_rx) = tokio::sync::mpsc::unbounded_channel::<
-        tools::implementations::grow_build::workflow::WorkflowLaunchEnvelope,
+    let (workflow_tx, mut workflow_rx) = tokio::sync::mpsc::unbounded_channel::<
+        tools::implementations::grow_build::workflow::WorkflowEnvelope,
     >();
     {
         let manager = workflow_manager.clone();
         let behavior = behavior.clone();
+        let workflow_cmd_tx = cmd_tx.clone();
         let launch_cwd = std::path::PathBuf::from(session_info.cwd.as_str());
         let launch_session_dir = crate::session::persistence::session_dir(&session_info);
         tokio::spawn(async move {
-            use crate::session::workflow::registry;
-            use tools::implementations::grow_build::workflow::WorkflowLaunchAck;
-            while let Some((req, ack)) = workflow_launch_rx.recv().await {
+            use crate::session::workflow::{registry, workspace::WorkflowWorkspace};
+            use tools::implementations::grow_build::workflow::{
+                WorkflowAck, WorkflowRunControl, WorkflowToolInput, WorkflowToolOutput,
+            };
+            while let Some((req, ack)) = workflow_rx.recv().await {
                 if !background_workflows_enabled {
-                    let _ = ack.send(WorkflowLaunchAck::Rejected {
+                    let _ = ack.send(WorkflowAck::Rejected {
                         code: "workflows_disabled",
                         detail: "Background workflows are disabled for this session \
                                  ([workflows] enabled = false / GROW_WORKFLOWS=0 / remote flag)."
@@ -1644,171 +1646,378 @@ pub(crate) async fn spawn_session_actor(
                     });
                     continue;
                 }
+                let admitted_behavior = req.admitted_behavior;
                 let input = req.input;
                 if let Err(detail) = input.validate() {
-                    let _ = ack.send(WorkflowLaunchAck::Rejected {
+                    let _ = ack.send(WorkflowAck::Rejected {
                         code: "workflow_invalid_input",
                         detail,
                     });
                     continue;
                 }
-                if input.resume_from_run_id.is_some()
-                    && (input.name.is_some()
-                        || input.script.is_some()
-                        || input.script_path.is_some())
-                {
-                    let _ = ack
-                        .send(WorkflowLaunchAck::Rejected {
-                            code: "workflow_invalid_source",
-                            detail: "resume uses the original immutable script and args; launch edited source as a new run"
-                                .into(),
-                        });
-                    continue;
-                }
-                let registry_snapshot = registry::WorkflowRegistry::scan(Some(&launch_cwd));
-                let resolved = if let Some(name) = input.name.as_deref() {
-                    registry_snapshot.resolve_by_name(name)
-                } else if let Some(script) = input.script.clone() {
-                    registry::resolve_inline(script)
-                } else if let Some(path) = input.script_path.as_deref() {
-                    registry::resolve_by_path(
-                        std::path::Path::new(path),
-                        &launch_cwd,
-                        Some(&launch_session_dir),
-                    )
-                } else if input.resume_from_run_id.is_some() {
-                    match manager
-                        .lock()
-                        .await
-                        .script_copy_for(input.resume_from_run_id.as_deref().unwrap())
-                    {
-                        Some(script) => registry::resolve_inline(script),
-                        None => {
-                            let _ = ack.send(WorkflowLaunchAck::Rejected {
-                                code: "workflow_resume_unknown_run",
-                                detail: "no persisted script for that run id".into(),
-                            });
-                            continue;
-                        }
-                    }
-                } else {
-                    let _ = ack.send(WorkflowLaunchAck::Rejected {
-                        code: "workflow_invalid_source",
-                        detail: "provide one of name / script / script_path".into(),
+                if admitted_behavior != tool_types::BehaviorId::Workflow {
+                    let _ = ack.send(WorkflowAck::Rejected {
+                        code: "workflow_behavior_required",
+                        detail: "Public Workflow actions require a turn admitted in Workflow behavior. Use /workflow [prompt]."
+                            .into(),
                     });
                     continue;
-                };
-                let resolved = match resolved {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let code = "workflow_resolve_failed";
-                        let _ = ack.send(WorkflowLaunchAck::Rejected {
-                            code,
-                            detail: e.to_string(),
-                        });
-                        continue;
-                    }
-                };
-                if input.validate_only {
-                    let script = resolved.script.clone();
-                    let probe_args = input.args.clone();
-                    let agent_budget = input.agent_budget.unwrap_or(workflow::DEFAULT_AGENT_BUDGET);
-                    tokio::spawn(async move {
-                        let verdict = tokio::task::spawn_blocking(move || {
-                            workflow::validate_script_with_agent_budget(
-                                &script,
-                                probe_args,
-                                agent_budget,
-                            )
-                        })
-                        .await;
-                        let msg = match verdict {
-                            Ok(Ok(report)) => WorkflowLaunchAck::Validated {
-                                name: report.name,
+                }
+                // This is the same admission lock used by Behavior switching.
+                // Keep it through every Workspace mutation and Run control so
+                // the live Behavior check and the side effect are one ordered
+                // operation rather than a check-then-act race.
+                let mut workflow_admission = manager.lock().await;
+                if behavior.lock().behavior() != tool_types::BehaviorId::Workflow {
+                    let _ = ack.send(WorkflowAck::Rejected {
+                        code: "workflow_behavior_required",
+                        detail: "Public Workflow actions require live Workflow behavior. Use /workflow [prompt]."
+                            .into(),
+                    });
+                    continue;
+                }
+                let output: Result<WorkflowToolOutput, (&'static str, String)> = async {
+                    let mut workspace = WorkflowWorkspace::open(&launch_session_dir, &launch_cwd)
+                        .map_err(|error| ("workflow_workspace_failed", error.to_string()))?;
+                    match input {
+                        WorkflowToolInput::Search { query, limit } => {
+                            let catalog = workspace.search(&launch_cwd, &query, limit.unwrap_or(10));
+                            let count = catalog.definitions.len();
+                            let diagnostic_count = catalog.diagnostics.len();
+                            Ok(WorkflowToolOutput::Search {
+                                matches: catalog.definitions,
+                                diagnostics: catalog.diagnostics,
+                                message: format!(
+                                    "Found {count} Workflow Definition candidate(s) and {diagnostic_count} diagnostic(s). Inspect ambiguous candidates before drafting or running."
+                                ),
+                            })
+                        }
+                        WorkflowToolInput::Inspect {
+                            definition_id,
+                            include_source,
+                        } => {
+                            workspace
+                                .focus(&launch_cwd, &definition_id)
+                                .map_err(|error| ("workflow_focus_failed", error.to_string()))?;
+                            let definition = workspace
+                                .resolve(&launch_cwd, &definition_id)
+                                .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
+                            let source = include_source.then(|| definition.resolved.script.clone());
+                            Ok(WorkflowToolOutput::Inspect {
+                                definition: definition.summary,
+                                source,
+                                message: "Definition inspected and set as the explicit Workflow focus."
+                                    .into(),
+                            })
+                        }
+                        WorkflowToolInput::Draft { name, source } => {
+                            let definition = workspace
+                                .draft(
+                                    &launch_cwd,
+                                    &launch_session_dir,
+                                    name.as_deref(),
+                                    source,
+                                )
+                                .map_err(|error| ("workflow_draft_failed", error.to_string()))?;
+                            Ok(WorkflowToolOutput::Draft {
+                                definition: definition.summary,
+                                message: "Session draft created and focused. Edits and validation affect only this draft; existing Runs remain immutable."
+                                    .into(),
+                            })
+                        }
+                        WorkflowToolInput::Validate {
+                            definition_id,
+                            args,
+                            agent_budget,
+                        } => {
+                            let definition = workspace
+                                .resolve(&launch_cwd, &definition_id)
+                                .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
+                            let script = definition.resolved.script.clone();
+                            let hash = definition.summary.content_hash.clone();
+                            let report = tokio::task::spawn_blocking(move || {
+                                workflow::validate_script_with_agent_budget(
+                                    &script,
+                                    args,
+                                    agent_budget.unwrap_or(workflow::DEFAULT_AGENT_BUDGET),
+                                )
+                            })
+                            .await
+                            .map_err(|error| {
+                                ("workflow_validation_failed", format!("validator panicked: {error}"))
+                            })?
+                            .map_err(|error| {
+                                ("workflow_validation_failed", error.to_string())
+                            })?;
+                            workspace
+                                .record_validated(&launch_cwd, &definition_id, &hash)
+                                .map_err(|error| ("workflow_workspace_failed", error.to_string()))?;
+                            let definition = workspace
+                                .resolve(&launch_cwd, &definition_id)
+                                .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
+                            Ok(WorkflowToolOutput::Validated {
+                                definition: definition.summary,
                                 phases: report.phases,
                                 summary: report.outcome_summary,
-                            },
-                            Ok(Err(e)) => WorkflowLaunchAck::Rejected {
-                                code: "workflow_validation_failed",
-                                detail: e.to_string(),
-                            },
-                            Err(e) => WorkflowLaunchAck::Rejected {
-                                code: "workflow_validation_failed",
-                                detail: format!("validator panicked: {e}"),
-                            },
-                        };
-                        let _ = ack.send(msg);
-                    });
-                    continue;
-                }
-                let definition_name = resolved.meta.name.clone();
-                let args = match (&input.args, &input.resume_from_run_id) {
-                    (Some(a), _) => a.clone(),
-                    (None, Some(rid)) => manager.lock().await.args_copy_for(rid),
-                    (None, None) => serde_json::Value::Null,
-                };
-                let objective = args
-                    .get("objective")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| resolved.meta.description.clone());
-                let spec = crate::session::workflow::manager::LaunchSpec {
-                    objective,
-                    args,
-                    agent_budget: input.agent_budget,
-                    max_concurrency: input.max_concurrency,
-                    resume_run_id: input.resume_from_run_id.clone(),
-                };
-                let launch_outcome = {
-                    let mut mgr = manager.lock().await;
-                    let active_behavior = behavior.lock().behavior();
-                    if active_behavior.owns_special_runtime() {
-                        let _ = ack.send(WorkflowLaunchAck::Rejected {
-                            code: "workflow_behavior_conflict",
-                            detail: format!(
-                                "public Workflow cannot run inside {} behavior",
-                                active_behavior.display_label()
-                            ),
-                        });
-                        continue;
-                    }
-                    let result = mgr.launch(resolved, spec);
-                    let script_path = result
-                        .as_ref()
-                        .ok()
-                        .and_then(|(run_id, _)| mgr.script_copy_path(run_id))
-                        .map(|p| p.display().to_string());
-                    (result, script_path)
-                };
-                match launch_outcome {
-                    (Ok((run_id, outcome_rx)), script_path) => {
-                        let display_name = manager
-                            .lock()
-                            .await
-                            .tracker()
-                            .lock()
-                            .get(&run_id)
-                            .map(|run| run.name.clone())
-                            .unwrap_or(definition_name);
-                        let _ = ack.send(WorkflowLaunchAck::Started {
-                            task_id: run_id.clone(),
-                            run_id: run_id.clone(),
-                            name: display_name,
-                            script_path,
-                        });
-                        tokio::spawn(async move {
-                            if let Ok(outcome) = outcome_rx.await {
-                                tracing::info!(run_id, ?outcome, "background workflow finished");
+                                message: "Current Definition hash passed the canned-host preflight."
+                                    .into(),
+                            })
+                        }
+                        WorkflowToolInput::Run {
+                            definition_id,
+                            args,
+                            max_concurrency,
+                            agent_budget,
+                        } => {
+                            let mut definition = workspace
+                                .resolve(&launch_cwd, &definition_id)
+                                .map_err(|error| ("workflow_resolve_failed", error.to_string()))?;
+                            if !definition.summary.status.contains("validated") {
+                                let script = definition.resolved.script.clone();
+                                let probe_args = args.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    workflow::validate_script_with_agent_budget(
+                                        &script,
+                                        probe_args,
+                                        agent_budget.unwrap_or(workflow::DEFAULT_AGENT_BUDGET),
+                                    )
+                                })
+                                .await
+                                .map_err(|error| {
+                                    ("workflow_validation_failed", format!("validator panicked: {error}"))
+                                })?
+                                .map_err(|error| {
+                                    ("workflow_validation_failed", error.to_string())
+                                })?;
+                                workspace
+                                    .record_validated(
+                                        &launch_cwd,
+                                        &definition_id,
+                                        &definition.summary.content_hash,
+                                    )
+                                    .map_err(|error| {
+                                        ("workflow_workspace_failed", error.to_string())
+                                    })?;
+                                definition = workspace
+                                    .resolve(&launch_cwd, &definition_id)
+                                    .map_err(|error| {
+                                        ("workflow_resolve_failed", error.to_string())
+                                    })?;
+                            } else {
+                                workspace
+                                    .focus(&launch_cwd, &definition_id)
+                                    .map_err(|error| {
+                                        ("workflow_focus_failed", error.to_string())
+                                    })?;
+                                definition = workspace
+                                    .resolve(&launch_cwd, &definition_id)
+                                    .map_err(|error| {
+                                        ("workflow_resolve_failed", error.to_string())
+                                    })?;
                             }
-                        });
-                    }
-                    (Err(e), _) => {
-                        let _ = ack.send(WorkflowLaunchAck::Rejected {
-                            code: "workflow_launch_failed",
-                            detail: e.to_string(),
-                        });
+                            let definition_summary = definition.summary.clone();
+                            let objective = args
+                                .as_ref()
+                                .and_then(|value| value.get("objective"))
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| definition.resolved.meta.description.clone());
+                            let spec = crate::session::workflow::manager::LaunchSpec {
+                                objective,
+                                args: args.unwrap_or(serde_json::Value::Null),
+                                agent_budget,
+                                max_concurrency,
+                                resume_run_id: None,
+                            };
+                            let (run_id, outcome_rx) = workflow_admission
+                                .launch(definition.resolved, spec)
+                                .map_err(|error| ("workflow_launch_failed", error.to_string()))?;
+                            let run_handle = workflow_admission
+                                .tracker()
+                                .lock()
+                                .get(&run_id)
+                                .map(|run| run.name)
+                                .unwrap_or_else(|| definition_summary.name.clone());
+                            let logged_run_id = run_id.clone();
+                            tokio::spawn(async move {
+                                if let Ok(outcome) = outcome_rx.await {
+                                    tracing::info!(run_id = logged_run_id, ?outcome, "background workflow finished");
+                                }
+                            });
+                            Ok(WorkflowToolOutput::RunStarted {
+                                content_hash: definition_summary.content_hash.clone(),
+                                definition: definition_summary,
+                                run_id,
+                                run_handle,
+                                message: "Workflow Run started from an immutable Definition snapshot. Later edits affect only the next Run."
+                                    .into(),
+                            })
+                        }
+                        WorkflowToolInput::Publish {
+                            definition_id,
+                            scope,
+                        } => {
+                            let definition = workspace
+                                .publish(&launch_cwd, &definition_id, scope)
+                                .map_err(|error| ("workflow_publish_failed", error.to_string()))?;
+                            let path = definition.summary.path.clone().unwrap_or_default();
+                            let message = if definition.summary.focused {
+                                format!(
+                                    "Draft published atomically to {path}; the saved Definition is now focused."
+                                )
+                            } else {
+                                format!(
+                                    "Draft published atomically to {path}; a newer session draft edit was preserved and remains focused."
+                                )
+                            };
+                            Ok(WorkflowToolOutput::Published {
+                                definition: definition.summary,
+                                message,
+                            })
+                        }
+                        WorkflowToolInput::Discard { definition_id } => {
+                            workspace
+                                .discard(&definition_id)
+                                .map_err(|error| ("workflow_discard_failed", error.to_string()))?;
+                            let focused_definition = workspace
+                                .catalog(&launch_cwd)
+                                .definitions
+                                .into_iter()
+                                .find(|definition| definition.focused);
+                            Ok(WorkflowToolOutput::Discarded {
+                                definition_id,
+                                focused_definition,
+                                message: "Session Workflow draft discarded; saved Definitions and existing Runs were unchanged."
+                                    .into(),
+                            })
+                        }
+                        WorkflowToolInput::ControlRun {
+                            run_id,
+                            operation,
+                            agent_budget,
+                        } => {
+                            let tracker = workflow_admission.tracker();
+                            let matches: Vec<_> = tracker
+                                .lock()
+                                .list()
+                                .iter()
+                                .filter(|run| run.run_id == run_id || run.name == run_id)
+                                .cloned()
+                                .collect();
+                            let state = match matches.as_slice() {
+                                [state] => state.clone(),
+                                [] => {
+                                    return Err((
+                                        "workflow_run_not_found",
+                                        format!("No Workflow Run matches '{run_id}'"),
+                                    ));
+                                }
+                                _ => {
+                                    return Err((
+                                        "workflow_run_ambiguous",
+                                        format!("More than one Workflow Run matches '{run_id}'"),
+                                    ));
+                                }
+                            };
+                            if state.private {
+                                return Err((
+                                    "workflow_run_private",
+                                    "Deep Research uses a private runtime and is not part of the public Workflow workspace."
+                                        .into(),
+                                ));
+                            }
+                            let final_state = match operation {
+                                WorkflowRunControl::Pause => {
+                                    if !workflow_admission.pause(&state.run_id) {
+                                        return Err((
+                                            "workflow_pause_failed",
+                                            format!("Run '{}' is not active", state.name),
+                                        ));
+                                    }
+                                    workflow_admission
+                                        .tracker()
+                                        .lock()
+                                        .get(&state.run_id)
+                                }
+                                WorkflowRunControl::Stop => {
+                                    if !workflow_admission.cancel(&state.run_id) {
+                                        return Err((
+                                            "workflow_stop_failed",
+                                            format!("Run '{}' is already terminal", state.name),
+                                        ));
+                                    }
+                                    workflow_admission
+                                        .tracker()
+                                        .lock()
+                                        .get(&state.run_id)
+                                }
+                                WorkflowRunControl::Resume => {
+                                    let script = workflow_admission.script_copy_for(&state.run_id).ok_or((
+                                        "workflow_resume_failed",
+                                        "Immutable Run script is missing".into(),
+                                    ))?;
+                                    let args = workflow_admission.args_copy_for(&state.run_id);
+                                    let mut resolved = registry::resolve_inline(script).map_err(|error| {
+                                        ("workflow_resume_failed", error.to_string())
+                                    })?;
+                                    if let Some(definition_id) = state.definition_id.clone() {
+                                        resolved.definition_id = definition_id;
+                                    }
+                                    if let Some(scope) = state.definition_scope {
+                                        resolved.scope = scope;
+                                    }
+                                    if let Some(hash) = state.definition_hash.clone() {
+                                        resolved.content_hash = hash;
+                                    }
+                                    let spec = crate::session::workflow::manager::LaunchSpec {
+                                        objective: state.objective.clone(),
+                                        args,
+                                        agent_budget: agent_budget.or(state.agent_budget),
+                                        max_concurrency: Some(state.max_concurrency),
+                                        resume_run_id: Some(state.run_id.clone()),
+                                    };
+                                    let (resumed_id, outcome_rx) = workflow_admission
+                                        .launch(resolved, spec)
+                                        .map_err(|error| {
+                                            ("workflow_resume_failed", error.to_string())
+                                        })?;
+                                    let logged_run_id = resumed_id.clone();
+                                    tokio::spawn(async move {
+                                        if let Ok(outcome) = outcome_rx.await {
+                                            tracing::info!(run_id = logged_run_id, ?outcome, "resumed workflow finished");
+                                        }
+                                    });
+                                    workflow_admission.tracker().lock().get(&resumed_id)
+                                }
+                            }
+                            .ok_or((
+                                "workflow_control_failed",
+                                "Run state disappeared while applying control".into(),
+                            ))?;
+                            Ok(WorkflowToolOutput::RunControlled {
+                                run_id: final_state.run_id,
+                                run_handle: final_state.name,
+                                status: final_state.status.as_str().into(),
+                                definition_id: final_state.definition_id,
+                                definition_scope: final_state.definition_scope,
+                                content_hash: final_state.definition_hash,
+                                message: format!(
+                                    "Workflow Run is now {}.",
+                                    final_state.status.as_str()
+                                ),
+                            })
+                        }
                     }
                 }
+                .await;
+                let _ = match output {
+                    Ok(output) => {
+                        let _ = workflow_cmd_tx
+                            .send(crate::session::commands::SessionCommand::AdvertiseCommands);
+                        ack.send(WorkflowAck::Completed(output))
+                    }
+                    Err((code, detail)) => ack.send(WorkflowAck::Rejected { code, detail }),
+                };
             }
         });
     }
@@ -1939,7 +2148,7 @@ pub(crate) async fn spawn_session_actor(
         },
         active_agent_type: parking_lot::Mutex::new(initial_agent_type),
         active_skill: parking_lot::Mutex::new(None),
-        turn_behavior: parking_lot::Mutex::new(behavior.lock().behavior()),
+        turn_behavior: Arc::new(parking_lot::Mutex::new(behavior.lock().behavior())),
         behavior: behavior.clone(),
         control_revision: Arc::new(std::sync::atomic::AtomicU64::new(
             persisted_control_revision,
@@ -1954,7 +2163,7 @@ pub(crate) async fn spawn_session_actor(
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
         workflow_manager: workflow_manager.clone(),
-        workflow_launch_tx: workflow_launch_tx.clone(),
+        workflow_tx: workflow_tx.clone(),
         managed_mcp_handle,
         tool_metadata_snapshot,
         mcp_announced_servers: Mutex::new(
@@ -2107,9 +2316,10 @@ pub(crate) async fn spawn_session_actor(
         .borrow()
         .tool_bridge()
         .update_resource(
-            tools::implementations::grow_build::workflow::WorkflowLaunchHandle(
-                session.workflow_launch_tx.clone(),
-            ),
+            tools::implementations::grow_build::workflow::WorkflowHandle {
+                sender: session.workflow_tx.clone(),
+                admitted_behavior: session.turn_behavior.clone(),
+            },
         )
         .await;
     session

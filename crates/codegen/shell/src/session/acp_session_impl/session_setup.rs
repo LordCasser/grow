@@ -211,18 +211,32 @@ impl SessionActor {
             .into_iter()
             .map(|td| td.function.name)
             .collect();
-        let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
+        let has_workflow_runs = self.workflow_tracker().await.lock().has_public_runs();
         let availability = self.build_command_availability(&tool_names, has_workflow_runs);
         let behavior_availability = self.behavior_availability_projection().await;
-        let (_, workflows) = self.named_workflow_snapshot();
+        let (_, workflows, workflow_diagnostics) = self.named_workflow_snapshot();
         let commands = slash_commands::available_commands(&skills, availability, &workflows);
         if commands.is_empty() {
             return;
         }
-        let meta = Some(slash_commands::build_tools_meta(
-            &tool_names,
-            &behavior_availability,
-        ));
+        let mut meta = slash_commands::build_tools_meta(&tool_names, &behavior_availability);
+        meta.insert(
+            "grow/workflowDefinitions".into(),
+            if availability.workflow_behavior {
+                serde_json::to_value(&workflows).unwrap_or_else(|_| serde_json::json!([]))
+            } else {
+                serde_json::json!([])
+            },
+        );
+        meta.insert(
+            "grow/workflowDiagnostics".into(),
+            if availability.workflow_behavior {
+                serde_json::to_value(&workflow_diagnostics)
+                    .unwrap_or_else(|_| serde_json::json!([]))
+            } else {
+                serde_json::json!([])
+            },
+        );
         tracing::info!(
             session_id = %self.session_info.id.0,
             command_count = commands.len(),
@@ -231,7 +245,7 @@ impl SessionActor {
         );
         self.send_update(
             acp::SessionUpdate::AvailableCommandsUpdate(
-                acp::AvailableCommandsUpdate::new(commands).meta(meta),
+                acp::AvailableCommandsUpdate::new(commands).meta(Some(meta)),
             ),
             None,
         )

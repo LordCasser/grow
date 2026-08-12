@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use tools::implementations::grow_build::workflow::{WorkflowDefinitionId, WorkflowScope};
 use workflow::{PauseKind, PhaseMeta, WorkflowOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +140,16 @@ pub const WORKFLOW_AGENT_ROWS_MAX: usize = 256;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRunState {
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_id: Option<WorkflowDefinitionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_scope: Option<WorkflowScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_hash: Option<String>,
+    #[serde(default)]
+    pub private: bool,
+    #[serde(default)]
+    pub save_prompt: bool,
     #[serde(default)]
     pub revision: u64,
     pub name: String,
@@ -259,6 +270,11 @@ impl WorkflowTracker {
         };
         let mut state = WorkflowRunState {
             run_id,
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
+            private: false,
+            save_prompt: false,
             revision: 0,
             name,
             objective,
@@ -284,6 +300,34 @@ impl WorkflowTracker {
             execution_epoch: 0,
         });
         state
+    }
+
+    pub fn set_definition_provenance(
+        &mut self,
+        run_id: &str,
+        definition_id: WorkflowDefinitionId,
+        definition_scope: WorkflowScope,
+        definition_hash: String,
+        private: bool,
+    ) -> Option<WorkflowRunState> {
+        let run = self
+            .runs
+            .iter_mut()
+            .find(|run| run.state.run_id == run_id)?;
+        run.state.definition_id = Some(definition_id);
+        run.state.definition_scope = Some(definition_scope);
+        run.state.definition_hash = Some(definition_hash);
+        run.state.private = private;
+        Some(run.state.clone())
+    }
+
+    pub fn set_save_prompt(&mut self, run_id: &str, save_prompt: bool) -> Option<WorkflowRunState> {
+        let run = self
+            .runs
+            .iter_mut()
+            .find(|run| run.state.run_id == run_id)?;
+        run.state.save_prompt = save_prompt;
+        Some(run.state.clone())
     }
 
     pub fn resume_run(
@@ -620,6 +664,16 @@ impl WorkflowTracker {
         self.runs.iter().map(|r| r.state.clone()).collect()
     }
 
+    pub(crate) fn has_active_public_run(&self) -> bool {
+        self.runs
+            .iter()
+            .any(|run| run.state.status == WorkflowRunStatus::Active && !run.state.private)
+    }
+
+    pub(crate) fn has_public_runs(&self) -> bool {
+        self.runs.iter().any(|run| !run.state.private)
+    }
+
     pub fn elapsed_ms(&self, run_id: &str) -> u64 {
         self.runs
             .iter()
@@ -689,6 +743,7 @@ impl WorkflowTracker {
         self.runs.iter().any(|run| {
             run.state.run_id == run_id
                 && run.state.revision == revision
+                && !run.state.private
                 && run.state.status.is_completion_reportable()
                 && !self.reported_terminal_run_ids.contains(run_id)
         })
@@ -703,6 +758,11 @@ impl WorkflowTracker {
             if !run.state.status.is_completion_reportable()
                 || self.reported_terminal_run_ids.contains(&run.state.run_id)
             {
+                continue;
+            }
+            if run.state.private {
+                self.reported_terminal_run_ids
+                    .insert(run.state.run_id.clone());
                 continue;
             }
             if self.terminal_at_restore_run_ids.contains(&run.state.run_id) {
@@ -725,7 +785,7 @@ impl WorkflowTracker {
         let live: Vec<&TrackedRun> = self
             .runs
             .iter()
-            .filter(|r| !r.state.status.is_completion_reportable())
+            .filter(|r| !r.state.private && !r.state.status.is_completion_reportable())
             .collect();
         let moved = live.iter().any(|r| {
             self.status_reported_revisions.get(&r.state.run_id) != Some(&r.state.revision)
@@ -857,6 +917,105 @@ mod tests {
             .unwrap();
         assert_eq!(s.status, WorkflowRunStatus::Complete);
         assert_eq!(s.result_summary.as_deref(), Some("shipped"));
+    }
+
+    #[test]
+    fn same_definition_keeps_independent_runs_and_unique_handles() {
+        let mut tracker = WorkflowTracker::default();
+        let first = tracker.start_run(
+            "wf_1".into(),
+            "review".into(),
+            "first".into(),
+            vec![],
+            Some(16),
+            None,
+        );
+        let second = tracker.start_run(
+            "wf_2".into(),
+            "review".into(),
+            "second".into(),
+            vec![],
+            Some(16),
+            None,
+        );
+        assert_eq!(first.name, "review");
+        assert_eq!(second.name, "review-2");
+        tracker
+            .apply_outcome(
+                "wf_1",
+                &WorkflowOutcome::Completed {
+                    result: serde_json::json!("done"),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            tracker.get("wf_1").unwrap().status,
+            WorkflowRunStatus::Complete
+        );
+        assert_eq!(
+            tracker.get("wf_2").unwrap().status,
+            WorkflowRunStatus::Active
+        );
+    }
+
+    #[test]
+    fn private_runtime_never_counts_as_an_active_public_run() {
+        let (mut tracker, run_id) = tracker_with_run();
+        assert!(tracker.has_active_public_run());
+        tracker
+            .set_definition_provenance(
+                &run_id,
+                WorkflowDefinitionId::new("builtin:deep-research"),
+                WorkflowScope::Builtin,
+                "hash".into(),
+                true,
+            )
+            .unwrap();
+        assert!(!tracker.has_active_public_run());
+        assert!(!tracker.has_public_runs());
+
+        tracker
+            .set_definition_provenance(
+                &run_id,
+                WorkflowDefinitionId::new("project:review"),
+                WorkflowScope::Project,
+                "hash".into(),
+                false,
+            )
+            .unwrap();
+        tracker.pause_user(&run_id, None).unwrap();
+        assert!(!tracker.has_active_public_run());
+        assert!(tracker.has_public_runs());
+
+        let (mut private_tracker, private_run_id) = tracker_with_run();
+        private_tracker
+            .set_definition_provenance(
+                &private_run_id,
+                WorkflowDefinitionId::new("builtin:deep-research"),
+                WorkflowScope::Builtin,
+                "hash".into(),
+                true,
+            )
+            .unwrap();
+        assert!(private_tracker.take_status_report().is_empty());
+        private_tracker
+            .apply_outcome(
+                &private_run_id,
+                &WorkflowOutcome::Completed {
+                    result: serde_json::json!("private result"),
+                },
+            )
+            .unwrap();
+        assert!(!private_tracker.is_unreported_completion(
+            &private_run_id,
+            private_tracker.get(&private_run_id).unwrap().revision,
+        ));
+        let (restored, fresh) = private_tracker.take_unreported_terminal_runs();
+        assert!(restored.is_empty() && fresh.is_empty());
+        assert!(!private_tracker.is_unreported_completion(
+            &private_run_id,
+            private_tracker.get(&private_run_id).unwrap().revision,
+        ));
     }
 
     #[test]

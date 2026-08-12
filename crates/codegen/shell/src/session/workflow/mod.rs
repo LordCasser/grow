@@ -5,6 +5,7 @@ pub(crate) mod registry;
 pub(crate) mod schema_contract;
 pub(crate) mod store;
 pub(crate) mod tracker;
+pub(crate) mod workspace;
 
 #[cfg(test)]
 mod deep_research_tests;

@@ -1382,6 +1382,9 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
     };
     let previous = agent.behavior_mode;
     agent.behavior_mode = mode;
+    if mode != BehaviorId::Workflow {
+        agent.show_workflows = false;
+    }
     agent.behavior_mode_pending = None;
     agent.plan_phase = cmu
         .meta

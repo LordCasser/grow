@@ -43,11 +43,11 @@ flowchart LR
 | Normal | 标准 regular turn | 普通 Agent 权限 | 可立即切换 |
 | Clarify | 对抗性问答，逼近目标与决策 | 不额外限制；副作用仍走普通权限 | 无 runtime，可立即切换 |
 | Plan | Drafting/Awaiting/Amending 只规划；Executing 执行批准计划 | 非 Executing 拒绝 workspace mutation；Executing 恢复普通权限 | 离开未结束 Plan 需同目标二次确认并取消 Plan-owned foreground |
-| Static Workflow | 主 Agent正常对话与整合 | 普通权限与 workflow tool | Behavior 不拥有已启动的公共 run |
+| Workflow | 主 Agent正常对话与整合 | 普通权限与 Workflow tool | Behavior 是公共 Definition/Run 管理的唯一入口，但不拥有已启动 Run 的生命周期 |
 | Deep Research | 首条 query 启动私有研究；后续 foreground 正常回答 | foreground 与 worker 都只读 | 普通消息不重启；离开 active run需确认并生成取消报告 |
 | Goal | 所有阶段可正常对话 | 主 Agent 获得 Goal scoped tools | 未 complete/clear 前独占 Behavior；planner/verifier 不占 foreground |
 
-Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Static Workflow run属于公共 workflow runtime。Deep Research 只拥有 control snapshot 中明确记录的 run id。
+Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Workflow Workspace 持久化 session 草稿与 Definition 焦点，Run 则属于独立公共 runtime。Deep Research 只拥有 control snapshot 中明确记录的私有 run id。
 
 ## 切换矩阵
 

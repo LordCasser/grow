@@ -3415,6 +3415,9 @@ mod tests {
     fn make_workflow_run(name: &str, status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
         crate::views::workflows::WorkflowRunSnapshot {
             run_id: format!("wf_{name}"),
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
             name: name.to_string(),
             objective: "obj".to_string(),
             status: status.to_string(),

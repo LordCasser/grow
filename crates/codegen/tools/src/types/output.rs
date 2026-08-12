@@ -733,7 +733,9 @@ impl ToolOutput {
             }
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
             ToolOutput::GetGoal(o) => serde_json::to_string_pretty(o).unwrap_or_default(),
-            ToolOutput::Workflow(o) => o.message.clone(),
+            ToolOutput::Workflow(o) => {
+                serde_json::to_string_pretty(o).unwrap_or_else(|_| o.message().to_string())
+            }
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
         }

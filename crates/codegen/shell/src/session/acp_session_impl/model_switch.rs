@@ -193,9 +193,10 @@ impl SessionActor {
             }
             bridge
                 .update_resource(
-                    tools::implementations::grow_build::workflow::WorkflowLaunchHandle(
-                        self.workflow_launch_tx.clone(),
-                    ),
+                    tools::implementations::grow_build::workflow::WorkflowHandle {
+                        sender: self.workflow_tx.clone(),
+                        admitted_behavior: self.turn_behavior.clone(),
+                    },
                 )
                 .await;
             bridge

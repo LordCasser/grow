@@ -248,7 +248,7 @@ pub struct PagerLocalSnapshot {
     /// Effective primary-agent Behavior, including optimistic selection.
     pub behavior_mode: tools::types::BehaviorId,
     /// Whether the active session exposes the Workflow tool. Used to hide the
-    /// Static Workflow Behavior rather than offering an unavailable mode.
+    /// Workflow Behavior rather than offering an unavailable mode.
     pub workflows_available: bool,
     pub deep_research_available: bool,
     pub goal_available: bool,

@@ -15,7 +15,6 @@ fn management_command(
         "pause" => run.can_pause(),
         "resume" => run.can_resume(),
         "stop" => run.can_stop(),
-        "save" => run.can_save(),
         _ => false,
     };
     if !allowed {
@@ -37,6 +36,41 @@ fn resolve_management_command(
             None
         }
     })
+}
+
+fn definition_command(
+    operation: &str,
+    definition: Option<&crate::views::workflows::WorkflowDefinitionSnapshot>,
+) -> Option<String> {
+    let definition = definition?;
+    let instruction = match operation {
+        "focus" => format!(
+            "Focus Workflow Definition `{}` and report its scope and current state.",
+            definition.definition_id
+        ),
+        "edit" => format!(
+            "Inspect Workflow Definition `{}` and prepare it for editing. If it is saved, derive its session draft first. Remind me that changes affect only the next Run.",
+            definition.definition_id
+        ),
+        "validate" => format!(
+            "Validate Workflow Definition `{}` at its current content hash and show the result.",
+            definition.definition_id
+        ),
+        "run" => format!(
+            "Run Workflow Definition `{}`. Show its scope, content hash, and new Run handle before continuing.",
+            definition.definition_id
+        ),
+        "publish" if definition.scope == "session" => format!(
+            "Publish Workflow Definition `{}` after validation. Ask me to choose Project or User scope; do not infer the scope.",
+            definition.definition_id
+        ),
+        "discard" if definition.scope == "session" => format!(
+            "Discard session Workflow Definition `{}` and report the new focus.",
+            definition.definition_id
+        ),
+        _ => return None,
+    };
+    Some(format!("/workflow {instruction}"))
 }
 
 fn transcript_target(
@@ -92,9 +126,11 @@ impl AgentView {
                 let mut view = self.workflows_view.clone();
                 view.normalize(&runs);
                 let in_detail = view.detail_run(&runs).is_some();
-                let manage_target = view
-                    .detail_run(&runs)
-                    .or_else(|| runs.get(view.selected_run).copied());
+                let manage_target = view.detail_run(&runs).or_else(|| {
+                    (view.list_section == crate::views::workflows::WorkflowListSection::Runs)
+                        .then(|| runs.get(view.selected_run).copied())
+                        .flatten()
+                });
                 let outcome = match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         if in_detail && runs.len() > 1 {
@@ -126,7 +162,7 @@ impl AgentView {
                         if let Some(run) = view.detail_run(&runs) {
                             view.select_phase(view.selected_phase.saturating_sub(1), run);
                         } else {
-                            view.select_run(view.selected_run.saturating_sub(1), &runs);
+                            view.select_previous_list_item(&runs);
                         }
                         self.workflows_view = view;
                         InputOutcome::Changed
@@ -135,7 +171,7 @@ impl AgentView {
                         if let Some(run) = view.detail_run(&runs) {
                             view.select_phase(view.selected_phase.saturating_add(1), run);
                         } else {
-                            view.select_run(view.selected_run.saturating_add(1), &runs);
+                            view.select_next_list_item(&runs);
                         }
                         self.workflows_view = view;
                         InputOutcome::Changed
@@ -151,7 +187,14 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     KeyCode::Enter | KeyCode::Right if !in_detail => {
-                        if let Some(run) = runs.get(view.selected_run) {
+                        if let Some(command) =
+                            definition_command("edit", view.selected_definition())
+                        {
+                            self.show_workflows = false;
+                            return Some(InputOutcome::Action(
+                                Action::SendSlashCommandPreservingDraft(command),
+                            ));
+                        } else if let Some(run) = runs.get(view.selected_run) {
                             view.selected_run_id = Some(run.run_id.clone());
                             view.detail_run_id = Some(run.run_id.clone());
                             view.phase_pinned = false;
@@ -159,15 +202,52 @@ impl AgentView {
                         self.workflows_view = view;
                         InputOutcome::Changed
                     }
-                    KeyCode::Char('p')
-                    | KeyCode::Char('r')
-                    | KeyCode::Char('x')
-                    | KeyCode::Char('s') => {
+                    KeyCode::Char('f')
+                    | KeyCode::Char('e')
+                    | KeyCode::Char('v')
+                    | KeyCode::Char('d')
+                        if !in_detail && view.selected_definition().is_some() =>
+                    {
+                        let operation = match key.code {
+                            KeyCode::Char('f') => "focus",
+                            KeyCode::Char('e') => "edit",
+                            KeyCode::Char('v') => "validate",
+                            KeyCode::Char('d') => "discard",
+                            _ => unreachable!(),
+                        };
+                        match definition_command(operation, view.selected_definition()) {
+                            Some(command) => {
+                                self.show_workflows = false;
+                                InputOutcome::Action(Action::SendSlashCommandPreservingDraft(
+                                    command,
+                                ))
+                            }
+                            None => InputOutcome::Changed,
+                        }
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('p')
+                        if !in_detail && view.selected_definition().is_some() =>
+                    {
+                        let operation = if key.code == KeyCode::Char('r') {
+                            "run"
+                        } else {
+                            "publish"
+                        };
+                        match definition_command(operation, view.selected_definition()) {
+                            Some(command) => {
+                                self.show_workflows = false;
+                                InputOutcome::Action(Action::SendSlashCommandPreservingDraft(
+                                    command,
+                                ))
+                            }
+                            None => InputOutcome::Changed,
+                        }
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('r') | KeyCode::Char('x') => {
                         let op = match key.code {
                             KeyCode::Char('p') => "pause",
                             KeyCode::Char('r') => "resume",
                             KeyCode::Char('x') => "stop",
-                            KeyCode::Char('s') => "save",
                             _ => unreachable!(),
                         };
                         let command = resolve_management_command(op, manage_target);
@@ -193,9 +273,11 @@ impl AgentView {
                 let mut view = self.workflows_view.clone();
                 view.normalize(&runs);
                 let in_detail = view.detail_run(&runs).is_some();
-                let manage_target = view
-                    .detail_run(&runs)
-                    .or_else(|| runs.get(view.selected_run).copied());
+                let manage_target = view.detail_run(&runs).or_else(|| {
+                    (view.list_section == crate::views::workflows::WorkflowListSection::Runs)
+                        .then(|| runs.get(view.selected_run).copied())
+                        .flatten()
+                });
                 let outcome =
                     handle_modal_mouse(&mut view.window, mouse.kind, mouse.column, mouse.row);
 
@@ -223,11 +305,27 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     ModalWindowOutcome::ShortcutActivated(id) => {
+                        let definition_operation = match id {
+                            shortcut_ids::FOCUS => Some("focus"),
+                            shortcut_ids::EDIT => Some("edit"),
+                            shortcut_ids::VALIDATE => Some("validate"),
+                            shortcut_ids::RUN_DEFINITION => Some("run"),
+                            shortcut_ids::PUBLISH => Some("publish"),
+                            shortcut_ids::DISCARD => Some("discard"),
+                            _ => None,
+                        };
+                        if let Some(command) = definition_operation.and_then(|operation| {
+                            definition_command(operation, view.selected_definition())
+                        }) {
+                            self.show_workflows = false;
+                            return Some(InputOutcome::Action(
+                                Action::SendSlashCommandPreservingDraft(command),
+                            ));
+                        }
                         let op = match id {
                             shortcut_ids::PAUSE => Some("pause"),
                             shortcut_ids::RESUME => Some("resume"),
                             shortcut_ids::STOP => Some("stop"),
-                            shortcut_ids::SAVE => Some("save"),
                             _ => None,
                         };
                         match op.and_then(|op| resolve_management_command(op, manage_target)) {
@@ -271,6 +369,19 @@ impl AgentView {
                                     .position(|(title, _)| title == &phase_name)
                             {
                                 view.select_phase(idx, run);
+                            }
+                        } else if let Some(definition_id) = view
+                            .definition_hits
+                            .iter()
+                            .find(|(rect, _)| hit(rect))
+                            .map(|(_, id)| id.clone())
+                        {
+                            if let Some(pos) = view
+                                .definitions
+                                .iter()
+                                .position(|definition| definition.definition_id == definition_id)
+                            {
+                                view.select_definition(pos);
                             }
                         } else if let Some(run_id) = view
                             .run_hits
@@ -317,6 +428,9 @@ mod workflows_overlay_key_tests {
     fn make_workflow_run(run_id: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
             run_id: run_id.to_string(),
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
             name: "deep-research".to_string(),
             objective: "obj".to_string(),
             status: "active".to_string(),

@@ -173,9 +173,254 @@ fn public_workflow_conflict(
     admitted: tool_types::BehaviorId,
     current: tool_types::BehaviorId,
 ) -> Option<tool_types::BehaviorId> {
-    [current, admitted]
+    if admitted != tool_types::BehaviorId::Workflow {
+        Some(admitted)
+    } else if current != tool_types::BehaviorId::Workflow {
+        Some(current)
+    } else {
+        None
+    }
+}
+
+fn recognizable_shell_write(command: &str) -> bool {
+    let parsed_write = workspace::permission::bash_command_splitting::try_parse_shell(command)
+        .is_some_and(|tree| {
+            !workspace::permission::command_write_paths_in_tree(tree.root_node(), command)
+                .is_empty()
+        });
+    if parsed_write {
+        return true;
+    }
+    let command = command.to_ascii_lowercase();
+    command.contains('>')
+        || [
+            "tee ",
+            "sed -i",
+            "perl -i",
+            "rm ",
+            "mv ",
+            "cp ",
+            "touch ",
+            "mkdir ",
+            "install ",
+            "truncate ",
+            "dd ",
+            "python ",
+            "python3 ",
+            "ruby ",
+            "node ",
+        ]
+        .iter()
+        .any(|token| command.contains(token))
+}
+
+fn recognizable_shell_write_paths(command: &str, cwd: &std::path::Path) -> Vec<String> {
+    workspace::permission::bash_command_splitting::try_parse_shell(command)
+        .map(|tree| {
+            workspace::permission::command_write_paths_with_cwd_in_tree(
+                tree.root_node(),
+                command,
+                cwd,
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn shell_write_path(
+    value: &str,
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let value = std::path::Path::new(value);
+    if value.is_absolute() {
+        return tools::types::resources::resolve_model_path(
+            cwd,
+            display_cwd,
+            value.to_string_lossy().as_ref(),
+        );
+    }
+    cwd.join(value)
+}
+
+fn recognizable_shell_write_under(
+    command: &str,
+    roots: &[std::path::PathBuf],
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> bool {
+    recognizable_shell_write_paths(command, cwd)
         .into_iter()
-        .find(|behavior| behavior.owns_special_runtime())
+        .map(|path| shell_write_path(&path, cwd, display_cwd))
+        .any(|path| roots.iter().any(|root| normalized_path_under(root, &path)))
+}
+
+fn workflow_path_write(
+    access_kind: &AccessKind,
+    is_definition_path: impl Fn(&str) -> bool,
+) -> bool {
+    match access_kind {
+        AccessKind::Edit(path) => is_definition_path(path),
+        AccessKind::Bash(command) => {
+            is_definition_path(command) && recognizable_shell_write(command)
+        }
+        _ => false,
+    }
+}
+
+fn normalized_path_under(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let root = resolve_existing_ancestors(root);
+    let path = resolve_existing_ancestors(path);
+    path == root || path.starts_with(&root)
+}
+
+/// Canonicalize the longest existing prefix and append the missing tail. This
+/// makes admission follow the same directory symlinks that a later write will
+/// follow, including when the final file does not exist yet.
+fn resolve_existing_ancestors(path: &std::path::Path) -> std::path::PathBuf {
+    let normalized = paths::normalize_lexically(path);
+    let mut existing = normalized.as_path();
+    let mut tail = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = existing.file_name() else {
+                    return normalized;
+                };
+                tail.push(name.to_os_string());
+                let Some(parent) = existing.parent() else {
+                    return normalized;
+                };
+                existing = parent;
+            }
+            Err(_) => return normalized,
+        }
+    }
+    let Ok(mut resolved) = dunce::canonicalize(existing) else {
+        return normalized;
+    };
+    for component in tail.iter().rev() {
+        resolved.push(component);
+    }
+    resolved
+}
+
+fn definition_edit_path(
+    value: &str,
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    tools::types::resources::resolve_model_path(cwd, display_cwd, value)
+}
+
+fn saved_workflow_definition_write(
+    access_kind: &AccessKind,
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> bool {
+    let project = crate::session::workflow::registry::project_root(cwd)
+        .join(".grow")
+        .join("workflows");
+    let user = crate::session::workflow::registry::user_workflow_dir();
+    match access_kind {
+        AccessKind::Edit(path) => {
+            let path = definition_edit_path(path, cwd, display_cwd);
+            normalized_path_under(&project, &path) || normalized_path_under(&user, &path)
+        }
+        // Shell access is intentionally limited to recognizable writes. Match
+        // both the configured roots and the conventional project spelling;
+        // the permission parser still owns precise shell operand resolution.
+        AccessKind::Bash(command) if recognizable_shell_write(command) => {
+            if recognizable_shell_write_under(
+                command,
+                &[project.clone(), user.clone()],
+                cwd,
+                display_cwd,
+            ) {
+                return true;
+            }
+            let normalized = command.replace('\\', "/").to_ascii_lowercase();
+            let roots = [project, user];
+            normalized.contains(".grow/workflows/")
+                || normalized.ends_with(".grow/workflows")
+                || roots.iter().any(|root| {
+                    let root = root
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .to_ascii_lowercase();
+                    normalized == root || normalized.contains(&format!("{root}/"))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn session_workflow_definition_write(
+    access_kind: &AccessKind,
+    session_dir: &std::path::Path,
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> bool {
+    if let AccessKind::Edit(path) = access_kind {
+        return normalized_path_under(
+            &session_dir.join("workflow-workspace"),
+            &definition_edit_path(path, cwd, display_cwd),
+        );
+    }
+    if let AccessKind::Bash(command) = access_kind
+        && recognizable_shell_write(command)
+        && recognizable_shell_write_under(
+            command,
+            &[session_dir.join("workflow-workspace")],
+            cwd,
+            display_cwd,
+        )
+    {
+        return true;
+    }
+    workflow_path_write(access_kind, |value| {
+        let normalized = value.replace('\\', "/").to_ascii_lowercase();
+        normalized.contains("workflow-workspace/") || normalized.ends_with("workflow-workspace")
+    })
+}
+
+fn workflow_definition_write(
+    access_kind: &AccessKind,
+    session_dir: &std::path::Path,
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> bool {
+    saved_workflow_definition_write(access_kind, cwd, display_cwd)
+        || session_workflow_definition_write(access_kind, session_dir, cwd, display_cwd)
+}
+
+fn workflow_run_snapshot_write(
+    access_kind: &AccessKind,
+    session_dir: &std::path::Path,
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> bool {
+    let root_path = session_dir.join("workflows");
+    let root = root_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let contains_snapshot_path = |value: &str| {
+        let normalized = value.replace('\\', "/").to_ascii_lowercase();
+        normalized == root || normalized.contains(&format!("{root}/"))
+    };
+    match access_kind {
+        AccessKind::Edit(path) => {
+            normalized_path_under(&root_path, &definition_edit_path(path, cwd, display_cwd))
+        }
+        AccessKind::Bash(command) if contains_snapshot_path(command) => {
+            recognizable_shell_write(command)
+        }
+        AccessKind::Bash(command) if recognizable_shell_write(command) => {
+            recognizable_shell_write_under(command, &[root_path], cwd, display_cwd)
+        }
+        _ => false,
+    }
 }
 /// Run Plan lifecycle transitions after every ordinary call in the batch.
 fn split_plan_control_tail(
@@ -517,6 +762,8 @@ impl SessionActor {
             map
         };
         let workspace_ops = self.workspace_ops.clone();
+        let workflow_manager = self.workflow_manager.clone();
+        let behavior = self.behavior.clone();
         let pending_interjections = self.pending_interjections.clone();
         let completion_delivery = self.completion_delivery.clone();
         let goal_active = self.goal_loop_active();
@@ -532,6 +779,8 @@ impl SessionActor {
             .map(|(idx, prepared)| {
                 let prepared = Arc::new(prepared.clone());
                 let workspace_ops = workspace_ops.clone();
+                let workflow_manager = workflow_manager.clone();
+                let behavior = behavior.clone();
                 let session_id = session_id.clone();
                 let pending_interjections = pending_interjections.clone();
                 let completion_delivery = completion_delivery.clone();
@@ -568,7 +817,20 @@ impl SessionActor {
                             } else {
                                 None
                             };
-                            dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                            if prepared.workflow_draft_write {
+                                let _admission = workflow_manager.lock().await;
+                                if behavior.lock().behavior()
+                                    != tool_types::BehaviorId::Workflow
+                                {
+                                    return Err(tool_runtime::ToolError::custom(
+                                        "workflow_behavior_required",
+                                        "Workflow draft writes require live Workflow behavior. Use /workflow [prompt].",
+                                    ));
+                                }
+                                dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                            } else {
+                                dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                            }
                         }
                     };
                     let result = if interruptible {
@@ -1048,6 +1310,12 @@ impl SessionActor {
             }
         }
         let admitted_behavior = *self.turn_behavior.lock();
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let cwd = self.tool_context.cwd.as_path();
+        let display_cwd = self.display_cwd.get().map(std::path::Path::new);
+        let saved_workflow_write = saved_workflow_definition_write(&access_kind, cwd, display_cwd);
+        let workflow_draft_write =
+            session_workflow_definition_write(&access_kind, &session_dir, cwd, display_cwd);
         let declared_scope = self
             .agent
             .borrow()
@@ -1070,6 +1338,30 @@ impl SessionActor {
                 "Rejected: public Workflow cannot run inside {} behavior.",
                 conflict.display_label()
             );
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
+        if (saved_workflow_write || workflow_draft_write)
+            && (admitted_behavior != tool_types::BehaviorId::Workflow
+                || current_behavior != tool_types::BehaviorId::Workflow)
+        {
+            let message = "Rejected: Grow may create or modify public Workflow Definitions only in Workflow behavior. Use /workflow [prompt]. External editor changes remain allowed and will be rediscovered."
+                .to_string();
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
+        if saved_workflow_write {
+            let message = "Rejected: saved Workflow Definitions are replaced only by publishing a validated session draft. Derive the saved Definition into the Workflow workspace, edit the draft, then publish it; the saved Definition remains usable until then."
+                .to_string();
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
+        if workflow_run_snapshot_write(&access_kind, &session_dir, cwd, display_cwd) {
+            let message = "Rejected: Workflow Run scripts, args, and journals are immutable snapshots. Modify or derive the Definition and start a new Run instead."
+                .to_string();
             self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                 .await?;
             return Ok(Err(ToolLoop::Continue));
@@ -1731,6 +2023,7 @@ impl SessionActor {
             concatenated_json_count,
             dispatch_target_name,
             tool_scope,
+            workflow_draft_write,
         };
         Ok(Ok(prepared))
     }
@@ -2152,30 +2445,7 @@ impl SessionActor {
                 )],
             ),
             ToolInput::Workflow(ref w) => {
-                let script_name = |script: &str| -> Option<String> {
-                    let head = script.get(..600).unwrap_or(script);
-                    let rest = &head[head.find("name:")? + 5..];
-                    let rest = &rest[rest.find('"')? + 1..];
-                    Some(rest[..rest.find('"')?].to_string())
-                };
-                let inline_name = w.script.as_deref().and_then(script_name);
-                let title = if w.validate_only {
-                    match inline_name.or_else(|| w.name.clone()) {
-                        Some(n) => format!("Validating workflow '{n}'"),
-                        None => "Validating workflow script".to_string(),
-                    }
-                } else if w.script.is_some() {
-                    match inline_name {
-                        Some(n) => format!("Creating workflow '{n}'"),
-                        None => "Creating workflow".to_string(),
-                    }
-                } else if let Some(ref name) = w.name {
-                    format!("Workflow: {name}")
-                } else if w.resume_from_run_id.is_some() {
-                    "Workflow: resume run".to_string()
-                } else {
-                    "Workflow: launch script".to_string()
-                };
+                let title = format!("Workflow: {}", w.action_label());
                 (title, acp::ToolKind::Other, vec![], vec![])
             }
             ToolInput::UpdateGoal(ref ug) => {
@@ -3145,7 +3415,11 @@ mod plan_control_tail_predicate_tests {
 }
 #[cfg(test)]
 mod plan_mode_edit_gate_tests {
-    use super::{PlanEditGate, plan_gate_mcp_scope, plan_mode_edit_gate, public_workflow_conflict};
+    use super::{
+        PlanEditGate, plan_gate_mcp_scope, plan_mode_edit_gate, public_workflow_conflict,
+        saved_workflow_definition_write, session_workflow_definition_write,
+        workflow_definition_write, workflow_run_snapshot_write,
+    };
     use crate::session::behavior::BehaviorCoordinator;
     use crate::session::mcp_servers::McpState;
     use std::sync::Arc;
@@ -3162,10 +3436,152 @@ mod plan_mode_edit_gate_tests {
     #[test]
     fn workflow_creation_observes_both_turn_and_current_behavior() {
         use tool_types::BehaviorId::*;
-        assert_eq!(public_workflow_conflict(Normal, Plan), Some(Plan));
+        assert_eq!(public_workflow_conflict(Normal, Plan), Some(Normal));
         assert_eq!(public_workflow_conflict(Goal, Normal), Some(Goal));
-        assert_eq!(public_workflow_conflict(Normal, Normal), None);
-        assert_eq!(public_workflow_conflict(Workflow, Clarify), None);
+        assert_eq!(public_workflow_conflict(Normal, Normal), Some(Normal));
+        assert_eq!(public_workflow_conflict(Workflow, Clarify), Some(Clarify));
+        assert_eq!(public_workflow_conflict(Workflow, Workflow), None);
+    }
+    #[test]
+    fn workflow_definition_writes_are_recognized_without_blocking_reads() {
+        let cwd = std::path::Path::new("/tmp/project");
+        let session_dir = std::path::Path::new("/tmp/session");
+        assert!(workflow_definition_write(
+            &AccessKind::Edit(".grow/workflows/review.rhai".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(saved_workflow_definition_write(
+            &AccessKind::Edit(".grow/workflows/review.rhai".into()),
+            cwd,
+            None
+        ));
+        assert!(!session_workflow_definition_write(
+            &AccessKind::Edit(".grow/workflows/review.rhai".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(workflow_definition_write(
+            &AccessKind::Bash("tee .grow/workflows/review.rhai".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(workflow_definition_write(
+            &AccessKind::Bash("cd .grow && tee workflows/review.rhai".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(workflow_definition_write(
+            &AccessKind::Bash("env -C .grow tee workflows/review.rhai".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(workflow_definition_write(
+            &AccessKind::Bash("bash -c 'cd .grow && tee workflows/review.rhai'".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(workflow_definition_write(
+            &AccessKind::Bash("tee\t.grow/workflows/review.rhai".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(!workflow_definition_write(
+            &AccessKind::Bash("sed -n '1,20p' .grow/workflows/review.rhai".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(workflow_definition_write(
+            &AccessKind::Bash("rm -r /tmp/session/workflow-workspace".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(session_workflow_definition_write(
+            &AccessKind::Edit("/tmp/session/workflow-workspace/drafts/a.rhai".into()),
+            session_dir,
+            cwd,
+            None
+        ));
+        assert!(!saved_workflow_definition_write(
+            &AccessKind::Edit("/tmp/session/workflow-workspace/drafts/a.rhai".into()),
+            cwd,
+            None
+        ));
+        assert!(workflow_run_snapshot_write(
+            &AccessKind::Edit("/tmp/session/workflows/wf_1/script.rhai".into()),
+            session_dir,
+            cwd,
+            None,
+        ));
+        assert!(!workflow_run_snapshot_write(
+            &AccessKind::Bash("sed -n '1,20p' /tmp/session/workflows/wf_1/script.rhai".into()),
+            session_dir,
+            cwd,
+            None,
+        ));
+        assert!(workflow_run_snapshot_write(
+            &AccessKind::Bash("tee ../session/workflows/wf_1/script.rhai".into()),
+            session_dir,
+            cwd,
+            None,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workflow_edit_gate_follows_symlinked_aliases_and_relative_run_paths() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        let session_dir = root.path().join("session");
+        let saved = cwd.join(".grow/workflows");
+        let runs = session_dir.join("workflows");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&saved).unwrap();
+        std::fs::create_dir_all(&runs).unwrap();
+        let saved_alias = root.path().join("saved-alias");
+        let runs_alias = root.path().join("runs-alias");
+        symlink(&saved, &saved_alias).unwrap();
+        symlink(&runs, &runs_alias).unwrap();
+
+        assert!(saved_workflow_definition_write(
+            &AccessKind::Edit(saved_alias.join("review.rhai").display().to_string()),
+            &cwd,
+            None,
+        ));
+        assert!(saved_workflow_definition_write(
+            &AccessKind::Bash("tee ../saved-alias/review.rhai".into()),
+            &cwd,
+            None,
+        ));
+        assert!(workflow_run_snapshot_write(
+            &AccessKind::Edit(runs_alias.join("wf-1/script.rhai").display().to_string()),
+            &session_dir,
+            &cwd,
+            None,
+        ));
+        assert!(workflow_run_snapshot_write(
+            &AccessKind::Edit("../session/workflows/wf-1/args.json".into()),
+            &session_dir,
+            &cwd,
+            None,
+        ));
+        assert!(workflow_run_snapshot_write(
+            &AccessKind::Bash("cp /tmp/replacement ../runs-alias/wf-1/args.json".into()),
+            &session_dir,
+            &cwd,
+            None,
+        ));
     }
     /// Non-MCP inputs resolve no read-only classification (`None`).
     fn gate(tracker: &BehaviorCoordinator, input: &ToolInput) -> PlanEditGate {
@@ -3284,15 +3700,9 @@ mod plan_mode_edit_gate_tests {
             gate_mcp(&t, &mcp_tool("any__tool"), tool_protocol::ToolScope::Read),
             PlanEditGate::Allow
         );
-        let workflow = ToolInput::Workflow(WorkflowToolInput {
-            max_concurrency: None,
-            agent_budget: None,
-            name: Some("review".into()),
-            script: None,
-            script_path: None,
-            args: None,
-            resume_from_run_id: None,
-            validate_only: false,
+        let workflow = ToolInput::Workflow(WorkflowToolInput::Search {
+            query: "review".into(),
+            limit: None,
         });
         assert_eq!(gate(&t, &workflow), PlanEditGate::RejectWorkflow);
     }

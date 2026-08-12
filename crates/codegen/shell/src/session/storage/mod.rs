@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::extensions::notification::SessionNotification;
@@ -39,14 +39,82 @@ pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 /// renaming it over the target, so a crash or a concurrent writer never leaves a
 /// torn file. The temp is removed on failure.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_bytes_atomic_inner(path, bytes, false)
+}
+
+fn write_bytes_atomic_inner(path: &Path, bytes: &[u8], durable: bool) -> io::Result<()> {
     let tmp = temp_sibling(path);
-    match std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        if durable {
+            sync_file_durable(&file)?;
+        }
+        drop(file);
+        replace_file(&tmp, path, durable)?;
+        #[cfg(unix)]
+        if durable {
+            if let Some(parent) = path.parent() {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
     }
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, target: &Path, _durable: bool) -> io::Result<()> {
+    std::fs::rename(source, target)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, target: &Path, durable: bool) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    fn extended_path(path: &Path) -> io::Result<Vec<u16>> {
+        let path = std::path::absolute(path)?;
+        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if wide.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains NUL",
+            ));
+        }
+        let unc = wide.starts_with(&[b'\\' as u16, b'\\' as u16]);
+        let mut result = if unc { r"\\?\UNC\" } else { r"\\?\" }
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        if unc {
+            wide.drain(..2);
+        }
+        result.extend(wide);
+        result.push(0);
+        Ok(result)
+    }
+
+    let source = extended_path(source)?;
+    let target = extended_path(target)?;
+    let flags = if durable {
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+    } else {
+        MOVEFILE_REPLACE_EXISTING
+    };
+    unsafe { MoveFileExW(PCWSTR(source.as_ptr()), PCWSTR(target.as_ptr()), flags) }
+        .map_err(io::Error::other)
 }
 
 #[cfg(target_os = "macos")]
@@ -81,15 +149,10 @@ pub(crate) fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
 
 /// Async sibling of [`write_bytes_atomic`].
 pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
-    let tmp = temp_sibling(path);
-    let result = match tokio::fs::write(&tmp, bytes).await {
-        Ok(()) => tokio::fs::rename(&tmp, path).await,
-        Err(e) => Err(e),
-    };
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    result
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_bytes_atomic(&path, &bytes))
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// Atomically replace a control-plane file and do not acknowledge until both
@@ -101,17 +164,9 @@ pub(crate) async fn write_bytes_atomic_durable_async(
     bytes: Vec<u8>,
 ) -> io::Result<()> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        write_bytes_atomic(&path, &bytes)?;
-        let file = std::fs::File::open(&path)?;
-        sync_file_durable(&file)?;
-        if let Some(parent) = path.parent() {
-            std::fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(io::Error::other)?
+    tokio::task::spawn_blocking(move || write_bytes_atomic_inner(&path, &bytes, true))
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// Serialize `items` to newline-delimited JSON bytes.
@@ -2497,6 +2552,21 @@ mod tests {
     use super::*;
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn durable_atomic_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_CONTROL_FILE);
+        write_bytes_atomic_durable_async(&path, b"old".to_vec())
+            .await
+            .unwrap();
+
+        write_bytes_atomic_durable_async(&path, b"new".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), b"new");
+    }
 
     /// Wrap an ACP notification as the envelope stored in updates.jsonl.
     fn acp_envelope(session_update_json: &str) -> String {

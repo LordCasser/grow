@@ -794,6 +794,12 @@ pub(crate) fn apply_turn_start_shim(
         agent.session.available_commands = commands;
         agent.session.available_commands_generation += 1;
     }
+    if let Some(definitions) = agent.session.tracker.take_pending_workflow_definitions() {
+        agent.workflows_view.definitions = definitions;
+    }
+    if let Some(diagnostics) = agent.session.tracker.take_pending_workflow_diagnostics() {
+        agent.workflows_view.diagnostics = diagnostics;
+    }
     if let Some(tools) = agent.session.tracker.take_pending_acp_tools() {
         agent.session.available_tools = Some(tools.into_iter().collect());
     }

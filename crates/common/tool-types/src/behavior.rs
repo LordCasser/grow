@@ -91,7 +91,7 @@ impl BehaviorId {
             Self::Normal => "Normal",
             Self::Clarify => "Clarify",
             Self::Plan => "Plan",
-            Self::Workflow => "Static Workflow",
+            Self::Workflow => "Workflow",
             Self::DeepResearch => "Deep Research",
             Self::Goal => "Goal",
         }

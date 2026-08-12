@@ -1,7 +1,7 @@
 //! Session Behavior transitions, reminders, and persistence.
 use super::*;
 use crate::session::behavior::BehaviorChangeOutcome;
-/// Plan is a frozen, human-approved execution protocol. The Static Workflow
+/// Plan is a frozen, human-approved execution protocol. The Workflow
 /// launcher is therefore not advertised in any Plan phase; the runtime gate
 /// remains as defense in depth for stale or forged calls.
 pub(super) fn filter_cursor_tools_by_plan_mode(
@@ -58,17 +58,16 @@ impl SessionActor {
             .lock()
             .deep_research_run_id()
             .map(str::to_owned);
-        let public_workflow_active = workflow_tracker.list().iter().any(|run| {
-            !run.status.is_terminal()
-                && owned_deep_research_run.as_deref() != Some(run.run_id.as_str())
-        });
+        let public_workflow_active = workflow_tracker.has_active_public_run();
         let deep_research_active = current == BehaviorId::DeepResearch
             && owned_deep_research_run.as_deref().is_some_and(|run_id| {
                 workflow_tracker
                     .get(run_id)
                     .is_some_and(|run| !run.status.is_terminal())
             });
-        let source_owned_work_active = current == BehaviorId::Plan || deep_research_active;
+        let source_owned_work_active = current == BehaviorId::Plan
+            || deep_research_active
+            || (current == BehaviorId::Workflow && public_workflow_active);
         let controller = self.behavior.lock();
         let choices = [
             BehaviorId::Normal,
@@ -86,7 +85,7 @@ impl SessionActor {
                         .to_string(),
                 ),
                 BehaviorId::Workflow if !workflow_supported => {
-                    Some("Static Workflow behavior is unavailable in this session.".to_string())
+                    Some("Workflow behavior is unavailable in this session.".to_string())
                 }
                 BehaviorId::DeepResearch if !self.background_workflows_enabled => Some(
                     "Deep Research behavior requires the background Workflow runtime.".to_string(),
@@ -127,13 +126,13 @@ impl SessionActor {
     pub(super) async fn sync_active_behavior_prompt(&self, admitted: tool_types::BehaviorId) {
         use crate::session::behavior::{
             clarify_reminder_template, deep_research_reminder_template, goal_reminder_template,
-            plan_behavior_template, static_workflow_reminder_template,
+            plan_behavior_template, workflow_reminder_template,
         };
         let instructions = match admitted {
             tool_types::BehaviorId::Normal => None,
             tool_types::BehaviorId::Clarify => Some(clarify_reminder_template()),
             tool_types::BehaviorId::Plan => Some(plan_behavior_template()),
-            tool_types::BehaviorId::Workflow => Some(static_workflow_reminder_template()),
+            tool_types::BehaviorId::Workflow => Some(workflow_reminder_template()),
             tool_types::BehaviorId::DeepResearch => Some(deep_research_reminder_template()),
             tool_types::BehaviorId::Goal => Some(goal_reminder_template()),
         }
@@ -344,7 +343,21 @@ impl SessionActor {
             BehaviorState, PlanPhase, plan_execution_reminder_template,
             plan_mode_reminder_full_template, plan_mode_reminder_sparse_template,
         };
-        if *self.turn_behavior.lock() != tool_types::BehaviorId::Plan {
+        let admitted = *self.turn_behavior.lock();
+        if admitted == tool_types::BehaviorId::Workflow {
+            let session_dir = crate::session::persistence::session_dir(&self.session_info);
+            let context = crate::session::workflow::workspace::WorkflowWorkspace::open(
+                &session_dir,
+                std::path::Path::new(self.session_info.cwd.as_str()),
+            )
+            .map(|workspace| {
+                workspace.compact_context(std::path::Path::new(self.session_info.cwd.as_str()))
+            })
+            .unwrap_or_else(|error| format!("Workflow workspace unavailable: {error}"));
+            self.push_system_reminder_with_tag(&context, self.reminder_wrapper_tag());
+            return;
+        }
+        if admitted != tool_types::BehaviorId::Plan {
             return;
         }
         let push_reminder = |this: &Self, content: &str| {

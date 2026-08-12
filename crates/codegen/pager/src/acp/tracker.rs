@@ -279,6 +279,10 @@ pub struct AcpUpdateTracker {
     /// is responsible for copying to `AgentSession.available_commands` and
     /// bumping `available_commands_generation`.
     pending_acp_commands: Option<Vec<acp::AvailableCommand>>,
+    /// Complete public Definition snapshot. Unlike dynamic slash commands,
+    /// this includes same-name Definitions from different scopes.
+    pending_workflow_definitions: Option<Vec<crate::views::workflows::WorkflowDefinitionSnapshot>>,
+    pending_workflow_diagnostics: Option<Vec<crate::views::workflows::WorkflowDiagnosticSnapshot>>,
     /// Pending agent toolset from the most recent `AvailableCommandsUpdate.meta`.
     /// Format on the wire: `{"tools": ["read_file", ...]}`.
     /// `Some(_)` only if the shell included a tools list this round.
@@ -539,6 +543,16 @@ impl AcpUpdateTracker {
     /// `AgentSession.available_commands` and bumps the generation counter.
     pub fn take_pending_acp_commands(&mut self) -> Option<Vec<acp::AvailableCommand>> {
         self.pending_acp_commands.take()
+    }
+    pub fn take_pending_workflow_definitions(
+        &mut self,
+    ) -> Option<Vec<crate::views::workflows::WorkflowDefinitionSnapshot>> {
+        self.pending_workflow_definitions.take()
+    }
+    pub fn take_pending_workflow_diagnostics(
+        &mut self,
+    ) -> Option<Vec<crate::views::workflows::WorkflowDiagnosticSnapshot>> {
+        self.pending_workflow_diagnostics.take()
     }
     /// Take the agent's most recently advertised tool list, if any.
     ///
@@ -802,6 +816,16 @@ impl AcpUpdateTracker {
                 if let Some(availability) = parse_behavior_availability_meta(update.meta.as_ref()) {
                     self.behavior_availability = Some(availability);
                 }
+                self.pending_workflow_definitions = update
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("grow/workflowDefinitions"))
+                    .and_then(|value| serde_json::from_value(value.clone()).ok());
+                self.pending_workflow_diagnostics = update
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("grow/workflowDiagnostics"))
+                    .and_then(|value| serde_json::from_value(value.clone()).ok());
                 self.pending_acp_commands = Some(update.available_commands);
                 true
             }
@@ -2043,14 +2067,13 @@ fn is_workflow_tool(tc: &acp::ToolCall) -> bool {
     if !is_workflow {
         return false;
     }
-    let validate_only = tc.title.starts_with("Validating workflow")
-        || tc
-            .raw_input
+    matches!(
+        tc.raw_input
             .as_ref()
-            .and_then(|v| v.get("validate_only"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-    !validate_only
+            .and_then(|value| value.get("action"))
+            .and_then(|value| value.as_str()),
+        Some("run" | "control_run")
+    )
 }
 /// Check if a tool call is a scheduler tool (scheduler_create/delete/list).
 ///
@@ -2480,27 +2503,27 @@ mod tests {
         };
         assert!(is_workflow_tool(&wf(
             "Workflow: deep-research",
-            serde_json::json!({ "variant": "Workflow", "name": "deep-research" }),
+            serde_json::json!({ "variant": "Workflow", "action": "run", "definition_id": "builtin:deep-research" }),
         )));
         assert!(is_workflow_tool(&wf(
             "Workflow: resume run",
-            serde_json::json!({ "variant": "Workflow", "resume_from_run_id": "wf_1" }),
+            serde_json::json!({ "variant": "Workflow", "action": "control_run", "run_id": "wf_1", "operation": "resume" }),
         )));
         assert!(!is_workflow_tool(&wf(
             "Validating workflow 'triage'",
-            serde_json::json!({ "variant": "Workflow", "script": "let meta = ...", "validate_only": true }),
+            serde_json::json!({ "variant": "Workflow", "action": "validate", "definition_id": "session:triage" }),
         )));
-        assert!(is_workflow_tool(&wf(
+        assert!(!is_workflow_tool(&wf(
             "Creating workflow 'triage'",
-            serde_json::json!({ "variant": "Workflow", "script": "let meta = ..." }),
+            serde_json::json!({ "variant": "Workflow", "action": "draft", "script": "let meta = ..." }),
         )));
         assert!(!is_workflow_tool(&wf(
             "workflow",
-            serde_json::json!({ "validate_only": true }),
+            serde_json::json!({ "action": "search", "query": "goal" }),
         )));
-        assert!(is_workflow_tool(&wf(
+        assert!(!is_workflow_tool(&wf(
             "workflow",
-            serde_json::json!({ "name": "goal" }),
+            serde_json::json!({ "action": "inspect", "definition_id": "project:goal" }),
         )));
     }
     fn tool_call(id: &str, kind: acp::ToolKind, title: &str) -> acp::SessionUpdate {
@@ -5213,6 +5236,63 @@ mod tests {
             .expect("tools list should be present");
         assert_eq!(tools, vec!["scheduler_create", "read_file"]);
         assert!(tracker.take_pending_acp_tools().is_none());
+    }
+    #[test]
+    fn tracker_keeps_complete_definition_snapshot_separate_from_commands() {
+        let mut tracker = AcpUpdateTracker::new();
+        let mut sb = ScrollbackState::new();
+        let update = acp::SessionUpdate::AvailableCommandsUpdate(
+            acp::AvailableCommandsUpdate::new(vec![]).meta(
+                serde_json::json!({
+                    "grow/workflowDefinitions": [{
+                        "definition_id": "project:review",
+                        "name": "review",
+                        "scope": "project",
+                        "status": "saved,validated",
+                        "content_hash": "0123456789abcdef",
+                        "focused": true,
+                        "path": "/repo/.grow/workflows/review.rhai"
+                    }]
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        tracker.handle_update(update, &meta(), &mut sb);
+        let definitions = tracker
+            .take_pending_workflow_definitions()
+            .expect("definition snapshot should be present");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].definition_id, "project:review");
+        assert!(definitions[0].focused);
+        assert!(tracker.take_pending_workflow_definitions().is_none());
+    }
+    #[test]
+    fn tracker_keeps_workflow_diagnostics_separate_from_commands() {
+        let mut tracker = AcpUpdateTracker::new();
+        let mut sb = ScrollbackState::new();
+        let update = acp::SessionUpdate::AvailableCommandsUpdate(
+            acp::AvailableCommandsUpdate::new(vec![]).meta(
+                serde_json::json!({
+                    "grow/workflowDiagnostics": [{
+                        "scope": "project",
+                        "path": "/repo/.grow/workflows/broken.rhai",
+                        "code": "invalid_script",
+                        "message": "workflow metadata is invalid"
+                    }]
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        tracker.handle_update(update, &meta(), &mut sb);
+        let diagnostics = tracker
+            .take_pending_workflow_diagnostics()
+            .expect("diagnostic snapshot should be present");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "invalid_script");
+        assert_eq!(diagnostics[0].scope, "project");
+        assert!(tracker.take_pending_workflow_diagnostics().is_none());
     }
     #[test]
     fn tracker_retains_shell_behavior_availability_projection() {

@@ -80,7 +80,7 @@ impl CompiledPolicy {
             let words = peeled.words;
             let invocation_cwd_unpinned = cwd_unpinned
                 || cwd_unpinned_before(&cwd_changes, invocation.start_byte, invocation.scope)
-                || peeled.has_chdir;
+                || !peeled.chdir_targets.is_empty();
             forced_ask |= peeled.exhausted;
             forced_ask |= peeled.has_split_string;
             forced_ask |= peeled.env_options_uncertain;
@@ -292,26 +292,237 @@ pub(crate) fn command_words_write_paths(words: &[String]) -> Vec<String> {
 /// per-command writers from [`command_words_write_paths`] (`dd of=`, `sort -o`,
 /// `git --output`, `cp`/`mv` dest, `tee`/`truncate`, in-place `sed`/`rustfmt`,
 /// `uniq` output, ...). No safe-sink filtering — the caller decides.
-pub(crate) fn command_write_paths_in_tree(root: Node<'_>, src: &str) -> Vec<String> {
+pub fn command_write_paths_in_tree(root: Node<'_>, src: &str) -> Vec<String> {
+    command_write_paths_with_cwd_in_tree(root, src, Path::new(""))
+}
+
+/// Every literal write path resolved through literal in-scope cwd changes.
+/// Dynamic/ambiguous cwd changes are intentionally left unresolved; callers
+/// that enforce security policy must apply their own fail-closed floor.
+pub fn command_write_paths_with_cwd_in_tree(
+    root: Node<'_>,
+    src: &str,
+    initial_cwd: &Path,
+) -> Vec<String> {
+    command_write_paths_with_cwd_inner(root, src, initial_cwd, MAX_INLINE_SHELL_DEPTH)
+}
+
+fn command_write_paths_with_cwd_inner(
+    root: Node<'_>,
+    src: &str,
+    initial_cwd: &Path,
+    inline_depth_remaining: usize,
+) -> Vec<String> {
     let mut out = Vec::new();
+    let invocations = shell_command_invocations(root, src);
+    let cwd_changes = literal_cwd_changes(&invocations, initial_cwd);
 
     // Output redirects (`> f`, `>> f`); fd-dups/heredocs are already skipped.
     for redirect in shell_redirect_targets(root, src) {
         if matches!(redirect.mode, ShellFileMode::Write)
             && let Some(path) = redirect.path
         {
-            out.push(path);
+            out.push(resolve_write_path_at(
+                &path,
+                initial_cwd,
+                redirect.start_byte,
+                redirect.scope,
+                &cwd_changes,
+            ));
         }
     }
     // Per-command writers, after peeling env/timeout/... wrappers.
-    for invocation in shell_command_invocations(root, src) {
+    for invocation in invocations {
+        let invocation_cwd = cwd_at(
+            initial_cwd,
+            invocation.start_byte,
+            invocation.scope,
+            &cwd_changes,
+        );
+        let peeled = unwrap_invocation_checked(&invocation);
+        let words = peeled.words.literal_words();
+        let command_cwd = peeled
+            .chdir_targets
+            .iter()
+            .fold(invocation_cwd, |cwd, target| join_shell_cwd(&cwd, target));
+        out.extend(command_words_write_paths(&words).into_iter().map(|path| {
+            join_shell_cwd(&command_cwd, &path)
+                .to_string_lossy()
+                .into_owned()
+        }));
+        if inline_depth_remaining > 0 {
+            let shell_words = peeled.words.shell_words();
+            if let InlineShellScript::Literal(index) = shell_dash_c_script(&shell_words)
+                && let ShellWord::Literal(inner) = shell_words[index]
+                && let Some(tree) = try_parse_shell(inner)
+            {
+                out.extend(command_write_paths_with_cwd_inner(
+                    tree.root_node(),
+                    inner,
+                    &command_cwd,
+                    inline_depth_remaining - 1,
+                ));
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone)]
+struct LiteralCwdChange {
+    at: usize,
+    scope: ExecutionScope,
+    state: LiteralCwdState,
+}
+
+#[derive(Clone)]
+struct LiteralCwdState {
+    cwd: PathBuf,
+    stack: Vec<PathBuf>,
+}
+
+fn join_shell_cwd(cwd: &Path, value: &str) -> PathBuf {
+    let value = Path::new(value);
+    if value.is_absolute() {
+        paths::normalize_lexically(value)
+    } else {
+        paths::normalize_lexically(&cwd.join(value))
+    }
+}
+
+fn cwd_state_at(
+    initial_cwd: &Path,
+    at: usize,
+    scope: ExecutionScope,
+    changes: &[LiteralCwdChange],
+) -> LiteralCwdState {
+    changes
+        .iter()
+        .filter(|change| change.at < at && (change.scope == scope || change.scope.contains(scope)))
+        .max_by_key(|change| change.at)
+        .map(|change| change.state.clone())
+        .unwrap_or_else(|| LiteralCwdState {
+            cwd: initial_cwd.to_path_buf(),
+            stack: Vec::new(),
+        })
+}
+
+fn cwd_at(
+    initial_cwd: &Path,
+    at: usize,
+    scope: ExecutionScope,
+    changes: &[LiteralCwdChange],
+) -> PathBuf {
+    cwd_state_at(initial_cwd, at, scope, changes).cwd
+}
+
+fn literal_cwd_changes(
+    invocations: &[ShellInvocation],
+    initial_cwd: &Path,
+) -> Vec<LiteralCwdChange> {
+    let mut changes = Vec::new();
+    for invocation in invocations {
         let words = InvocationSlice {
             words: &invocation.words,
         }
         .literal_words();
-        out.extend(command_words_write_paths(&words));
+        let Some(program) = words.first().map(|word| shell_program_name(word)) else {
+            continue;
+        };
+        if !matches!(program, "cd" | "pushd" | "popd") {
+            continue;
+        }
+        let mut state = cwd_state_at(
+            initial_cwd,
+            invocation.start_byte,
+            invocation.scope,
+            &changes,
+        );
+        match program {
+            "cd" => {
+                let Some(target) = literal_cd_target(&words) else {
+                    continue;
+                };
+                state.cwd = join_shell_cwd(&state.cwd, target);
+            }
+            "pushd" => {
+                let Some(target) = literal_pushd_target(&words) else {
+                    continue;
+                };
+                let target = join_shell_cwd(&state.cwd, target);
+                state.stack.push(state.cwd);
+                state.cwd = target;
+            }
+            "popd" => {
+                if words.len() != 1 {
+                    continue;
+                }
+                let Some(target) = state.stack.pop() else {
+                    continue;
+                };
+                state.cwd = target;
+            }
+            _ => unreachable!(),
+        }
+        changes.push(LiteralCwdChange {
+            at: invocation.start_byte,
+            scope: invocation.scope,
+            state,
+        });
     }
-    out
+    changes
+}
+
+fn literal_cd_target(words: &[String]) -> Option<&str> {
+    let mut end_of_options = false;
+    for word in words.iter().skip(1) {
+        if !end_of_options && word == "--" {
+            end_of_options = true;
+            continue;
+        }
+        if !end_of_options && word.starts_with('-') && word != "-" {
+            continue;
+        }
+        return (word != "-").then_some(word.as_str());
+    }
+    None
+}
+
+fn literal_pushd_target(words: &[String]) -> Option<&str> {
+    let mut end_of_options = false;
+    for word in words.iter().skip(1) {
+        if !end_of_options && word == "--" {
+            end_of_options = true;
+            continue;
+        }
+        if !end_of_options && word == "-n" {
+            continue;
+        }
+        if !end_of_options
+            && (word
+                .strip_prefix('+')
+                .or_else(|| word.strip_prefix('-'))
+                .is_some_and(|index| {
+                    !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
+                }))
+        {
+            return None;
+        }
+        return Some(word.as_str());
+    }
+    None
+}
+
+fn resolve_write_path_at(
+    path: &str,
+    initial_cwd: &Path,
+    at: usize,
+    scope: ExecutionScope,
+    changes: &[LiteralCwdChange],
+) -> String {
+    join_shell_cwd(&cwd_at(initial_cwd, at, scope, changes), path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Safe write sinks that do not touch a real file. Exact match.
@@ -709,7 +920,7 @@ struct InvocationSlice<'a> {
 
 struct CheckedInvocationPeel<'a> {
     words: InvocationSlice<'a>,
-    has_chdir: bool,
+    chdir_targets: Vec<&'a str>,
     has_split_string: bool,
     env_options_uncertain: bool,
     exhausted: bool,
@@ -746,7 +957,7 @@ fn unwrap_invocation_checked(invocation: &ShellInvocation) -> CheckedInvocationP
         words: InvocationSlice {
             words: invocation.words.get(peeled_count..).unwrap_or_default(),
         },
-        has_chdir: norm.has_chdir,
+        chdir_targets: norm.chdir_targets,
         has_split_string: norm.has_split_string,
         env_options_uncertain: norm.env_options_uncertain,
         exhausted: norm.exhausted,
@@ -2750,6 +2961,30 @@ mod tests {
         assert!(parsed("cat payload 1>&-").is_empty());
         assert!(parsed("cat payload 0<&3").is_empty());
         assert_eq!(parsed("cat payload > 3"), vec!["3"]);
+    }
+
+    #[test]
+    fn write_path_extraction_resolves_literal_cwd_changes_and_env_chdir() {
+        let parsed = |cmd: &str| {
+            let tree = try_parse_shell(cmd).expect("shell parses");
+            command_write_paths_with_cwd_in_tree(tree.root_node(), cmd, Path::new("/repo"))
+        };
+        assert_eq!(
+            parsed("cd .grow && tee workflows/review.rhai"),
+            vec!["/repo/.grow/workflows/review.rhai"]
+        );
+        assert_eq!(
+            parsed("env -C .grow tee workflows/review.rhai"),
+            vec!["/repo/.grow/workflows/review.rhai"]
+        );
+        assert_eq!(
+            parsed("bash -c 'cd .grow && tee workflows/review.rhai'"),
+            vec!["/repo/.grow/workflows/review.rhai"]
+        );
+        assert_eq!(
+            parsed("pushd .grow; tee workflows/review.rhai; popd; tee outside"),
+            vec!["/repo/.grow/workflows/review.rhai", "/repo/outside"]
+        );
     }
 
     /// An outer reader fed a substitution can't pin its operand (Ask); an inner

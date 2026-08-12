@@ -8,7 +8,7 @@ impl SlashCommand for WorkflowCommand {
         "workflow"
     }
     fn description(&self) -> &str {
-        "[behavior] Switch to Static Workflow"
+        "[behavior] Switch to Workflow"
     }
     fn usage(&self) -> &str {
         "/workflow [prompt]"

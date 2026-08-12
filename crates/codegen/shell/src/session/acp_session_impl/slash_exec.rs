@@ -72,7 +72,7 @@ impl SessionActor {
         ))];
         let slash_skills = self.slash_skills_for_resolve().await;
         let availability = self.command_availability().await;
-        let (_, workflows) = self.named_workflow_snapshot();
+        let (_, workflows, _) = self.named_workflow_snapshot();
         let loop_fire_mode = if self.rebuild_spec.scheduler_background_loops {
             LoopFireMode::Detached
         } else {
@@ -1125,7 +1125,7 @@ impl SessionActor {
                         match self.launch_deep_research(query).await {
                             Ok(run_id) => {
                                 self.send_host_turn_slash_command_output(&format!(
-                                "Deep Research started in the background ({run_id}). A terminal report will be delivered here. Use /workflow to manage the run."
+                                "Deep Research started in the background ({run_id}). A terminal report will be delivered here. This private Run is managed by Deep Research Behavior and does not appear in the public Workflow workspace."
                             ))
                             .await;
                             }
@@ -1147,9 +1147,13 @@ impl SessionActor {
                 self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
+            BuiltinAction::WorkflowWorkspace => {
+                let msg = self.workflow_workspace_report().await;
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
             BuiltinAction::WorkflowLaunch { name, input } => {
-                let (registry, _) = self.named_workflow_snapshot();
-                let msg = self.launch_named_workflow(&registry, &name, &input).await;
+                let msg = self.launch_named_workflow(&name, &input).await;
                 self.send_available_commands_update().await;
                 self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)

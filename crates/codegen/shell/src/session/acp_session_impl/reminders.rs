@@ -225,8 +225,9 @@ impl SessionActor {
         body.push_str(&format!(
             "\nIt runs in the background: status snapshots and the final result arrive as \
              reminders at turn starts, and the user can watch it in /workflows. If it pauses, \
-             it can be resumed by calling the workflow tool with resume_from_run_id: \
-             \"{run_id}\". Keep run ids internal — the user knows runs by display name. No \
+             it can be resumed by calling the workflow tool with action: \"control_run\", \
+             run_id: \"{run_id}\", operation: \"resume\". Keep run ids internal — the user \
+             knows runs by display name. No \
              action needed unless the user asks."
         ));
         self.push_system_reminder(&body);
@@ -262,6 +263,16 @@ fn format_workflow_status_reminder(
             run.run_id,
             run.status.as_str()
         );
+        if let Some(definition_id) = run.definition_id.as_ref() {
+            let provenance = run
+                .definition_scope
+                .zip(run.definition_hash.as_deref())
+                .map(|(scope, hash)| {
+                    format!("{}@{}", scope.as_str(), hash.get(..8).unwrap_or(hash))
+                })
+                .unwrap_or_else(|| "unknown hash".into());
+            let _ = write!(buf, "\n  Definition: {definition_id} ({provenance})");
+        }
         let objective = run
             .objective
             .split_whitespace()
@@ -342,7 +353,8 @@ fn format_workflow_status_reminder(
                 };
                 let _ = write!(
                     buf,
-                    "\n  Resumable: call the workflow tool with resume_from_run_id: \"{}\"{}.",
+                    "\n  Resumable: call the workflow tool with action: \"control_run\", \
+                     run_id: \"{}\", operation: \"resume\"{}.",
                     run.run_id, budget_suffix
                 );
             }
@@ -395,6 +407,16 @@ fn format_workflow_completion_reminder(
             run.run_id,
             run.status.as_str()
         );
+        if let Some(definition_id) = run.definition_id.as_ref() {
+            let provenance = run
+                .definition_scope
+                .zip(run.definition_hash.as_deref())
+                .map(|(scope, hash)| {
+                    format!("{}@{}", scope.as_str(), hash.get(..8).unwrap_or(hash))
+                })
+                .unwrap_or_else(|| "unknown hash".into());
+            let _ = write!(buf, "\n  Definition: {definition_id} ({provenance})");
+        }
         let objective = run
             .objective
             .split_whitespace()
@@ -441,18 +463,25 @@ fn format_workflow_completion_reminder(
             } else {
                 let _ = writeln!(
                     buf,
-                    "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" \
-                     and a raised agent_budget (the resume is rejected while usage is at \
-                     or over the cap).",
+                    "  Resumable: call the workflow tool with action: \"control_run\", \
+                     run_id: \"{}\", operation: \"resume\", and a raised agent_budget (the \
+                     resume is rejected while usage is at or over the cap).",
                     run.run_id
                 );
             }
         }
+        if run.save_prompt {
+            let _ = writeln!(
+                buf,
+                "  This temporary Definition completed successfully. Offer to publish this hash and ask the user to choose Project or User scope. Publishing requires Workflow behavior; if the current behavior differs, direct the user to /workflow first."
+            );
+        }
         if run.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
             let _ = writeln!(
                 buf,
-                "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" — \
-                 completed agents replay from the journal and the failed step re-executes.",
+                "  Resumable: call the workflow tool with action: \"control_run\", \
+                 run_id: \"{}\", operation: \"resume\" — completed agents replay from the \
+                 journal and the failed step re-executes.",
                 run.run_id
             );
         }
@@ -824,6 +853,11 @@ mod workflow_reminder_tests {
     fn failed_run(detail: String) -> WorkflowRunState {
         WorkflowRunState {
             run_id: "wf_1".to_owned(),
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
+            private: false,
+            save_prompt: false,
             revision: 2,
             name: "demo".to_owned(),
             objective: "exercise formatter".to_owned(),
@@ -860,7 +894,7 @@ mod workflow_reminder_tests {
             .next()
             .unwrap()
             .trim_end();
-        assert!(reminder.contains("resume_from_run_id: \"wf_1\""));
+        assert!(reminder.contains("run_id: \"wf_1\", operation: \"resume\""));
         assert!(rendered_detail.starts_with("first second "));
         assert!(rendered_detail.ends_with('…'));
         assert!(rendered_detail.len() <= WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);

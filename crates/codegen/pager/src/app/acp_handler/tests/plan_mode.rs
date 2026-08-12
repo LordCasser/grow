@@ -483,6 +483,18 @@
         assert!(behavior_mode_update_applied(&update));
     }
 
+    #[test]
+    fn leaving_workflow_closes_management_workspace_immediately() {
+        let mut agent = make_agent(Some("s1"));
+        agent.behavior_mode = tools::types::BehaviorId::Workflow;
+        agent.show_workflows = true;
+
+        detect_plan_mode_change(&make_current_mode_update("normal"), &mut agent);
+
+        assert_eq!(agent.behavior_mode, tools::types::BehaviorId::Normal);
+        assert!(!agent.show_workflows);
+    }
+
     /// Rejection retains the source identity and never releases a held FIFO.
     #[test]
     fn behavior_change_rejected_retains_source_identity() {

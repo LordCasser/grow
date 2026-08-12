@@ -193,38 +193,106 @@ impl SessionActor {
     ) -> (
         crate::session::workflow::registry::WorkflowRegistry,
         Vec<crate::session::workflow::registry::WorkflowListing>,
+        Vec<tools::implementations::grow_build::workflow::WorkflowDiagnostic>,
     ) {
-        crate::session::workflow::registry::workflow_snapshot(Some(std::path::Path::new(
-            self.session_info.cwd.as_str(),
-        )))
+        let cwd = std::path::Path::new(self.session_info.cwd.as_str());
+        let registry = crate::session::workflow::registry::WorkflowRegistry::scan(Some(cwd));
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        match crate::session::workflow::workspace::WorkflowWorkspace::open(&session_dir, cwd) {
+            Ok(workspace) => {
+                let catalog = workspace.catalog(cwd);
+                let listings = catalog
+                    .definitions
+                    .into_iter()
+                    .map(
+                        |definition| crate::session::workflow::registry::WorkflowListing {
+                            definition_id: definition.definition_id,
+                            name: definition.name,
+                            description: definition.description,
+                            when_to_use: definition.when_to_use,
+                            source: definition.scope.as_str(),
+                            scope: definition.scope,
+                            path: definition.path,
+                            status: definition.status,
+                            content_hash: definition.content_hash,
+                            focused: definition.focused,
+                        },
+                    )
+                    .collect();
+                (registry, listings, catalog.diagnostics)
+            }
+            Err(error) => {
+                let mut diagnostics = registry.diagnostics().to_vec();
+                diagnostics.push(
+                    tools::implementations::grow_build::workflow::WorkflowDiagnostic {
+                        scope: tools::implementations::grow_build::workflow::WorkflowScope::Session,
+                        path: Some(session_dir.join("workflow-workspace").display().to_string()),
+                        code: "workspace_unavailable".into(),
+                        message: error.to_string(),
+                    },
+                );
+                let listings = registry.list();
+                (registry, listings, diagnostics)
+            }
+        }
     }
 
-    pub(crate) async fn launch_named_workflow(
-        self: &Arc<Self>,
-        registry: &crate::session::workflow::registry::WorkflowRegistry,
-        name: &str,
-        input: &str,
-    ) -> String {
+    pub(crate) async fn launch_named_workflow(self: &Arc<Self>, name: &str, input: &str) -> String {
         // This lock is also the special-Behavior admission gate. Recheck the
         // Behavior after acquiring it: a slash command may have been resolved
         // while a concurrent Behavior switch was still committing.
         let mut manager = self.workflow_manager.lock().await;
         let behavior = self.behavior.lock().behavior();
-        if matches!(
-            behavior,
-            tool_types::BehaviorId::Plan
-                | tool_types::BehaviorId::Goal
-                | tool_types::BehaviorId::DeepResearch
-        ) {
+        if behavior != tool_types::BehaviorId::Workflow {
             return format!(
-                "Workflow cannot be launched while {} behavior is active.",
-                behavior.display_label()
+                "Saved Workflow Definitions can only run in Workflow behavior. Use /workflow [prompt] (current: {}).",
+                behavior.display_label(),
             );
         }
-        let resolved = match registry.resolve_by_name(name) {
-            Ok(r) => r,
-            Err(e) => return format!("Workflow '{name}' unavailable: {e}"),
+        let cwd = std::path::Path::new(self.session_info.cwd.as_str());
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let mut workspace =
+            match crate::session::workflow::workspace::WorkflowWorkspace::open(&session_dir, cwd) {
+                Ok(workspace) => workspace,
+                Err(error) => return format!("Workflow workspace unavailable: {error}"),
+            };
+        let candidates: Vec<_> = workspace
+            .catalog(cwd)
+            .definitions
+            .into_iter()
+            .filter(|definition| definition.name == name)
+            .collect();
+        let definition_id = match candidates.as_slice() {
+            [definition] => definition.definition_id.clone(),
+            [] => return format!("Workflow '{name}' unavailable."),
+            _ => {
+                return format!(
+                    "More than one Definition is named '{name}'. Open /workflows and choose a scoped Definition."
+                );
+            }
         };
+        if let Err(error) = workspace.focus(cwd, &definition_id) {
+            return format!("Could not focus Workflow '{name}': {error}");
+        }
+        let definition = match workspace.resolve(cwd, &definition_id) {
+            Ok(definition) => definition,
+            Err(error) => return format!("Workflow '{name}' unavailable: {error}"),
+        };
+        if let Err(error) = workflow::validate_script_with_agent_budget(
+            &definition.resolved.script,
+            parse_named_workflow_args(input, &definition.resolved.meta.description)
+                .0
+                .into(),
+            workflow::DEFAULT_AGENT_BUDGET,
+        ) {
+            return format!("Workflow '{name}' failed preflight and was not started: {error}");
+        }
+        if let Err(error) =
+            workspace.record_validated(cwd, &definition_id, &definition.summary.content_hash)
+        {
+            return format!("Workflow '{name}' changed during preflight: {error}");
+        }
+        let resolved = definition.resolved;
         let (args, objective) = parse_named_workflow_args(input, &resolved.meta.description);
         let spec = crate::session::workflow::manager::LaunchSpec {
             objective,
@@ -234,16 +302,15 @@ impl SessionActor {
             resume_run_id: None,
         };
         let launched = manager.launch(resolved, spec);
-        drop(manager);
         match launched {
             Ok((run_id, outcome_rx)) => {
-                let (display, objective) = self
-                    .workflow_tracker()
-                    .await
+                let (display, objective) = manager
+                    .tracker()
                     .lock()
                     .get(&run_id)
                     .map(|r| (r.name.clone(), r.objective.clone()))
                     .unwrap_or_else(|| (name.to_string(), String::new()));
+                drop(manager);
                 let command_line = if input.trim().is_empty() {
                     format!("/{name}")
                 } else {
@@ -273,20 +340,34 @@ impl SessionActor {
     pub(crate) async fn manage_workflow_run(self: &Arc<Self>, run_id: &str, op: &str) -> String {
         use crate::session::workflow::tracker::WorkflowRunStatus;
 
+        // The manager lock is the public Workflow admission lock shared with
+        // Behavior switching. Hold it from the live Behavior check through
+        // control so pause/stop cannot execute after a concurrent switch.
+        let mut manager = self.workflow_manager.lock().await;
+        let behavior = self.behavior.lock().behavior();
+        if behavior != tool_types::BehaviorId::Workflow {
+            return format!(
+                "Workflow Runs can only be managed in Workflow behavior. Use /workflow (current: {}).",
+                behavior.display_label()
+            );
+        }
+
         const USAGE: &str = "Usage: /workflow <name> [args] to launch a saved workflow, or \
                              /workflow-run <op> [name] to manage \
-                             a run — ops: pause, resume, stop, save.";
+                             a run — ops: pause, resume, stop. Publish session drafts through the Workflow workspace with an explicit Project or User scope.";
         if op.is_empty() {
             return USAGE.to_string();
         }
 
         let matches: Vec<(String, WorkflowRunStatus, String)> = {
-            let tracker = self.workflow_tracker().await;
+            let tracker = manager.tracker();
             let tracker = tracker.lock();
             let all: Vec<_> = tracker
                 .list()
                 .iter()
-                .filter(|r| r.run_id.starts_with(run_id) || r.name.starts_with(run_id))
+                .filter(|r| {
+                    !r.private && (r.run_id.starts_with(run_id) || r.name.starts_with(run_id))
+                })
                 .map(|r| (r.run_id.clone(), r.status, r.name.clone()))
                 .collect();
             narrow_run_matches(all, run_id, op)
@@ -315,7 +396,9 @@ impl SessionActor {
                 if status != WorkflowRunStatus::Active {
                     return format!("Run '{name}' is not active (status: {}).", status.as_str());
                 }
-                self.workflow_manager.lock().await.pause(&full_id);
+                if !manager.pause(&full_id) {
+                    return format!("Run '{name}' is no longer active.");
+                }
                 format!("Paused {name}. /workflow-run resume{id_suffix} to continue.")
             }
             "stop" => {
@@ -325,28 +408,10 @@ impl SessionActor {
                         status.as_str()
                     );
                 }
-                let owned_by_deep_research =
-                    self.behavior.lock().deep_research_run_id() == Some(full_id.as_str());
-                if owned_by_deep_research {
-                    let goal = self.goal_tracker.lock().snapshot().cloned();
-                    if let Err(error) = self
-                        .persist_control_snapshot_durably(
-                            crate::session::behavior::BehaviorSnapshot::normal(),
-                            goal,
-                        )
-                        .await
-                    {
-                        return format!("Could not durably stop Deep Research: {error}");
-                    }
-                    self.cancel_deep_research_with_report(&full_id).await;
-                    self.behavior
-                        .lock()
-                        .select_behavior(tool_types::BehaviorId::Normal);
-                    self.enqueue_current_mode_update(agent_client_protocol::SessionModeId::new(
-                        tools::types::BehaviorId::Normal.as_id(),
-                    ));
-                } else {
-                    self.workflow_manager.lock().await.cancel(&full_id);
+                // Private Deep Research runs were filtered out above and are
+                // controlled only by the Deep Research Behavior owner.
+                if !manager.cancel(&full_id) {
+                    return format!("Run '{name}' is already finished.");
                 }
                 format!("Stopped {name}.")
             }
@@ -355,16 +420,10 @@ impl SessionActor {
                 // Behavior selection and re-read both Behavior and run state
                 // after acquiring the shared gate; the command may have been
                 // parsed before a concurrent switch or terminal event.
-                let mut manager = self.workflow_manager.lock().await;
                 let behavior = self.behavior.lock().behavior();
-                if matches!(
-                    behavior,
-                    tool_types::BehaviorId::Plan
-                        | tool_types::BehaviorId::Goal
-                        | tool_types::BehaviorId::DeepResearch
-                ) {
+                if behavior != tool_types::BehaviorId::Workflow {
                     return format!(
-                        "Workflow cannot be resumed while {} behavior is active.",
+                        "Workflow can only be resumed in Workflow behavior (current: {}).",
                         behavior.display_label()
                     );
                 }
@@ -448,47 +507,88 @@ impl SessionActor {
                     Err(e) => format!("Could not resume '{name}': {e}"),
                 }
             }
-            "save" => {
-                let Some(script) = self.workflow_manager.lock().await.script_copy_for(&full_id)
-                else {
-                    return format!("No persisted script for '{name}'; nothing to save.");
-                };
-                let definition_name =
-                    match crate::session::workflow::registry::resolve_inline(script.clone()) {
-                        Ok(resolved) => resolved.meta.name,
-                        Err(error) => return format!("Could not save workflow '{name}': {error}"),
-                    };
-                if definition_name != name {
-                    return format!(
-                        "Save is disabled for run '{name}': it is a duplicate-run display handle, \
-                         while the script is still named '{definition_name}'. Choose a new unique \
-                         meta.name and save the script under that name instead."
-                    );
-                }
-                if crate::session::workflow::registry::BUILTIN_WORKFLOWS
-                    .iter()
-                    .any(|builtin| builtin.name == definition_name)
-                {
-                    return format!(
-                        "Save is disabled for built-in workflow '{definition_name}', which is \
-                         already runnable. To customize it, create a copy with a new unique \
-                         meta.name."
-                    );
-                }
-                match crate::session::workflow::registry::save_project_workflow(
-                    std::path::Path::new(self.session_info.cwd.as_str()),
-                    &definition_name,
-                    &script,
-                ) {
-                    Ok(path) => format!(
-                        "Saved workflow '{definition_name}' to {} — runnable by name from now on.",
-                        path.display()
-                    ),
-                    Err(e) => format!("Could not save workflow '{definition_name}': {e}"),
-                }
-            }
             other => format!("Unknown op '{other}'. {USAGE}"),
         }
+    }
+
+    pub(crate) async fn workflow_workspace_report(&self) -> String {
+        let behavior = self.behavior.lock().behavior();
+        if behavior != tool_types::BehaviorId::Workflow {
+            return format!(
+                "The Workflow workspace is available only in Workflow behavior. Use /workflow [prompt] (current: {}).",
+                behavior.display_label()
+            );
+        }
+        let cwd = std::path::Path::new(self.session_info.cwd.as_str());
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let workspace =
+            match crate::session::workflow::workspace::WorkflowWorkspace::open(&session_dir, cwd) {
+                Ok(workspace) => workspace,
+                Err(error) => return format!("Workflow workspace unavailable: {error}"),
+            };
+        let catalog = workspace.catalog(cwd);
+        let mut lines = vec![format!(
+            "Workflow Workspace — {} Definition(s), {} diagnostic(s)",
+            catalog.definitions.len(),
+            catalog.diagnostics.len()
+        )];
+        lines.push("Definitions:".into());
+        if catalog.definitions.is_empty() {
+            lines.push("  (none)".into());
+        } else {
+            lines.extend(catalog.definitions.into_iter().map(|definition| {
+                let focus = if definition.focused { "*" } else { " " };
+                format!(
+                    " {focus} {} [{}; {}; {}]",
+                    definition.name,
+                    definition.scope.as_str(),
+                    definition.status,
+                    definition.definition_id
+                )
+            }));
+        }
+        if !catalog.diagnostics.is_empty() {
+            lines.push("Diagnostics:".into());
+            lines.extend(catalog.diagnostics.into_iter().map(|diagnostic| {
+                let path = diagnostic.path.as_deref().unwrap_or("<no path>");
+                format!(
+                    "  [{}; {}] {} — {}",
+                    diagnostic.scope.as_str(),
+                    diagnostic.code,
+                    path,
+                    diagnostic.message
+                )
+            }));
+        }
+        lines.push("Runs:".into());
+        let tracker = self.workflow_tracker().await;
+        let public_runs: Vec<_> = tracker
+            .lock()
+            .list()
+            .iter()
+            .filter(|run| !run.private)
+            .map(|run| {
+                let provenance = run
+                    .definition_scope
+                    .zip(run.definition_hash.as_deref())
+                    .map(|(scope, hash)| {
+                        format!("{}@{}", scope.as_str(), hash.get(..8).unwrap_or(hash))
+                    })
+                    .unwrap_or_else(|| "unknown source".into());
+                format!(
+                    "   {} [{}; {}; {provenance}]",
+                    run.name,
+                    run.status.as_str(),
+                    run.run_id
+                )
+            })
+            .collect();
+        if public_runs.is_empty() {
+            lines.push("  (none)".into());
+        } else {
+            lines.extend(public_runs);
+        }
+        lines.join("\n")
     }
 }
 

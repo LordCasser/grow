@@ -377,7 +377,7 @@ impl SessionActor {
         };
         let availability = self.command_availability().await;
         let mut pending_skill_information: Option<String> = None;
-        let (workflow_registry, named_workflows) = self.named_workflow_snapshot();
+        let (_, named_workflows, _) = self.named_workflow_snapshot();
         let loop_fire_mode = if self.rebuild_spec.scheduler_background_loops {
             LoopFireMode::Detached
         } else {
@@ -418,9 +418,7 @@ impl SessionActor {
                     }
                     BuiltinAction::WorkflowLaunch { name, input } => {
                         self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        let msg = self
-                            .launch_named_workflow(&workflow_registry, &name, &input)
-                            .await;
+                        let msg = self.launch_named_workflow(&name, &input).await;
                         self.send_host_turn_slash_command_output(&msg).await;
                         return ok_end_turn(0, None);
                     }

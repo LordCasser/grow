@@ -10,23 +10,23 @@ impl SlashCommand for WorkflowsCommand {
     }
 
     fn description(&self) -> &str {
-        "Show workflow runs (phases, agents, progress)"
+        "Open the Workflow workspace (Definitions and Runs)"
     }
 
     fn usage(&self) -> &str {
         "/workflows"
     }
 
-    fn visible(&self, _ctx: &crate::slash::command::AppCtx) -> bool {
-        true
+    fn visible(&self, ctx: &crate::slash::command::AppCtx) -> bool {
+        ctx.workflows_available && ctx.behavior_mode == tools::types::BehaviorId::Workflow
     }
 
-    /// The run pane is drawn from `AgentView::show_workflows` on the full-TUI
+    /// The workspace is drawn from `AgentView::show_workflows` on the full-TUI
     /// path only; minimal never reads it, so the toggle would flip a flag
     /// nothing renders.
     fn mode_support(&self) -> ModeSupport {
         ModeSupport::FullscreenOnly(Remedy::SwitchMode {
-            why: "the workflow run pane needs fullscreen",
+            why: "the Workflow workspace needs fullscreen",
         })
     }
 
@@ -72,7 +72,7 @@ mod tests {
                 workflows_available: available,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
             };
-            assert!(WorkflowsCommand.visible(&ctx));
+            assert_eq!(WorkflowsCommand.visible(&ctx), false);
         }
     }
 

@@ -1648,6 +1648,9 @@ mod tests {
 
         let run = |run_id: &str| WorkflowRunSnapshot {
             run_id: run_id.to_owned(),
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
             name: "same-display-name".to_owned(),
             objective: "objective".to_owned(),
             status: "active".to_owned(),

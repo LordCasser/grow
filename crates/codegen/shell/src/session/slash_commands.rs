@@ -229,13 +229,21 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         },
     },
     BuiltinCommand {
+        name: "workflows",
+        description: "Show the Workflow workspace (Definitions and Runs)",
+        argument_hint: None,
+        aliases: &[],
+        gate: BuiltinGate::WorkflowManagement,
+        resolve: |_args| BuiltinAction::WorkflowWorkspace,
+    },
+    BuiltinCommand {
         name: "workflow-run",
-        description: "Launch a saved workflow, or manage a run (pause, resume, stop, save)",
-        argument_hint: Some("<name> [args] | pause|resume|stop|save [name]"),
+        description: "Choose a Definition to run, or manage a Run (pause, resume, stop)",
+        argument_hint: Some("<name> [args] | pause|resume|stop [name]"),
         aliases: &[],
         gate: BuiltinGate::WorkflowManagement,
         resolve: |args| {
-            const OPS: [&str; 4] = ["pause", "resume", "stop", "save"];
+            const OPS: [&str; 3] = ["pause", "resume", "stop"];
             let trimmed = args.trim();
             let mut parts = trimmed.split_whitespace();
             let first = parts.next().unwrap_or_default();
@@ -402,6 +410,9 @@ pub(crate) struct CommandAvailability {
     pub goal: bool,
     pub workflows: bool,
     pub workflow_management: bool,
+    /// Public Workflow management and dynamic Definition commands are visible
+    /// only while the live Behavior is Workflow.
+    pub workflow_behavior: bool,
 }
 impl CommandAvailability {
     /// `true` if commands gated on `gate` should be advertised this session.
@@ -415,7 +426,9 @@ impl CommandAvailability {
             BuiltinGate::Plugins => self.plugins,
             BuiltinGate::Goal => self.goal,
             BuiltinGate::WorkflowLaunches => self.workflows,
-            BuiltinGate::WorkflowManagement => self.workflows || self.workflow_management,
+            BuiltinGate::WorkflowManagement => {
+                self.workflow_behavior && (self.workflows || self.workflow_management)
+            }
         }
     }
     /// Test helper: every gate satisfied (matches the legacy "feedback only"
@@ -431,6 +444,7 @@ impl CommandAvailability {
             goal: true,
             workflows: true,
             workflow_management: true,
+            workflow_behavior: true,
         }
     }
 }
@@ -576,6 +590,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "vim-mode",
             "welcome",
             "workflow",
+            "workflow-run",
             "workflows",
             "?",
         ];
@@ -617,7 +632,10 @@ impl<'a> EffectiveCommandCatalog<'a> {
             effective_skills.push(SkillCommand { name, skill });
         }
         taken.extend(bare_counts.keys().map(|name| (*name).to_owned()));
-        let effective_workflows = if availability.allows(BuiltinGate::WorkflowLaunches) {
+        // Existing Runs may keep the management surface available after new
+        // Workflow launches are disabled. Definition shortcuts are launch
+        // affordances, so do not leak them through that management-only state.
+        let effective_workflows = if availability.workflow_behavior && availability.workflows {
             let mut counts: HashMap<&str, usize> = HashMap::new();
             for workflow in workflows {
                 *counts.entry(workflow.name.as_str()).or_default() += 1;
@@ -709,8 +727,13 @@ pub(super) fn available_commands(
     }));
     commands.extend(catalog.workflows.iter().map(|workflow| {
         let meta = serde_json::json!({
+            "workflowDefinitionId": workflow.definition_id,
             "workflowSource": workflow.source,
+            "workflowScope": workflow.scope,
             "workflowPath": workflow.path,
+            "workflowStatus": workflow.status,
+            "workflowContentHash": workflow.content_hash,
+            "workflowFocused": workflow.focused,
         })
         .as_object()
         .cloned();
@@ -912,6 +935,7 @@ pub(super) enum BuiltinAction {
         run_id: String,
         op: String,
     },
+    WorkflowWorkspace,
     WorkflowLaunch {
         name: String,
         input: String,
@@ -952,6 +976,7 @@ impl BuiltinAction {
             | BuiltinAction::GoalBudget { .. } => "goal",
             BuiltinAction::DeepResearch { .. } => "deep-research",
             BuiltinAction::WorkflowManage { .. } => "workflow-run",
+            BuiltinAction::WorkflowWorkspace => "workflows",
             BuiltinAction::WorkflowLaunch { .. } => "workflow-run",
         }
     }
@@ -989,6 +1014,7 @@ impl BuiltinAction {
             BuiltinAction::GoalBudget { token_budget } => token_budget.is_some(),
             BuiltinAction::DeepResearch { .. } => true,
             BuiltinAction::WorkflowManage { .. } => true,
+            BuiltinAction::WorkflowWorkspace => false,
             BuiltinAction::WorkflowLaunch { input, .. } => !input.is_empty(),
         }
     }
@@ -1177,6 +1203,16 @@ pub(super) fn resolve(
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
         return Ok(prompt_blocks);
     };
+    // Management commands are always recognized so hidden, stale, or
+    // hand-constructed calls reach their Shell-side Behavior gate instead of
+    // degrading into an ordinary model prompt.
+    if matches!(command_name, "workflow-run" | "workflows")
+        && let Some(builtin) = BUILTIN_COMMANDS
+            .iter()
+            .find(|builtin| builtin.name == command_name)
+    {
+        return Err(SlashCommandOutcome::Builtin((builtin.resolve)(args)));
+    }
     if let Some(prompt_cmd) = PROMPT_COMMANDS.iter().find(|c| c.name == command_name)
         && availability.allows(prompt_cmd.gate)
     {
@@ -1210,9 +1246,6 @@ pub(super) fn resolve(
         .find(|builtin| builtin.name == command_name || builtin.aliases.contains(&command_name))
     {
         let action = (builtin.resolve)(args);
-        if matches!(action, BuiltinAction::WorkflowLaunch { .. }) && !availability.workflows {
-            return Ok(prompt_blocks);
-        }
         return Err(SlashCommandOutcome::Builtin(action));
     }
     let full_text = prompt_blocks
@@ -1708,6 +1741,7 @@ mod tests {
                 "reload-plugins",
                 "session-info",
                 "deep-research",
+                "workflows",
                 "workflow-run",
                 "goal",
                 "loop",
@@ -2438,11 +2472,18 @@ mod tests {
     }
     fn listing(name: &str) -> crate::session::workflow::registry::WorkflowListing {
         crate::session::workflow::registry::WorkflowListing {
+            definition_id: tools::implementations::grow_build::workflow::WorkflowDefinitionId::new(
+                format!("project:{name}"),
+            ),
             name: name.to_string(),
             description: "does things".to_string(),
             when_to_use: None,
             source: "project",
+            scope: tools::implementations::grow_build::workflow::WorkflowScope::Project,
             path: Some(format!(".grow/workflows/{name}.rhai")),
+            status: "saved".into(),
+            content_hash: "abc123".into(),
+            focused: false,
         }
     }
     #[test]
@@ -2584,7 +2625,7 @@ mod tests {
             .unwrap_err(),
             SlashCommandOutcome::Builtin(BuiltinAction::WorkflowManage { .. })
         ));
-        assert!(
+        assert!(matches!(
             resolve(
                 vec![text_block("/workflow-run review")],
                 &[],
@@ -2592,8 +2633,47 @@ mod tests {
                 SkillSlashRewrite::default(),
                 &workflows,
             )
-            .is_ok()
-        );
+            .unwrap_err(),
+            SlashCommandOutcome::Builtin(BuiltinAction::WorkflowLaunch { .. })
+        ));
+    }
+
+    #[test]
+    fn hidden_workflow_management_commands_still_reach_shell_gate() {
+        let availability = CommandAvailability {
+            workflows: true,
+            workflow_management: true,
+            workflow_behavior: false,
+            ..CommandAvailability::default()
+        };
+        let names: Vec<_> = available_commands(&[], availability, &[])
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
+        assert!(!names.iter().any(|name| name == "workflow-run"));
+        assert!(!names.iter().any(|name| name == "workflows"));
+        assert!(matches!(
+            resolve(
+                vec![text_block("/workflow-run stop forged")],
+                &[],
+                availability,
+                SkillSlashRewrite::default(),
+                &[],
+            )
+            .unwrap_err(),
+            SlashCommandOutcome::Builtin(BuiltinAction::WorkflowManage { .. })
+        ));
+        assert!(matches!(
+            resolve(
+                vec![text_block("/workflows")],
+                &[],
+                availability,
+                SkillSlashRewrite::default(),
+                &[],
+            )
+            .unwrap_err(),
+            SlashCommandOutcome::Builtin(BuiltinAction::WorkflowWorkspace)
+        ));
     }
     #[test]
     fn workflow_manage_parses_both_orders_and_optional_id() {
@@ -2610,7 +2690,6 @@ mod tests {
             ("pause", "", "pause"),
             ("wf_12ab pause", "wf_12ab", "pause"),
             ("pause wf_12ab", "wf_12ab", "pause"),
-            ("SAVE wf_12ab", "wf_12ab", "save"),
             ("pause deep research", "deep research", "pause"),
             ("", "", ""),
         ] {

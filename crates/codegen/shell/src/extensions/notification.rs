@@ -858,6 +858,14 @@ pub enum SessionUpdate {
     WorkflowUpdated {
         run_id: String,
         #[serde(default)]
+        private: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition_scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition_hash: Option<String>,
+        #[serde(default)]
         revision: u64,
         name: String,
         objective: String,

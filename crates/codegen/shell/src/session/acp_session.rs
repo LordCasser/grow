@@ -385,6 +385,9 @@ pub(crate) struct PreparedToolCall {
     /// Authoritative side-effect scope; decides whether the call takes the
     /// per-file write lock.
     tool_scope: tool_protocol::ToolScope,
+    /// True when this native call writes a session Workflow draft. Dispatch
+    /// rechecks live Behavior while holding Workflow admission.
+    workflow_draft_write: bool,
 }
 impl PreparedToolCall {
     /// The tool name hooks see: the resolved dispatch target, else the wire name.
@@ -549,7 +552,7 @@ pub(crate) struct SessionActor {
     pub(crate) active_skill: parking_lot::Mutex<Option<String>>,
     /// Behavior captured atomically when the current user-visible turn wins
     /// foreground admission. Selection changes never mutate an admitted turn.
-    pub(crate) turn_behavior: parking_lot::Mutex<tool_types::BehaviorId>,
+    pub(crate) turn_behavior: Arc<parking_lot::Mutex<tool_types::BehaviorId>>,
     /// Session-scoped primary-Agent Behavior controller. It owns the selected
     /// collaboration protocol and Plan phase, not permissions or runtimes.
     pub(crate) behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorCoordinator>>,
@@ -591,8 +594,8 @@ pub(crate) struct SessionActor {
     >,
     pub(crate) workflow_manager:
         Arc<tokio::sync::Mutex<crate::session::workflow::manager::WorkflowManager>>,
-    pub(crate) workflow_launch_tx: tokio::sync::mpsc::UnboundedSender<
-        tools::implementations::grow_build::workflow::WorkflowLaunchEnvelope,
+    pub(crate) workflow_tx: tokio::sync::mpsc::UnboundedSender<
+        tools::implementations::grow_build::workflow::WorkflowEnvelope,
     >,
     /// Agent-level managed MCP config cache (refreshed in background).
     pub(crate) managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
@@ -817,7 +820,7 @@ impl SessionActor {
     /// `send_available_commands_update`).
     async fn command_availability(&self) -> slash_commands::CommandAvailability {
         let tool_names = self.registered_tool_names().await;
-        let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
+        let has_workflow_runs = self.workflow_tracker().await.lock().has_public_runs();
         self.build_command_availability(&tool_names, has_workflow_runs)
     }
     /// Build the `CommandAvailability` snapshot from a precomputed slice
@@ -850,6 +853,7 @@ impl SessionActor {
                 .iter()
                 .any(|n| n == tools::implementations::grow_build::workflow::WORKFLOW_TOOL_NAME),
             workflow_management: has_workflow_runs,
+            workflow_behavior: self.behavior.lock().behavior() == tool_types::BehaviorId::Workflow,
         }
     }
     /// Names of every tool registered with the session's tool bridge.

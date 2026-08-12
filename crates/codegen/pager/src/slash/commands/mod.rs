@@ -67,6 +67,7 @@ pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
 pub mod workflow;
+pub mod workflow_run;
 pub mod workflows;
 use super::command::SlashCommand;
 use std::sync::Arc;
@@ -126,6 +127,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(resume::ResumeCommand),
         Arc::new(mcps::McpsCommand),
         Arc::new(workflows::WorkflowsCommand),
+        Arc::new(workflow_run::WorkflowRunCommand),
         Arc::new(workflow::WorkflowCommand),
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
@@ -340,6 +342,7 @@ mod tests {
             "vim-mode",
             "welcome",
             "workflow",
+            "workflow-run",
             "workflows",
             "yolo",
         ];

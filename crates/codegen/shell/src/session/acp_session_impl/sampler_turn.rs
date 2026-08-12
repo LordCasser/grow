@@ -149,12 +149,10 @@ impl SessionActor {
                 bridge.tool_scope(&definition.function.name) == Some(tool_protocol::ToolScope::Read)
             });
         }
-        if matches!(
-            tool_behavior,
-            tool_types::BehaviorId::Plan
-                | tool_types::BehaviorId::Goal
-                | tool_types::BehaviorId::DeepResearch
-        ) {
+        let live_behavior = self.behavior.lock().behavior();
+        if tool_behavior != tool_types::BehaviorId::Workflow
+            || live_behavior != tool_types::BehaviorId::Workflow
+        {
             defs.retain(|definition| {
                 bridge.tool_kind(&definition.function.name)
                     != Some(tools::types::tool::ToolKind::Workflow)

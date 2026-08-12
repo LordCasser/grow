@@ -1999,7 +1999,7 @@ pub(super) async fn run_session(
                         let has_runs = !session.workflow_tracker().await.lock().list().is_empty();
                         let availability =
                             session.build_command_availability(&tool_names, has_runs);
-                        let (_, workflows) = session.named_workflow_snapshot();
+                        let (_, workflows, _) = session.named_workflow_snapshot();
                         let commands = slash_commands::available_commands(
                             &skills,
                             availability,

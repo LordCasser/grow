@@ -394,6 +394,16 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             workflows_modal_refresh =
                                 workflows_changed && agent.extensions_modal.is_some();
                         }
+                        if let Some(definitions) =
+                            agent.session.tracker.take_pending_workflow_definitions()
+                        {
+                            agent.workflows_view.definitions = definitions;
+                        }
+                        if let Some(diagnostics) =
+                            agent.session.tracker.take_pending_workflow_diagnostics()
+                        {
+                            agent.workflows_view.diagnostics = diagnostics;
+                        }
                         // Tools list arrives in the same update's `meta` payload.
                         // Stash it on the session so the per-frame sync in
                         // `app_view.rs` can push it through to the slash registry

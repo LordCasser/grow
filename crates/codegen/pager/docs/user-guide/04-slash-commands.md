@@ -134,7 +134,7 @@ Choose the current session's Permission policy. `/ask`, `/auto`, and `/always-ap
 
 ### `/behavior [normal|clarify|plan|workflow|deep-research|goal]`
 
-Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, `/deep-research`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Leaving unfinished Plan or active Deep Research shows an interruption warning; select the same target Behavior again within the displayed window to confirm. Ordinary Enter/Esc input never confirms a Behavior transition. An unfinished Goal remains exclusive until completion or `/goal clear`.
+Choose the primary Agent's collaboration protocol. `/normal`, `/clarify`, `/plan`, `/workflow`, `/deep-research`, and `/goal` are idempotent one-step selections with a `[behavior]` prefix. Runtime-dependent Behaviors are omitted when unavailable. Leaving unfinished Plan, active Deep Research, or Workflow with an Active public Run shows an interruption warning; select the same target Behavior again within the displayed window to confirm. Paused and budget-limited public Runs do not require confirmation. Ordinary Enter/Esc input never confirms a Behavior transition. An unfinished Goal remains exclusive until completion or `/goal clear`.
 
 These commands modify only the current session. Persistent defaults remain in Settings and affect future sessions only.
 
@@ -277,33 +277,31 @@ Enter Deep Research Behavior. With no query it waits for the next non-empty mess
 /deep-research Compare the migration risks of PostgreSQL 17 and MySQL 9
 ```
 
-The command returns right away. While it runs, ordinary messages do not start another turn or a second research run. Use `/workflows` for status and `/workflow-run pause|resume|stop` for the owned runtime. Natural completion prints the investigation and verification summary, core conclusions, limitations, and the absolute path to a complete Markdown report. That artifact is coverage-driven rather than length- or section-driven, may use cited tables, Mermaid diagrams, or verified external images when useful, and includes the sources actually used. Cancellation, budget exhaustion, interruption, and runtime failure still produce a terminal report. Natural completion returns the session to Normal. Deep Research is private and cannot be launched from `/workflow-run`.
+The command returns right away. While it runs, ordinary messages do not start another turn or a second research run. Natural completion prints the investigation and verification summary, core conclusions, limitations, and the absolute path to a complete Markdown report. That artifact is coverage-driven rather than length- or section-driven, may use cited tables, Mermaid diagrams, or verified external images when useful, and includes the sources actually used. Cancellation, budget exhaustion, interruption, and runtime failure still produce a terminal report. Natural completion returns the session to Normal. Deep Research is private: it is not listed or managed by `/workflows` or `/workflow-run` and cannot be launched through the public Workflow tool.
 
 ### `/workflow [prompt]`
 
-Enter Static Workflow Behavior, optionally sending the prompt after the Behavior switch succeeds. Static Workflow Behavior lets the primary Agent scout, author one bounded scripted workflow for the current phase, launch parallel children, verify the result, and choose the next phase without a whole-plan approval boundary.
+Enter Workflow Behavior, optionally sending the prompt after the Behavior switch succeeds. This is the only Behavior in which Grow can discover, create, modify, validate, publish, run, or manage public Workflow Definitions. Outside it, only `/workflow [prompt]` and `/behavior workflow` are offered as public Workflow entry points.
 
-Model-launched workflows may set `agent_budget` and `max_concurrency` independently. `agent_budget` is an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128 and explicit values run 1–1,024. `max_concurrency` bounds simultaneous children, defaults to 3, and accepts 1–16. Queued children remain cancellable. Named slash launches use both defaults.
+The session Workspace can keep several temporary drafts and Runs, but it has one explicit Definition focus. “Current workflow” means that focus. A saved Definition is first derived into a same-name session draft before Grow edits it; Grow never edits the Project/User file directly. Editing affects only the next Run. Session drafts persist their inline/file/Definition source and content hashes across session resume, then disappear with the session. External-editor changes to saved files remain allowed and are rediscovered on the next scan.
 
 ### `/workflow-run`
 
-Launch a saved workflow, or manage a running one by the session-unique display name shown in `/workflows`. Launch the same workflow twice and the display names are numbered (`review-changes`, `review-changes-2`); you never need the internal run IDs.
+A bare `/workflow-run` opens the Workflow selector; it never starts the latest Run implicitly. Explicit subcommands manage a Run by its session-unique handle. Launching the same Definition twice produces `review-changes`, `review-changes-2`, and so on.
 
 ```
-/workflow-run review-changes {"target":"origin/main...HEAD"}
 /workflow-run pause review-changes
 /workflow-run resume review-changes
 /workflow-run stop review-changes-2
-/workflow-run save review-changes
 ```
 
-Project workflows live in `.grow/workflows/*.rhai`; user workflows live in `~/.grow/workflows/*.rhai`. A same-process pause/resume continues the original immutable script, args, and `agent_budget` cap from committed host-call results — to iterate, edit the returned script copy and launch it as a new run.
+Every Run snapshots its Definition id, scope, content hash, script, args, and limits. A same-process pause/resume continues that immutable snapshot. Modifying or publishing a Definition never changes a running or resumable Run.
 
 A budget-limited run is different: it only resumes through a model/tool resume request that supplies an `agent_budget` above the admitted agent count. A bare `/workflow-run resume <name>` can't raise the cap, so it rejects budget-limited runs. Runs interrupted by a process restart aren't resumed at all, because external effects have no stable cross-process identity. And resume is not exactly-once: an external effect whose result wasn't committed before a same-process pause can run again.
 
 ### `/workflows`
 
-Open the live workflows **run** dashboard — active and retained runs, not a catalog of saved definitions. Each row shows the run's display name, phase, agent roster, progress, and result. Inside a run's detail view, `p` pauses, `r` resumes an ordinary pause, and `x` stops. Budget-limited runs can't bare-resume: `r` returns the shell's rejection (raise the cap with a model/tool resume that passes a higher `agent_budget`), while `x` still stops. `s` saves the run's script, but it's hidden for known built-ins and numbered duplicate handles — for those, choose a new unique `meta.name` and save the edited script explicitly.
+Open the Workflow Workspace. Definitions show focus, scope, temporary/saved, dirty, validated, and conflicted state; Runs show their Definition provenance and hash, handle, status, phase, and Agent progress. Definition actions are Focus, Inspect/Edit, Validate, Run, Publish, and Discard. Run actions are Pause, Resume, Stop, and details. Publishing always asks for Project (`.grow/workflows/<name>.rhai`) or User (`~/.grow/workflows/<name>.rhai`) scope and refuses an external-edit conflict.
 
 ---
 

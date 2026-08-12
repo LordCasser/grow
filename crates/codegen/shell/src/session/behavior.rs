@@ -294,13 +294,21 @@ impl BehaviorCoordinator {
                 .pending_switch()
                 .map(|(_, _, remaining)| remaining)
                 .unwrap_or(confirmation_window.as_millis() as u64);
+            let message = if source == BehaviorId::Workflow {
+                format!(
+                    "An active public Workflow Run will continue in the background, but it can only be managed in Workflow behavior. Select {} again to leave and confirm.",
+                    target.display_label()
+                )
+            } else {
+                format!(
+                    "Switching to {} will interrupt active {} work. Select it again to confirm.",
+                    target.display_label(),
+                    source.display_label()
+                )
+            };
             return BehaviorDecision {
                 outcome: BehaviorChangeOutcome::ConfirmationRequired {
-                    message: format!(
-                        "Switching to {} will interrupt active {} work. Select it again to confirm.",
-                        target.display_label(),
-                        source.display_label()
-                    ),
+                    message,
                     remaining_ms,
                 },
                 effects: Vec::new(),
@@ -342,7 +350,10 @@ impl BehaviorCoordinator {
             Some("Goal behavior is exclusive until the Goal completes or is cleared.".to_string())
         } else if let Some(reason) = facts.unavailable_reason.clone() {
             Some(reason)
-        } else if target.owns_special_runtime() && facts.public_workflow_active {
+        } else if source != BehaviorId::Workflow
+            && target.owns_special_runtime()
+            && facts.public_workflow_active
+        {
             Some(format!(
                 "{} behavior is unavailable while a public Workflow run is active; wait for it or stop it explicitly.",
                 target.display_label()
@@ -359,15 +370,22 @@ impl BehaviorCoordinator {
             };
         }
         if facts.source_owned_work_active {
+            let reason = if source == BehaviorId::Workflow {
+                format!(
+                    "Leaving Workflow while an active public Run continues requires confirmation; re-enter Workflow to manage it."
+                )
+            } else {
+                format!(
+                    "Switching to {} will interrupt active {} work and requires confirmation.",
+                    target.display_label(),
+                    source.display_label()
+                )
+            };
             return BehaviorAvailabilityEntry {
                 behavior: target,
                 supported: true,
                 disposition: BehaviorAvailabilityDisposition::ConfirmationRequired,
-                reason: Some(format!(
-                    "Switching to {} will interrupt active {} work and requires confirmation.",
-                    target.display_label(),
-                    source.display_label()
-                )),
+                reason: Some(reason),
             };
         }
         BehaviorAvailabilityEntry {
@@ -578,8 +596,8 @@ pub fn clarify_reminder_template() -> &'static str {
     include_str!("../../prompts/behaviors/clarify.md")
 }
 
-pub fn static_workflow_reminder_template() -> &'static str {
-    include_str!("../../prompts/behaviors/static-workflow.md")
+pub fn workflow_reminder_template() -> &'static str {
+    include_str!("../../prompts/behaviors/workflow.md")
 }
 
 pub fn deep_research_reminder_template() -> &'static str {
@@ -910,6 +928,33 @@ mod tests {
     }
 
     #[test]
+    fn leaving_workflow_with_active_public_run_confirms_without_cancelling_run() {
+        let window = std::time::Duration::from_secs(8);
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Workflow);
+        let facts = BehaviorSwitchFacts {
+            public_workflow_active: true,
+            source_owned_work_active: true,
+            ..BehaviorSwitchFacts::default()
+        };
+        let first = controller.decide_switch(BehaviorId::Normal, facts.clone(), window);
+        assert!(matches!(
+            first.outcome,
+            BehaviorChangeOutcome::ConfirmationRequired { ref message, .. }
+                if message.contains("continue in the background")
+        ));
+        let confirmed = controller.decide_switch(BehaviorId::Normal, facts, window);
+        assert!(matches!(confirmed.outcome, BehaviorChangeOutcome::Applied));
+        assert_eq!(
+            confirmed.effects,
+            [
+                BehaviorEffect::CancelSourceForeground(BehaviorId::Workflow),
+                BehaviorEffect::Select(BehaviorId::Normal),
+            ]
+        );
+    }
+
+    #[test]
     fn behavior_prompts_preserve_primary_orchestration_ownership() {
         assert!(clarify_reminder_template().contains("primary Agent must integrate"));
         assert!(plan_behavior_template().contains("must not replace the primary Agent's"));
@@ -918,11 +963,11 @@ mod tests {
     }
 
     #[test]
-    fn static_workflow_keeps_its_name_and_requires_bounded_jobs() {
-        let prompt = static_workflow_reminder_template();
-        assert!(prompt.contains("Static Workflow"));
+    fn workflow_requires_bounded_jobs_and_definition_discovery() {
+        let prompt = workflow_reminder_template();
+        assert!(prompt.contains("Workflow behavior"));
         assert!(!prompt.contains("Dynamic Workflow"));
-        assert!(prompt.contains("Do not wrap the user's whole"));
-        assert!(prompt.contains("inspect and integrate the phase results yourself"));
+        assert!(prompt.contains("Do not wrap the whole request"));
+        assert!(prompt.contains("Personally inspect central evidence"));
     }
 }

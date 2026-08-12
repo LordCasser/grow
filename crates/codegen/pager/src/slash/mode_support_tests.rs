@@ -165,9 +165,16 @@ fn mode_specific_builtin_refusals_are_pinned() {
                     .to_string()
             ),
             (
+                "workflow-run",
+                "/workflow-run isn't available in minimal mode \
+                 (the Workflow selector needs fullscreen). \
+                 Run /fullscreen to switch this session."
+                    .to_string()
+            ),
+            (
                 "workflows",
                 "/workflows isn't available in minimal mode \
-                 (the workflow run pane needs fullscreen). \
+                 (the Workflow workspace needs fullscreen). \
                  Run /fullscreen to switch this session."
                     .to_string()
             ),

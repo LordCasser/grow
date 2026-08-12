@@ -301,7 +301,7 @@ pub(crate) async fn create_test_actor_ex(
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         active_skill: parking_lot::Mutex::new(None),
-        turn_behavior: parking_lot::Mutex::new(tool_types::BehaviorId::Normal),
+        turn_behavior: Arc::new(parking_lot::Mutex::new(tool_types::BehaviorId::Normal)),
         behavior: Arc::new(parking_lot::Mutex::new(
             crate::session::behavior::BehaviorCoordinator::new(std::path::PathBuf::from(
                 "/tmp/test-session",
@@ -319,7 +319,7 @@ pub(crate) async fn create_test_actor_ex(
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
         workflow_manager: crate::session::workflow::manager::WorkflowManager::test_bundle().0,
-        workflow_launch_tx: tokio::sync::mpsc::unbounded_channel().0,
+        workflow_tx: tokio::sync::mpsc::unbounded_channel().0,
         managed_mcp_handle: Default::default(),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),

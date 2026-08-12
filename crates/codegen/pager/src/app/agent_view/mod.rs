@@ -2590,6 +2590,9 @@ pub(crate) mod test_fixtures {
     fn wf_snapshot(run_id: &str, status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
         crate::views::workflows::WorkflowRunSnapshot {
             run_id: run_id.to_string(),
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
             name: "deep-research".to_string(),
             objective: "obj".to_string(),
             status: status.to_string(),

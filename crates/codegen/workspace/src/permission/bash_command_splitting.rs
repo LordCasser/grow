@@ -572,7 +572,7 @@ pub(crate) const MAX_INLINE_SHELL_DEPTH: usize = 8;
 
 pub(crate) struct CheckedWrapperPeel<'a> {
     pub(crate) words: &'a [String],
-    pub(crate) has_chdir: bool,
+    pub(crate) chdir_targets: Vec<&'a str>,
     /// `env -S`/`--split-string` rewrite was seen; callers must Ask (floor).
     pub(crate) has_split_string: bool,
     /// Unmodeled env option arity; callers must Ask and must not peel.
@@ -583,13 +583,13 @@ pub(crate) struct CheckedWrapperPeel<'a> {
 /// Peel canonical wrappers while retaining cwd, split-string, and exhaustion facts.
 pub(crate) fn unwrap_wrappers_checked(words: &[String]) -> CheckedWrapperPeel<'_> {
     let mut current = words;
-    let mut has_chdir = false;
+    let mut chdir_targets = Vec::new();
     let mut has_split_string = false;
     let mut env_options_uncertain = false;
     for _ in 0..MAX_WRAPPER_DEPTH {
         if current.first().and_then(|w| w.rsplit(['/', '\\']).next()) == Some("env") {
             let scan = env_scan(current);
-            has_chdir |= scan.chdir.is_some();
+            chdir_targets.extend(scan.chdir);
             has_split_string |= scan.has_split_string;
             env_options_uncertain |= scan.options_uncertain;
         }
@@ -598,7 +598,7 @@ pub(crate) fn unwrap_wrappers_checked(words: &[String]) -> CheckedWrapperPeel<'_
             None => {
                 return CheckedWrapperPeel {
                     words: current,
-                    has_chdir,
+                    chdir_targets,
                     has_split_string,
                     env_options_uncertain,
                     exhausted: false,
@@ -608,7 +608,7 @@ pub(crate) fn unwrap_wrappers_checked(words: &[String]) -> CheckedWrapperPeel<'_
     }
     CheckedWrapperPeel {
         words: current,
-        has_chdir,
+        chdir_targets,
         has_split_string,
         env_options_uncertain,
         exhausted: is_wrapper_command(current) && strip_wrapper_command(current).is_some(),
@@ -656,7 +656,7 @@ pub(crate) fn peel_transparent_prefixes(words: &[String]) -> TransparentPrefixPe
 /// Normalized argv after bounded alternation of wrapper and transparent peels.
 pub(crate) struct NormalizedCommandPeel<'a> {
     pub(crate) words: &'a [String],
-    pub(crate) has_chdir: bool,
+    pub(crate) chdir_targets: Vec<&'a str>,
     pub(crate) has_split_string: bool,
     pub(crate) env_options_uncertain: bool,
     pub(crate) exhausted: bool,
@@ -669,7 +669,7 @@ pub(crate) struct NormalizedCommandPeel<'a> {
 /// all fail closed (callers Ask).
 pub(crate) fn normalize_command_words(words: &[String]) -> NormalizedCommandPeel<'_> {
     let mut current = words;
-    let mut has_chdir = false;
+    let mut chdir_targets = Vec::new();
     let mut has_split_string = false;
     let mut env_options_uncertain = false;
     let mut exhausted = false;
@@ -680,7 +680,7 @@ pub(crate) fn normalize_command_words(words: &[String]) -> NormalizedCommandPeel
         let start_ptr = current.as_ptr();
 
         let wrapped = unwrap_wrappers_checked(current);
-        has_chdir |= wrapped.has_chdir;
+        chdir_targets.extend(wrapped.chdir_targets);
         has_split_string |= wrapped.has_split_string;
         env_options_uncertain |= wrapped.env_options_uncertain;
         exhausted |= wrapped.exhausted;
@@ -718,7 +718,7 @@ pub(crate) fn normalize_command_words(words: &[String]) -> NormalizedCommandPeel
 
     NormalizedCommandPeel {
         words: current,
-        has_chdir,
+        chdir_targets,
         has_split_string,
         env_options_uncertain,
         exhausted,

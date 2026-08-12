@@ -28,9 +28,31 @@ pub struct WorkflowAgentLiveStatus {
 
 pub type WorkflowAgentLiveMap = std::collections::HashMap<String, WorkflowAgentLiveStatus>;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct WorkflowDefinitionSnapshot {
+    pub definition_id: String,
+    pub name: String,
+    pub scope: String,
+    pub status: String,
+    pub content_hash: String,
+    pub focused: bool,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct WorkflowDiagnosticSnapshot {
+    pub scope: String,
+    pub path: Option<String>,
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkflowRunSnapshot {
     pub run_id: String,
+    pub definition_id: Option<String>,
+    pub definition_scope: Option<String>,
+    pub definition_hash: Option<String>,
     pub name: String,
     pub objective: String,
     pub status: String,
@@ -86,10 +108,6 @@ impl WorkflowRunSnapshot {
         self.management_available && !self.is_terminal()
     }
 
-    pub fn can_save(&self) -> bool {
-        self.management_available && !self.builtin
-    }
-
     pub fn active_agent_count(&self) -> usize {
         self.agents.iter().filter(|a| a.state == "running").count()
     }
@@ -140,6 +158,11 @@ impl WorkflowRunSnapshot {
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowsViewState {
+    pub definitions: Vec<WorkflowDefinitionSnapshot>,
+    pub diagnostics: Vec<WorkflowDiagnosticSnapshot>,
+    pub selected_definition: usize,
+    pub definition_viewport: usize,
+    pub list_section: WorkflowListSection,
     pub selected_run: usize,
     pub selected_run_id: Option<String>,
     pub run_viewport: usize,
@@ -151,6 +174,7 @@ pub struct WorkflowsViewState {
     pub pin_active_phase: Option<String>,
     pub window: crate::views::modal_window::ModalWindowState,
     pub run_hits: Vec<(Rect, String)>,
+    pub definition_hits: Vec<(Rect, String)>,
     pub phase_hits: Vec<(Rect, String)>,
     pub agent_hits: Vec<(Rect, String)>,
     pub list_area: Option<Rect>,
@@ -161,13 +185,25 @@ pub struct WorkflowsViewState {
     pub roster_anchor: Option<(String, String)>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WorkflowListSection {
+    #[default]
+    Definitions,
+    Runs,
+}
+
 pub mod shortcut_ids {
     pub const OPEN: usize = 1;
     pub const RUNS: usize = 2;
     pub const PAUSE: usize = 3;
     pub const RESUME: usize = 4;
     pub const STOP: usize = 5;
-    pub const SAVE: usize = 6;
+    pub const FOCUS: usize = 6;
+    pub const EDIT: usize = 7;
+    pub const VALIDATE: usize = 8;
+    pub const RUN_DEFINITION: usize = 9;
+    pub const PUBLISH: usize = 10;
+    pub const DISCARD: usize = 11;
 }
 
 pub fn footer_shortcuts(
@@ -211,24 +247,19 @@ pub fn footer_shortcuts(
                 id: shortcut_ids::STOP,
             });
         }
-        if run.is_some_and(WorkflowRunSnapshot::can_save) {
+    } else {
+        if run.is_some() {
             s.push(Shortcut {
-                label: "s save",
+                label: "↑↓ select run",
+                clickable: false,
+                id: 0,
+            });
+            s.push(Shortcut {
+                label: "enter open",
                 clickable: true,
-                id: shortcut_ids::SAVE,
+                id: shortcut_ids::OPEN,
             });
         }
-    } else {
-        s.push(Shortcut {
-            label: "↑↓ select",
-            clickable: false,
-            id: 0,
-        });
-        s.push(Shortcut {
-            label: "enter open",
-            clickable: true,
-            id: shortcut_ids::OPEN,
-        });
         if run.is_some_and(WorkflowRunSnapshot::can_stop) {
             s.push(Shortcut {
                 label: "x stop",
@@ -261,14 +292,32 @@ pub fn modal_config(
 
 impl WorkflowsViewState {
     pub fn reset(&mut self) {
-        *self = Self::default();
+        let definitions = std::mem::take(&mut self.definitions);
+        let diagnostics = std::mem::take(&mut self.diagnostics);
+        *self = Self {
+            definitions,
+            diagnostics,
+            ..Self::default()
+        };
     }
 
     pub fn normalize(&mut self, runs: &[&WorkflowRunSnapshot]) {
+        if self.definitions.is_empty() {
+            self.selected_definition = 0;
+            self.definition_viewport = 0;
+            self.list_section = WorkflowListSection::Runs;
+        } else {
+            self.selected_definition = self
+                .selected_definition
+                .min(self.definitions.len().saturating_sub(1));
+        }
         if runs.is_empty() {
             self.selected_run = 0;
             self.selected_run_id = None;
             self.run_viewport = 0;
+            if !self.definitions.is_empty() {
+                self.list_section = WorkflowListSection::Definitions;
+            }
         } else if let Some(id) = self.selected_run_id.as_deref() {
             if let Some(idx) = runs.iter().position(|run| run.run_id == id) {
                 self.selected_run = idx;
@@ -286,7 +335,7 @@ impl WorkflowsViewState {
         {
             self.detail_run_id = None;
         }
-        if runs.len() == 1 && self.detail_run_id.is_none() {
+        if runs.len() == 1 && self.definitions.is_empty() && self.detail_run_id.is_none() {
             self.detail_run_id = Some(runs[0].run_id.clone());
         }
 
@@ -342,6 +391,53 @@ impl WorkflowsViewState {
         }
         self.selected_run = idx.min(runs.len() - 1);
         self.selected_run_id = Some(runs[self.selected_run].run_id.clone());
+        self.list_section = WorkflowListSection::Runs;
+    }
+
+    pub fn select_definition(&mut self, idx: usize) {
+        if self.definitions.is_empty() {
+            return;
+        }
+        self.selected_definition = idx.min(self.definitions.len() - 1);
+        self.list_section = WorkflowListSection::Definitions;
+    }
+
+    pub fn selected_definition(&self) -> Option<&WorkflowDefinitionSnapshot> {
+        (self.list_section == WorkflowListSection::Definitions)
+            .then(|| self.definitions.get(self.selected_definition))
+            .flatten()
+    }
+
+    pub fn select_previous_list_item(&mut self, runs: &[&WorkflowRunSnapshot]) {
+        match self.list_section {
+            WorkflowListSection::Definitions if self.selected_definition > 0 => {
+                self.selected_definition -= 1;
+            }
+            WorkflowListSection::Definitions => {}
+            WorkflowListSection::Runs if self.selected_run > 0 => {
+                self.select_run(self.selected_run.saturating_sub(1), runs)
+            }
+            WorkflowListSection::Runs if !self.definitions.is_empty() => {
+                self.select_definition(self.definitions.len() - 1);
+            }
+            WorkflowListSection::Runs => {}
+        }
+    }
+
+    pub fn select_next_list_item(&mut self, runs: &[&WorkflowRunSnapshot]) {
+        match self.list_section {
+            WorkflowListSection::Definitions
+                if self.selected_definition + 1 < self.definitions.len() =>
+            {
+                self.selected_definition += 1;
+            }
+            WorkflowListSection::Definitions if !runs.is_empty() => self.select_run(0, runs),
+            WorkflowListSection::Definitions => {}
+            WorkflowListSection::Runs if self.selected_run + 1 < runs.len() => {
+                self.select_run(self.selected_run + 1, runs);
+            }
+            WorkflowListSection::Runs => {}
+        }
     }
 
     pub fn select_phase(&mut self, idx: usize, run: &WorkflowRunSnapshot) {
@@ -363,6 +459,15 @@ impl WorkflowsViewState {
         );
     }
 
+    pub fn ensure_definition_visible(&mut self, visible_rows: usize) {
+        self.definition_viewport = ensure_selection_visible(
+            self.definition_viewport,
+            self.selected_definition,
+            visible_rows,
+            self.definitions.len(),
+        );
+    }
+
     pub fn ensure_phase_visible(&mut self, visible_rows: usize, total_rows: usize) {
         self.phase_viewport = ensure_selection_visible(
             self.phase_viewport,
@@ -381,12 +486,11 @@ impl WorkflowsViewState {
         match self.detail_run(runs) {
             None => {
                 if over(self.list_area) {
-                    let idx = if lines > 0 {
-                        self.selected_run.saturating_add(1)
+                    if lines > 0 {
+                        self.select_next_list_item(runs);
                     } else {
-                        self.selected_run.saturating_sub(1)
-                    };
-                    self.select_run(idx, runs);
+                        self.select_previous_list_item(runs);
+                    }
                 }
             }
             Some(run) if over(self.rail_area) => {
@@ -542,6 +646,7 @@ pub fn render_workflows(
 
     let theme = Theme::current();
     state.run_hits.clear();
+    state.definition_hits.clear();
     state.phase_hits.clear();
     state.agent_hits.clear();
     state.list_area = None;
@@ -550,10 +655,55 @@ pub fn render_workflows(
     let detail_run = state.detail_run(runs);
     let in_detail = detail_run.is_some();
     let has_run_list = runs.len() > 1;
-    let selected_run = detail_run.or_else(|| runs.get(state.selected_run).copied());
-    let (shortcuts, sizing) = modal_config(in_detail, has_run_list, selected_run);
+    let selected_run = detail_run.or_else(|| {
+        (state.list_section == WorkflowListSection::Runs)
+            .then(|| runs.get(state.selected_run).copied())
+            .flatten()
+    });
+    let (mut shortcuts, sizing) = modal_config(in_detail, has_run_list, selected_run);
+    if !in_detail && let Some(definition) = state.selected_definition() {
+        let is_draft = definition.scope == "session";
+        let insert_at = shortcuts.len().saturating_sub(1);
+        let mut definition_shortcuts = vec![
+            crate::views::modal_window::Shortcut {
+                label: "f focus",
+                clickable: true,
+                id: shortcut_ids::FOCUS,
+            },
+            crate::views::modal_window::Shortcut {
+                label: "e inspect/edit",
+                clickable: true,
+                id: shortcut_ids::EDIT,
+            },
+            crate::views::modal_window::Shortcut {
+                label: "v validate",
+                clickable: true,
+                id: shortcut_ids::VALIDATE,
+            },
+            crate::views::modal_window::Shortcut {
+                label: "r run",
+                clickable: true,
+                id: shortcut_ids::RUN_DEFINITION,
+            },
+        ];
+        if is_draft {
+            definition_shortcuts.extend([
+                crate::views::modal_window::Shortcut {
+                    label: "p publish",
+                    clickable: true,
+                    id: shortcut_ids::PUBLISH,
+                },
+                crate::views::modal_window::Shortcut {
+                    label: "d discard",
+                    clickable: true,
+                    id: shortcut_ids::DISCARD,
+                },
+            ]);
+        }
+        shortcuts.splice(insert_at..insert_at, definition_shortcuts);
+    }
     let config = ModalWindowConfig {
-        title: "Workflows",
+        title: "Workflow Workspace",
         tabs: None,
         shortcuts: &shortcuts,
         sizing,
@@ -578,12 +728,12 @@ fn render_list(
     theme: &Theme,
 ) {
     let mut y = inner.y;
-    if runs.is_empty() {
+    if state.definitions.is_empty() && runs.is_empty() && state.diagnostics.is_empty() {
         span_at(
             buf,
             inner.x + 1,
             y + 1,
-            "No workflow runs in this session yet.",
+            "No public Workflow Definitions or Runs are available.",
             Style::default().fg(theme.gray_bright),
             inner.right(),
         );
@@ -591,7 +741,7 @@ fn render_list(
             buf,
             inner.x + 1,
             y + 3,
-            "Start one with /deep-research <query> or ask for a workflow.",
+            "Ask Grow to create a Workflow Definition in Workflow behavior.",
             Style::default().fg(theme.gray),
             inner.right(),
         );
@@ -605,7 +755,180 @@ fn render_list(
         inner.height,
     ));
     let bottom = inner.bottom();
-    let visible_rows = usize::from(inner.height);
+    if !state.diagnostics.is_empty() {
+        span_at(
+            buf,
+            inner.x + 1,
+            y,
+            &format!("Diagnostics ({})", state.diagnostics.len()),
+            Style::default()
+                .fg(theme.accent_error)
+                .add_modifier(Modifier::BOLD),
+            inner.right(),
+        );
+        y = y.saturating_add(1);
+        let max_diagnostics = usize::from(bottom.saturating_sub(y)).min(3);
+        for diagnostic in state.diagnostics.iter().take(max_diagnostics) {
+            if y >= bottom {
+                break;
+            }
+            let location = diagnostic
+                .path
+                .as_deref()
+                .map(strip_control)
+                .unwrap_or_else(|| diagnostic.scope.clone());
+            let row = format!(
+                "{} · {} · {}",
+                strip_control(&diagnostic.code),
+                location,
+                strip_control(&diagnostic.message)
+            );
+            span_at(
+                buf,
+                inner.x + 3,
+                y,
+                &truncate_to_width(&row, inner.width.saturating_sub(4) as usize),
+                Style::default().fg(theme.gray_bright),
+                inner.right(),
+            );
+            y = y.saturating_add(1);
+        }
+        let hidden = state.diagnostics.len().saturating_sub(max_diagnostics);
+        if hidden > 0 && y < bottom {
+            span_at(
+                buf,
+                inner.x + 3,
+                y,
+                &format!("{hidden} more diagnostics"),
+                Style::default().fg(theme.gray_dim),
+                inner.right(),
+            );
+            y = y.saturating_add(1);
+        }
+        if y < bottom {
+            y = y.saturating_add(1);
+        }
+    }
+    if !state.definitions.is_empty() {
+        if y >= bottom {
+            return;
+        }
+        span_at(
+            buf,
+            inner.x + 1,
+            y,
+            &format!("Definitions ({})", state.definitions.len()),
+            Style::default()
+                .fg(theme.gray_bright)
+                .add_modifier(Modifier::BOLD),
+            inner.right(),
+        );
+        y = y.saturating_add(1);
+        if y >= bottom {
+            return;
+        }
+        let preferred_definitions = usize::from(inner.height.saturating_sub(4) / 3).max(1);
+        let reserved_run_rows = if runs.is_empty() { 1 } else { 2 };
+        let available_definition_rows = usize::from(bottom.saturating_sub(y))
+            .saturating_sub(reserved_run_rows)
+            .max(1);
+        let max_definitions = preferred_definitions.min(available_definition_rows);
+        state.ensure_definition_visible(max_definitions);
+        for (idx, definition) in state
+            .definitions
+            .iter()
+            .enumerate()
+            .skip(state.definition_viewport)
+            .take(max_definitions)
+        {
+            if y >= bottom {
+                break;
+            }
+            let focus = if definition.focused { "● " } else { "  " };
+            let selected = state.list_section == WorkflowListSection::Definitions
+                && idx == state.selected_definition;
+            let cursor = if selected { "›" } else { " " };
+            let label = format!("{cursor}{focus}{}", strip_control(&definition.name));
+            let hash = definition
+                .content_hash
+                .get(..8)
+                .unwrap_or(&definition.content_hash);
+            let right = format!("{} · {} · {hash}", definition.scope, definition.status);
+            let right_width = unicode_width::UnicodeWidthStr::width(right.as_str()) as u16;
+            let right_x = inner.right().saturating_sub(right_width + 1);
+            span_at(
+                buf,
+                inner.x + 1,
+                y,
+                &truncate_to_width(&label, right_x.saturating_sub(inner.x + 2) as usize),
+                Style::default()
+                    .fg(if definition.focused {
+                        theme.accent_plan
+                    } else {
+                        theme.text_primary
+                    })
+                    .add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                right_x,
+            );
+            span_at(
+                buf,
+                right_x,
+                y,
+                &right,
+                Style::default().fg(theme.gray_dim),
+                inner.right(),
+            );
+            state.definition_hits.push((
+                Rect::new(inner.x + 1, y, inner.width.saturating_sub(2), 1),
+                definition.definition_id.clone(),
+            ));
+            y = y.saturating_add(1);
+        }
+        let hidden_definitions = state.definitions.len().saturating_sub(max_definitions);
+        if hidden_definitions > 0 && y < bottom {
+            span_at(
+                buf,
+                inner.x + 3,
+                y,
+                &format!("{hidden_definitions} more Definitions · use ↑↓ to scroll"),
+                Style::default().fg(theme.gray_dim),
+                inner.right(),
+            );
+            y = y.saturating_add(1);
+        }
+        if y < bottom {
+            y = y.saturating_add(1);
+        }
+    }
+    if runs.is_empty() {
+        if y < bottom {
+            span_at(
+                buf,
+                inner.x + 1,
+                y,
+                "Runs (0) · select a Definition command or ask Grow to run one",
+                Style::default().fg(theme.gray_dim),
+                inner.right(),
+            );
+        }
+        return;
+    }
+    span_at(
+        buf,
+        inner.x + 1,
+        y,
+        &format!("Runs ({})", runs.len()),
+        Style::default()
+            .fg(theme.gray_bright)
+            .add_modifier(Modifier::BOLD),
+        inner.right(),
+    );
+    y = y.saturating_add(1);
+    let visible_rows = usize::from(bottom.saturating_sub(y));
     state.ensure_run_visible(visible_rows, runs.len());
     for (idx, run) in runs.iter().enumerate().skip(state.run_viewport) {
         if y >= bottom {
@@ -623,8 +946,14 @@ fn render_list(
                 if run.phases.len() == 1 { "" } else { "s" }
             )
         };
+        let provenance = run
+            .definition_scope
+            .as_deref()
+            .zip(run.definition_hash.as_deref())
+            .map(|(scope, hash)| format!("{scope}@{} · ", hash.get(..8).unwrap_or(hash)))
+            .unwrap_or_default();
         let meta = format!(
-            "{phase_part} · {}/{} agent{} · {}",
+            "{provenance}{phase_part} · {}/{} agent{} · {}",
             run.done_agents(),
             run.agents.len(),
             if run.agents.len() == 1 { "" } else { "s" },
@@ -639,7 +968,7 @@ fn render_list(
         let row = PickerRow {
             label: &label,
             right_label: &meta,
-            selected: idx == state.selected_run,
+            selected: state.list_section == WorkflowListSection::Runs && idx == state.selected_run,
             expanded: false,
             fields: &[],
             description_lines: &[],
@@ -689,8 +1018,14 @@ fn render_detail(
     } else {
         format!("{glyph} ")
     };
+    let provenance = run
+        .definition_scope
+        .as_deref()
+        .zip(run.definition_hash.as_deref())
+        .map(|(scope, hash)| format!("{scope}@{} · ", hash.get(..8).unwrap_or(hash)))
+        .unwrap_or_default();
     let meta = format!(
-        "{}/{} agent{} · {}",
+        "{provenance}{}/{} agent{} · {}",
         run.done_agents(),
         run.agents.len(),
         if run.agents.len() == 1 { "" } else { "s" },
@@ -1096,6 +1431,9 @@ mod tests {
     pub(crate) fn make_run(run_id: &str, name: &str, status: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
             run_id: run_id.to_string(),
+            definition_id: Some(format!("project:{name}")),
+            definition_scope: Some("project".into()),
+            definition_hash: Some("0123456789abcdef".into()),
             name: name.to_string(),
             objective: "Research the thing thoroughly".to_string(),
             status: status.to_string(),
@@ -1182,22 +1520,89 @@ mod tests {
         assert!(text.contains("researcher-1"), "{text}");
         assert!(text.contains("grow-4.5"), "{text}");
         assert!(text.contains("1/2 agents"), "{text}");
-        assert!(text.contains("s save"), "{text}");
     }
 
     #[test]
-    fn footer_hides_save_for_builtin_runs() {
-        let mut run = make_run("wf_1", "deep-research", "active");
-        let labels = |run: &WorkflowRunSnapshot| {
-            footer_shortcuts(true, false, Some(run))
-                .into_iter()
-                .map(|shortcut| shortcut.label)
-                .collect::<Vec<_>>()
+    fn workspace_list_separates_definitions_and_runs_with_provenance() {
+        let run = make_run("wf_1", "review", "active");
+        let runs = vec![&run];
+        let mut state = WorkflowsViewState {
+            definitions: vec![WorkflowDefinitionSnapshot {
+                definition_id: "session:draft-1".into(),
+                name: "review".into(),
+                scope: "session".into(),
+                status: "temporary,dirty,validated".into(),
+                content_hash: "fedcba9876543210".into(),
+                focused: true,
+                path: Some("/session/workflow-workspace/drafts/draft-1.rhai".into()),
+            }],
+            ..WorkflowsViewState::default()
         };
-        assert!(labels(&run).contains(&"s save"));
+        state.normalize(&runs);
+        assert!(state.detail_run_id.is_none());
+        let text = render_to_text(&runs, &state);
+        assert!(text.contains("Definitions (1)"), "{text}");
+        assert!(
+            text.contains("session · temporary,dirty,validated"),
+            "{text}"
+        );
+        assert!(text.contains("Runs (1)"), "{text}");
+        assert!(text.contains("project@01234567"), "{text}");
+        assert!(text.contains("f focus"), "{text}");
+        assert!(text.contains("p publish"), "{text}");
+    }
 
-        run.builtin = true;
-        assert!(!labels(&run).contains(&"s save"));
+    #[test]
+    fn workspace_list_surfaces_registry_diagnostics() {
+        let state = WorkflowsViewState {
+            diagnostics: vec![WorkflowDiagnosticSnapshot {
+                scope: "project".into(),
+                path: Some("/repo/.grow/workflows/broken.rhai".into()),
+                code: "invalid_script".into(),
+                message: "workflow metadata is invalid".into(),
+            }],
+            ..WorkflowsViewState::default()
+        };
+        let text = render_to_text(&[], &state);
+        assert!(text.contains("Diagnostics (1)"), "{text}");
+        assert!(text.contains("invalid_script"), "{text}");
+        assert!(text.contains("broken.rhai"), "{text}");
+    }
+
+    #[test]
+    fn list_navigation_crosses_definition_and_run_sections() {
+        let run = make_run("wf_1", "review", "active");
+        let runs = vec![&run];
+        let mut state = WorkflowsViewState {
+            definitions: vec![WorkflowDefinitionSnapshot {
+                definition_id: "project:review".into(),
+                name: "review".into(),
+                scope: "project".into(),
+                status: "saved".into(),
+                content_hash: "abc".into(),
+                focused: false,
+                path: None,
+            }],
+            ..WorkflowsViewState::default()
+        };
+        state.normalize(&runs);
+        assert_eq!(state.list_section, WorkflowListSection::Definitions);
+        state.select_next_list_item(&runs);
+        assert_eq!(state.list_section, WorkflowListSection::Runs);
+        state.select_previous_list_item(&runs);
+        assert_eq!(state.list_section, WorkflowListSection::Definitions);
+    }
+
+    #[test]
+    fn run_footer_has_controls_but_no_definition_publish_action() {
+        let run = make_run("wf_1", "deep-research", "active");
+        let labels = footer_shortcuts(true, false, Some(&run))
+            .into_iter()
+            .map(|shortcut| shortcut.label)
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"p pause"));
+        assert!(labels.contains(&"x stop"));
+        assert!(!labels.iter().any(|label| label.contains("publish")));
     }
 
     #[test]
@@ -1784,8 +2189,14 @@ mod tests {
         let runs: Vec<&WorkflowRunSnapshot> = Vec::new();
         let state = WorkflowsViewState::default();
         let text = render_to_text(&runs, &state);
-        assert!(text.contains("No workflow runs"), "{text}");
-        assert!(text.contains("/deep-research"), "{text}");
+        assert!(
+            text.contains("No public Workflow Definitions or Runs"),
+            "{text}"
+        );
+        assert!(
+            text.contains("create a Workflow Definition in Workflow behavior"),
+            "{text}"
+        );
     }
 
     #[test]

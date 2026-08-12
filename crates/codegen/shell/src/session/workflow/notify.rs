@@ -153,6 +153,12 @@ pub(crate) fn build_workflow_updated(
 
     GrowSessionUpdate::WorkflowUpdated {
         run_id: state.run_id.clone(),
+        private: state.private,
+        definition_id: state.definition_id.as_ref().map(ToString::to_string),
+        definition_scope: state
+            .definition_scope
+            .map(|scope| scope.as_str().to_string()),
+        definition_hash: state.definition_hash.clone(),
         revision: state.revision,
         name: state.name.clone(),
         objective: state.objective.clone(),

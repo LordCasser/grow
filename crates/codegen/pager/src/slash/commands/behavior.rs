@@ -25,7 +25,7 @@ pub(crate) fn available_modes(ctx: &AppCtx<'_>) -> Vec<(BehaviorId, &'static str
     if ctx.workflows_available {
         modes.push((
             BehaviorId::Workflow,
-            "Static Workflow",
+            "Workflow",
             "Author and run one deterministic scripted workflow per phase, without approval",
         ));
     }
@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn behavior_items_labels_workflow_as_static_workflow() {
+    fn behavior_items_labels_workflow_as_workflow() {
         let state = ModelState::default();
         let ctx = ctx_with_all_behaviors(&state);
         let items = behavior_items(&ctx, None, false);
@@ -230,9 +230,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing behavior item with wire id {id}"))
         };
 
-        // Static Workflow: display label changed, wire id unchanged in insert_text.
+        // Workflow display and wire id intentionally use the same product name.
         let workflow = by_wire_id("workflow");
-        assert_eq!(workflow.display, "Static Workflow");
+        assert_eq!(workflow.display, "Workflow");
         assert!(workflow.insert_text.ends_with("workflow"));
 
         // Other behavior labels are untouched.

@@ -154,7 +154,7 @@ nix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 siphasher = { workspace = true }
-windows = { workspace = true }
+windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 criterion = { workspace = true }

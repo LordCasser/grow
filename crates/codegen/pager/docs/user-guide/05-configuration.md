@@ -359,16 +359,16 @@ To pin the model a subagent uses, set its entry under `[subagents.models]`. `per
 
 Goal is exposed only when goal orchestration and the independent verifier are configured. An agent's `update_goal { action: candidate_complete, message }` call requests verification; only an `Achieved` verdict from that verifier completes the goal. Missing, failed, timed-out, or exhausted verification pauses the Goal Behavior instead of accepting self-reported completion.
 
-The workflow engine powers the `workflow` tool, named `.grow/workflows/*.rhai` scripts, `/workflow-run` launches, and the private Deep Research runner. It is **on by default**. Disable it with config, environment, or remote settings; Static Workflow and Deep Research then disappear from the Behavior picker.
+The workflow engine powers the Workflow Workspace, named `.grow/workflows/*.rhai` and `~/.grow/workflows/*.rhai` Definitions, immutable Runs, and the private Deep Research runner. It is **on by default**. Disable it with config, environment, or remote settings; Workflow and Deep Research then disappear from the Behavior picker.
 
 ```toml
 [workflows]
 enabled = false                       # disable background workflows (or GROW_WORKFLOWS=0)
 ```
 
-Project workflows are discovered from `<repo-root>/.grow/workflows/`; user workflows from `~/.grow/workflows/`. Discovery and invocation key off the script's `meta.name`, so keep each filename aligned with its `meta.name` and names unique across scopes. Deep Research uses a private definition and is never added to this public registry.
+Project Definitions are discovered from `<repo-root>/.grow/workflows/`; user Definitions from `~/.grow/workflows/`. Registry snapshots include diagnostics for invalid scripts, filename/meta mismatches, same-scope duplicates, untrusted paths, and publish conflicts. Deep Research uses a private Definition and is never added to this public registry or Workspace.
 
-Each launch gets a session-unique display handle. That handle is what you see in the `/workflows` run dashboard and pass to `/workflow-run pause`, `resume`, or `stop` — the internal run IDs never surface in commands. A numbered handle isn't a reusable definition name, so the dashboard disables **save** until you pick a new unique `meta.name` and save the edited script yourself. See [Slash Commands](04-slash-commands.md) for examples.
+Each launch gets a session-unique display handle. That handle is what you see in `/workflows` and pass to `/workflow-run pause`, `resume`, or `stop`; Definition publishing is a separate validated Workspace action with an explicit Project or User scope. See [Slash Commands](04-slash-commands.md) for examples.
 
 ### Skills
 

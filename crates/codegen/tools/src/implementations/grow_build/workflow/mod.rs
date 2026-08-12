@@ -5,55 +5,149 @@ use super::task::types::SubagentDepthCounter;
 
 pub use crate::slash_commands::WORKFLOW_TOOL_NAME;
 
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(transparent)]
+pub struct WorkflowDefinitionId(pub String);
+
+impl WorkflowDefinitionId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+impl std::fmt::Display for WorkflowDefinitionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowScope {
+    Session,
+    Project,
+    User,
+    Builtin,
+}
+
+impl WorkflowScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Project => "project",
+            Self::User => "user",
+            Self::Builtin => "builtin",
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowRunControl {
+    Pause,
+    Resume,
+    Stop,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct WorkflowToolInput {
-    #[serde(default)]
-    #[schemars(
-        range(min = 1, max = 16),
-        description = "Maximum number of child Agents that may execute simultaneously in this run. Defaults to 3 and may be set from 1 through 16. This limits concurrency; agent_budget separately limits cumulative logical calls."
-    )]
-    pub max_concurrency: Option<u16>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowDraftSource {
+    Inline {
+        #[schemars(description = "Inline Rhai source used to create the session draft.")]
+        script: String,
+    },
+    File {
+        #[schemars(description = "Trusted Rhai file used to create the session draft.")]
+        path: String,
+    },
+    Definition {
+        #[schemars(description = "Existing saved Definition to derive into a session draft.")]
+        definition_id: WorkflowDefinitionId,
+    },
+}
 
-    #[serde(default)]
-    #[schemars(
-        range(min = 1, max = 1024),
-        description = "Absolute cumulative cap on logical child-agent calls for this run. Every agent() and every parallel() item consumes one slot; schema retries do not. Defaults to 128 and may be set from 1 through 1,024. A panel that would exceed the remaining budget is rejected before any of its children launch."
-    )]
-    pub agent_budget: Option<u64>,
-
-    #[serde(default)]
-    #[schemars(
-        description = "Name of a registered workflow (built-in, or discovered from the project `.grow/workflows/` or user `~/.grow/workflows/`). Exactly one of `name`, `script`, or `script_path` must be set."
-    )]
-    pub name: Option<String>,
-
-    #[serde(default)]
-    #[schemars(
-        description = "Inline Rhai workflow script. Start with `let meta = #{ name: ..., description: ... };`, declare phases with phase(), use agent(prompt, opts) or parallel([opts...]), and terminate with complete(value) or pause(kind, message). Run validate_only with representative args before launch."
-    )]
-    pub script: Option<String>,
-
-    #[serde(default)]
-    #[schemars(description = "Path to a .rhai workflow script on disk.")]
-    pub script_path: Option<String>,
-
-    #[serde(default)]
-    #[schemars(
-        description = "JSON value bound to the script's `args` global. Use an object for named arguments."
-    )]
-    pub args: Option<serde_json::Value>,
-
-    #[serde(default)]
-    #[schemars(
-        description = "Resume a same-process paused run, continuing its original immutable script and args; do not also pass name, script, script_path, or args. A budget-limited run resumes only when agent_budget is passed with a higher cap. Process-restart interruptions are terminal."
-    )]
-    pub resume_from_run_id: Option<String>,
-
-    #[serde(default)]
-    #[schemars(
-        description = "Run a path-specific smoke check without launching: validate metadata, compile the full script, and execute the single path selected by the supplied args and canned host results. It does not exercise every branch or prove live tools and agent outputs work."
-    )]
-    pub validate_only: bool,
+/// Public Workflow API. Definitions, drafts, and runs are intentionally
+/// separate actions so a run can never be confused with an editable source.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum WorkflowToolInput {
+    Search {
+        #[schemars(
+            description = "Task description matched against workflow name, description, and when_to_use metadata."
+        )]
+        query: String,
+        #[serde(default)]
+        #[schemars(range(min = 1, max = 50))]
+        limit: Option<usize>,
+    },
+    Inspect {
+        definition_id: WorkflowDefinitionId,
+        #[serde(default)]
+        include_source: bool,
+    },
+    Draft {
+        #[serde(default)]
+        #[schemars(
+            description = "Optional expected name. Required only when the source cannot provide metadata itself."
+        )]
+        name: Option<String>,
+        source: WorkflowDraftSource,
+    },
+    Validate {
+        definition_id: WorkflowDefinitionId,
+        #[serde(default)]
+        args: Option<serde_json::Value>,
+        #[serde(default)]
+        #[schemars(range(min = 1, max = 1024))]
+        agent_budget: Option<u64>,
+    },
+    Run {
+        definition_id: WorkflowDefinitionId,
+        #[serde(default)]
+        args: Option<serde_json::Value>,
+        #[serde(default)]
+        #[schemars(range(min = 1, max = 16))]
+        max_concurrency: Option<u16>,
+        #[serde(default)]
+        #[schemars(range(min = 1, max = 1024))]
+        agent_budget: Option<u64>,
+    },
+    Publish {
+        #[schemars(description = "A session draft Definition id.")]
+        definition_id: WorkflowDefinitionId,
+        #[schemars(
+            description = "Required destination. Only project and user are publishable scopes."
+        )]
+        scope: WorkflowScope,
+    },
+    Discard {
+        #[schemars(description = "A session draft Definition id.")]
+        definition_id: WorkflowDefinitionId,
+    },
+    ControlRun {
+        #[schemars(description = "Session-unique run handle or internal run id.")]
+        run_id: String,
+        operation: WorkflowRunControl,
+        #[serde(default)]
+        #[schemars(
+            description = "Required only when resuming a budget-limited run with a higher cap."
+        )]
+        agent_budget: Option<u64>,
+    },
 }
 
 impl WorkflowToolInput {
@@ -61,114 +155,240 @@ impl WorkflowToolInput {
     pub const DEFAULT_MAX_CONCURRENCY: u16 = 3;
     pub const MAX_CONCURRENCY: u16 = 16;
 
-    pub fn normalize(&mut self) {
-        self.name = blank_to_none(self.name.take());
-        self.script = blank_to_none(self.script.take());
-        self.script_path = blank_to_none(self.script_path.take());
-        self.resume_from_run_id = blank_to_none(self.resume_from_run_id.take());
-    }
-
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(max_concurrency) = self.max_concurrency
-            && !(1..=Self::MAX_CONCURRENCY).contains(&max_concurrency)
+        match self {
+            Self::Search { query, limit } => {
+                if query.trim().is_empty() {
+                    return Err("`query` must not be blank".into());
+                }
+                if limit.is_some_and(|value| !(1..=50).contains(&value)) {
+                    return Err("`limit` must be from 1 through 50".into());
+                }
+            }
+            Self::Inspect { definition_id, .. }
+            | Self::Validate { definition_id, .. }
+            | Self::Run { definition_id, .. }
+            | Self::Publish { definition_id, .. }
+            | Self::Discard { definition_id } => validate_definition_id(definition_id)?,
+            Self::Draft { source, .. } => match source {
+                WorkflowDraftSource::Inline { script } if script.trim().is_empty() => {
+                    return Err("draft inline `script` must not be blank".into());
+                }
+                WorkflowDraftSource::File { path } if path.trim().is_empty() => {
+                    return Err("draft file `path` must not be blank".into());
+                }
+                WorkflowDraftSource::Definition { definition_id } => {
+                    validate_definition_id(definition_id)?;
+                }
+                WorkflowDraftSource::Inline { .. } | WorkflowDraftSource::File { .. } => {}
+            },
+            Self::ControlRun {
+                run_id,
+                agent_budget,
+                ..
+            } => {
+                if run_id.trim().is_empty() {
+                    return Err("`run_id` must not be blank".into());
+                }
+                validate_budget(*agent_budget)?;
+            }
+        }
+        match self {
+            Self::Validate { agent_budget, .. } | Self::Run { agent_budget, .. } => {
+                validate_budget(*agent_budget)?
+            }
+            _ => {}
+        }
+        if let Self::Run {
+            max_concurrency: Some(value),
+            ..
+        } = self
+            && !(1..=Self::MAX_CONCURRENCY).contains(value)
         {
             return Err(format!(
                 "`max_concurrency` must be from 1 through {}",
                 Self::MAX_CONCURRENCY
             ));
         }
-        if let Some(budget) = self.agent_budget {
-            if budget == 0 {
-                return Err("`agent_budget` must be a positive integer".into());
-            }
-            if budget > Self::MAX_AGENT_BUDGET {
-                return Err(format!(
-                    "`agent_budget` must be at most {} agents",
-                    Self::MAX_AGENT_BUDGET
-                ));
-            }
+        if let Self::Publish { scope, .. } = self
+            && !matches!(scope, WorkflowScope::Project | WorkflowScope::User)
+        {
+            return Err("`scope` must be `project` or `user` when publishing".into());
         }
-        let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
-        let sources = [
-            present(&self.name),
-            present(&self.script),
-            present(&self.script_path),
-        ]
-        .iter()
-        .filter(|v| **v)
-        .count();
-        if present(&self.resume_from_run_id) {
-            return match sources {
-                0 => Ok(()),
-                _ => Err(
-                    "`resume_from_run_id` continues a same-process paused run's original immutable script and args; do not combine it with `name`, `script`, or `script_path`"
-                        .into(),
-                ),
-            };
+        if let Self::Discard { definition_id } = self
+            && !definition_id.0.starts_with("session:")
+        {
+            return Err("only a session draft Definition can be discarded".into());
         }
-        match sources {
-            0 => Err("provide one of `name`, `script`, or `script_path`".into()),
-            1 => Ok(()),
-            _ => Err("`name`, `script`, and `script_path` are mutually exclusive".into()),
+        Ok(())
+    }
+
+    pub fn action_label(&self) -> &'static str {
+        match self {
+            Self::Search { .. } => "search",
+            Self::Inspect { .. } => "inspect",
+            Self::Draft { .. } => "draft",
+            Self::Validate { .. } => "validate",
+            Self::Run { .. } => "run",
+            Self::Publish { .. } => "publish",
+            Self::Discard { .. } => "discard",
+            Self::ControlRun { .. } => "control run",
         }
     }
 }
 
-fn blank_to_none(v: Option<String>) -> Option<String> {
-    v.filter(|s| !s.trim().is_empty())
+fn validate_definition_id(id: &WorkflowDefinitionId) -> Result<(), String> {
+    let Some((scope, local_id)) = id.0.split_once(':') else {
+        return Err("`definition_id` must be a stable scoped id such as `project:review`".into());
+    };
+    if !matches!(scope, "session" | "project" | "user" | "builtin")
+        || local_id.is_empty()
+        || local_id.contains(':')
+    {
+        return Err(
+            "`definition_id` must use session, project, user, or builtin scope and a non-empty local id"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_budget(value: Option<u64>) -> Result<(), String> {
+    if value.is_some_and(|budget| budget == 0 || budget > WorkflowToolInput::MAX_AGENT_BUDGET) {
+        Err(format!(
+            "`agent_budget` must be from 1 through {}",
+            WorkflowToolInput::MAX_AGENT_BUDGET
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
-pub struct WorkflowLaunchRequest {
+pub struct WorkflowRequest {
     pub input: WorkflowToolInput,
+    /// Behavior captured when the owning foreground turn was admitted. This is
+    /// stamped by the trusted session resource and is never model input.
+    pub admitted_behavior: tool_types::BehaviorId,
 }
 
 #[derive(Debug)]
-pub enum WorkflowLaunchAck {
-    Started {
-        run_id: String,
-        task_id: String,
-        name: String,
-        script_path: Option<String>,
-    },
-    Validated {
-        name: String,
-        phases: usize,
-        summary: String,
-    },
-    Rejected {
-        code: &'static str,
-        detail: String,
-    },
+pub enum WorkflowAck {
+    Completed(WorkflowToolOutput),
+    Rejected { code: &'static str, detail: String },
 }
 
-pub type WorkflowLaunchEnvelope = (
-    WorkflowLaunchRequest,
-    tokio::sync::oneshot::Sender<WorkflowLaunchAck>,
-);
+pub type WorkflowEnvelope = (WorkflowRequest, tokio::sync::oneshot::Sender<WorkflowAck>);
 
-pub struct WorkflowLaunchHandle(pub tokio::sync::mpsc::UnboundedSender<WorkflowLaunchEnvelope>);
+pub struct WorkflowHandle {
+    pub sender: tokio::sync::mpsc::UnboundedSender<WorkflowEnvelope>,
+    pub admitted_behavior: std::sync::Arc<parking_lot::Mutex<tool_types::BehaviorId>>,
+}
 
-impl std::fmt::Debug for WorkflowLaunchHandle {
+impl std::fmt::Debug for WorkflowHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkflowLaunchHandle").finish()
+        f.debug_struct("WorkflowHandle").finish()
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct WorkflowToolOutput {
-    pub run_id: String,
-    #[schemars(
-        description = "Alias of run_id; workflow runs are not background tasks — do not pass to task_output/wait_tasks. Completion notifies automatically."
-    )]
-    pub task_id: String,
-    #[schemars(
-        description = "The session-unique display handle for this run, such as review-changes or review-changes-2. Use it in user-facing status and /workflow management; keep run_id internal."
-    )]
+pub struct WorkflowDefinitionSummary {
+    pub definition_id: WorkflowDefinitionId,
     pub name: String,
+    pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub script_path: Option<String>,
+    pub when_to_use: Option<String>,
+    pub scope: WorkflowScope,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_definition_id: Option<WorkflowDefinitionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    pub content_hash: String,
+    pub focused: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct WorkflowDiagnostic {
+    pub scope: WorkflowScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub code: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum WorkflowToolOutput {
+    Search {
+        matches: Vec<WorkflowDefinitionSummary>,
+        diagnostics: Vec<WorkflowDiagnostic>,
+        message: String,
+    },
+    Inspect {
+        definition: WorkflowDefinitionSummary,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        message: String,
+    },
+    Draft {
+        definition: WorkflowDefinitionSummary,
+        message: String,
+    },
+    Validated {
+        definition: WorkflowDefinitionSummary,
+        phases: usize,
+        summary: String,
+        message: String,
+    },
+    RunStarted {
+        definition: WorkflowDefinitionSummary,
+        run_id: String,
+        run_handle: String,
+        content_hash: String,
+        message: String,
+    },
+    Published {
+        definition: WorkflowDefinitionSummary,
+        message: String,
+    },
+    Discarded {
+        definition_id: WorkflowDefinitionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        focused_definition: Option<WorkflowDefinitionSummary>,
+        message: String,
+    },
+    RunControlled {
+        run_id: String,
+        run_handle: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition_id: Option<WorkflowDefinitionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition_scope: Option<WorkflowScope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_hash: Option<String>,
+        message: String,
+    },
+}
+
+impl WorkflowToolOutput {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Search { message, .. }
+            | Self::Inspect { message, .. }
+            | Self::Draft { message, .. }
+            | Self::Validated { message, .. }
+            | Self::RunStarted { message, .. }
+            | Self::Published { message, .. }
+            | Self::Discarded { message, .. }
+            | Self::RunControlled { message, .. } => message,
+        }
+    }
 }
 
 impl tool_runtime::ToolOutput for WorkflowToolOutput {}
@@ -186,11 +406,7 @@ impl crate::types::tool_metadata::ToolMetadata for WorkflowTool {
     }
 
     fn description_template(&self) -> &str {
-        r##"Launch a workflow: a Rhai script that orchestrates subagents as one background run. Provide exactly one source: `name` (a registered workflow — built-in, or from the project `.grow/workflows/` or user `~/.grow/workflows/`), an inline `script`, or a `script_path`. Optionally pass `args` (bound to the script's `args`), `max_concurrency` (simultaneous children, default 3, maximum 16), and `agent_budget` (cumulative logical child calls, default 128, maximum 1,024). These limits are independent. The call returns immediately; progress appears in `/workflows` and completion is reported automatically — do not poll or sleep-wait.
-
-Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives. Inline scripts start with `let meta = #{ name: "...", description: "..." };`; use phase(title), agent(prompt, opts), parallel([opts...]), complete(value), or pause(kind, message). `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.
-
-A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow-run pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (process restarts are terminal); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grow/workflows/<name>.rhai`."##
+        r##"Manage public Workflow Definitions and immutable Runs inside Workflow Behavior. Use `search` before assuming the focused Definition is relevant; `inspect` loads candidate details; `draft` creates or derives one session draft and focuses it; `validate` smoke-checks representative args; `run` starts a Definition snapshot and automatically preflights an unvalidated hash; `publish` atomically saves a draft to the required project or user scope; `discard` removes only a session draft; `control_run` pauses, resumes, or stops a specific Run. Definitions use stable scoped ids such as `session:<id>`, `project:<name>`, `user:<name>`, or `builtin:<name>`. A Run keeps its Definition id, scope, source hash, script, and args immutable. Changes affect only later Runs."##
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -224,106 +440,61 @@ impl tool_runtime::Tool for WorkflowTool {
     async fn run(
         &self,
         ctx: tool_runtime::ToolCallContext,
-        mut input: WorkflowToolInput,
+        input: WorkflowToolInput,
     ) -> Result<WorkflowToolOutput, tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
-
-        input.normalize();
-
-        if let Err(detail) = input.validate() {
-            return Err(tool_runtime::ToolError::custom(
-                "workflow_invalid_input",
-                detail,
-            ));
-        }
+        input
+            .validate()
+            .map_err(|detail| tool_runtime::ToolError::custom("workflow_invalid_input", detail))?;
 
         let (depth, sender) = {
-            let res = resources.lock().await;
-            let depth = res.get::<SubagentDepthCounter>().map(|d| d.0).unwrap_or(0);
-            let sender = res.get::<WorkflowLaunchHandle>().map(|h| h.0.clone());
-            (depth, sender)
+            let resources = resources.lock().await;
+            (
+                resources
+                    .get::<SubagentDepthCounter>()
+                    .map(|depth| depth.0)
+                    .unwrap_or(0),
+                resources
+                    .get::<WorkflowHandle>()
+                    .map(|handle| (handle.sender.clone(), *handle.admitted_behavior.lock())),
+            )
         };
-
-        // Workflows stay top-level-only regardless of configurable subagent depth.
         if depth > 0 {
             return Err(tool_runtime::ToolError::custom(
                 "workflow_depth_exceeded",
-                "Workflows can only be launched from a top-level session (subagents and \
-                 workflow-spawned agents cannot start workflows)",
+                "Workflow actions are available only from a top-level session",
             ));
         }
-
-        let sender = sender.ok_or_else(|| {
+        let (sender, admitted_behavior) = sender.ok_or_else(|| {
             tool_runtime::ToolError::custom(
                 "workflow_not_available",
-                "Workflow launching is not available in this session (WorkflowLaunchHandle not \
-                 registered)",
+                "Workflow workspace is not available in this session",
             )
         })?;
-
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<WorkflowLaunchAck>();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         sender
-            .send((WorkflowLaunchRequest { input }, ack_tx))
+            .send((
+                WorkflowRequest {
+                    input,
+                    admitted_behavior,
+                },
+                ack_tx,
+            ))
             .map_err(|_| {
                 tool_runtime::ToolError::custom(
                     "workflow_channel_closed",
-                    "Workflow launch channel closed — the session may be shutting down",
+                    "Workflow workspace channel closed while the session was shutting down",
                 )
             })?;
-
         match ack_rx.await {
-            Ok(WorkflowLaunchAck::Started {
-                run_id,
-                task_id,
-                name,
-                script_path,
-            }) => Ok(WorkflowToolOutput {
-                message: {
-                    let iterate = script_path
-                        .as_deref()
-                        .map(|p| {
-                            format!(
-                                " The editable script projection is at {p}. Edit it and launch \
-                                 that `script_path` as a new run to iterate; same-process pause \
-                                 resume continues only this run's original immutable source."
-                            )
-                        })
-                        .unwrap_or_default();
-                    format!(
-                        "Workflow '{name}' started in the background. Progress appears in \
-                         /workflows and completion is reported automatically. '{name}' is the \
-                         session-unique display handle for user-facing status and /workflow \
-                         management; keep the structured run id internal.{iterate}"
-                    )
-                },
-                run_id,
-                task_id,
-                name,
-                script_path,
-            }),
-            Ok(WorkflowLaunchAck::Validated {
-                name,
-                phases,
-                summary,
-            }) => Ok(WorkflowToolOutput {
-                message: format!(
-                    "Smoke check passed for workflow '{name}' ({phases} declared phases; \
-                     canned-host path {summary}). This did not launch the workflow and did not \
-                     exercise every branch or live dependency. Offer a real run next."
-                ),
-                run_id: String::new(),
-                task_id: String::new(),
-                name,
-                script_path: None,
-            }),
-            Ok(WorkflowLaunchAck::Rejected { code, detail }) => {
+            Ok(WorkflowAck::Completed(output)) => Ok(output),
+            Ok(WorkflowAck::Rejected { code, detail }) => {
                 Err(tool_runtime::ToolError::custom(code, detail))
             }
             Err(_) => Err(tool_runtime::ToolError::custom(
-                "workflow_launch_no_ack",
-                "The session dropped the launch channel before answering; the workflow may not \
-                 have started.",
+                "workflow_no_ack",
+                "The session dropped the Workflow request before answering",
             )),
         }
     }
@@ -334,123 +505,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validation_requires_exactly_one_source_and_bounded_positive_budget() {
-        let base = WorkflowToolInput {
-            max_concurrency: None,
-            agent_budget: None,
-            name: None,
-            script: None,
-            script_path: None,
-            args: None,
-            resume_from_run_id: None,
-            validate_only: false,
-        };
-        assert!(base.validate().is_err());
-
-        let named = WorkflowToolInput {
-            name: Some("deep-research".into()),
-            ..base.clone()
-        };
-        assert!(named.validate().is_ok());
+    fn tagged_actions_validate_their_own_boundaries() {
         assert!(
-            WorkflowToolInput {
-                max_concurrency: Some(1),
-                ..named.clone()
+            WorkflowToolInput::Search {
+                query: "review changes".into(),
+                limit: Some(5),
             }
             .validate()
             .is_ok()
         );
         assert!(
-            WorkflowToolInput {
-                max_concurrency: Some(WorkflowToolInput::MAX_CONCURRENCY),
-                ..named.clone()
-            }
-            .validate()
-            .is_ok()
-        );
-        assert!(
-            WorkflowToolInput {
-                max_concurrency: Some(0),
-                ..named.clone()
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            WorkflowToolInput {
-                max_concurrency: Some(WorkflowToolInput::MAX_CONCURRENCY + 1),
-                ..named.clone()
-            }
-            .validate()
-            .is_err()
-        );
-
-        let both = WorkflowToolInput {
-            name: Some("goal".into()),
-            script: Some("let meta = #{};".into()),
-            ..base.clone()
-        };
-        assert!(both.validate().is_err());
-
-        let resume_only = WorkflowToolInput {
-            resume_from_run_id: Some("wf_123".into()),
-            ..base.clone()
-        };
-        assert!(resume_only.validate().is_ok());
-
-        let edited_resume = WorkflowToolInput {
-            script_path: Some("edited.rhai".into()),
-            resume_from_run_id: Some("wf_123".into()),
-            ..base.clone()
-        };
-        assert!(edited_resume.validate().is_err());
-        assert!(
-            WorkflowToolInput {
-                agent_budget: Some(10),
-                resume_from_run_id: Some("wf_123".into()),
+            WorkflowToolInput::Draft {
                 name: None,
-                ..base.clone()
+                source: WorkflowDraftSource::File { path: " ".into() },
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            WorkflowToolInput::Publish {
+                definition_id: WorkflowDefinitionId::new("session:abc"),
+                scope: WorkflowScope::Session,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            WorkflowToolInput::Run {
+                definition_id: WorkflowDefinitionId::new("project:review"),
+                args: None,
+                max_concurrency: Some(WorkflowToolInput::MAX_CONCURRENCY + 1),
+                agent_budget: None,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            WorkflowToolInput::Discard {
+                definition_id: WorkflowDefinitionId::new("session:draft"),
             }
             .validate()
             .is_ok()
         );
+        assert!(
+            WorkflowToolInput::Discard {
+                definition_id: WorkflowDefinitionId::new("project:saved"),
+            }
+            .validate()
+            .is_err()
+        );
+    }
 
-        assert!(
-            WorkflowToolInput {
-                agent_budget: Some(0),
-                name: Some("deep-research".into()),
-                ..base.clone()
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            WorkflowToolInput {
-                agent_budget: Some(WorkflowToolInput::MAX_AGENT_BUDGET + 1),
-                name: Some("deep-research".into()),
-                ..base.clone()
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            WorkflowToolInput {
-                agent_budget: Some(1),
-                name: Some("deep-research".into()),
-                ..base.clone()
-            }
-            .validate()
-            .is_ok()
-        );
-        assert!(
-            WorkflowToolInput {
-                agent_budget: Some(1),
-                script: Some("let meta = #{};".into()),
-                validate_only: true,
-                ..base
-            }
-            .validate()
-            .is_ok()
-        );
+    #[test]
+    fn serde_uses_action_tag() {
+        let value = serde_json::to_value(WorkflowToolInput::Inspect {
+            definition_id: WorkflowDefinitionId::new("user:review"),
+            include_source: false,
+        })
+        .unwrap();
+        assert_eq!(value["action"], "inspect");
+        assert!(value.get("name").is_none());
+
+        let draft = serde_json::to_value(WorkflowToolInput::Draft {
+            name: None,
+            source: WorkflowDraftSource::Definition {
+                definition_id: WorkflowDefinitionId::new("project:review"),
+            },
+        })
+        .unwrap();
+        assert_eq!(draft["action"], "draft");
+        assert_eq!(draft["source"]["kind"], "definition");
+        assert_eq!(draft["source"]["definition_id"], "project:review");
     }
 }
