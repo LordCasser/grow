@@ -2269,11 +2269,16 @@ impl AgentView {
                 color: None,
                 bold: false,
             });
-        }
-        if self.auto_flag_visible(effective_plan) {
+        } else if self.auto_flag_visible(effective_plan) {
             mode_flags_vec.push(PromptFlag {
                 text: "auto",
                 color: Some(theme.accent_system),
+                bold: false,
+            });
+        } else {
+            mode_flags_vec.push(PromptFlag {
+                text: "ask",
+                color: None,
                 bold: false,
             });
         }
@@ -4362,6 +4367,12 @@ mod behavior_status_tests {
     fn prompt_status_always_shows_normal_behavior() {
         let text = draw_text(&mut make_agent());
         assert!(text.contains("normal"), "rendered prompt status: {text}");
+    }
+
+    #[test]
+    fn prompt_status_shows_ask_permission_by_default() {
+        let text = draw_text(&mut make_agent());
+        assert!(text.contains("ask"), "rendered prompt status: {text}");
     }
 
     #[test]
