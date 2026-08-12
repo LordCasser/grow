@@ -1815,13 +1815,32 @@ pub fn generate_schema<T: schemars::JsonSchema>() -> serde_json::Value {
         obj.remove("title");
         obj.remove("description");
     }
-    if let Some(obj) = value.as_object_mut()
-        && obj.get("type").and_then(|v| v.as_str()) == Some("object")
-    {
-        obj.entry("properties")
-            .or_insert_with(|| serde_json::Value::Object(Default::default()));
-        obj.entry("required")
-            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(obj) = value.as_object_mut() {
+        // Schemars represents an internally tagged enum as a root `oneOf`
+        // whose variants are objects, without declaring the root type. That
+        // is valid JSON Schema, but model function APIs require the root to
+        // explicitly be an object. Only tighten schemas whose every variant
+        // already has that shape; mixed/scalar unions must not be rewritten.
+        let is_object_union = obj.get("type").is_none()
+            && obj
+                .get("oneOf")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|variants| {
+                    !variants.is_empty()
+                        && variants.iter().all(|variant| {
+                            variant.get("type").and_then(serde_json::Value::as_str)
+                                == Some("object")
+                        })
+                });
+        if is_object_union {
+            obj.insert("type".to_string(), serde_json::json!("object"));
+        }
+        if obj.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+            obj.entry("properties")
+                .or_insert_with(|| serde_json::Value::Object(Default::default()));
+            obj.entry("required")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        }
     }
     value
 }
@@ -4581,6 +4600,63 @@ mod tests {
                 .as_object()
                 .is_some_and(|p| !p.is_empty()),
             "per-property schema must be retained: {schema}"
+        );
+    }
+
+    #[test]
+    fn generate_schema_marks_workflow_tagged_union_as_object() {
+        let schema =
+            generate_schema::<crate::implementations::grow_build::workflow::WorkflowToolInput>();
+
+        assert_eq!(
+            schema.get("type").and_then(serde_json::Value::as_str),
+            Some("object"),
+            "model function schemas must declare an object root: {schema}"
+        );
+        assert!(
+            schema["oneOf"]
+                .as_array()
+                .is_some_and(|variants| !variants.is_empty()),
+            "workflow action variants must be retained: {schema}"
+        );
+    }
+
+    #[test]
+    fn generate_schema_does_not_rewrite_mixed_unions_as_objects() {
+        #[allow(dead_code)]
+        #[derive(schemars::JsonSchema)]
+        #[serde(untagged)]
+        enum MixedInput {
+            Object { value: String },
+            Scalar(String),
+        }
+
+        let schema = generate_schema::<MixedInput>();
+        assert!(
+            schema.get("type").is_none(),
+            "a union containing a scalar must not be narrowed to object: {schema}"
+        );
+    }
+
+    #[test]
+    fn registered_builtin_schemas_have_object_roots() {
+        let builder = ToolRegistryBuilder::new();
+        let invalid: Vec<_> = builder
+            .tools
+            .iter()
+            .filter(|(_, entry)| {
+                entry
+                    .input_schema
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("object")
+            })
+            .map(|(name, entry)| (name, &entry.input_schema))
+            .collect();
+
+        assert!(
+            invalid.is_empty(),
+            "every built-in model function must declare an object root: {invalid:?}"
         );
     }
     fn toolset_with_viewer_ctx(

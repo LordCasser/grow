@@ -760,6 +760,47 @@ async fn goal_tool_schema_reaches_the_sampling_spec_as_an_object() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn workflow_tool_schema_reaches_the_sampling_spec_as_an_object() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::WorkflowTool,
+                >()])
+                .await;
+            actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Workflow);
+
+            let definitions = actor.prepare_tool_definitions_inner().await;
+            let definition = definitions
+                .iter()
+                .find(|definition| {
+                    definition.function.name
+                        == tools::implementations::grow_build::WORKFLOW_TOOL_NAME
+                })
+                .expect("Workflow Behavior must advertise workflow");
+            assert_eq!(definition.function.parameters["type"], "object");
+            assert!(definition.function.parameters["oneOf"].is_array());
+
+            let specs = actor.turn_base_tool_specs(&definitions);
+            let spec = specs
+                .iter()
+                .find(|spec| spec.name == tools::implementations::grow_build::WORKFLOW_TOOL_NAME)
+                .expect("workflow must survive conversion into the sampling request");
+            assert_eq!(spec.parameters["type"], "object");
+            assert!(spec.parameters["oneOf"].is_array());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn delegated_goal_worker_keeps_read_only_snapshot_tool_outside_goal_behavior() {
     tokio::task::LocalSet::new()
         .run_until(async {
