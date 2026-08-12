@@ -279,6 +279,13 @@ jobs:
                 exit 1
               fi
               scripts/build-ohos.sh --smoke
+              # The container runs as root, but the following host-side signing
+              # step must update the built ELF in place. Hand the final artifact
+              # back to the owner of the bind-mounted workspace without making
+              # it group- or world-writable.
+              workspace_uid="$(stat -c %u /workspace/grow)"
+              workspace_gid="$(stat -c %g /workspace/grow)"
+              chown "${workspace_uid}:${workspace_gid}" "$BIN"
             '
 
       # OHOS self-signing is a deterministic integrity marker, not an identity
