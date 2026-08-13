@@ -1519,7 +1519,6 @@ fn stage_dashboard_model(
     let display = model_id.0.to_string();
     if let Some(d) = app.dashboard.as_mut() {
         d.dispatch.set_text("");
-        d.error_toast = None;
         // Mirror the staged choice into the dashboard's catalog snapshot so a
         // subsequent `/model` dropdown marks THIS model as `(current)` (and
         // its effort as `(active)`) rather than the app default the snapshot
@@ -1531,6 +1530,18 @@ fn stage_dashboard_model(
             effort,
             display,
         });
+        let pending = d
+            .pending_model
+            .as_ref()
+            .expect("pending model was just staged");
+        let selection = match pending.effort {
+            Some(effort) => format!("{} ({effort} effort)", pending.display),
+            None => pending.display.clone(),
+        };
+        d.error_toast = Some(format!(
+            "{} {selection} set for next session",
+            crate::glyphs::check_mark()
+        ));
     }
 }
 

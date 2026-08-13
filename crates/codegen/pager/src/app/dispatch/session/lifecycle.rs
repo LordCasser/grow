@@ -1075,14 +1075,18 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 let resolved_effort = agent.session.models.reasoning_effort;
                 let unchanged =
                     prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;
-                if !unchanged {
-                    let msg = if let Some(eff) = resolved_effort {
-                        format!("Switched to {display_name} ({eff} effort)")
+                let msg = if unchanged {
+                    if let Some(eff) = resolved_effort {
+                        format!("Already using {display_name} ({eff} effort)")
                     } else {
-                        format!("Switched to {display_name}")
-                    };
-                    agent.scrollback.push_block(RenderBlock::system(msg));
-                }
+                        format!("Already using {display_name}")
+                    }
+                } else if let Some(eff) = resolved_effort {
+                    format!("Switched to {display_name} ({eff} effort)")
+                } else {
+                    format!("Switched to {display_name}")
+                };
+                agent.scrollback.push_block(RenderBlock::system(msg));
                 vec![]
             }
             Err(msg) => {

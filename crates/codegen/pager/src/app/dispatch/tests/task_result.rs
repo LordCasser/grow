@@ -1096,18 +1096,25 @@ fn switch_agent_complete_failure_writes_scrollback() {
 }
 
 #[test]
-fn switch_model_complete_skips_message_and_persist_when_unchanged() {
+fn switch_model_complete_reports_already_using_and_skips_persist_when_unchanged() {
+    use shell::sampling::types::ReasoningEffort;
+
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let model_id = acp::ModelId::new(std::sync::Arc::from("grow-4.5"));
 
     let agent = app.agents.get_mut(&id).unwrap();
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "supportsReasoningEffort".into(),
+        serde_json::Value::Bool(true),
+    );
     agent.session.models.available.insert(
         model_id.clone(),
-        acp::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()),
+        acp::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()).meta(Some(meta)),
     );
     agent.session.models.current = Some(model_id.clone());
-    agent.session.models.reasoning_effort = None;
+    agent.session.models.reasoning_effort = Some(ReasoningEffort::High);
     agent.session.model_switch_pending = true;
 
     let before = app.agents[&id].scrollback.len();
@@ -1115,7 +1122,7 @@ fn switch_model_complete_skips_message_and_persist_when_unchanged() {
         Action::TaskComplete(TaskResult::SwitchModelComplete {
             agent_id: id,
             model_id: model_id.clone(),
-            effort: None,
+            effort: Some(ReasoningEffort::High),
             result: Ok(()),
             prev_model_id: None,
         }),
@@ -1123,7 +1130,16 @@ fn switch_model_complete_skips_message_and_persist_when_unchanged() {
     );
 
     assert!(!app.agents[&id].session.model_switch_pending);
-    assert_eq!(app.agents[&id].scrollback.len(), before, "no message added");
+    assert_eq!(app.agents[&id].scrollback.len(), before + 1);
+    let last = app.agents[&id]
+        .scrollback
+        .entry(before)
+        .expect("already-using message");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(block) => block.text.as_str(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert_eq!(text, "Already using grow-4.5 (high effort)");
     assert!(
         !effects
             .iter()

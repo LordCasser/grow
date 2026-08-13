@@ -1003,6 +1003,52 @@ fn dashboard_slash_model_stages_pending_model() {
         Some("grow-4.5"),
         "staging must update the snapshot's current selection",
     );
+    let expected = format!(
+        "{} grow-4.5 set for next session",
+        crate::glyphs::check_mark()
+    );
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+        Some(expected.as_str()),
+        "the session-less dashboard must explain that the choice is staged",
+    );
+}
+
+/// `/effort` on the session-less dashboard is a next-session choice, not a
+/// live switch. The acknowledgement must say so instead of silently closing
+/// the picker or claiming that an existing session switched.
+#[serial_test::serial(GROW_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_effort_reports_next_session_staging() {
+    use shell::sampling::types::ReasoningEffort;
+
+    let mut app = test_app();
+    let model_id = acp::ModelId::new(std::sync::Arc::from("reasoning-model"));
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "supportsReasoningEffort".into(),
+        serde_json::Value::Bool(true),
+    );
+    let info =
+        acp::ModelInfo::new(model_id.clone(), "Reasoning Model".to_string()).meta(Some(meta));
+    app.models.available.insert(model_id.clone(), info);
+    app.models.current = Some(model_id);
+    open_dashboard(&mut app);
+
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/effort high".into());
+
+    assert!(effects.is_empty());
+    let dashboard = app.dashboard.as_ref().unwrap();
+    let pending = dashboard
+        .pending_model
+        .as_ref()
+        .expect("effort selection must stage the current model");
+    assert_eq!(pending.effort, Some(ReasoningEffort::High));
+    let expected = format!(
+        "{} reasoning-model (high effort) set for next session",
+        crate::glyphs::check_mark()
+    );
+    assert_eq!(dashboard.error_toast.as_deref(), Some(expected.as_str()));
 }
 
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
