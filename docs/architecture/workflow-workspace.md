@@ -21,7 +21,8 @@ Workflow 由四个所有权边界组成，而不是一段“可变的后台脚�
 Rhai 引擎仍然是确定性执行层：脚本禁用运行时求值和睡眠，host 调用按序列与哈希记录
 journal；`agent()`、`parallel()`、`phase()`、`complete()`、`pause()`、`await_user()` 和
 `budget()` 构成编排接口。Definition 的改变只影响下一次 Run，暂停/恢复也始终使用原始
-Run 快照，而不是重新解析当前 Definition。
+Run 快照，而不是重新解析当前 Definition。完整的脚本写作契约（meta、函数签名、Agent
+选项、限制与最小示例）见 [workflow-rhai.md](../workflow-rhai.md)。
 
 ## 发现与编辑
 

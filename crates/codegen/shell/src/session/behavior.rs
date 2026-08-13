@@ -597,7 +597,11 @@ pub fn clarify_reminder_template() -> &'static str {
 }
 
 pub fn workflow_reminder_template() -> &'static str {
-    include_str!("../../prompts/behaviors/workflow.md")
+    concat!(
+        include_str!("../../prompts/behaviors/workflow.md"),
+        "\n\n",
+        include_str!("../../../../../docs/workflow-rhai.md"),
+    )
 }
 
 pub fn deep_research_reminder_template() -> &'static str {
@@ -969,5 +973,15 @@ mod tests {
         assert!(!prompt.contains("Dynamic Workflow"));
         assert!(prompt.contains("Do not wrap the whole request"));
         assert!(prompt.contains("Personally inspect central evidence"));
+    }
+
+    #[test]
+    fn workflow_prompt_embeds_the_rhai_authoring_reference() {
+        let prompt = workflow_reminder_template();
+        assert!(prompt.contains("Workflow Rhai 写作参考"));
+        assert!(prompt.contains("let meta = #{"));
+        assert!(prompt.contains("parallel([opts1, opts2, ...])"));
+        assert!(prompt.contains("output_schema"));
+        assert!(prompt.contains("capability_mode"));
     }
 }

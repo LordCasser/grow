@@ -26,6 +26,11 @@ validated draft may replace it through publish. Validate representative args bef
 always requires an explicit Project or User scope and may fail if the saved source
 changed since derivation.
 
+When drafting or editing Rhai source, use the complete Rhai authoring reference
+appended to this prompt: the meta contract, orchestration functions, agent options,
+result shape, host utilities, restrictions, and a minimal example are all there.
+Never guess the meta format or host function names.
+
 After a new draft's current hash completes successfully, offer to save it once
 for that hash with Project and User choices. If the user explicitly asks to save
 or reuse it, validate and offer the scope immediately. Always report Definition

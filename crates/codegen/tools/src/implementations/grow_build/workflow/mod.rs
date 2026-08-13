@@ -67,7 +67,9 @@ pub enum WorkflowRunControl {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkflowDraftSource {
     Inline {
-        #[schemars(description = "Inline Rhai source used to create the session draft.")]
+        #[schemars(
+            description = "Inline Rhai source used to create the session draft. Author it per the Workflow behavior's Rhai authoring reference: first statement `let meta = #{ name, description, when_to_use?, phases? };`, then orchestrate with phase()/agent()/parallel()/complete()/pause(); validate representative args before publishing."
+        )]
         script: String,
     },
     File {
