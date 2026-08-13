@@ -549,6 +549,14 @@ impl PluginsConfig {
 pub struct CompactionConfig {
     pub memory_flush: Option<crate::config::MemoryFlushConfig>,
     pub pruning: Option<crate::config::PruningConfig>,
+    /// Session-side tool-result pruning before summary compaction (pre-prune).
+    /// `None` = defer to env/remote settings/default (true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_prune: Option<bool>,
+    /// Per-item pruning token budget for pre-prune. `None` or `0` = derive from
+    /// the context window (5%). Env/remote settings override per the same chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_prune_token_budget: Option<u64>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -2017,6 +2025,31 @@ impl Config {
             self.remote_settings
                 .as_ref()
                 .and_then(|r| r.compaction_tool_choice.as_deref()),
+        )
+    }
+    /// Resolve pre-prune (session-side tool-result pruning) flag: env
+    /// `GROW_COMPACTION_PRE_PRUNE` > config `[compaction] pre_prune` > remote
+    /// settings > default `true`.
+    pub(crate) fn resolve_compaction_pre_prune(&self) -> bool {
+        crate::util::config::resolve_compaction_pre_prune_from(
+            env_string(crate::util::config::ENV_COMPACTION_PRE_PRUNE).as_deref(),
+            self.compaction.pre_prune,
+            self.remote_settings
+                .as_ref()
+                .and_then(|r| r.compaction_pre_prune),
+        )
+    }
+    /// Resolve the pre-prune per-item token budget: env
+    /// `GROW_COMPACTION_PRE_PRUNE_TOKEN_BUDGET` > config
+    /// `[compaction] pre_prune_token_budget` > remote settings. `None` derives
+    /// the budget from the context window (5%).
+    pub(crate) fn resolve_compaction_pre_prune_token_budget(&self) -> Option<u64> {
+        crate::util::config::resolve_compaction_pre_prune_token_budget_from(
+            env_string(crate::util::config::ENV_COMPACTION_PRE_PRUNE_TOKEN_BUDGET).as_deref(),
+            self.compaction.pre_prune_token_budget,
+            self.remote_settings
+                .as_ref()
+                .and_then(|r| r.compaction_pre_prune_token_budget),
         )
     }
     /// Precedence: env `GROW_COMPACTION_DETAIL`, then config

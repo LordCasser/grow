@@ -43,6 +43,7 @@ pub mod inter_compaction;
 pub mod intra_compaction;
 pub mod item;
 pub mod prompt;
+pub mod prune;
 pub mod reminder;
 pub mod sampler;
 pub mod select;
@@ -73,6 +74,7 @@ pub use item::{
     CompactionFileRef, CompactionItem, CompactionItemBuilder, CompactionItemFactory, CompactionRole,
 };
 pub use prompt::CompactionPrompt;
+pub use prune::{PruneItem, PrunePlan, plan_tool_result_pruning, prune_tool_result_content};
 // Reminder types/formatters: import from `reminder::` (borrowed views).
 // Only the summary-injection helper is re-exported at the crate root — both
 // intra FullReplace and inter already use it by this name.

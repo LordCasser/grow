@@ -9,8 +9,8 @@ use sampling_types::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::{
-    ChatStateCommand, ImageRewrite, ImageRewriteReport, RepairHistoryBlocked, StrictAppendAck,
-    StrictAppendError,
+    ChatStateCommand, ImageRewrite, ImageRewriteReport, PruneError, PruneReport,
+    RepairHistoryBlocked, StrictAppendAck, StrictAppendError,
 };
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
@@ -229,6 +229,24 @@ impl ChatStateHandle {
         })
         .await
         .flatten()
+    }
+
+    /// Prune the tool results selected by `plan` inside the actor and await
+    /// the report. The actor trims each selected item's content to
+    /// head + marker + tail, re-estimates `total_tokens` (never upward), and
+    /// persists via the same `replace_history` path as compaction.
+    ///
+    /// Returns `Err(PruneError::ActorUnavailable)` when the actor is dead or
+    /// drops the reply — pruning is never silently skipped.
+    pub async fn prune_tool_results(
+        &self,
+        plan: compaction::PrunePlan,
+    ) -> Result<PruneReport, PruneError> {
+        self.query("PruneToolResults", |reply| {
+            ChatStateCommand::PruneToolResults { plan, reply }
+        })
+        .await
+        .ok_or(PruneError::ActorUnavailable)?
     }
 
     /// Out-of-band history repair (`grow/session/repair`); see

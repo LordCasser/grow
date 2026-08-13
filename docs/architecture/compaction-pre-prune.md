@@ -1,0 +1,160 @@
+# Compaction Pre-Prune Architecture
+
+> **Status**: Implemented (Task C)
+> **Date**: 2026-08-13
+> **Scope**: shell, diagnostics, config-types, chat-state (command consumer only)
+> **Author**: software-architect / coder (Task C)
+
+## 1. What This Is
+
+Pre-prune is the **model-free** half of session load shedding. When auto-compaction
+would fire (context window over the trigger threshold), `run_compact_only` first
+tries to trim oversized tool results in the stored conversation. If the trim alone
+brings the token estimate back under the trigger threshold, the summarizer LLM call
+is skipped entirely. If not, the existing summary path runs — with a smaller input.
+
+The deterministic core lives in `compaction` (`crates/common/compaction/src/prune.rs`,
+Tasks A) and the actor-side application in `chat-state`
+(`ChatStateHandle::prune_tool_results`, Task B). This document covers the shell-side
+ladder that wires them together (Task C).
+
+## 2. Trigger and Ladder
+
+Insertion point: `run_compact_only` (shell `session/compaction.rs`), after the
+pre-compaction flush and **before** `run_compact_inner`. The ladder function is
+`maybe_pre_prune(&trigger_info) -> Result<bool, acp::Error>`:
+
+1. **Config gate**: `compaction.pre_prune == false`, or
+   `auto_compact_suppressed != SUPPRESS_NONE`, or the plan is empty → return
+   `false` (no pruning, summary path unchanged).
+2. **Budget derivation**:
+   - `item_budget = compaction.pre_prune_token_budget`
+     or `context_window × 5%` (lower bound 1 token);
+   - `target = context_window × threshold_percent / 100` — the same absolute
+     count the trigger threshold represents (`exceeds_threshold` scales by
+     `×100`, so the absolute form divides by 100).
+3. **Plan**: `compaction::plan_tool_result_pruning(&conversation,
+   &EstimatedItemTokenCounter, item_budget, target)` — oldest oversized tool
+   results first, stop as soon as the projected post-prune total is `<= target`.
+4. **Apply**: `chat_state_handle.prune_tool_results(plan)` — actor-serialized,
+   idempotent, persists via `replace_history` only.
+   **Any `Err` fails open**: `warn` log + `false` (continue the summary path).
+   Pruning is an optimization, never a correctness requirement.
+5. **Strict gate**: re-read `get_estimated_total_tokens()`; only when it is
+   **below** the trigger threshold (same `exceeds_threshold` helper as
+   `should_auto_compact`) does the ladder return `true` — the caller skips
+   `run_compact_inner`. Otherwise `false`: the summary path runs, and its input
+   is now the pruned (smaller) conversation.
+
+### 2.1 Gate conservativeness (Task B residual risk)
+
+Pruning re-estimates chat-state `total_tokens` (clamped never to increase) but
+**leaves `estimated_tokens_since_model` untouched**, so
+`get_estimated_total_tokens()` may over-count the pruned bytes. The gate
+therefore errs fail-safe: when the post-prune estimate is still at/over the
+threshold, the summary runs even though it might not have been needed. The code
+must never fudge the estimate to make the gate pass. (Note: the turn-start
+`ensure_prefix_ready` history replace re-bases `total_tokens` to a fresh static
+estimate and zeroes `since_model`; the conservative component matters most for
+mid-turn triggers such as the preflight-overflow path.)
+
+## 3. Success Path Observability
+
+When the gate passes, the ladder emits, in order:
+
+- `AutoCompactStarted` (already sent by `run_compact_only` before the ladder),
+- diagnostics event `AutoCompactPruned`:
+
+  | Field | Semantics |
+  |---|---|
+  | `tokens_before` | chat-state `total_tokens` before pruning |
+  | `tokens_after` | post-prune `get_estimated_total_tokens()` (conservative, see §2.1) |
+  | `pruned_count` | number of tool results actually trimmed |
+  | `threshold_percent` | the trigger threshold the gate compared against |
+  | `budget_tokens` | the per-item token budget the plan applied |
+  | `source` | invocation site (`pre_sampling` / `preflight_overflow` / `model_switch` / `context_window_exceeded` / `sampler_error_recovery`) |
+
+- `AutoCompactCompleted` notification with `tokens_before` /
+  `tokens_after` / `elapsed_ms` and a short `summary_preview` describing the
+  prune (e.g. `"pruned 1 tool result (101039 → 54820 tokens)"`).
+
+No `AutoCompactFailed` is sent on this path. The caller returns `Ok(())`
+immediately; the outer turn loop proceeds to sampling.
+
+## 4. Config Contract
+
+| Key | Type | Default | Env override | Semantics |
+|---|---|---|---|---|
+| `[compaction] pre_prune` (user TOML) / remote `compaction_pre_prune` | bool | `true` | `GROW_COMPACTION_PRE_PRUNE` | Master gate for the ladder |
+| `[compaction] pre_prune_token_budget` (user TOML) / remote `compaction_pre_prune_token_budget` | u64 \| none | `None` (derive 5% of window) | `GROW_COMPACTION_PRE_PRUNE_TOKEN_BUDGET` | Per-item pruning token budget |
+
+Resolution chain (env > user config > remote > default), mirroring
+`resolve_compaction_tool_choice_from` / `resolve_compaction_verbatim_input`
+(see `shell/src/util/config/resolve/compaction.rs`). A budget value that fails
+to parse or is `0` falls through to `None` (default derivation). Runtime state
+lives on `CompactionConfig` as `Cell<bool>` / `Cell<Option<u64>>` (the `!Send`
+`SessionActor` pattern). Subagents resolve the same three tiers through
+`SubagentSpawnContext`.
+
+## 5. Display / Logging Layering
+
+- **No UI events from the prune itself**: the `PruneToolResults` command emits
+  no chat-state events and no shell persistence messages. The user-visible
+  surface is exactly the `AutoCompactStarted` / `AutoCompactCompleted`
+  notifications described in §3 (the compaction attempt's own notifications,
+  not conversation-content events).
+- **`chat_history.jsonl`**: rewritten through `replace_history` and carries the
+  pruned content (head + marker + tail).
+- **`updates.jsonl`**: untouched by pruning — the append log retains the
+  original tool-result content, so rewind replay across a prune point restores
+  the unpruned content. This is the intended time-travel semantics: replay
+  rebuilds the conversation from the append log, which never saw the prune.
+- **Suppress state**: pruning never changes `auto_compact_suppressed`. Only the
+  summary path's own failure classification (or the convergence check, §6)
+  touches it.
+
+## 6. Post-Compaction Convergence (fail-safe)
+
+`run_compact_inner` now runs a **unified** post-replace convergence check on
+every path (previously fork-scenario-only): after
+`replace_conversation_for_compaction`, if `get_total_tokens()` still exceeds
+the context window itself, the outcome is:
+
+- `SUPPRESS_STICKY` on `auto_compact_suppressed` (reusing the existing state;
+  no new suppress value),
+- a `warn` log,
+- `Err(acp::Error)` carrying `data.compact_error =
+  "compact_converged_over_window"` (plus an `error_kind: max_tokens_truncation`
+  marker so turn-end classifies it `MaxOutputTokens`, per
+  `docs/architecture/truncation-recovery.md` §8.3).
+
+The fork-scenario threshold check (sticky-suppress when a released inherited
+prefix still lands over the *trigger threshold*) is unchanged. The convergence
+check gates the *window* dimension; the fork check gates the *trigger*
+dimension.
+
+The `ModelContextWindowExceeded` turn branch matches this error and **fails the
+turn** with a diagnostic message (`unified_log` +
+`shell.turn.compact_converged_over_window`) instead of resampling — previously
+a still-over-window session resampled forever. All other error paths are
+unchanged. Compaction success that lands under the window continues the
+resample as before.
+
+## 7. P2 Not Done (Deferred)
+
+**Per-model budget override** (e.g. `[model.<id>].pre_prune_token_budget`)
+is not implemented:
+
+- **ceiling**: the current session-level budget (5% of the window) is uniform
+  across models; a model with a materially different bytes/token ratio gets a
+  budget that is too loose or too tight for its true token cost.
+- **trigger**: fleet evidence that pre-prune produces over-aggressive or
+  under-aggressive trims on specific models (observable via
+  `AutoCompactPruned.budget_tokens` vs. reported usage, or a rise in
+  post-prune `ModelContextWindowExceeded`/compaction calls per model).
+- **upgrade path**: add `auto_compact_threshold_percent`-style per-model tiers
+  (env > `[model.<id>]` > `[compaction]` > remote per-model > remote global)
+  next to `resolve_auto_compact_threshold_percent_from_tiers` in
+  `shell/src/util/config/resolve/compaction.rs`, and thread the resolved value
+  through `spawn_session_actor` / `spawn_session_on_thread` like the existing
+  two fields.

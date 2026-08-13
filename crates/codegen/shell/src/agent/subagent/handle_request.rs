@@ -1018,6 +1018,8 @@ pub(crate) async fn run_shell_child(
         chat_state::CompactionMode::Summary,
         ctx.resolve_compaction_verbatim_input(),
         ctx.resolve_compaction_tool_choice(),
+        ctx.resolve_compaction_pre_prune(),
+        ctx.resolve_compaction_pre_prune_token_budget(),
         false,
         None,
         None,

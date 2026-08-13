@@ -260,6 +260,8 @@ pub(crate) async fn create_test_actor_ex(
             compaction_mode: chat_state::CompactionMode::Transcript,
             verbatim_input: true,
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
+            pre_prune: std::cell::Cell::new(true),
+            pre_prune_token_budget: std::cell::Cell::new(None),
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),

@@ -221,6 +221,10 @@ impl ChatStateActor {
             } => {
                 self.replace_conversation(items, is_compaction);
             }
+            ChatStateCommand::PruneToolResults { plan, reply } => {
+                let report = self.prune_tool_results(plan);
+                let _ = reply.send(report);
+            }
             ChatStateCommand::RewriteImagesAndAck {
                 rewrites,
                 dropped_placeholder,

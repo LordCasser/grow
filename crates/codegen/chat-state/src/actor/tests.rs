@@ -4485,3 +4485,402 @@ async fn repair_history_command_refused_while_turn_active() {
         .unwrap();
     assert_eq!(report.stripped_tool_result_ids, vec!["call_ORPHAN"]);
 }
+
+// ============================================================================
+// Tool-result pruning (PruneToolResults)
+// ============================================================================
+
+/// Full happy path: a planned oversized tool result is replaced by
+/// head + marker + tail, structural fields survive, `total_tokens` drops,
+/// the history snapshot is persisted through `replace_history`, and no UI
+/// event is published (the pager renders streamed wire events and must not
+/// be disturbed by pruning stored state).
+#[tokio::test]
+async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
+    use crate::actor::state::EstimatedItemTokenCounter;
+    use compaction::plan_tool_result_pruning;
+
+    let content = format!("{}{}{}", "H".repeat(400), "M".repeat(400), "T".repeat(400));
+    let conv = vec![
+        ConversationItem::user("hello"),
+        ConversationItem::tool_result_with_images(
+            "call-1",
+            content.as_str(),
+            vec![sampling_types::ContentPart::Text {
+                text: "keep-me".into(),
+            }],
+        ),
+    ];
+    let mut h = TestHarness::with_conversation(conv.clone());
+    h.drain_events();
+
+    // 1200 bytes ≈ 300 tokens; a 50-token budget prunes it to 200 bytes.
+    let plan = plan_tool_result_pruning(&conv, &EstimatedItemTokenCounter, 50, 20);
+    assert_eq!(
+        plan.items.len(),
+        1,
+        "only the oversized tool result is selected"
+    );
+    assert_eq!(plan.items[0].index, 1);
+
+    let before = h.handle.get_total_tokens().await;
+    let report = h
+        .handle
+        .prune_tool_results(plan)
+        .await
+        .expect("prune succeeds");
+    assert_eq!(report.pruned_count, 1);
+    assert_eq!(report.tokens_before, before);
+    assert!(
+        report.tokens_after < report.tokens_before,
+        "pruning must reduce the estimated total"
+    );
+
+    let conversation = h.handle.get_conversation().await;
+    assert_eq!(conversation.len(), 2, "conversation length is preserved");
+    let ConversationItem::ToolResult(tr) = &conversation[1] else {
+        panic!("expected tool result at index 1");
+    };
+    assert_eq!(
+        tr.tool_call_id, "call-1",
+        "structural fields survive pruning"
+    );
+    assert!(matches!(
+        tr.images.as_slice(),
+        [sampling_types::ContentPart::Text { text }] if text.as_ref() == "keep-me"
+    ));
+    // Head (100 bytes) + full marker (39 bytes, fits the 50-byte room) +
+    // tail (50 bytes): head+tail pruning, not a prefix clip.
+    assert_eq!(
+        tr.content.as_ref(),
+        format!(
+            "{}{}{}",
+            "H".repeat(100),
+            super::mutations::PRUNE_MARKER,
+            "T".repeat(50)
+        )
+        .as_str(),
+        "content must be head + marker + tail"
+    );
+
+    assert_eq!(h.handle.get_total_tokens().await, report.tokens_after);
+
+    // Persisted as a full-history replacement (the `chat_history.jsonl`
+    // snapshot path shared with compaction); no per-message appends.
+    let records = h.drain_persistence();
+    assert_eq!(records.len(), 1);
+    let PersistenceRecord::ReplaceHistory(items) = &records[0] else {
+        panic!("expected ReplaceHistory, got {records:?}");
+    };
+    assert_eq!(items.len(), 2);
+    let ConversationItem::ToolResult(persisted) = &items[1] else {
+        panic!("expected tool result in persisted history");
+    };
+    assert!(persisted.content.contains(super::mutations::PRUNE_MARKER));
+
+    // Pruning must not disturb the rendered UI: no events at all.
+    assert!(
+        h.drain_events().is_empty(),
+        "prune must not publish UI events"
+    );
+}
+
+/// Replaying the same plan never re-prunes: already-marker'd or already
+/// in-budget content is skipped, and the no-op run persists nothing.
+#[tokio::test]
+async fn prune_tool_results_is_idempotent() {
+    use crate::actor::state::EstimatedItemTokenCounter;
+    use compaction::plan_tool_result_pruning;
+
+    let conv = vec![ConversationItem::tool_result("call-1", "x".repeat(4000))];
+    let mut h = TestHarness::with_conversation(conv.clone());
+    let plan = plan_tool_result_pruning(&conv, &EstimatedItemTokenCounter, 50, 100);
+
+    let first = h
+        .handle
+        .prune_tool_results(plan.clone())
+        .await
+        .expect("first prune succeeds");
+    assert_eq!(first.pruned_count, 1);
+    let content_after_first = match &h.handle.get_conversation().await[0] {
+        ConversationItem::ToolResult(tr) => tr.content.clone(),
+        other => panic!("expected tool result, got {other:?}"),
+    };
+    h.drain_persistence();
+
+    let second = h
+        .handle
+        .prune_tool_results(plan)
+        .await
+        .expect("second prune succeeds");
+    assert_eq!(second.pruned_count, 0, "repeat plan must not re-prune");
+    assert_eq!(second.tokens_before, first.tokens_after);
+    assert_eq!(second.tokens_after, first.tokens_after);
+    let content_after_second = match &h.handle.get_conversation().await[0] {
+        ConversationItem::ToolResult(tr) => tr.content.clone(),
+        other => panic!("expected tool result, got {other:?}"),
+    };
+    assert_eq!(
+        content_after_second, content_after_first,
+        "replayed plan must not change content"
+    );
+    assert!(
+        h.drain_persistence().is_empty(),
+        "a no-op replay must not persist"
+    );
+}
+
+/// The re-estimate is clamped to the pre-prune total: pruning must never
+/// appear to increase usage, even when the provider-reported total is far
+/// below the static byte estimate.
+#[tokio::test]
+async fn prune_tool_results_never_appears_to_increase_usage() {
+    use crate::actor::state::EstimatedItemTokenCounter;
+    use compaction::plan_tool_result_pruning;
+
+    let conv = vec![ConversationItem::tool_result("call-1", "x".repeat(4000))];
+    let mut h = TestHarness::with_conversation(conv.clone());
+    h.handle.record_token_usage(10);
+    // Sync point: the query is ordered after the fire-and-forget record, so
+    // the TokensUpdated event is in the channel before we drain.
+    assert_eq!(h.handle.get_total_tokens().await, 10);
+    h.drain_events();
+
+    let plan = plan_tool_result_pruning(&conv, &EstimatedItemTokenCounter, 50, 100);
+    let report = h
+        .handle
+        .prune_tool_results(plan)
+        .await
+        .expect("prune succeeds");
+    assert_eq!(report.pruned_count, 1, "content is still pruned");
+    assert_eq!(report.tokens_before, 10);
+    assert_eq!(report.tokens_after, 10, "usage must not appear to increase");
+    assert_eq!(h.handle.get_total_tokens().await, 10);
+    assert!(h.drain_events().is_empty());
+}
+
+/// A prune command and a concurrent `PushToolResult` serialize inside the
+/// actor: whichever lands first, the other is not lost and both effects are
+/// durable.
+#[tokio::test]
+async fn prune_tool_results_interleaves_with_push_without_losing_messages() {
+    use compaction::{PruneItem, PrunePlan};
+
+    let mut h = TestHarness::with_conversation(vec![
+        ConversationItem::user("hello"),
+        ConversationItem::tool_result("call-1", "H".repeat(4000).as_str()),
+    ]);
+    let plan = PrunePlan {
+        items: vec![PruneItem {
+            index: 1,
+            tokens_before: 1000,
+            budget_tokens: 50,
+            estimated_savings: 950,
+        }],
+    };
+
+    let prune_handle = h.handle.clone();
+    let push_handle = h.handle.clone();
+    let prune = async move { prune_handle.prune_tool_results(plan).await.unwrap() };
+    let push = async move {
+        tokio::task::yield_now().await;
+        push_handle.push_tool_result(ConversationItem::tool_result("call-2", "fresh-result"));
+    };
+    let (report, ()) = tokio::join!(prune, push);
+
+    assert_eq!(report.pruned_count, 1);
+    let conversation = h.handle.get_conversation().await;
+    assert_eq!(conversation.len(), 3, "concurrent push must not be lost");
+    let ConversationItem::ToolResult(pruned) = &conversation[1] else {
+        panic!("expected pruned tool result at index 1");
+    };
+    assert!(pruned.content.contains(super::mutations::PRUNE_MARKER));
+    let ConversationItem::ToolResult(fresh) = &conversation[2] else {
+        panic!("expected pushed tool result at index 2");
+    };
+    assert_eq!(fresh.tool_call_id, "call-2");
+    assert_eq!(fresh.content.as_ref(), "fresh-result");
+
+    // Both effects are durable: the push as an append, the prune as a
+    // full-history replacement (their order may vary).
+    let records = h.drain_persistence();
+    assert!(records.iter().any(|r| matches!(
+        r,
+        PersistenceRecord::Message(item)
+            if matches!(item, ConversationItem::ToolResult(tr) if tr.tool_call_id == "call-2")
+    )));
+    assert!(records.iter().any(|r| matches!(
+        r,
+        PersistenceRecord::ReplaceHistory(items)
+            if items
+                .iter()
+                .any(|i| matches!(i, ConversationItem::ToolResult(tr)
+                    if tr.content.contains(super::mutations::PRUNE_MARKER)))
+    )));
+}
+
+/// Defensive plan entries are skipped with diagnostics instead of panicking:
+/// out-of-bounds indices, indices onto non-tool items, stale `tokens_before`
+/// (the actual content decides), and duplicate entries (only the first
+/// prunes).
+#[tokio::test]
+async fn prune_tool_results_defensively_skips_bad_plan_entries() {
+    use compaction::{PruneItem, PrunePlan};
+
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::user("not a tool result"),
+        ConversationItem::tool_result("call-1", "x".repeat(4000).as_str()),
+    ]);
+    let plan = PrunePlan {
+        items: vec![
+            // Out of bounds: skipped, never a panic.
+            PruneItem {
+                index: 99,
+                tokens_before: 500,
+                budget_tokens: 50,
+                estimated_savings: 450,
+            },
+            // A non-tool item: forbidden to prune, skipped.
+            PruneItem {
+                index: 0,
+                tokens_before: 500,
+                budget_tokens: 50,
+                estimated_savings: 450,
+            },
+            // Stale token count: actual content (1000) decides, still prunes.
+            PruneItem {
+                index: 1,
+                tokens_before: u32::MAX,
+                budget_tokens: 50,
+                estimated_savings: 950,
+            },
+            // Duplicate of the real target: marker already present, skipped.
+            PruneItem {
+                index: 1,
+                tokens_before: 1000,
+                budget_tokens: 50,
+                estimated_savings: 950,
+            },
+        ],
+    };
+
+    let report = h
+        .handle
+        .prune_tool_results(plan)
+        .await
+        .expect("prune succeeds");
+    assert_eq!(report.pruned_count, 1, "only the first valid entry prunes");
+    assert!(report.tokens_after < report.tokens_before);
+
+    let conversation = h.handle.get_conversation().await;
+    assert_eq!(conversation.len(), 2);
+    let ConversationItem::User(user) = &conversation[0] else {
+        panic!("user item must be untouched");
+    };
+    assert!(matches!(
+        user.content.as_slice(),
+        [sampling_types::ContentPart::Text { text }] if text.as_ref() == "not a tool result"
+    ));
+    let ConversationItem::ToolResult(tr) = &conversation[1] else {
+        panic!("expected tool result at index 1");
+    };
+    assert!(tr.content.contains(super::mutations::PRUNE_MARKER));
+    assert_eq!(
+        tr.content.matches(super::mutations::PRUNE_MARKER).count(),
+        1,
+        "marker must appear exactly once after a duplicate plan entry"
+    );
+}
+
+/// A `budget_tokens == 0` plan entry is clamped to 1 token: the content is
+/// trimmed to head + clipped marker + tail, never silently emptied.
+#[tokio::test]
+async fn prune_tool_results_zero_budget_clamps_instead_of_emptying() {
+    use compaction::{PruneItem, PrunePlan};
+
+    // 300 'H' + 300 'T' = 600 bytes. Clamped budget 1 token → 4 bytes:
+    // head 2 + marker clipped to its 1-byte room ("\n") + tail 1.
+    let content = format!("{}{}", "H".repeat(300), "T".repeat(300));
+    let h = TestHarness::with_conversation(vec![ConversationItem::tool_result("call-1", content)]);
+    let plan = PrunePlan {
+        items: vec![PruneItem {
+            index: 0,
+            tokens_before: 150,
+            budget_tokens: 0,
+            estimated_savings: 150,
+        }],
+    };
+
+    let report = h
+        .handle
+        .prune_tool_results(plan)
+        .await
+        .expect("prune succeeds");
+    assert_eq!(report.pruned_count, 1);
+    let conversation = h.handle.get_conversation().await;
+    let ConversationItem::ToolResult(tr) = &conversation[0] else {
+        panic!("expected tool result");
+    };
+    assert!(
+        !tr.content.is_empty(),
+        "a zero budget must clamp, not empty the content"
+    );
+    assert_eq!(tr.content.as_ref(), "HH\nT", "head + clipped marker + tail");
+    assert!(report.tokens_after < report.tokens_before);
+}
+
+/// Error paths: pruning an empty conversation fails without persisting; an
+/// empty plan on a non-empty conversation is a zero-prune no-op; a dead actor
+/// surfaces `ActorUnavailable` instead of a silent skip.
+#[tokio::test]
+async fn prune_tool_results_error_paths() {
+    use compaction::{PruneItem, PrunePlan};
+
+    let plan = PrunePlan {
+        items: vec![PruneItem {
+            index: 0,
+            tokens_before: 10,
+            budget_tokens: 5,
+            estimated_savings: 5,
+        }],
+    };
+
+    let mut h = TestHarness::new();
+    let err = h
+        .handle
+        .prune_tool_results(plan.clone())
+        .await
+        .expect_err("empty conversation must be an error");
+    assert!(matches!(
+        err,
+        crate::commands::PruneError::EmptyConversation
+    ));
+    assert!(
+        h.drain_persistence().is_empty(),
+        "the empty-conversation error must not persist"
+    );
+    assert!(h.drain_events().is_empty());
+
+    // An empty plan on a non-empty conversation prunes nothing.
+    h.handle.push_user_message(ConversationItem::user("hello"));
+    // Sync point: the query is ordered after the fire-and-forget push, so its
+    // Message persistence record is in the channel before we drain.
+    assert_eq!(h.handle.get_conversation_len().await, 1);
+    h.drain_persistence();
+    let report = h
+        .handle
+        .prune_tool_results(compaction::PrunePlan::default())
+        .await
+        .expect("empty plan succeeds");
+    assert_eq!(report.pruned_count, 0);
+    assert_eq!(report.tokens_before, report.tokens_after);
+    assert!(h.drain_persistence().is_empty());
+
+    // A dead actor (no receiver) reports delivery failure.
+    let noop = crate::handle::ChatStateHandle::noop();
+    let err = noop
+        .prune_tool_results(plan)
+        .await
+        .expect_err("dead actor must be an error");
+    assert!(matches!(err, crate::commands::PruneError::ActorUnavailable));
+}

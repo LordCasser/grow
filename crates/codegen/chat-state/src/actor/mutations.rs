@@ -23,6 +23,16 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
     }
 }
 
+/// Marker inserted between the head and tail of a pruned tool-result text.
+///
+/// Chosen so genuine tool output essentially never contains it verbatim:
+/// idempotency checks and tests recognize already-pruned content by its
+/// presence. It must stay under the marker room of realistic per-item
+/// budgets (a quarter of `budget_tokens * 4` bytes); [`compaction`]'s prune
+/// clips an oversized marker to its reserved room on a char boundary, so a
+/// longer marker degrades gracefully rather than eating the head/tail shares.
+pub(super) const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
+
 impl ChatStateActor {
     /// Repair any dangling tool calls in the conversation and persist the fix.
     ///
@@ -306,6 +316,131 @@ impl ChatStateActor {
         }
 
         cleared
+    }
+
+    /// Apply a [`compaction::PrunePlan`] to the stored conversation in one
+    /// actor transaction: replace the `content` of each planned `ToolResult`
+    /// with head + marker + tail and persist the whole history through
+    /// `replace_history` (the same `chat_history.jsonl` snapshot path as
+    /// compaction). `images`, `tool_call_id`, and every other structural
+    /// field are preserved; conversation length and item identity never
+    /// change.
+    ///
+    /// # Serialization
+    ///
+    /// Runs inside the actor's command loop, so it cannot interleave with
+    /// `PushToolResult` / `PushAssistantResponse` mid-turn — unlike a
+    /// `GetConversation` + `ReplaceConversation` read-modify-write, which can
+    /// lose concurrently appended items (the `ReplaceSystemHead` lesson).
+    ///
+    /// # UI, logging, and turn capture
+    ///
+    /// No `ChatStateEvent` is published: the pager renders streamed wire
+    /// events, so pruning stored state must not disturb what the user already
+    /// saw. `updates.jsonl` is never written — `replace_history` only
+    /// rewrites the `chat_history.jsonl` snapshot, and rewind replay across a
+    /// prune point restores the unpruned content (correct time-travel
+    /// semantics). `snapshot_turn_slice` / `rebase_turn_capture_offset` need
+    /// no action: pruning swaps only `content` in place, so the captured turn
+    /// tail and its `turn_start_offset` slicing stay valid.
+    ///
+    /// # Defensive behavior
+    ///
+    /// Plan indices outside the conversation or onto a non-`ToolResult` item
+    /// are skipped with a diagnostic (never panic, never touch the item). A
+    /// `budget_tokens == 0` plan item is clamped to `1` so content is trimmed
+    /// but never silently emptied. `item.tokens_before` is advisory — the
+    /// actual current content decides whether pruning applies.
+    ///
+    /// # Idempotency and usage accounting
+    ///
+    /// Items whose content already contains [`PRUNE_MARKER`] or already fits
+    /// the budget are skipped, so replaying the same plan never re-prunes.
+    /// `total_tokens` is re-estimated with
+    /// [`super::state::estimate_conversation_tokens`] and clamped to the
+    /// pre-prune value: pruning must never appear to increase usage (the same
+    /// `min(pre_replace_total)` guard as `install_persisted_conversation`).
+    /// `estimated_tokens_since_model` and `estimate_at_last_response` are
+    /// left untouched, matching [`Self::prune_retained_conversation`]: the
+    /// compaction overhead ratio must keep measuring against the
+    /// last-response snapshot, and the post-response delta self-heals at the
+    /// next `record_token_usage`.
+    pub(super) fn prune_tool_results(
+        &mut self,
+        plan: compaction::PrunePlan,
+    ) -> Result<crate::commands::PruneReport, crate::commands::PruneError> {
+        use crate::commands::{PruneError, PruneReport};
+
+        if self.state.conversation.is_empty() {
+            return Err(PruneError::EmptyConversation);
+        }
+
+        let tokens_before = self.state.total_tokens;
+        let mut pruned_count = 0usize;
+
+        for item in &plan.items {
+            let Some(slot) = self.state.conversation.get_mut(item.index) else {
+                tracing::warn!(
+                    index = item.index,
+                    conversation_len = self.state.conversation.len(),
+                    "PruneToolResults: plan index out of bounds; skipped"
+                );
+                continue;
+            };
+            // The actual current content wins over the plan's `tokens_before`
+            // (the conversation may have moved since planning); never panic.
+            let actual_before = super::state::estimate_item_tokens(slot);
+            if actual_before != u64::from(item.tokens_before) {
+                tracing::debug!(
+                    index = item.index,
+                    plan_tokens_before = item.tokens_before,
+                    actual_tokens_before = actual_before,
+                    "PruneToolResults: plan token count is stale; using actual content"
+                );
+            }
+            let ConversationItem::ToolResult(tr) = slot else {
+                tracing::warn!(
+                    index = item.index,
+                    "PruneToolResults: plan index does not hold a tool result; skipped"
+                );
+                continue;
+            };
+            // Idempotency: never re-prune content that already carries the
+            // marker. Content that already fits the budget is reported by
+            // `prune_tool_result_content` as `None` and skipped as well.
+            if tr.content.contains(PRUNE_MARKER) {
+                continue;
+            }
+            let budget_tokens = item.budget_tokens.max(1);
+            if let Some(pruned) =
+                compaction::prune_tool_result_content(&tr.content, budget_tokens, PRUNE_MARKER)
+            {
+                tr.content = std::sync::Arc::<str>::from(pruned);
+                pruned_count += 1;
+            }
+        }
+
+        let mut tokens_after = tokens_before;
+        if pruned_count > 0 {
+            let reestimated = super::state::estimate_conversation_tokens(&self.state.conversation);
+            // Prune must never appear to increase usage.
+            tokens_after = tokens_before.min(reestimated);
+            self.state.total_tokens = tokens_after;
+            self.persistence.replace_history(&self.state.conversation);
+            tracing::info!(
+                pruned_count,
+                tokens_before,
+                tokens_after,
+                conversation_len = self.state.conversation.len(),
+                "PruneToolResults: pruned oversized tool results"
+            );
+        }
+
+        Ok(PruneReport {
+            pruned_count,
+            tokens_before,
+            tokens_after,
+        })
     }
 
     /// Approximate byte footprint of all string content in the conversation.

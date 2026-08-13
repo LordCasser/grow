@@ -434,6 +434,43 @@ pub(crate) struct AutoCompactTriggerInfo {
     pub tokens_used: u64,
     pub context_window: u64,
     pub percentage: u8,
+    /// Invocation site, recorded verbatim in `AutoCompactPruned` diagnostics
+    /// (`pre_sampling` / `preflight_overflow` / `model_switch` /
+    /// `context_window_exceeded` / `sampler_error_recovery`).
+    pub source: &'static str,
+}
+
+/// Stable `data.compact_error` marker on the `acp::Error` returned when
+/// compaction replaces the conversation but it still exceeds the context
+/// window. The overflow branch matches it and fails the turn instead of
+/// resampling in a loop (fail-safe).
+pub(crate) const COMPACT_CONVERGED_OVER_WINDOW: &str = "compact_converged_over_window";
+
+/// Whether `err` carries the [`COMPACT_CONVERGED_OVER_WINDOW`] marker.
+pub(crate) fn is_compact_converged_over_window(err: &acp::Error) -> bool {
+    err.data
+        .as_ref()
+        .and_then(|d| d.get("compact_error"))
+        .and_then(|v| v.as_str())
+        == Some(COMPACT_CONVERGED_OVER_WINDOW)
+}
+
+/// The convergence failure error: compaction succeeded (the history was
+/// replaced) but the conversation still exceeds the window, so resampling
+/// would overflow again. Carries the `error_kind` marker so turn-end
+/// classifies it `MaxOutputTokens` (the closest existing classification, per
+/// `docs/architecture/truncation-recovery.md` §8.3).
+fn compact_converged_over_window_error(context_window: u64) -> acp::Error {
+    acp::Error::internal_error().data(serde_json::json!({
+        "message": format!(
+            "compaction converged but the conversation still exceeds the \
+             {context_window}-token context window; rewind to an earlier \
+             point, switch to a model with a larger window, or start a new \
+             session"
+        ),
+        "error_kind": sampler::SamplingErrorKind::MaxTokensTruncation.as_str(),
+        "compact_error": COMPACT_CONVERGED_OVER_WINDOW,
+    }))
 }
 /// Why auto-compaction was suppressed after a deterministic failure.
 /// [`SuppressReason::as_str`] is a stable local diagnostics value; do not rename
@@ -1711,8 +1748,16 @@ impl SessionActor {
         let new_len = compacted_history.len();
         self.chat_state_handle
             .replace_conversation_for_compaction(compacted_history);
+        // `get_total_tokens()` (not `get_estimated_total_tokens()`) is the
+        // right measure here: `replace_conversation_for_compaction` re-bases
+        // `total_tokens` to the compacted history and zeroes
+        // `estimated_tokens_since_model`, so both queries agree at this exact
+        // point, and `total_tokens` is the value the fork-scenario threshold
+        // check below already compares against.
+        let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
+        // Fork scenario threshold check (unchanged): sticky-suppress AUTO when
+        // a released inherited prefix still lands over the trigger threshold.
         if self.startup_hints.inherited_prefix_len.is_some() {
-            let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
             if token_estimation::exceeds_threshold(
                 post_replace_tokens,
                 context_window,
@@ -1736,6 +1781,26 @@ impl SessionActor {
             self.compaction
                 .auto_compact_suppressed
                 .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Unified convergence check (all paths): if the compacted history
+        // still exceeds the context window itself, the next sample would
+        // overflow again. Fail-safe: sticky-suppress AUTO and report
+        // `CompactConvergedOverWindow` so the overflow branch fails the turn
+        // instead of resampling in a loop. The fork threshold check above is
+        // untouched (it gates the *trigger* dimension, this gates the
+        // *window* dimension).
+        let converged_over_window = post_replace_tokens > context_window;
+        if converged_over_window {
+            self.compaction
+                .auto_compact_suppressed
+                .store(SUPPRESS_STICKY, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                post_replace_tokens,
+                context_window,
+                "compaction converged but the conversation still exceeds the context window; suppressing AUTO and failing the turn (no re-loop)"
+            );
+            tracing::Span::current().record("detail", "converged_over_window");
         }
         self.last_idle_flush_conversation_len
             .store(new_len, std::sync::atomic::Ordering::Relaxed);
@@ -1818,6 +1883,13 @@ impl SessionActor {
             }
         }
         compaction.complete(tokens_after);
+        if converged_over_window {
+            // The conversation was replaced and every post-compaction side
+            // effect above has run; only the *outcome* is reported as a
+            // convergence failure so the caller fails the turn instead of
+            // resampling (which would overflow again).
+            return Err(compact_converged_over_window_error(context_window));
+        }
         Ok(())
     }
     /// Check if auto-compact should be triggered based on context window usage.
@@ -1826,6 +1898,7 @@ impl SessionActor {
         &self,
         total_tokens: u64,
         context_window: std::num::NonZeroU64,
+        source: &'static str,
     ) -> Option<AutoCompactTriggerInfo> {
         let cw = context_window.get();
         if token_estimation::exceeds_threshold(
@@ -1838,6 +1911,7 @@ impl SessionActor {
                 tokens_used: total_tokens,
                 context_window: cw,
                 percentage,
+                source,
             })
         } else {
             None
@@ -1920,9 +1994,12 @@ impl SessionActor {
                 tokens_used: estimated_total,
                 context_window: cw,
                 percentage,
+                source: "pre_sampling",
             });
         }
-        if let Some(trigger_info) = self.should_auto_compact(estimated_total, context_window) {
+        if let Some(trigger_info) =
+            self.should_auto_compact(estimated_total, context_window, "pre_sampling")
+        {
             tracing::info!(
                 "Pre-sampling auto-compact trigger: model={model}, \
                  {}% full ({}/{} tokens)",
@@ -1965,6 +2042,7 @@ impl SessionActor {
             tokens_used: estimated_total,
             context_window: cw,
             percentage,
+            source: "preflight_overflow",
         })
     }
     /// On model change: clear sticky/other suppress and compact if the window shrank.
@@ -1991,7 +2069,9 @@ impl SessionActor {
             return Ok(());
         }
         let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-        let Some(trigger_info) = self.should_auto_compact(total_tokens, cfg.context_window) else {
+        let Some(trigger_info) =
+            self.should_auto_compact(total_tokens, cfg.context_window, "model_switch")
+        else {
             return Ok(());
         };
         tracing::info!(
@@ -2020,6 +2100,134 @@ impl SessionActor {
                 },
             ));
         }
+    }
+    /// Pre-prune ladder: model-free tool-result pruning that runs inside
+    /// `run_compact_only` before the summary LLM call. Returns `true` when
+    /// pruning alone brought the estimated total back under the trigger
+    /// threshold (the caller then skips `run_compact_inner`).
+    ///
+    /// Pruning is an **optimization**, not a correctness requirement: every
+    /// failure mode here fails open to the existing summary path and never
+    /// touches the suppress state. The skip-summary gate is strict — it uses
+    /// the same `exceeds_threshold` helper as `should_auto_compact`, so the
+    /// summary is skipped only when the post-prune estimate is genuinely below
+    /// the trigger threshold.
+    ///
+    /// Conservativeness note (Task B residual risk): pruning re-estimates
+    /// `total_tokens` but leaves `estimated_tokens_since_model` untouched, so
+    /// `get_estimated_total_tokens()` may over-count the pruned bytes. The
+    /// gate therefore errs toward running the summary (fail-safe); the code
+    /// must never fudge the estimate to make the gate pass.
+    pub(crate) async fn maybe_pre_prune(
+        &self,
+        trigger_info: &AutoCompactTriggerInfo,
+    ) -> Result<bool, acp::Error> {
+        if !self.compaction.pre_prune.get() {
+            return Ok(false);
+        }
+        if self
+            .compaction
+            .auto_compact_suppressed
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != SUPPRESS_NONE
+        {
+            return Ok(false);
+        }
+        let context_window = trigger_info.context_window;
+        let threshold_percent = self.compaction.threshold_percent.get();
+        // Default per-item budget: 5% of the context window, lower bound 1.
+        let item_budget: u64 = self
+            .compaction
+            .pre_prune_token_budget
+            .get()
+            .unwrap_or_else(|| context_window.saturating_mul(5) / 100)
+            .max(1);
+        // The plan's target: the same absolute token count the trigger
+        // threshold represents (`used * 100 >= cw * pct` ⇒ skip gating uses
+        // `exceeds_threshold`, so `cw * pct / 100` is the matching absolute).
+        let target = context_window.saturating_mul(threshold_percent as u64) / 100;
+        let conversation = self.chat_state_handle.get_conversation().await;
+        let plan = compaction::plan_tool_result_pruning(
+            &conversation,
+            &chat_state::actor::state::EstimatedItemTokenCounter,
+            item_budget.min(u32::MAX as u64) as u32,
+            target.min(u32::MAX as u64) as u32,
+        );
+        if plan.is_empty() {
+            return Ok(false);
+        }
+        let prune_start = std::time::Instant::now();
+        let report = match self.chat_state_handle.prune_tool_results(plan).await {
+            Ok(report) => report,
+            Err(e) => {
+                // Fail-open: pruning is an optimization; continue with the
+                // summary path (the conversation is simply not pruned).
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    error = %e,
+                    "pre-prune failed; continuing with summary compaction"
+                );
+                return Ok(false);
+            }
+        };
+        if report.pruned_count == 0 {
+            return Ok(false);
+        }
+        let tokens_after = self.chat_state_handle.get_estimated_total_tokens().await;
+        if token_estimation::exceeds_threshold(tokens_after, context_window, threshold_percent) {
+            // Still at/over the trigger threshold: continue with the summary
+            // path. Its input is smaller now (the pruned content is persisted),
+            // so the prune still helped even though the gate did not pass.
+            tracing::info!(
+                session_id = %self.session_info.id.0,
+                pruned_count = report.pruned_count,
+                tokens_before = report.tokens_before,
+                tokens_after,
+                context_window,
+                threshold_percent,
+                "pre-prune reduced tool-result size but the estimate is still over threshold; continuing with summary compaction"
+            );
+            return Ok(false);
+        }
+        let elapsed_ms = prune_start.elapsed().as_millis() as i64;
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            pruned_count = report.pruned_count,
+            tokens_before = report.tokens_before,
+            tokens_after,
+            context_window,
+            threshold_percent,
+            budget_tokens = item_budget,
+            source = trigger_info.source,
+            "pre-prune resolved auto-compact pressure; skipping summary compaction"
+        );
+        ::diagnostics::session_ctx::log_event(::diagnostics::events::AutoCompactPruned {
+            tokens_before: report.tokens_before,
+            tokens_after,
+            pruned_count: report.pruned_count,
+            threshold_percent,
+            budget_tokens: item_budget,
+            source: trigger_info.source,
+        });
+        // The auto-compact attempt completes here (Started was already sent by
+        // `run_compact_only`); `summary_preview` carries a short explanation
+        // instead of a summary snippet.
+        self.send_grow_notification(
+            crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+                tokens_before: Some(trigger_info.tokens_used),
+                tokens_after,
+                elapsed_ms: Some(elapsed_ms),
+                summary_preview: Some(format!(
+                    "pruned {} tool result{} ({} → {} tokens)",
+                    report.pruned_count,
+                    if report.pruned_count == 1 { "" } else { "s" },
+                    report.tokens_before,
+                    tokens_after,
+                )),
+            },
+        )
+        .await;
+        Ok(true)
     }
     /// Compact without auto-continue. The outer turn loop rebuilds and retries.
     /// Emits diagnostics (`auto_compact_fired`) and UI notifications automatically.
@@ -2085,6 +2293,26 @@ impl SessionActor {
             "pre_compact_on_error",
         )
         .await;
+        match self.maybe_pre_prune(&trigger_info).await {
+            Ok(true) => {
+                // Pruning alone resolved the pressure: the summary call was
+                // skipped. The completed notification was already sent by
+                // `maybe_pre_prune`.
+                let span = tracing::Span::current();
+                span.record("mode", "prune");
+                span.record("success", true);
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(e) => {
+                // Fail-open: pre-prune is an optimization; never block the
+                // summary path.
+                tracing::warn!(
+                    error = %e,
+                    "pre-prune failed; continuing with summary compaction"
+                );
+            }
+        }
         let compact_start = std::time::Instant::now();
         let result = self
             .run_compact_inner(None, None, ::diagnostics::events::CompactionTrigger::Auto)

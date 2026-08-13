@@ -2331,6 +2331,7 @@ impl SessionActor {
                         tokens_used: total_tokens,
                         context_window,
                         percentage,
+                        source: "context_window_exceeded",
                     };
                     tracing::info!(
                         session_id = %self.session_info.id.0,
@@ -2351,14 +2352,57 @@ impl SessionActor {
                             "percentage": percentage,
                         })),
                     );
-                    if let Err(e) = self.run_compact_only(trigger_info).await {
-                        tracing::error!(error = %e, "compaction after model_context_window_exceeded failed");
-                        if Self::is_auth_compact_error(&e) {
-                            return Err(self.surface_compact_auth_failure(e).await);
+                    match self.run_compact_only(trigger_info).await {
+                        Ok(()) => continue,
+                        // Fail-safe: compaction ran and replaced the history
+                        // but the conversation still exceeds the window, so a
+                        // resample would overflow again (the pre-existing
+                        // behavior looped forever). Fail the turn with a
+                        // diagnostic message instead.
+                        Err(e) if compaction::is_compact_converged_over_window(&e) => {
+                            let post_tokens =
+                                self.chat_state_handle.get_estimated_total_tokens().await;
+                            let message = format!(
+                                "Compaction could not shrink the conversation \
+                                 enough: it still exceeds the model's \
+                                 {context_window}-token context window. Rewind \
+                                 to an earlier point, switch to a model with a \
+                                 larger window, or start a new session."
+                            );
+                            tracing::warn!(
+                                session_id = %self.session_info.id.0,
+                                prompt_id = %req_id,
+                                loop_index,
+                                post_tokens,
+                                context_window,
+                                "model_context_window_exceeded: compaction converged over the window; failing the turn"
+                            );
+                            ::diagnostics::unified_log::warn(
+                                "shell.turn.compact_converged_over_window",
+                                Some(self.session_info.id.0.as_ref()),
+                                Some(serde_json::json!({
+                                    "prompt_id": req_id,
+                                    "loop_index": loop_index,
+                                    "post_tokens": post_tokens,
+                                    "context_window": context_window,
+                                })),
+                            );
+                            return Err(acp::Error::internal_error().data(
+                                crate::sampling::error::terminal_error_data(
+                                    message,
+                                    None,
+                                    sampler::SamplingErrorKind::MaxTokensTruncation,
+                                ),
+                            ));
                         }
-                        return Err(e);
+                        Err(e) => {
+                            tracing::error!(error = %e, "compaction after model_context_window_exceeded failed");
+                            if Self::is_auth_compact_error(&e) {
+                                return Err(self.surface_compact_auth_failure(e).await);
+                            }
+                            return Err(e);
+                        }
                     }
-                    continue;
                 }
                 Some(sampling_types::StopReason::PauseTurn) if tool_calls.is_empty() => {
                     // Anthropic server-tool iteration limit: resend the

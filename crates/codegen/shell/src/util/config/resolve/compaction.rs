@@ -33,6 +33,47 @@ pub fn resolve_compaction_tool_choice_from(
         .unwrap_or_default()
 }
 
+/// Env-var override for `compaction.pre_prune` (session-side tool-result
+/// pruning before summary compaction). `"true"`/`"false"`; anything else falls
+/// through to the next tier.
+pub(crate) const ENV_COMPACTION_PRE_PRUNE: &str = "GROW_COMPACTION_PRE_PRUNE";
+
+/// Env-var override for `compaction.pre_prune_token_budget` (per-item pruning
+/// token budget). Parsed as `u64`; unparseable or `0` values fall through to
+/// `None`, which derives the budget from the context window (5%).
+pub(crate) const ENV_COMPACTION_PRE_PRUNE_TOKEN_BUDGET: &str =
+    "GROW_COMPACTION_PRE_PRUNE_TOKEN_BUDGET";
+
+/// Resolve `compaction.pre_prune`: env > user config > remote settings >
+/// default (`true`). Pure so it is unit-testable without mutating process env.
+pub fn resolve_compaction_pre_prune_from(
+    env: Option<&str>,
+    config: Option<bool>,
+    remote: Option<bool>,
+) -> bool {
+    env.and_then(|s| s.trim().parse::<bool>().ok())
+        .or(config)
+        .or(remote)
+        .unwrap_or(true)
+}
+
+/// Resolve `compaction.pre_prune_token_budget`: env > user config > remote
+/// settings. Unparseable or `0` values fall through to `None` (default
+/// derivation: 5% of the context window, lower bound 1 token).
+pub fn resolve_compaction_pre_prune_token_budget_from(
+    env: Option<&str>,
+    config: Option<u64>,
+    remote: Option<u64>,
+) -> Option<u64> {
+    fn nonzero(v: u64) -> Option<u64> {
+        (v > 0).then_some(v)
+    }
+    env.and_then(|s| s.trim().parse::<u64>().ok())
+        .and_then(nonzero)
+        .or_else(|| config.and_then(nonzero))
+        .or_else(|| remote.and_then(nonzero))
+}
+
 /// Env-var override for `auto_compact_threshold_percent`. Parsed as `u8`;
 /// out-of-range or unparseable values are ignored.
 pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROW_AUTO_COMPACT_THRESHOLD_PERCENT";
@@ -215,5 +256,54 @@ mod compaction_tool_choice_tests {
         assert_eq!("AUTO".parse(), Ok(CompactionToolChoice::Auto));
         assert_eq!(" None ".parse(), Ok(CompactionToolChoice::None));
         assert!("required".parse::<CompactionToolChoice>().is_err());
+    }
+}
+
+#[cfg(test)]
+mod pre_prune_tests {
+    use super::{
+        resolve_compaction_pre_prune_from as resolve, resolve_compaction_pre_prune_token_budget_from
+            as resolve_budget,
+    };
+
+    #[test]
+    fn pre_prune_defaults_true() {
+        assert!(resolve(None, None, None));
+    }
+
+    #[test]
+    fn pre_prune_env_over_config_over_remote() {
+        assert!(!resolve(Some("false"), Some(true), Some(true)));
+        assert!(resolve(Some("true"), Some(false), Some(false)));
+        assert!(!resolve(None, Some(false), Some(true)));
+        assert!(resolve(None, None, Some(true)));
+    }
+
+    #[test]
+    fn pre_prune_garbage_env_falls_through() {
+        assert!(!resolve(Some("garbage"), Some(false), Some(true)));
+        assert!(resolve(Some("1"), None, None)); // "1" is not a bool parse
+    }
+
+    #[test]
+    fn budget_defaults_none() {
+        assert_eq!(resolve_budget(None, None, None), None);
+    }
+
+    #[test]
+    fn budget_env_over_config_over_remote() {
+        assert_eq!(resolve_budget(Some("2048"), Some(100), Some(200)), Some(2048));
+        assert_eq!(resolve_budget(None, Some(100), Some(200)), Some(100));
+        assert_eq!(resolve_budget(None, None, Some(200)), Some(200));
+    }
+
+    #[test]
+    fn budget_zero_and_garbage_fall_through() {
+        // Zero at a tier falls through to the next tier.
+        assert_eq!(resolve_budget(Some("0"), Some(100), None), Some(100));
+        // Zero everywhere → None (default derivation).
+        assert_eq!(resolve_budget(Some("0"), Some(0), Some(0)), None);
+        // Unparseable env falls through.
+        assert_eq!(resolve_budget(Some("abc"), None, Some(50)), Some(50));
     }
 }

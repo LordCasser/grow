@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use compaction::PrunePlan;
 use sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
     ToolSpec,
@@ -42,6 +43,34 @@ impl ImageRewriteReport {
     pub fn total_images(self) -> usize {
         self.converted_images + self.dropped_images
     }
+}
+
+/// Result of an actor-serialized tool-result prune.
+///
+/// `tokens_before` / `tokens_after` are the actor's `total_tokens` before and
+/// after the command. `tokens_after` is the re-estimate clamped so pruning
+/// never appears to increase usage, so `tokens_after <= tokens_before` always
+/// holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Number of tool results actually trimmed in this execution.
+    pub pruned_count: usize,
+    /// `total_tokens` before pruning.
+    pub tokens_before: u64,
+    /// `total_tokens` after re-estimation (never higher than `tokens_before`).
+    pub tokens_after: u64,
+}
+
+/// Failure modes for [`ChatStateCommand::PruneToolResults`].
+#[derive(Debug, thiserror::Error)]
+pub enum PruneError {
+    /// The conversation holds no items, so there is nothing to prune.
+    #[error("cannot prune tool results: conversation is empty")]
+    EmptyConversation,
+
+    /// The chat-state actor is dead or dropped the reply.
+    #[error("chat-state actor is unavailable")]
+    ActorUnavailable,
 }
 
 /// Refusal reply for [`ChatStateCommand::RepairHistory`]: a turn was in
@@ -168,6 +197,19 @@ pub enum ChatStateCommand {
         rewrites: Vec<ImageRewrite>,
         dropped_placeholder: String,
         reply: oneshot::Sender<Option<ImageRewriteReport>>,
+    },
+
+    /// Atomically prune oversized tool-result contents in the stored
+    /// conversation (head + marker + tail) and persist the result through the
+    /// same `replace_history` path as compaction. Runs inside the actor so it
+    /// serializes with turn pushes — no read-modify-write race. Idempotent
+    /// per plan: already-pruned items are skipped on repeat execution.
+    ///
+    /// Emits no UI/notification events: the pager renders streamed wire
+    /// events, and pruning must not disturb what the user already saw.
+    PruneToolResults {
+        plan: PrunePlan,
+        reply: oneshot::Sender<Result<PruneReport, PruneError>>,
     },
 
     /// Out-of-band history repair (`grow/session/repair`): run
@@ -439,6 +481,11 @@ mod tests {
         let _ = ChatStateCommand::ReplaceConversation {
             items: vec![],
             is_compaction: false,
+        };
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::PruneToolResults {
+            plan: PrunePlan::default(),
+            reply: tx,
         };
         let _ = ChatStateCommand::CachePromptText {
             text: "prompt".to_string(),

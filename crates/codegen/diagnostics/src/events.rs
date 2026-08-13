@@ -356,6 +356,28 @@ pub struct AutoCompactFired {
     pub percentage: u8,
 }
 
+/// Pre-prune resolved the auto-compact pressure: oversized tool results were
+/// trimmed in the stored conversation and the summary LLM call was skipped.
+#[derive(Serialize)]
+pub struct AutoCompactPruned {
+    /// Chat-state `total_tokens` before pruning (the actor's authoritative count).
+    pub tokens_before: u64,
+    /// Post-prune estimated total (`total_tokens` + `estimated_tokens_since_model`).
+    /// The `since_model` component is untouched by pruning, so this value is
+    /// conservative (may over-count pruned bytes) — the gate errs fail-safe.
+    pub tokens_after: u64,
+    /// Number of tool results actually trimmed.
+    pub pruned_count: usize,
+    /// The trigger threshold (%) the post-prune estimate was compared against.
+    pub threshold_percent: u8,
+    /// Per-item pruning token budget applied by the plan.
+    pub budget_tokens: u64,
+    /// Invocation site that triggered the compaction attempt
+    /// (`pre_sampling` / `preflight_overflow` / `model_switch` /
+    /// `context_window_exceeded` / `sampler_error_recovery`).
+    pub source: &'static str,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Compaction
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1269,6 +1291,7 @@ diagnostics_event!(SlashCommandUsed, "slash_command_used");
 diagnostics_event!(PermissionPrompted, "permission_prompted");
 diagnostics_event!(PermissionDecisionPayload, "permission_decision");
 diagnostics_event!(AutoCompactFired, "auto_compact_fired");
+diagnostics_event!(AutoCompactPruned, "auto_compact_pruned");
 diagnostics_event!(CompactionTriggered, "compaction_triggered");
 diagnostics_event!(CompactionCompleted, "compaction_completed");
 diagnostics_event!(AutoCompactSuppressed, "auto_compact_suppressed");

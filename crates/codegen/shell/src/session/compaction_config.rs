@@ -245,6 +245,14 @@ pub struct CompactionConfig {
     /// When `true`, feed the summarizer the verbatim conversation instead of the lossy rewrite (the retry loop may still fall back).
     pub verbatim_input: bool,
     pub tool_choice: crate::util::config::CompactionToolChoice,
+    /// Pre-prune gate (`compaction.pre_prune`): when `true`, `run_compact_only`
+    /// first tries model-free tool-result pruning; a successful prune that
+    /// brings the estimate under the trigger threshold skips the summary call.
+    /// `Cell` per the !Send `SessionActor` pattern.
+    pub pre_prune: Cell<bool>,
+    /// Per-item pruning token budget override; `None` derives 5% of the context
+    /// window (lower bound 1 token).
+    pub pre_prune_token_budget: Cell<Option<u64>>,
     /// Prefire two-pass state (background NOTE₁ cache + in-flight guard).
     /// `Default` (empty cache, not in-flight).
     pub prefire: PrefireState,

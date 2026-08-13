@@ -416,9 +416,38 @@ This is distinct from truncation continue: the problem is that the **input** is 
 not that the **output budget** was exhausted. More output budget (continue) would not help
 because the context window is full.
 
-### 8.3 Fallback
+Since Task C, the compaction step first runs the **pre-prune ladder**
+(`maybe_pre_prune`, see `docs/architecture/compaction-pre-prune.md`): oversized
+tool results are trimmed model-free, and if that alone drops the estimate under
+the trigger threshold the summary call is skipped. Any pre-prune failure fails
+open to the summary path.
 
-If compaction fails or the compacted conversation still exceeds the context window:
+### 8.3 Fallback (fail-safe, implemented)
+
+`run_compact_inner` checks, on **every** path after
+`replace_conversation_for_compaction`, whether `get_total_tokens()` still
+exceeds the context window (the fork-scenario trigger-threshold check is
+unchanged and orthogonal). If it does:
+
+- `auto_compact_suppressed` is set to `SUPPRESS_STICKY` (no new suppress value),
+- a `warn` is logged,
+- `run_compact_only` returns `Err` with the marker
+  `data.compact_error = "compact_converged_over_window"` and
+  `error_kind = max_tokens_truncation`.
+
+The `ModelContextWindowExceeded` turn branch matches that marker and **fails the
+turn** with a diagnostic message (`unified_log` event
+`shell.turn.compact_converged_over_window`) instead of resampling — the previous
+behavior looped forever (sample → overflow → compact → still over window →
+sample …). Sampling is therefore bounded. The error classification reuses
+`MaxOutputTokens` (the closest existing `StopFailureKind`, per this section's
+original design). Other compaction errors keep their existing handling.
+
+When compaction succeeds and the conversation lands back under the window, the
+resample continues as before (regression-locked by
+`context_window_exceeded_triggers_compaction`).
+
+If compaction itself fails for other reasons:
 - Emit `StopFailure` with `MaxOutputTokens` kind (the closest existing classification).
 - Turn fails with diagnostic message.
 

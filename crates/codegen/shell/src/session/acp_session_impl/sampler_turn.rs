@@ -1319,6 +1319,7 @@ impl SessionActor {
                     tokens_used: total_tokens,
                     context_window: cw,
                     percentage,
+                    source: "sampler_error_recovery",
                 };
                 if let Err(e) = self.run_compact_only(trigger_info).await {
                     if Self::is_auth_compact_error(&e) {

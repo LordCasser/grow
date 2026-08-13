@@ -876,6 +876,16 @@ pub struct RemoteSettings {
     pub compaction_verbatim_input: Option<bool>,
     #[serde(default)]
     pub compaction_tool_choice: Option<String>,
+    /// Pre-prune (model-free tool-result pruning before summary compaction)
+    /// from remote settings. Env (`GROW_COMPACTION_PRE_PRUNE`) and user config
+    /// override it. `None` = default (true).
+    #[serde(default)]
+    pub compaction_pre_prune: Option<bool>,
+    /// Per-item pruning token budget for pre-prune from remote settings. Env
+    /// (`GROW_COMPACTION_PRE_PRUNE_TOKEN_BUDGET`) and user config override it.
+    /// `0` or `None` = default derivation (5% of the context window).
+    #[serde(default)]
+    pub compaction_pre_prune_token_budget: Option<u64>,
 }
 /// Remote enable tier for the per-tip contextual hints (mirrors the client's
 /// `[ui.contextual_hints]` shape). Each field is a soft default for one tip;

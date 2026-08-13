@@ -339,6 +339,37 @@ impl SubagentSpawnContext {
                 .and_then(|r| r.compaction_tool_choice.as_deref()),
         )
     }
+    /// Subagent pre-prune flag, mirroring `Config::resolve_compaction_pre_prune`
+    /// (env > config `[compaction] pre_prune` > remote settings > default `true`).
+    pub fn resolve_compaction_pre_prune(&self) -> bool {
+        crate::util::config::resolve_compaction_pre_prune_from(
+            crate::agent::config::env_string(crate::util::config::ENV_COMPACTION_PRE_PRUNE)
+                .as_deref(),
+            self.agent_config
+                .as_ref()
+                .and_then(|c| c.compaction.pre_prune),
+            self.remote_settings
+                .as_ref()
+                .and_then(|r| r.compaction_pre_prune),
+        )
+    }
+    /// Subagent pre-prune per-item token budget, mirroring
+    /// `Config::resolve_compaction_pre_prune_token_budget`; `None` derives the
+    /// budget from the context window.
+    pub fn resolve_compaction_pre_prune_token_budget(&self) -> Option<u64> {
+        crate::util::config::resolve_compaction_pre_prune_token_budget_from(
+            crate::agent::config::env_string(
+                crate::util::config::ENV_COMPACTION_PRE_PRUNE_TOKEN_BUDGET,
+            )
+            .as_deref(),
+            self.agent_config
+                .as_ref()
+                .and_then(|c| c.compaction.pre_prune_token_budget),
+            self.remote_settings
+                .as_ref()
+                .and_then(|r| r.compaction_pre_prune_token_budget),
+        )
+    }
     /// Whether a completed subagent's worktree is snapshotted into a durable ref
     /// and its directory deleted. Resolution mirrors the other subagent gates
     /// (env > config > remote settings > default). Default `false` so it ships dark;

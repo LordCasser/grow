@@ -1578,5 +1578,8 @@ mod reminder_policy_tests;
 #[path = "acp_session_tests/truncation_recovery_tests.rs"]
 mod truncation_recovery_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/compaction_pre_prune_tests.rs"]
+mod compaction_pre_prune_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/turn_pipeline_v2_tests.rs"]
 mod turn_pipeline_v2_tests;

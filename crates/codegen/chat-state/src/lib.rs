@@ -43,7 +43,8 @@ pub use actor::state::{
     estimate_tool_definitions_tokens,
 };
 pub use commands::{
-    ImageRewrite, ImageRewriteReport, ModelMetadata, StrictAppendAck, StrictAppendError,
+    ImageRewrite, ImageRewriteReport, ModelMetadata, PruneError, PruneReport, StrictAppendAck,
+    StrictAppendError,
 };
 pub use compaction_mode::CompactionMode;
 pub use compaction_transcript::CompactionDetail;
