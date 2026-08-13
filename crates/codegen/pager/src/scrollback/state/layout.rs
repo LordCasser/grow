@@ -314,9 +314,9 @@ impl ScrollbackState {
         let base_y = cache.virtual_y[visible_range.start];
         let content_y = base_y + row_in_viewport + self.scroll_offset;
         let row_in_entry = content_y.checked_sub(cache.virtual_y[entry_idx])?;
-        // Permission blocks deliberately have one row of vertical padding on
-        // each side. Only content rows are actionable.
-        let content_row = row_in_entry.checked_sub(1)?;
+        // Permission blocks have no vertical padding, so `row_in_entry` IS
+        // the content row.
+        let content_row = row_in_entry;
         if group.len() == 1 {
             return (content_row == 0).then_some(0);
         }
@@ -3610,5 +3610,105 @@ mod tests {
         );
         assert_eq!(content_y0, virtual_y[range.start]);
         assert_eq!(range.end, header + 50);
+    }
+
+    fn permission_event(tool_call_id: &str) -> crate::scrollback::blocks::SubagentPermissionEvent {
+        crate::scrollback::blocks::SubagentPermissionEvent {
+            child_session_id: "child".into(),
+            subagent_title: Some("Coder task".into()),
+            subagent_type: Some("software-engineering/coder".into()),
+            description: Some("task".into()),
+            tool_call_id: tool_call_id.into(),
+            tool_name: "run_terminal_command".into(),
+            access_kind: "bash".into(),
+            access_summary: Some("cargo test".into()),
+            access_detail: None,
+            outcome: shell::extensions::notification::SubagentPermissionOutcome::Approved,
+            source: "main_agent".into(),
+            reason: None,
+            classifier_reason: None,
+            latency_ms: Some(1),
+        }
+    }
+
+    /// A singleton permission entry is exactly one rendered row (no vpad):
+    /// row 0 is the member itself and the hit-test row math is identity.
+    #[test]
+    fn permission_member_singleton_maps_row_zero_and_rejects_rows_below() {
+        let mut state = ScrollbackState::new();
+        let id = state.push_subagent_permission(permission_event("tool-1"));
+        state.prepare_layout(80, 40);
+        let idx = state.index_of_id(id).unwrap();
+        let area = Rect::new(0, 0, 80, 40);
+
+        assert_eq!(
+            state.permission_member_at_screen_row(idx, area.y, area),
+            Some(0),
+            "the single content row resolves to the only member"
+        );
+        assert_eq!(
+            state.permission_member_at_screen_row(idx, area.y + 1, area),
+            None,
+            "rows past the singleton's one rendered row are not actionable"
+        );
+    }
+
+    /// A collapsed multi-member group is a single header row: no row resolves
+    /// to a member (double-click toggles the group instead).
+    #[test]
+    fn permission_member_collapsed_group_header_resolves_no_member() {
+        let mut state = ScrollbackState::new();
+        let id = state.push_subagent_permission(permission_event("tool-1"));
+        state.push_subagent_permission(permission_event("tool-2"));
+        state.prepare_layout(80, 40);
+        let idx = state.index_of_id(id).unwrap();
+        let area = Rect::new(0, 0, 80, 40);
+
+        assert_eq!(
+            state.permission_member_at_screen_row(idx, area.y, area),
+            None,
+            "collapsed header row is the group toggle, not a member"
+        );
+        assert_eq!(
+            state.permission_member_at_screen_row(idx, area.y + 1, area),
+            None,
+            "collapsed groups expose no member rows at all"
+        );
+    }
+
+    /// An expanded multi-member group renders header + one row per member
+    /// with no vpad: row 0 is the header, rows 1..=len map to members 0..len.
+    #[test]
+    fn permission_member_expanded_group_maps_rows_to_members() {
+        let mut state = ScrollbackState::new();
+        let id = state.push_subagent_permission(permission_event("tool-1"));
+        state.push_subagent_permission(permission_event("tool-2"));
+        state.push_subagent_permission(permission_event("tool-3"));
+        let idx = state.index_of_id(id).unwrap();
+        state
+            .entries
+            .get_mut(&id)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        state.prepare_layout(80, 40);
+        let area = Rect::new(0, 0, 80, 40);
+
+        assert_eq!(
+            state.permission_member_at_screen_row(idx, area.y, area),
+            None,
+            "expanded row 0 is the group header"
+        );
+        for member in 0..3usize {
+            assert_eq!(
+                state.permission_member_at_screen_row(idx, area.y + 1 + member as u16, area),
+                Some(member),
+                "member row directly below the header (no vpad offset)"
+            );
+        }
+        assert_eq!(
+            state.permission_member_at_screen_row(idx, area.y + 4, area),
+            None,
+            "rows past the last member are not actionable"
+        );
     }
 }

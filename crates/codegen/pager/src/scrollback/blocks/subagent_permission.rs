@@ -195,6 +195,18 @@ impl SubagentPermissionBlock {
         self.members.len()
     }
 
+    /// Completes the `len`/`is_empty` pair.
+    ///
+    /// The block is always constructed with at least one member (`new` and
+    /// `new_in_epoch` take the first event) and members only grow via `push`
+    /// and `extend`, so `is_empty()` returns `false` for every value today.
+    /// The method exists for the standard pair invariant
+    /// `is_empty() == (len() == 0)` and as the clippy-required counterpart to
+    /// the public `len()`.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
     fn header_line(&self, theme: &Theme) -> BlockLine {
         let mut approved = 0usize;
         let mut denied = 0usize;
@@ -272,7 +284,7 @@ impl BlockContent for SubagentPermissionBlock {
     }
 
     fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
-        true
+        false
     }
 
     fn is_foldable(&self) -> bool {
@@ -371,5 +383,37 @@ mod tests {
         block.push(event(SubagentPermissionOutcome::Denied));
         assert_eq!(block.output(&ctx(DisplayMode::Collapsed)).lines.len(), 1);
         assert_eq!(block.output(&ctx(DisplayMode::Expanded)).lines.len(), 3);
+    }
+
+    /// Permission blocks render compact like `SearchToolCallBlock`: no vpad
+    /// rows, so a singleton occupies exactly one rendered row and the mouse
+    /// hit-test row math is identity. Re-enabling vpad must fail here AND
+    /// desync `permission_member_at_screen_row`.
+    #[test]
+    fn block_has_no_vertical_padding() {
+        let appearance = AppearanceConfig::default();
+        let single = SubagentPermissionBlock::new(event(SubagentPermissionOutcome::Approved));
+        assert!(!single.has_vpad_for(&appearance));
+        let mut multi = SubagentPermissionBlock::new(event(SubagentPermissionOutcome::Approved));
+        multi.push(event(SubagentPermissionOutcome::Denied));
+        assert!(!multi.has_vpad_for(&appearance));
+    }
+
+    /// `is_empty()` delegates to the same `members` field as `len()`, so the
+    /// pair invariant `is_empty() == (len() == 0)` holds by construction for
+    /// both single-member and multi-member blocks. The comparison is written
+    /// as `len().eq(&0)`: the literal `len() == 0` would trip
+    /// `clippy::len_zero`, whose suggested "fix" (`is_empty()`) would reduce
+    /// the assertion to a tautology and stop exercising `len()`.
+    #[test]
+    fn is_empty_matches_len_for_single_and_multi_member_blocks() {
+        let single = SubagentPermissionBlock::new(event(SubagentPermissionOutcome::Approved));
+        assert_eq!(single.is_empty(), single.len().eq(&0));
+        assert!(!single.is_empty());
+
+        let mut multi = SubagentPermissionBlock::new(event(SubagentPermissionOutcome::Approved));
+        multi.push(event(SubagentPermissionOutcome::Denied));
+        assert_eq!(multi.is_empty(), multi.len().eq(&0));
+        assert!(!multi.is_empty());
     }
 }

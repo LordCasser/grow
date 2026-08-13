@@ -1751,7 +1751,7 @@ mod tests {
             .scrollback
             .entry_screen_area(0, agent.pane_areas.scrollback)
             .expect("permission entry laid out");
-        let member_row = area.y + 1; // top vpad precedes the compact member row
+        let member_row = area.y; // no vpad: the compact member row is the entry's first row
         // Reproduce the competing exact-text target that used to consume the
         // mouse-up before permission member hit-testing.
         agent.last_scrollback_selection_model = stacked_lines_model(0, member_row, 1);
