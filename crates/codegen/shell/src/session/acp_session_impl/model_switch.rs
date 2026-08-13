@@ -2,6 +2,71 @@ use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
+    /// Adopt a validated live catalog/provider snapshot at a mailbox safe
+    /// point. This updates routing, limits, credentials and the auxiliary
+    /// image model without rebuilding the agent harness.
+    pub(super) async fn handle_reload_model_config(
+        &self,
+        model_id: acp::ModelId,
+        sampling_config: sampler::SamplerConfig,
+        image_description_model: Option<String>,
+        inference_idle_timeout: std::time::Duration,
+        max_retries: u32,
+        auto_compact_threshold_percent: u8,
+    ) {
+        // These actor-local knobs participate in the same mailbox snapshot as
+        // the provider route. Setting them before the first await prevents a
+        // turn spawned after this command from rebuilding a hybrid old/new
+        // sampler config.
+        self.inference_idle_timeout.set(inference_idle_timeout);
+        self.max_retries.set(max_retries);
+        self.compaction
+            .threshold_percent
+            .set(auto_compact_threshold_percent);
+        let context_window = self.compaction.context_window_override.unwrap_or_else(|| {
+            std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
+                std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
+                    .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
+            })
+        });
+        self.compactions_remaining
+            .set(sampling_config.compactions_remaining);
+        self.compaction_at_tokens
+            .set(sampling_config.compaction_at_tokens);
+        self.chat_state_handle
+            .update_sampling_config(sampling_types::SamplingConfig {
+                base_url: sampling_config.base_url.clone(),
+                model: sampling_config.model.clone(),
+                output_limit: sampling_config.output_limit,
+                temperature: sampling_config.temperature,
+                top_p: sampling_config.top_p,
+                api_backend: sampling_config.api_backend.clone(),
+                extra_headers: sampling_config.extra_headers.clone(),
+                query_params: sampling_config.query_params.clone(),
+                env_http_headers: sampling_config.env_http_headers.clone(),
+                context_window,
+                reasoning_effort: sampling_config.reasoning_effort,
+                stream_tool_calls: Some(sampling_config.stream_tool_calls),
+            });
+        let existing = self.chat_state_handle.get_credentials().await;
+        self.chat_state_handle
+            .update_credentials(chat_state::Credentials {
+                api_key: sampling_config.api_key.clone(),
+                alpha_test_key: existing.alpha_test_key,
+            });
+        *self.image_description_model.write() = image_description_model;
+        self.invalidate_model_auth_memo();
+        let agent_name = self.agent.borrow().definition().name.clone();
+        let _ = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::CurrentModel {
+                model_id,
+                agent_name: Some(agent_name),
+                reasoning_effort: Some(sampling_config.reasoning_effort),
+            });
+    }
+
     pub(super) async fn handle_set_session_model(
         &self,
         model_id: acp::ModelId,

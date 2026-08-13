@@ -243,6 +243,16 @@ pub enum SessionCommand {
         auto_compact_threshold_percent: u8,
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
     },
+    /// Apply a validated hot-reload snapshot to an existing session without
+    /// changing its harness or treating the update as a user model switch.
+    ReloadModelConfig {
+        model_id: acp::ModelId,
+        sampling_config: sampler::SamplerConfig,
+        image_description_model: Option<String>,
+        inference_idle_timeout: std::time::Duration,
+        max_retries: u32,
+        auto_compact_threshold_percent: u8,
+    },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the
     /// session's `AgentRebuildSpec` and the new `AgentDefinition`,
     /// re-register MCP tools, swap the live `Agent`, rewrite the

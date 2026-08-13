@@ -251,6 +251,9 @@ pub struct SamplingClient {
     bearer_resolver: Option<crate::config::SharedBearerResolver>,
     /// Endpoint URL builder, resolved once from `base_url` + `query_params`.
     endpoint: EndpointTemplate,
+    /// Maximum silence between streamed events. Direct/side-query callers use
+    /// the same model/session value as the actor-backed sampler path.
+    idle_timeout: std::time::Duration,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -559,6 +562,7 @@ impl SamplingClient {
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
             endpoint,
+            idle_timeout: std::time::Duration::from_secs(config.idle_timeout_secs.unwrap_or(300)),
         })
     }
 
@@ -1732,7 +1736,7 @@ impl SamplingClient {
         request: ConversationRequest,
     ) -> Result<ConversationResponse> {
         let request_id = crate::types::RequestId::random();
-        let idle_timeout = std::time::Duration::from_secs(300);
+        let idle_timeout = self.idle_timeout;
         let result = match self.api_backend() {
             ApiBackend::ChatCompletions => {
                 let (raw, meta) = self.conversation_stream(request).await?;
@@ -1799,6 +1803,14 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
         }
+    }
+
+    #[test]
+    fn direct_client_uses_configured_stream_idle_timeout() {
+        let mut config = minimal_config();
+        config.idle_timeout_secs = Some(77);
+        let client = SamplingClient::new(config).expect("client");
+        assert_eq!(client.idle_timeout, std::time::Duration::from_secs(77));
     }
 
     /// Verify the serialized shape of StreamingChatRequest matches the

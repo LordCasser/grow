@@ -295,12 +295,9 @@ impl ConfigReloader {
                 .send(ConfigUpdate::Compat(Box::new(new_compat)));
         }
 
-        // Models — compare the provider hierarchy and global model settings.
-        let old_model_table = self.last_global_config.get("provider");
-        let new_model_table = new_global.get("provider");
-        let old_models_table = self.last_global_config.get("models");
-        let new_models_table = new_global.get("models");
-        if old_model_table != new_model_table || old_models_table != new_models_table {
+        // Models — compare provider definitions, global selection, and the
+        // per-model overrides consumed by `Config::config_models`.
+        if model_config_changed(&self.last_global_config, &new_global) {
             info!("model config change detected");
             let _ = self.config_update_tx.send(ConfigUpdate::ModelsChanged);
         }
@@ -320,6 +317,37 @@ impl ConfigReloader {
         self.last_global_config = new_global;
         Ok(())
     }
+}
+
+/// Start the file watcher and its [`ConfigReloader`] task as one runtime.
+///
+/// The returned watcher owns the OS watches and must be retained for as long
+/// as hot reload is expected to remain active. Keeping this pairing here makes
+/// both the leader and the in-process pager use the same debounce, config
+/// baseline, and change-detection path.
+pub fn start_config_reload(
+    grow_home: &Path,
+    extra_paths: &[PathBuf],
+    cwd: Option<&Path>,
+    remote_settings: Option<crate::util::config::RemoteSettings>,
+    config_update_tx: mpsc::UnboundedSender<ConfigUpdate>,
+    experimental_memory: bool,
+    no_memory: bool,
+    cancel: CancellationToken,
+) -> Option<super::watcher::ConfigFileWatcher> {
+    let (watcher, events_rx) =
+        super::watcher::ConfigFileWatcher::start(grow_home, extra_paths, cwd, None)?;
+    let initial_config = crate::config::load_effective_config()
+        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
+    let reloader = ConfigReloader::new(
+        initial_config,
+        remote_settings,
+        config_update_tx,
+        experimental_memory,
+        no_memory,
+    );
+    tokio::spawn(reloader.run(events_rx, cancel));
+    Some(watcher)
 }
 
 /// Derive the unique project cwds whose files were touched in this
@@ -418,6 +446,12 @@ fn parse_compat_config(config: &toml::Value) -> tools::types::compat::CompatConf
         .get("compat")
         .and_then(|v| v.clone().try_into().ok())
         .unwrap_or_default()
+}
+
+fn model_config_changed(old: &toml::Value, new: &toml::Value) -> bool {
+    ["provider", "models", "model", "auth_provider"]
+        .into_iter()
+        .any(|section| old.get(section) != new.get(section))
 }
 
 fn extract_ui_fields(config: &toml::Value) -> (Option<String>, bool, Option<String>) {
@@ -634,7 +668,7 @@ fork_secondary_model = "grow-4.5"
     }
 
     #[test]
-    fn models_changed_detects_new_byok_model() {
+    fn models_changed_detects_new_model_override() {
         let a = toml::Value::Table(toml::map::Map::new());
         let b: toml::Value = toml::from_str(
             r#"
@@ -644,14 +678,50 @@ base_url = "https://api.example.com/v1"
 "#,
         )
         .unwrap();
-        assert_ne!(a.get("model"), b.get("model"));
+        assert!(model_config_changed(&a, &b));
     }
 
     #[test]
     fn models_changed_detects_default_change() {
         let a: toml::Value = toml::from_str("[models]\ndefault = \"grow-code-fast-1\"").unwrap();
         let b: toml::Value = toml::from_str("[models]\ndefault = \"grow-code-slow-1\"").unwrap();
-        assert_ne!(a.get("models"), b.get("models"));
+        assert!(model_config_changed(&a, &b));
+    }
+
+    #[test]
+    fn models_changed_detects_provider_catalog_change() {
+        let a = toml::Value::Table(toml::map::Map::new());
+        let b: toml::Value = toml::from_str(
+            r#"
+[provider.deepseek]
+api_backend = "chat_completions"
+
+[provider.deepseek.models.v4-pro]
+name = "DeepSeek V4 Pro"
+"#,
+        )
+        .unwrap();
+        assert!(model_config_changed(&a, &b));
+    }
+
+    #[test]
+    fn models_changed_detects_auth_provider_change() {
+        let a = toml::Value::Table(toml::map::Map::new());
+        let b: toml::Value = toml::from_str(
+            r#"
+[auth_provider.corp]
+type = "oauth"
+"#,
+        )
+        .unwrap();
+        assert!(model_config_changed(&a, &b));
+    }
+
+    #[test]
+    fn unrelated_config_does_not_report_models_changed() {
+        let a: toml::Value = toml::from_str("[ui]\ntheme = \"light\"").unwrap();
+        let b: toml::Value = toml::from_str("[ui]\ntheme = \"dark\"").unwrap();
+        assert!(!model_config_changed(&a, &b));
     }
 
     #[test]

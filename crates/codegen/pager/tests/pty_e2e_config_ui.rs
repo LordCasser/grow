@@ -16,6 +16,8 @@ mod dashboard_overlay_tab_esc_backout_and_ctrl_backslash;
 mod extensions_modal_copy_hints_pty;
 #[path = "pty_e2e/iterm_readline_editing.rs"]
 mod iterm_readline_editing;
+#[path = "pty_e2e/model_config_hot_reload_in_grow_home.rs"]
+mod model_config_hot_reload_in_grow_home;
 #[path = "pty_e2e/prompt_suggestion_ghost_tab_accepts.rs"]
 mod prompt_suggestion_ghost_tab_accepts;
 #[path = "pty_e2e/reasoning_efforts_fallback_menu_matches_builtin.rs"]

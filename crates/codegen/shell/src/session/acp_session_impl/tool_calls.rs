@@ -2735,7 +2735,7 @@ impl SessionActor {
         crate::agent::config::stamp_session_local_sampler_fields(
             &mut sampler_config,
             &active_session_config,
-            Some(self.max_retries),
+            Some(self.max_retries.get()),
         );
         let model = sampler_config.model.clone();
         let client = sampler::SamplingClient::new(sampler_config)
@@ -2901,7 +2901,8 @@ impl SessionActor {
                     );
                 }
                 InlineAttachVerdict::Attach => {
-                    if let Some(configured_model) = self.image_description_model.as_deref() {
+                    let configured_model = self.image_description_model.read().clone();
+                    if let Some(configured_model) = configured_model.as_deref() {
                         use base64::Engine as _;
                         let described = base64::engine::general_purpose::STANDARD
                             .decode(&image_content.data)
@@ -2944,8 +2945,9 @@ impl SessionActor {
                 }
             }
         }
+        let configured_model = self.image_description_model.read().clone();
         if !extracted_images.is_empty()
-            && let Some(configured_model) = self.image_description_model.as_deref()
+            && let Some(configured_model) = configured_model.as_deref()
         {
             use base64::Engine as _;
             let path = tool_parsed_args

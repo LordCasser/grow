@@ -479,8 +479,8 @@ pub(crate) struct SessionActor {
     /// Per-chunk idle timeout for inference streaming. If no SSE chunk is received
     /// within this duration, the stream is aborted with a non-retryable error.
     /// Resolved at construction: per-model config.toml → remote settings → 300s default.
-    pub(crate) inference_idle_timeout: Duration,
-    pub(crate) max_retries: u32,
+    pub(crate) inference_idle_timeout: std::cell::Cell<Duration>,
+    pub(crate) max_retries: std::cell::Cell<u32>,
     /// Maximum tool-use turns before the session stops. `None` = unlimited.
     pub(crate) max_turns: Option<usize>,
     /// Pending mid-turn interjections from the user (Ctrl+Enter).
@@ -723,7 +723,7 @@ pub(crate) struct SessionActor {
     pub(crate) rebuild_spec: Arc<crate::session::agent_rebuild::AgentRebuildSpec>,
     /// Explicitly configured vision model for `read_file` image/PDF results.
     /// `None` leaves those images on the active session model path.
-    pub(crate) image_description_model: Option<String>,
+    pub(crate) image_description_model: parking_lot::RwLock<Option<String>>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
     /// Per-subagent token state keyed by `subagent_id`; sums into

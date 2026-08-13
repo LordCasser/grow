@@ -447,33 +447,84 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     let toml_config = crate::agent::config::Config::new_from_toml_cfg(&disk_config)
         .map_err(|e| acp::Error::internal_error().data(e))?;
 
-    // Merge TOML-derived model fields into the agent's in-memory config so
-    // runtime-only fields (#[serde(skip)]: remote_settings, endpoints, CLI
-    // flags) are preserved. Only model-related TOML fields are refreshed.
-    {
-        let agent_config = agent.cfg.borrow();
-        let overrides = crate::config::ModelOverrideConfig::resolve(
-            agent_config.session_summary_model_override.as_deref(),
-            &disk_config,
-            agent_config.remote_settings.as_ref(),
-        );
-        drop(agent_config);
-        let mut agent_config = agent.cfg.borrow_mut();
-        agent_config.models = toml_config.models.clone();
-        agent_config.config_models = toml_config.config_models.clone();
-        agent_config.session_summary_model = overrides.session_summary;
-        agent_config.image_description_model = overrides.image_description;
-        agent_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
-    }
-    // Recompute the campaign overlay + `pre_campaign_default` (the catalog-miss
-    // fallback) so reload matches spawn; `new_from_toml_cfg` reset it to None.
-    {
-        let mut agent_config = agent.cfg.borrow_mut();
-        crate::util::config::sync_campaign_fields(&mut agent_config);
-    }
-    let merged_config = agent.cfg.borrow().clone();
+    // Build the complete candidate off to the side. Runtime-only fields
+    // (remote settings, endpoints, CLI flags) survive, while no live reader is
+    // changed until the catalog validates as one atomic snapshot.
+    let mut merged_config = agent.cfg.borrow().clone();
+    let overrides = crate::config::ModelOverrideConfig::resolve(
+        merged_config.session_summary_model_override.as_deref(),
+        &disk_config,
+        merged_config.remote_settings.as_ref(),
+    );
+    merged_config.models = toml_config.models;
+    merged_config.config_models = toml_config.config_models;
+    merged_config.model_providers = toml_config.model_providers;
+    merged_config.auth_providers = toml_config.auth_providers;
+    merged_config.config_warnings = toml_config.config_warnings;
+    merged_config.session_summary_model = overrides.session_summary;
+    merged_config.image_description_model = overrides.image_description;
+    merged_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
+    crate::util::config::sync_campaign_fields(&mut merged_config);
 
-    agent.models_manager.apply_config(merged_config);
+    agent
+        .models_manager
+        .apply_config(merged_config.clone())
+        .map_err(|error| acp::Error::invalid_request().data(error))?;
+    *agent.cfg.borrow_mut() = merged_config.clone();
+
+    // Existing sessions adopt the same validated provider snapshot at their
+    // actor mailbox boundary. A removed selection falls back to the newly
+    // resolved default; explicit per-session reasoning effort remains intact.
+    let fallback_model = agent.models_manager.current_model_id();
+    let live_catalog = agent.models_manager.models();
+    for handle in agent.sessions.borrow_mut().values_mut() {
+        let selected = if agent
+            .models_manager
+            .model_in_catalog(handle.model_id.0.as_ref())
+        {
+            handle.model_id.clone()
+        } else {
+            fallback_model.clone()
+        };
+        let Some(mut sampling_config) = agent
+            .models_manager
+            .sampling_config_for_model(selected.0.as_ref())
+        else {
+            continue;
+        };
+        let inference_idle_timeout = {
+            let per_model =
+                crate::agent::config::find_model_by_id(&live_catalog, selected.0.as_ref())
+                    .and_then(|entry| entry.info.inference_idle_timeout_secs);
+            let remote = merged_config
+                .remote_settings
+                .as_ref()
+                .and_then(|settings| settings.inference_idle_timeout_secs);
+            std::time::Duration::from_secs(per_model.or(remote).unwrap_or(600).max(10))
+        };
+        let max_retries = sampler::resolve_max_retries(sampling_config.max_retries);
+        let auto_compact_threshold_percent =
+            crate::util::config::resolve_auto_compact_threshold_percent(
+                &merged_config,
+                selected.0.as_ref(),
+                crate::agent::config::find_model_by_id(&live_catalog, selected.0.as_ref())
+                    .map(|entry| &entry.info),
+            );
+        if handle.reasoning_effort.is_some() {
+            sampling_config.reasoning_effort = handle.reasoning_effort;
+        }
+        let _ = handle.cmd_tx.send(
+            crate::session::commands::SessionCommand::ReloadModelConfig {
+                model_id: selected.clone(),
+                sampling_config,
+                image_description_model: merged_config.image_description_model.clone(),
+                inference_idle_timeout,
+                max_retries,
+                auto_compact_threshold_percent,
+            },
+        );
+        handle.model_id = selected;
+    }
     let count = agent.models_manager.models().len();
     tracing::info!(count, "model list reloaded from config.toml");
     ExtMethodResult::success(serde_json::json!({ "models": count }))

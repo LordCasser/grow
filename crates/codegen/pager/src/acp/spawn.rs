@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
+use agent_client_protocol as acp;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
@@ -176,6 +177,8 @@ pub async fn spawn_shell(
     let (acp_client, acp_agent) = acp_channels();
 
     let skills_paths = agent_config.skills.paths.clone();
+    let experimental_memory = agent_config.cli_experimental_memory;
+    let no_memory = agent_config.cli_no_memory;
 
     let spawn_fn: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<MvpAgent>> + Send + 'static> = {
         Box::new(move |client_tx| {
@@ -190,8 +193,14 @@ pub async fn spawn_shell(
     };
 
     // Spawn the agent thread with direct dispatch
-    let handle =
-        spawn_agent_thread_direct(spawn_fn, acp_agent, agent_cancel.clone(), skills_paths)?;
+    let handle = spawn_agent_thread_direct(
+        spawn_fn,
+        acp_agent,
+        agent_cancel.clone(),
+        skills_paths,
+        experimental_memory,
+        no_memory,
+    )?;
 
     Ok(SpawnedAgent {
         thread_handle: handle,
@@ -209,6 +218,8 @@ fn spawn_agent_thread_direct(
     channel: AcpAgentChannel,
     cancel: CancellationToken,
     skills_paths: Vec<String>,
+    experimental_memory: bool,
+    no_memory: bool,
 ) -> Result<thread::JoinHandle<Result<()>>> {
     Ok(thread::Builder::new()
         .name("acp-agent-worker".into())
@@ -225,6 +236,53 @@ fn spawn_agent_thread_direct(
                 let gw_rx =
                     AcpGatewayReceiver::new(channel.rx, agent_rc.clone()).with_tracing(true);
                 tokio::task::spawn_local(gw_rx.run());
+
+                // The in-process pager bypasses the long-lived leader startup
+                // path, so it must attach the same global config reloader here.
+                // Without this runtime, models added to config.toml after the
+                // pager starts never reach `/model` until the process restarts.
+                let (config_update_tx, mut config_update_rx) =
+                    tokio::sync::mpsc::unbounded_channel();
+                let _config_watcher = shell::config::reloader::start_config_reload(
+                    &shell::util::grow_home::grow_home(),
+                    &[],
+                    None,
+                    None,
+                    config_update_tx,
+                    experimental_memory,
+                    no_memory,
+                    cancel.clone(),
+                )
+                .map(|watcher| {
+                    let agent = agent_rc.clone();
+                    tokio::task::spawn_local(async move {
+                        use shell::config::reloader::ConfigUpdate;
+
+                        while let Some(update) = config_update_rx.recv().await {
+                            if !matches!(update, ConfigUpdate::ModelsChanged) {
+                                continue;
+                            }
+                            tracing::info!(
+                                "Model config change detected — reloading in-process agent model list"
+                            );
+                            let params = serde_json::value::to_raw_value(&serde_json::json!({}))
+                                .expect("empty config reload params must serialize");
+                            let request = acp::ExtRequest::new(
+                                "grow/internal/reload_models",
+                                params.into(),
+                            );
+                            if let Err(error) =
+                                shell::extensions::session_admin::handle(&agent, &request).await
+                            {
+                                tracing::warn!(
+                                    error = ?error,
+                                    "failed to reload in-process agent model list"
+                                );
+                            }
+                        }
+                    });
+                    watcher
+                });
 
                 let _skills_watcher = {
                     let cwd = std::env::current_dir().unwrap_or_default();

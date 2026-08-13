@@ -45,18 +45,18 @@ pub struct ModelsManager {
     inner: Arc<Inner>,
 }
 
-/// Catalog fields written together under one lock, so readers never see a torn mix.
-#[derive(Default)]
+/// Complete live model configuration written under one lock, so readers never
+/// observe a new provider config with an old catalog/current selection.
 struct CatalogState {
     models: IndexMap<String, ModelEntry>,
     /// `allowed_models` matched nothing; the prompt path blocks instead.
     allowlist_excludes_all: bool,
+    current_model_id: acp::ModelId,
+    cfg: config::Config,
 }
 
 struct Inner {
     catalog: RwLock<CatalogState>,
-    current_model_id: RwLock<acp::ModelId>,
-    cfg: RwLock<config::Config>,
     gateway: RwLock<Option<acp_transport::AcpAgentGatewaySender>>,
     /// Model-switch signal: a generation counter bumped when the current model id changes.
     model_switch_watch: tokio::sync::watch::Sender<u64>,
@@ -83,9 +83,9 @@ impl ModelsManager {
                 catalog: RwLock::new(CatalogState {
                     allowlist_excludes_all: allowlist_matches_nothing(&cfg, &models),
                     models,
+                    current_model_id,
+                    cfg,
                 }),
-                current_model_id: RwLock::new(current_model_id),
-                cfg: RwLock::new(cfg),
                 gateway: RwLock::new(None),
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
             }),
@@ -126,36 +126,21 @@ impl ModelsManager {
     }
 
     /// Swap config, rebuild catalog, and reselect the model.
-    pub fn apply_config(&self, new_config: config::Config) {
-        if let Err(e) = new_config.validate_llm_configuration() {
-            tracing::error!(error = %e, "ignoring config reload: invalid LLM configuration");
-            return;
-        }
-        if let Err(e) = new_config.validate_model_filters() {
-            tracing::error!(error = %e, "ignoring config reload: invalid model filters");
-            return;
-        }
+    pub fn apply_config(&self, new_config: config::Config) -> Result<(), String> {
+        new_config.validate_llm_configuration()?;
+        new_config.validate_model_filters()?;
         let new_catalog = resolve_model_catalog(&new_config);
-        if let Err(e) = validate_selectable(&new_config, &new_catalog) {
-            tracing::error!(error = %e, "ignoring config reload: allowed_models excludes all models");
-            return;
-        }
+        validate_selectable(&new_config, &new_catalog)?;
 
-        let (old_preferred, old_default_is_campaign) = {
-            let cfg = self.inner.cfg.read();
-            (
-                cfg.models.default.clone(),
-                cfg.models.default_is_campaign_driven,
-            )
-        };
+        // Serialize selection against an explicit model switch. Validation and
+        // catalog construction stay outside the lock, but the old selection is
+        // read only once the candidate is ready to commit; a concurrent user
+        // choice therefore cannot be overwritten from a stale snapshot.
+        let mut state = self.inner.catalog.write();
+        let old_preferred = state.cfg.models.default.clone();
+        let old_default_is_campaign = state.cfg.models.default_is_campaign_driven;
+        let old_current = state.current_model_id.clone();
         let new_preferred = new_config.models.default.clone();
-        *self.inner.cfg.write() = new_config.clone();
-        {
-            let mut cat = self.inner.catalog.write();
-            cat.allowlist_excludes_all = allowlist_matches_nothing(&new_config, &new_catalog);
-            cat.models = new_catalog;
-        }
-
         let preferred_changed = new_preferred != old_preferred && new_preferred.is_some();
         let mut campaign_defaults = std::collections::HashSet::new();
         if new_config.models.default_is_campaign_driven
@@ -168,28 +153,43 @@ impl ModelsManager {
         }
         let campaign_only_flip =
             is_campaign_only_flip(&old_preferred, &new_preferred, &campaign_defaults);
-        let current_still_ok = {
-            let cat = self.inner.catalog.read();
-            let models = &cat.models;
-            let cur = self.inner.current_model_id.read();
-            models
-                .get(cur.0.as_ref())
-                .is_some_and(|e| e.info.user_selectable)
-        };
-        if preferred_changed && !(campaign_only_flip && current_still_ok) {
-            self.reselect_default_model(&new_config);
+        let current_still_ok = new_catalog
+            .get(old_current.0.as_ref())
+            .is_some_and(|entry| entry.info.user_selectable);
+        let new_current = if preferred_changed && !(campaign_only_flip && current_still_ok) {
+            let (key, _, _) = resolve_default_model(&new_config, &new_catalog);
+            acp::ModelId::new(Arc::from(key))
+        } else if current_still_ok {
+            old_current.clone()
         } else {
-            self.reselect_current_model_if_missing(&new_config);
+            let (key, _, source) = resolve_default_model(&new_config, &new_catalog);
+            let selected = acp::ModelId::new(Arc::from(key));
+            tracing::info!(
+                old = %old_current.0,
+                new = %selected.0,
+                source = %source,
+                "current model not in new catalog, reselecting default"
+            );
+            selected
+        };
+
+        // Validation and selection are complete before the single commit.
+        // A failed candidate leaves every reader on the previous snapshot.
+        *state = CatalogState {
+            allowlist_excludes_all: allowlist_matches_nothing(&new_config, &new_catalog),
+            models: new_catalog,
+            current_model_id: new_current.clone(),
+            cfg: new_config,
+        };
+        drop(state);
+        if new_current != old_current {
+            self.inner
+                .model_switch_watch
+                .send_modify(|generation| *generation += 1);
         }
 
         self.notify_models_updated();
-    }
-
-    /// [`Self::apply_config`] plus an unconditional default re-resolve.
-    pub fn apply_config_reselecting_default(&self, new_config: config::Config) {
-        self.apply_config(new_config.clone());
-        self.reselect_default_model(&new_config);
-        self.notify_models_updated();
+        Ok(())
     }
 
     // ── Accessors ───────────────────────────────────────────────────
@@ -199,7 +199,7 @@ impl ModelsManager {
     }
 
     pub fn endpoints(&self) -> config::EndpointsConfig {
-        self.inner.cfg.read().endpoints.clone()
+        self.inner.catalog.read().cfg.endpoints.clone()
     }
 
     /// ACP-visible (non-hidden) projection of the catalog.
@@ -225,7 +225,7 @@ impl ModelsManager {
     }
 
     pub fn current_model_id(&self) -> acp::ModelId {
-        self.inner.current_model_id.read().clone()
+        self.inner.catalog.read().current_model_id.clone()
     }
 
     pub fn set_current_model_id(&self, id: acp::ModelId) {
@@ -234,9 +234,9 @@ impl ModelsManager {
 
     fn set_current_model_id_internal(&self, id: acp::ModelId) {
         let changed = {
-            let mut cur = self.inner.current_model_id.write();
-            let changed = *cur != id;
-            *cur = id;
+            let mut state = self.inner.catalog.write();
+            let changed = state.current_model_id != id;
+            state.current_model_id = id;
             changed
         };
         if changed {
@@ -330,7 +330,12 @@ impl ModelsManager {
 
     /// Resolved next-prompt-suggestion model pin from the live config
     pub fn prompt_suggest_model_pin(&self) -> crate::config::PromptSuggestModelPin {
-        self.inner.cfg.read().prompt_suggest_model_pin.clone()
+        self.inner
+            .catalog
+            .read()
+            .cfg
+            .prompt_suggest_model_pin
+            .clone()
     }
 
     /// Whether `model_id` resolves in the current catalog — as a config key
@@ -368,12 +373,11 @@ impl ModelsManager {
 
     /// Build a `SamplingConfig` from the current model + auth state.
     pub fn sampling_config(&self) -> SamplingConfig {
-        let config = self.inner.cfg.read().clone();
-        let current_model_id = self.current_model_id();
-        let all_models = self.models();
-        let current_model = match all_models
-            .get(current_model_id.0.as_ref())
-            .or_else(|| all_models.values().next())
+        let state = self.inner.catalog.read();
+        let current_model = match state
+            .models
+            .get(state.current_model_id.0.as_ref())
+            .or_else(|| state.models.values().next())
         {
             Some(m) => m,
             None => panic!("validated LLM configuration produced an empty model catalog"),
@@ -384,57 +388,24 @@ impl ModelsManager {
         sampling_config_for_model(
             current_model,
             credentials,
-            config.endpoints.alpha_test_key.clone(),
+            state.cfg.endpoints.alpha_test_key.clone(),
         )
+    }
+
+    /// Build the live provider config for one session's selected catalog ID.
+    /// Resolution accepts either the catalog slug or the provider model ID.
+    pub fn sampling_config_for_model(&self, model_id: &str) -> Option<SamplingConfig> {
+        let state = self.inner.catalog.read();
+        let model = config::find_model_by_id(&state.models, model_id)?;
+        Some(sampling_config_for_model(
+            model,
+            resolve_credentials(model),
+            state.cfg.endpoints.alpha_test_key.clone(),
+        ))
     }
 
     pub fn allowlist_excludes_all(&self) -> bool {
         self.inner.catalog.read().allowlist_excludes_all
-    }
-
-    /// Re-pick the default if `current_model_id` is gone from the catalog *or*
-    fn reselect_current_model_if_missing(&self, config: &config::Config) {
-        let current = self.inner.current_model_id.read().clone();
-        let needs_reselection = {
-            let cat = self.inner.catalog.read();
-            let models = &cat.models;
-            match models.get(current.0.as_ref()) {
-                None => true,
-                Some(entry) => !entry.info.user_selectable,
-            }
-        };
-        if !needs_reselection {
-            return;
-        }
-        let (key, _, source) = {
-            let cat = self.inner.catalog.read();
-            let models = &cat.models;
-            resolve_default_model(config, models)
-        };
-        let new_id = acp::ModelId::new(Arc::from(key));
-        tracing::info!(
-            old = %current.0, new = %new_id.0, source = %source,
-            "current model not in new catalog, reselecting default"
-        );
-        self.set_current_model_id_internal(new_id);
-    }
-
-    /// Re-resolve the default model against the current catalog.
-    fn reselect_default_model(&self, config: &config::Config) {
-        let (key, _, source) = {
-            let cat = self.inner.catalog.read();
-            let models = &cat.models;
-            resolve_default_model(config, models)
-        };
-        let new_id = acp::ModelId::new(Arc::from(key));
-        let current = self.inner.current_model_id.read().clone();
-        if current.0.as_ref() != new_id.0.as_ref() {
-            tracing::info!(
-                old = %current.0, new = %new_id.0, source = %source,
-                "re-resolved default model after catalog populated"
-            );
-            self.set_current_model_id_internal(new_id);
-        }
     }
 }
 

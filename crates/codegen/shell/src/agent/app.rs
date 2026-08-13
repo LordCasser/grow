@@ -729,12 +729,16 @@ pub async fn run_leader(
             // switch for the rollout).
             let watcher_cwd = recursive_config_watch_enabled.then_some(cwd_for_watcher.as_path());
 
-            let _config_watcher = if let Some((watcher, events_rx)) =
-                crate::config::watcher::ConfigFileWatcher::start(
+            let _config_watcher = if let Some(watcher) =
+                crate::config::reloader::start_config_reload(
                     &grow_home::grow_home(),
                     &watch_paths,
                     watcher_cwd,
-                    None,
+                    None, // settings stream in after readiness via background refresh
+                    config_update_tx,
+                    agent_config.cli_experimental_memory,
+                    agent_config.cli_no_memory,
+                    cancel_clone.clone(),
                 ) {
                 // Share ownership between the leader's
                 // long-lived binding and the per-cwd dynamic
@@ -765,16 +769,6 @@ pub async fn run_leader(
                         }
                     });
                 }
-                let initial_config = crate::config::load_effective_config()
-                    .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
-                let reloader = crate::config::reloader::ConfigReloader::new(
-                    initial_config,
-                    None, // settings stream in after readiness via background refresh
-                    config_update_tx,
-                    agent_config.cli_experimental_memory,
-                    agent_config.cli_no_memory,
-                );
-                tokio::spawn(reloader.run(events_rx, cancel_clone.clone()));
                 Some(watcher)
             } else {
                 warn!("Config file watcher failed to start; hot-reload disabled");

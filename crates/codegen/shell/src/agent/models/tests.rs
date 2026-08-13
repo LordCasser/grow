@@ -55,7 +55,9 @@ fn from_config_uses_only_explicit_provider_models() {
 fn apply_config_preserves_an_existing_session_selection() {
     let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
     manager.set_current_model_id(acp::ModelId::new("local/beta"));
-    manager.apply_config(two_model_config("local/alpha"));
+    manager
+        .apply_config(two_model_config("local/alpha"))
+        .unwrap();
     assert_eq!(manager.current_model_id().0.as_ref(), "local/beta");
 }
 
@@ -70,7 +72,7 @@ fn apply_config_reselects_when_current_model_disappears() {
         "#,
         "local/alpha",
     );
-    manager.apply_config(next);
+    manager.apply_config(next).unwrap();
     assert_eq!(manager.current_model_id().0.as_ref(), "local/alpha");
 }
 
@@ -110,6 +112,56 @@ fn sampling_config_uses_selected_provider_credentials() {
     let sampling = manager.sampling_config();
     assert_eq!(sampling.base_url, "https://llm.example/v1");
     assert_eq!(sampling.api_key.as_deref(), Some("test-key"));
+}
+
+#[test]
+fn invalid_reload_leaves_the_live_snapshot_unchanged() {
+    let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
+    manager.set_current_model_id(acp::ModelId::new("local/beta"));
+    let before_models = manager.models();
+    let before_current = manager.current_model_id();
+    let before_route = manager
+        .sampling_config_for_model("local/beta")
+        .unwrap()
+        .base_url;
+
+    let mut invalid = two_model_config("local/alpha");
+    invalid.models.allowed_models = Some(vec!["local/missing".into()]);
+    assert!(manager.apply_config(invalid).is_err());
+
+    assert_eq!(manager.models().len(), before_models.len());
+    assert_eq!(manager.current_model_id(), before_current);
+    assert_eq!(
+        manager
+            .sampling_config_for_model("local/beta")
+            .unwrap()
+            .base_url,
+        before_route
+    );
+}
+
+#[test]
+fn live_sampling_lookup_uses_reloaded_provider_route() {
+    let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
+    assert_eq!(
+        manager
+            .sampling_config_for_model("local/alpha")
+            .unwrap()
+            .base_url,
+        "https://llm.example/v1"
+    );
+    let mut next = two_model_config("local/alpha");
+    next.config_models.values_mut().for_each(|model| {
+        model.base_url = Some("https://new.example/v2".into());
+    });
+    manager.apply_config(next).unwrap();
+    assert_eq!(
+        manager
+            .sampling_config_for_model("local/alpha")
+            .unwrap()
+            .base_url,
+        "https://new.example/v2"
+    );
 }
 
 #[test]

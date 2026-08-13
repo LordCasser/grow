@@ -371,7 +371,7 @@ impl SessionActor {
             context_window: cfg.context_window.get(),
             reasoning_effort: cfg.reasoning_effort,
             force_http1: false,
-            max_retries: Some(self.max_retries),
+            max_retries: Some(self.max_retries.get()),
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
             idle_timeout_secs: None,
             origin_client: self.origin_client.clone(),
@@ -527,7 +527,7 @@ impl SessionActor {
         crate::agent::config::stamp_session_local_sampler_fields(
             &mut cfg,
             &active_session_config,
-            Some(self.max_retries),
+            Some(self.max_retries.get()),
         );
         let model = cfg.model.clone();
         let client = sampler::SamplingClient::new(cfg).map_err(|error| {
@@ -547,6 +547,7 @@ impl SessionActor {
         self.refresh_byok_credential().await;
         let mut full_config = self.reconstruct_full_config().await;
         full_config.force_http1 = force_http1;
+        full_config.idle_timeout_secs = Some(self.inference_idle_timeout.get().as_secs());
         let sampling_client =
             sampler::SamplingClient::new(full_config).map_err(|e| self.to_acp_error(e))?;
         Ok(sampling_client)
@@ -570,7 +571,7 @@ impl SessionActor {
         {
             sampler_config.doom_loop_recovery = None;
         }
-        sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
+        sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.get().as_secs());
         self.sampler_handle.update_config(sampler_config);
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {

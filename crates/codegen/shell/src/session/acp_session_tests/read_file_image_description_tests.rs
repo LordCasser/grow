@@ -70,7 +70,7 @@ async fn configured_image_description_never_silently_falls_back_to_main_model() 
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            actor.image_description_model = Some("missing-vision-model".to_owned());
+            *actor.image_description_model.write() = Some("missing-vision-model".to_owned());
 
             let result = run_image_result(&actor).await;
 
@@ -94,7 +94,7 @@ async fn configured_image_description_owns_images_extracted_from_file_content() 
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            actor.image_description_model = Some("missing-vision-model".to_owned());
+            *actor.image_description_model.write() = Some("missing-vision-model".to_owned());
             let image = test_image_content();
             let result = ToolRunResult {
                 output: ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
@@ -139,6 +139,55 @@ async fn configured_image_description_owns_images_extracted_from_file_content() 
                     .content
                     .contains("Configured image description failed")
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_model_reload_updates_every_next_turn_sampler_knob() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let mut sampling = sampler::SamplerConfig::default();
+            sampling.base_url = "https://reloaded.example/v2".into();
+            sampling.model = "reloaded-model".into();
+            sampling.context_window = 64_000;
+            sampling.max_retries = Some(2);
+            sampling
+                .query_params
+                .insert("deployment".into(), "next".into());
+
+            actor
+                .handle_reload_model_config(
+                    acp::ModelId::new("provider/reloaded"),
+                    sampling,
+                    Some("provider/vision".into()),
+                    std::time::Duration::from_secs(77),
+                    2,
+                    73,
+                )
+                .await;
+
+            let live = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            assert_eq!(live.base_url, "https://reloaded.example/v2");
+            assert_eq!(live.model, "reloaded-model");
+            assert_eq!(
+                live.query_params.get("deployment").map(String::as_str),
+                Some("next")
+            );
+            assert_eq!(
+                actor.image_description_model.read().as_deref(),
+                Some("provider/vision")
+            );
+            assert_eq!(actor.inference_idle_timeout.get().as_secs(), 77);
+            assert_eq!(actor.max_retries.get(), 2);
+            assert_eq!(actor.compaction.threshold_percent.get(), 73);
+            let next_turn = actor.reconstruct_full_config().await;
+            assert_eq!(next_turn.max_retries, Some(2));
         })
         .await;
 }

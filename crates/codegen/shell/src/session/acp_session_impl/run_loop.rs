@@ -962,6 +962,25 @@ pub(super) async fn run_session(
                         let updated_model_id = session.handle_set_session_model(model_id, sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
                         let _ = responds_to.send(updated_model_id);
                     }
+                    SessionCommand::ReloadModelConfig {
+                        model_id,
+                        sampling_config,
+                        image_description_model,
+                        inference_idle_timeout,
+                        max_retries,
+                        auto_compact_threshold_percent,
+                    } => {
+                        session
+                            .handle_reload_model_config(
+                                model_id,
+                                sampling_config,
+                                image_description_model,
+                                inference_idle_timeout,
+                                max_retries,
+                                auto_compact_threshold_percent,
+                            )
+                            .await;
+                    }
                     SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                         let outcome = session.handle_rebuild_agent_for_definition(definition).await;
                         let _ = responds_to.send(outcome);
