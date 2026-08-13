@@ -11,7 +11,7 @@ Grow 自己的边界。
 Grow 不是 xAI 官方产品，也不会内置 Grok 模型、推理端点或产品凭据。所有模型都由用户通过
 BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
-当前源码版本为 `1.1.7`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
+当前源码版本为 `1.1.8`。完整配置参考 [config.example.toml](config.example.toml)，分主题文档见
 [Grow User Guide](crates/codegen/pager/docs/user-guide/README.md)。
 
 ## Fork 之后改了什么
@@ -29,18 +29,18 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 | 数据与网络 | 删除遥测上传、计费订阅、远程会话同步、托管搜索、远程公告和媒体生成等产品服务链。模型请求只访问当前 Provider。 |
 | 分发 | GitHub Release 是唯一官方二进制渠道；覆盖 macOS、GNU/musl Linux 与 Windows 的 x86_64/arm64、Linux riscv64 和 OHOS arm64。除 OHOS 外，产物内嵌固定版本 `rg`。 |
 
-### 1.1.7 重点
+### 1.1.8 重点
 
-- Workflow 成为公共 Workflow Definition 的唯一协作协议；Tool、slash 管理和 Grow 发起的文件写入
-  同时校验 turn 捕获与实时 Behavior，私有 Deep Research runtime 保持隔离。
-- session Workflow Workspace 支持多草稿、单焦点、派生编辑、元数据搜索、验证缓存、保存提示、
-  Project/User 原子发布、乐观并发冲突与崩溃恢复。
-- Workflow Run 固化 Definition ID、scope、内容哈希、Rhai 和参数快照；同一 Definition 可并行运行，
-  后续修改只影响下一次 Run。
-- `/workflows` 统一展示 Definitions、Runs 和 Registry diagnostics；`/workflow-run` 裸调用打开选择器，
-  不再隐式启动最近任务。
+- 子 Agent 的能力围栏与权限模式恢复为正交关系：围栏内普通调用不再滥用 Auto 判断，Shell 二次
+  风险与显式能力扩展分别按 `always-approve`、`auto`、`ask` 裁决。
+- Auto 判断使用主 Agent 当前任务上下文的只读临时分支；三类 API backend 使用原生 JSON 输出约束，
+  空、错误或瞬态失败在同一总时限内有限重传，判断消息和结果不进入正常上下文。
+- 子 Agent 权限拒绝与超时降为工具级失败，后续工具和模型采样继续；Ask 提示穿透到所属主任务，
+  权限审计按连续事件合并，并支持双击单条详情。
+- 文本模型遇到图片输入拒绝时可原子移除或转换图片后重采样；Pager session 也可热加载模型目录，
+  模型选择反馈明确区分当前 session 与下一个 session。
 
-版本级变更见 [1.1.7 release notes](crates/codegen/shell/changelogs/1.1.7.md)。
+版本级变更见 [1.1.8 release notes](crates/codegen/shell/changelogs/1.1.8.md)。
 
 ## 安装
 
@@ -51,21 +51,21 @@ BYOK 配置接入；会话、诊断和工作区状态默认保存在本地。
 
 | 平台 | Release 资产 |
 | --- | --- |
-| macOS Apple Silicon | `grow-1.1.7-macos-aarch64.tar.gz` |
-| macOS Intel | `grow-1.1.7-macos-x86_64.tar.gz` |
-| Linux x86_64 | `grow-1.1.7-linux-x86_64.tar.gz` |
-| Linux arm64 | `grow-1.1.7-linux-aarch64.tar.gz` |
-| Linux riscv64 | `grow-1.1.7-linux-riscv64.tar.gz` |
-| Linux x86_64（musl） | `grow-1.1.7-linux-x86_64-musl.tar.gz` |
-| Linux arm64（musl） | `grow-1.1.7-linux-aarch64-musl.tar.gz` |
-| Windows x86_64 | `grow-1.1.7-windows-x86_64.tar.gz` |
-| Windows arm64 | `grow-1.1.7-windows-aarch64.tar.gz` |
-| OpenHarmony arm64 | `grow-1.1.7-ohos-aarch64.tar.gz` |
+| macOS Apple Silicon | `grow-1.1.8-macos-aarch64.tar.gz` |
+| macOS Intel | `grow-1.1.8-macos-x86_64.tar.gz` |
+| Linux x86_64 | `grow-1.1.8-linux-x86_64.tar.gz` |
+| Linux arm64 | `grow-1.1.8-linux-aarch64.tar.gz` |
+| Linux riscv64 | `grow-1.1.8-linux-riscv64.tar.gz` |
+| Linux x86_64（musl） | `grow-1.1.8-linux-x86_64-musl.tar.gz` |
+| Linux arm64（musl） | `grow-1.1.8-linux-aarch64-musl.tar.gz` |
+| Windows x86_64 | `grow-1.1.8-windows-x86_64.tar.gz` |
+| Windows arm64 | `grow-1.1.8-windows-aarch64.tar.gz` |
+| OpenHarmony arm64 | `grow-1.1.8-ohos-aarch64.tar.gz` |
 
 选择对应资产后安装：
 
 ```sh
-GROW_VERSION=1.1.7
+GROW_VERSION=1.1.8
 GROW_ASSET="grow-${GROW_VERSION}-macos-aarch64.tar.gz" # 按上表替换
 
 curl -fLO "https://github.com/LordCasser/grow/releases/download/v${GROW_VERSION}/${GROW_ASSET}"
@@ -78,7 +78,7 @@ grow --version
 Windows PowerShell：
 
 ```powershell
-$GrowVersion = "1.1.7"
+$GrowVersion = "1.1.8"
 $GrowAsset = "grow-$GrowVersion-windows-x86_64.tar.gz" # arm64 时替换资产名
 
 Invoke-WebRequest `
@@ -361,7 +361,7 @@ cargo build --locked --release -p cli --bin grow --target <target>
 Release workflow 另外构建 `riscv64gc-unknown-linux-gnu`。GNU 资产以 glibc 2.28 为最低基线，
 musl 与 riscv64 通过 `cross` 构建；Windows 使用静态 CRT。
 
-## 1.1.7 发布准备
+## 1.1.8 发布准备
 
 Grow 的可发布应用 crate 继承根 workspace 版本；部分内部 leaf crate 仍保持自己的 `0.1.0`
 版本。tag 必须与 `cli` / workspace 版本一致。
@@ -379,18 +379,18 @@ cargo test --locked -p shell --lib -- --test-threads=4
 cargo test --locked -p pager --lib
 cargo test --locked -p shell --test test_mcp_permission_persistence
 
-GROW_VERSION=1.1.7 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
+GROW_VERSION=1.1.8 GROW_TOOLS_BUNDLE_RG_PATH="$(command -v rg)" \
   cargo build --locked --profile release-dist -p cli --bin grow
 ./target/release-dist/grow --version
 ```
 
 release commit 完成且工作区干净后，可以用 `scripts/act-release.sh validate` 在本地校验 tag/version
-契约；脚本会在缺少 `v1.1.7` 时只创建本地 tag，不会推送。
+契约；脚本会在缺少 `v1.1.8` 时只创建本地 tag，不会推送。
 
 正式发布流程：
 
 1. 提交版本、lockfile、release notes 和文档。
-2. 创建并推送 annotated tag `v1.1.7`，不要提前创建公开 Release；然后从默认分支手动运行
+2. 创建并推送 annotated tag `v1.1.8`，不要提前创建公开 Release；然后从默认分支手动运行
    [release workflow](.github/workflows/release.yml)，传入这个已有 tag。workflow checkout 精确 tag，
    但让 Cargo 缓存保留在默认分支作用域以供后续版本复用。
 3. workflow 通过 matrix 构建 10 个目标；除 OHOS 外均嵌入
