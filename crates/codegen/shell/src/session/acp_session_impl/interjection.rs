@@ -95,9 +95,21 @@ impl SessionActor {
         images: &[acp::ImageContent],
     ) {
         let model_id = self.current_model_id().await;
-        let user_chunk_meta = serde_json::json!({ "modelId": model_id })
+        let permission_evidence = match &item {
+            ConversationItem::User(user) => user.permission_evidence,
+            _ => None,
+        };
+        let mut user_chunk_meta = serde_json::json!({ "modelId": model_id })
             .as_object()
-            .cloned();
+            .cloned()
+            .unwrap_or_default();
+        if let Some(evidence) = permission_evidence {
+            user_chunk_meta.insert(
+                "permissionEvidence".into(),
+                serde_json::to_value(evidence).expect("permission evidence serializes"),
+            );
+        }
+        let user_chunk_meta = Some(user_chunk_meta);
 
         // Persist to updates.jsonl: one UserMessageChunk per content block
         // (text first, then any images — Image chunks already round-trip).

@@ -437,6 +437,16 @@ pub enum AutoCompactCancelReason {
     UserCancelled,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentPermissionOutcome {
+    Approved,
+    Denied,
+    TimedOut,
+    Unavailable,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "sessionUpdate")]
 pub enum SessionUpdate {
@@ -681,6 +691,35 @@ pub enum SessionUpdate {
         /// the producer; consumers must not infer it from current Goal state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal_id: Option<String>,
+    },
+    /// Final authorization outcome for a permission requested by a child
+    /// session. This is a durable UI/audit projection only; it is never added
+    /// to either the primary or child model conversation.
+    SubagentPermissionDecision {
+        child_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        tool_call_id: String,
+        tool_name: String,
+        access_kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_summary: Option<String>,
+        /// Full unredacted request detail for a live UI notification. The
+        /// permission audit bridge clears this field in the durable copy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_detail: Option<String>,
+        outcome: SubagentPermissionOutcome,
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Full classifier explanation for the live detail modal. Never
+        /// persisted by the permission audit bridge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        classifier_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latency_ms: Option<u64>,
     },
     /// Periodic progress update for a running subagent.
     ///
@@ -1471,6 +1510,34 @@ mod tests {
         let json_str = serde_json::to_string(&update).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
         assert_eq!(update, parsed);
+    }
+
+    #[test]
+    fn subagent_permission_decision_roundtrips_as_durable_ui_event() {
+        let update = SessionUpdate::SubagentPermissionDecision {
+            child_session_id: "child-019ff8d7".into(),
+            subagent_type: Some("software-coder".into()),
+            description: Some("run focused tests".into()),
+            tool_call_id: "tool-7".into(),
+            tool_name: "run_terminal_command".into(),
+            access_kind: "bash".into(),
+            access_summary: Some("cargo test -p shell".into()),
+            access_detail: Some("cargo test -p shell -- --nocapture".into()),
+            outcome: SubagentPermissionOutcome::Approved,
+            source: "main_agent".into(),
+            reason: Some("needed to verify the requested change".into()),
+            classifier_reason: Some("The command is in task scope.".into()),
+            latency_ms: Some(42),
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["sessionUpdate"], "subagent_permission_decision");
+        assert_eq!(json["child_session_id"], "child-019ff8d7");
+        assert_eq!(json["outcome"], "approved");
+        assert_eq!(json["source"], "main_agent");
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(json).unwrap(),
+            update
+        );
     }
 
     #[test]

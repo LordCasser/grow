@@ -1842,6 +1842,7 @@ impl MvpAgent {
         let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
         let subagents_max_depth = self.cfg.borrow().subagents_max_depth;
+        let subagent_classifier_input = self.cfg.borrow().subagent_classifier_input;
         let ask_user_question_enabled = parse_ask_user_question_from_meta(session_meta)
             .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value);
         let client_hooks = crate::extensions::hooks::parse_client_hooks(session_meta);
@@ -1907,7 +1908,7 @@ impl MvpAgent {
                 );
             }
         }
-        let (mut handle, permission_events_rx, agent_system_prompt, session_thread) = {
+        let (mut handle, agent_system_prompt, session_thread) = {
             let _timer = crate::instrumentation_timer!("session.spawn_actor_call");
             let credentials = chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
@@ -2046,6 +2047,7 @@ impl MvpAgent {
                     background_workflows_enabled,
                     subagents_enabled,
                     subagents_max_depth,
+                    subagent_classifier_input,
                     ask_user_question_enabled,
                     client_hooks,
                     prompt_display_cwd,
@@ -2116,11 +2118,6 @@ impl MvpAgent {
             tracing::debug!(session_id = %session_info.id.0, "enqueued SessionCommand::Initialize");
         }
         let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
-        self.retained_resources
-            .borrow_mut()
-            .entry(session_info.id.clone())
-            .or_default()
-            .permission_event_receiver = Some(permission_events_rx);
         if handle_display_cwd.is_some() {
             handle.display_cwd = handle_display_cwd;
         }
@@ -2147,23 +2144,5 @@ impl MvpAgent {
                 .await;
         });
         Ok(())
-    }
-    /// Collects all pending permission events from a session's receiver.
-    /// Returns only the events from the current turn (since last collection).
-    pub(super) fn collect_permission_events(
-        &self,
-        session_id: &acp::SessionId,
-    ) -> Vec<PermissionEvent> {
-        let mut events = Vec::new();
-        let mut retained = self.retained_resources.borrow_mut();
-        if let Some(rx) = retained
-            .get_mut(session_id)
-            .and_then(|d| d.permission_event_receiver.as_mut())
-        {
-            while let Ok(event) = rx.try_recv() {
-                events.push(event);
-            }
-        }
-        events
     }
 }

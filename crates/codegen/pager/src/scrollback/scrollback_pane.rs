@@ -241,6 +241,7 @@ impl ScrollbackPane {
                 | crate::scrollback::block::RenderBlock::Thinking(_)
                 | crate::scrollback::block::RenderBlock::BgTask(_)
                 | crate::scrollback::block::RenderBlock::Subagent(_)
+                | crate::scrollback::block::RenderBlock::SubagentPermission(_)
         ) {
             return;
         }

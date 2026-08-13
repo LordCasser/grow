@@ -5,6 +5,278 @@
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 
+fn permission_audit_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|value| !value.is_empty())
+        .map(|value| tools::util::truncate_line(&value, 240).into_owned())
+}
+
+/// Project one permission request into durable/UI audit data without copying
+/// arbitrary tool input. Full commands and MCP argument values are valid
+/// authorization evidence but are not safe telemetry: they may contain
+/// credentials, and `updates.jsonl` is durable and replayed to clients.
+fn permission_audit_access_summary(
+    event: &workspace::permission::PermissionEvent,
+) -> Option<String> {
+    let summary = match event.access_kind.as_str() {
+        "read" | "grep" | "edit" => event
+            .access_detail
+            .as_ref()
+            .map(|_| "path details redacted".to_owned()),
+        "bash" => Some("command details redacted".to_owned()),
+        "mcp" => event
+            .access_detail
+            .as_deref()
+            .and_then(|detail| detail.split_whitespace().next())
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("{name} (arguments redacted)")),
+        "web_fetch" => event.access_detail.as_deref().map(|raw| {
+            let Ok(mut url) = url::Url::parse(raw) else {
+                return "URL details redacted".to_owned();
+            };
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_path("");
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }),
+        "capability_grant" => event
+            .capability_target
+            .as_deref()
+            .map(|target| format!("target: {target}")),
+        _ => None,
+    };
+    permission_audit_text(summary)
+}
+
+fn subagent_permission_updates(
+    event: workspace::permission::PermissionEvent,
+) -> Option<(GrowSessionUpdate, GrowSessionUpdate)> {
+    use crate::extensions::notification::SubagentPermissionOutcome;
+
+    if event.permission_mode.as_deref() != Some("auto") {
+        return None;
+    }
+    let access_summary = permission_audit_access_summary(&event);
+    let outcome = match event.decision.as_str() {
+        "allow" => SubagentPermissionOutcome::Approved,
+        "timed_out" => SubagentPermissionOutcome::TimedOut,
+        "cancelled" => SubagentPermissionOutcome::Cancelled,
+        _ if event.classifier_verdict.as_deref() == Some("unavailable") => {
+            SubagentPermissionOutcome::Unavailable
+        }
+        _ => SubagentPermissionOutcome::Denied,
+    };
+    let source = if event.user_prompted {
+        "user_prompt".to_owned()
+    } else if event.classifier_verdict.is_some() {
+        "main_agent".to_owned()
+    } else {
+        event
+            .decision_reason
+            .clone()
+            .unwrap_or_else(|| "permission_manager".to_owned())
+    };
+    // Model and prompt prose may echo the raw request. Durable audit keeps
+    // only harness-owned reason codes; detailed evidence remains in the
+    // ephemeral permission manager event.
+    let reason = permission_audit_text(event.decision_reason.clone());
+    let live_access_detail = event.access_detail.clone();
+    let live_reason = event.decision_reason.clone();
+    let live_classifier_reason = event.classifier_reason.clone();
+    let child_session_id = event.subagent_session_id?;
+    let durable = GrowSessionUpdate::SubagentPermissionDecision {
+        child_session_id,
+        subagent_type: event.subagent_type,
+        description: event.subagent_description,
+        tool_call_id: event.tool_id,
+        tool_name: event.tool_name,
+        access_kind: event.access_kind,
+        access_summary,
+        access_detail: None,
+        outcome,
+        source,
+        reason,
+        classifier_reason: None,
+        latency_ms: event.classifier_latency_ms.or(event.wait_ms),
+    };
+    let mut live = durable.clone();
+    if let GrowSessionUpdate::SubagentPermissionDecision {
+        access_detail,
+        reason,
+        classifier_reason,
+        ..
+    } = &mut live
+    {
+        *access_detail = live_access_detail;
+        *reason = live_reason;
+        *classifier_reason = live_classifier_reason;
+    }
+    Some((durable, live))
+}
+
+#[cfg(test)]
+mod permission_audit_tests {
+    use super::*;
+    use crate::extensions::notification::SubagentPermissionOutcome;
+
+    fn event(decision: &str) -> workspace::permission::PermissionEvent {
+        workspace::permission::PermissionEvent {
+            audit_sequence: 0,
+            tool_id: "tool-1".into(),
+            tool_name: "run_terminal_command".into(),
+            access_kind: "bash".into(),
+            access_detail: Some("cargo test -p shell".into()),
+            yolo_mode: false,
+            auto_approved: decision == "allow",
+            user_prompted: false,
+            decision: decision.into(),
+            prompt_outcome: None,
+            reject_reason: None,
+            timestamp: chrono::Utc::now(),
+            subagent_session_id: Some("child-1".into()),
+            subagent_type: Some("software-coder".into()),
+            subagent_description: Some("verify the change".into()),
+            permission_mode: Some("auto".into()),
+            requested_permission_mode: Some("auto".into()),
+            capability_target: None,
+            capability_purpose: None,
+            decision_reason: Some("auto_classifier_allow".into()),
+            classifier_source: Some("llm".into()),
+            classifier_verdict: Some("allow".into()),
+            classifier_reason: Some("required by the primary task".into()),
+            classifier_latency_ms: Some(18),
+            auto_denials_consecutive: Some(0),
+            auto_denials_total: Some(0),
+            wait_ms: Some(20),
+            queue_depth: Some(1),
+        }
+    }
+
+    #[test]
+    fn maps_final_permission_event_to_ui_audit_update() {
+        let (durable, live) = subagent_permission_updates(event("allow")).expect("audit update");
+        let GrowSessionUpdate::SubagentPermissionDecision {
+            child_session_id,
+            outcome,
+            source,
+            latency_ms,
+            access_detail,
+            classifier_reason,
+            ..
+        } = durable
+        else {
+            panic!("unexpected update")
+        };
+        assert_eq!(child_session_id, "child-1");
+        assert_eq!(outcome, SubagentPermissionOutcome::Approved);
+        assert_eq!(source, "main_agent");
+        assert_eq!(latency_ms, Some(18));
+        assert_eq!(access_detail, None);
+        assert_eq!(classifier_reason, None);
+        let GrowSessionUpdate::SubagentPermissionDecision {
+            access_detail,
+            classifier_reason,
+            ..
+        } = live
+        else {
+            panic!("unexpected live update")
+        };
+        assert_eq!(access_detail.as_deref(), Some("cargo test -p shell"));
+        assert_eq!(
+            classifier_reason.as_deref(),
+            Some("required by the primary task")
+        );
+    }
+
+    #[test]
+    fn unavailable_and_prompt_timeout_remain_distinct_audit_outcomes() {
+        let mut unavailable = event("reject");
+        unavailable.classifier_verdict = Some("unavailable".into());
+        unavailable.classifier_source = Some("timeout".into());
+        unavailable.classifier_reason = Some("permission judgment timed out".into());
+        let GrowSessionUpdate::SubagentPermissionDecision { outcome, .. } =
+            subagent_permission_updates(unavailable)
+                .expect("unavailable update")
+                .0
+        else {
+            panic!("unexpected update")
+        };
+        assert_eq!(outcome, SubagentPermissionOutcome::Unavailable);
+
+        let mut prompt_timeout = event("timed_out");
+        prompt_timeout.user_prompted = true;
+        prompt_timeout.classifier_source = None;
+        prompt_timeout.classifier_verdict = None;
+        let GrowSessionUpdate::SubagentPermissionDecision {
+            outcome, source, ..
+        } = subagent_permission_updates(prompt_timeout)
+            .expect("timeout update")
+            .0
+        else {
+            panic!("unexpected update")
+        };
+        assert_eq!(outcome, SubagentPermissionOutcome::TimedOut);
+        assert_eq!(source, "user_prompt");
+    }
+
+    #[test]
+    fn ignores_primary_and_non_auto_permission_events() {
+        let mut primary = event("allow");
+        primary.subagent_session_id = None;
+        assert!(subagent_permission_updates(primary).is_none());
+
+        let mut child_ask = event("allow");
+        child_ask.permission_mode = Some("ask".into());
+        assert!(subagent_permission_updates(child_ask).is_none());
+    }
+
+    #[test]
+    fn durable_audit_summary_never_copies_tool_secrets() {
+        let mut bash = event("allow");
+        bash.access_detail = Some("TOKEN=top-secret cargo test --password hunter2".into());
+        let bash_json =
+            serde_json::to_string(&subagent_permission_updates(bash).unwrap().0).unwrap();
+        assert!(bash_json.contains("command details redacted"));
+        assert!(!bash_json.contains("top-secret"));
+        assert!(!bash_json.contains("hunter2"));
+
+        let mut path = event("allow");
+        path.access_kind = "read".into();
+        path.access_detail = Some("/private/TOKEN-top-secret/report.md".into());
+        path.classifier_reason = Some("Allowed because TOKEN=top-secret is valid".into());
+        let path_json =
+            serde_json::to_string(&subagent_permission_updates(path).unwrap().0).unwrap();
+        assert!(path_json.contains("path details redacted"));
+        assert!(!path_json.contains("report.md"));
+        assert!(!path_json.contains("TOKEN-top-secret"));
+        assert!(!path_json.contains("TOKEN=top-secret"));
+
+        let mut mcp = event("allow");
+        mcp.access_kind = "mcp".into();
+        mcp.access_detail = Some(
+            r#"linear__create_issue {"Authorization":"Bearer secret","password":"hunter2"}"#.into(),
+        );
+        let mcp_json = serde_json::to_string(&subagent_permission_updates(mcp).unwrap().0).unwrap();
+        assert!(mcp_json.contains("linear__create_issue (arguments redacted)"));
+        assert!(!mcp_json.contains("Bearer secret"));
+        assert!(!mcp_json.contains("hunter2"));
+
+        let mut web = event("allow");
+        web.access_kind = "web_fetch".into();
+        web.access_detail = Some(
+            "https://user:password@example.test/docs?token=query-secret#fragment-secret".into(),
+        );
+        let web_json = serde_json::to_string(&subagent_permission_updates(web).unwrap().0).unwrap();
+        assert!(web_json.contains("https://example.test/"));
+        for secret in ["user", "password", "query-secret", "fragment-secret"] {
+            assert!(!web_json.contains(secret), "audit leaked {secret}");
+        }
+    }
+}
+
 fn reconcile_goal_behavior(
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
     restored: tool_types::BehaviorId,
@@ -458,10 +730,9 @@ mod cli_catchall_drop_tests {
         assert!(dropped.is_empty());
     }
 }
-/// Spawns a session actor and returns the session handle plus a receiver for permission events.
-///
-/// The permission events receiver feeds local diagnostics for decisions such
-/// as YOLO mode and user accept/reject.
+/// Spawns a session actor. The permission-event receiver, when this session
+/// owns the shared manager, is consumed internally by the primary session's
+/// passive audit bridge.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     name = "session.spawn",
@@ -539,6 +810,7 @@ pub(crate) async fn spawn_session_actor(
     background_workflows_enabled: bool,
     subagents_enabled: bool,
     subagents_max_depth: u32,
+    subagent_classifier_input: crate::config::SubagentClassifierInput,
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
@@ -567,15 +839,7 @@ pub(crate) async fn spawn_session_actor(
         tools::implementations::grow_build::scheduler::types::SchedulerHandle,
     >,
     max_turns: Option<usize>,
-) -> Result<
-    (
-        SessionHandle,
-        mpsc::UnboundedReceiver<PermissionEvent>,
-        String,
-        tokio::sync::oneshot::Receiver<()>,
-    ),
-    agent::AgentBuildError,
-> {
+) -> Result<(SessionHandle, String, tokio::sync::oneshot::Receiver<()>), agent::AgentBuildError> {
     if max_turns == Some(0) {
         return Err(agent::AgentBuildError::InvalidConfig(
             "max_turns must be greater than 0".to_string(),
@@ -592,9 +856,8 @@ pub(crate) async fn spawn_session_actor(
     let (permissions, permission_events_rx, deny_read_globs) = if let Some(handle) =
         inherited_permission_handle
     {
-        let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel::<PermissionEvent>();
         let deny_read_globs = handle.deny_read_globs();
-        (handle, dummy_rx, deny_read_globs)
+        (handle, None, deny_read_globs)
     } else {
         let web_fetch_allowed_domains = match &web_fetch_config {
             WebFetchConfig::Enabled { params } => params.allowed_domains(),
@@ -665,7 +928,7 @@ pub(crate) async fn spawn_session_actor(
                 permissions.set_classifier_transcript(turns);
             }
         }
-        (permissions, permission_events_rx, deny_read_globs)
+        (permissions, Some(permission_events_rx), deny_read_globs)
     };
     let initial_prompt_index = conversation
         .iter()
@@ -1308,11 +1571,12 @@ pub(crate) async fn spawn_session_actor(
             );
             e
         })?;
-    let subagent_capabilities = if startup_hints.is_subagent {
+    let (subagent_capabilities, delegable_capability_ceiling) = if startup_hints.is_subagent {
         let initial_mode = agent
             .definition()
             .capability_mode
             .unwrap_or(tool_types::SubagentCapabilityMode::All);
+        let bound_mcp_client_ids = mcp_state.lock().await.shared_client_ids();
         let state = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
             agent.tool_bridge(),
             agent
@@ -1322,7 +1586,7 @@ pub(crate) async fn spawn_session_actor(
                 .unwrap_or(&agent.definition().tool_config),
             initial_mode,
             inherited_mcp_eligibility,
-            mcp_state.lock().await.shared_client_ids(),
+            bound_mcp_client_ids.clone(),
         )
         .await;
         let backend = crate::session::subagent_capability::ShellToolAccessGrantBackend {
@@ -1338,6 +1602,7 @@ pub(crate) async fn spawn_session_actor(
             pending_interactions: pending_interactions.clone(),
             gateway: gateway.clone(),
             followup_messages: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            cancelled_requests: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
         agent
             .tool_bridge()
@@ -1347,9 +1612,17 @@ pub(crate) async fn spawn_session_actor(
                 ),
             )
             .await;
-        Some(state)
+        (
+            Some(state),
+            Some(
+                crate::session::subagent_capability::DelegableCapabilityCeiling::new(
+                    initial_mode,
+                    bound_mcp_client_ids,
+                ),
+            ),
+        )
     } else {
-        None
+        (None, None)
     };
     let selected_behavior = behavior.lock().behavior();
     let selected_behavior_unavailable = match selected_behavior {
@@ -2115,6 +2388,7 @@ pub(crate) async fn spawn_session_actor(
         )),
         max_turns,
         max_retries: std::cell::Cell::new(sampler::resolve_max_retries(max_retries)),
+        subagent_classifier_input,
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),
@@ -2141,6 +2415,8 @@ pub(crate) async fn spawn_session_actor(
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
         models_manager,
+        owns_permission_manager,
+        permission_audit_bridge: parking_lot::Mutex::new(None),
         display_cwd: {
             let lock = std::sync::OnceLock::new();
             if let Some(ref cwd) = prompt_display_cwd {
@@ -2313,6 +2589,31 @@ pub(crate) async fn spawn_session_actor(
     // the wiring method resolves both cases and keeps the classifier on the
     // primary model/config rather than the child's model.
     session.wire_permission_auto_llm_classifier().await;
+    if let Some(mut permission_events_rx) = permission_events_rx {
+        let weak_session = Arc::downgrade(&session);
+        let bridge = tokio::task::spawn_local(async move {
+            while let Some(event) = permission_events_rx.recv().await {
+                let Some(session) = weak_session.upgrade() else {
+                    break;
+                };
+                let audit_sequence = event.audit_sequence;
+                if let Some((durable, live)) = subagent_permission_updates(event) {
+                    if let Err(error) = session.send_grow_passive_notification(durable, live).await
+                    {
+                        tracing::error!(
+                            %error,
+                            "failed to durably append subagent permission audit event"
+                        );
+                    }
+                }
+                session
+                    .permissions
+                    .mark_audit_event_processed(audit_sequence);
+            }
+            tracing::debug!("permission audit bridge exiting (channel closed)");
+        });
+        *session.permission_audit_bridge.lock() = Some(bridge);
+    }
     session
         .agent
         .borrow()
@@ -2569,6 +2870,7 @@ pub(crate) async fn spawn_session_actor(
             behavior: behavior.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
+            delegable_capability_ceiling,
             agent_name: agent_name_for_handle,
             subagent_filter: subagent_filter_for_handle,
             managed_mcp_proxy_base_url,
@@ -2578,7 +2880,6 @@ pub(crate) async fn spawn_session_actor(
             tools_notification_handle: Some(tools_notification_handle.clone()),
             scheduler_handle: scheduler_handle_for_handle,
         },
-        permission_events_rx,
         system_prompt,
         session_done_rx,
     ))
@@ -2604,7 +2905,6 @@ impl SessionThread {
 /// Return type from the session thread's initialization, sent via oneshot.
 struct SessionInitResult {
     handle: SessionHandle,
-    permission_events_rx: mpsc::UnboundedReceiver<PermissionEvent>,
     system_prompt: String,
 }
 /// Spawn a session actor on a dedicated thread with its own tokio runtime and `LocalSet`.
@@ -2612,8 +2912,9 @@ struct SessionInitResult {
 /// The entire `spawn_session_actor` body runs on the session thread — the `!Send`
 /// `SessionActor` is constructed there and never crosses a thread boundary. The
 /// `Send` construction parameters are moved into the thread, and the `Send` results
-/// (`SessionHandle`, `permission_events_rx`, `system_prompt`) are sent back to the
-/// caller via a oneshot channel.
+/// (`SessionHandle`, `system_prompt`) are sent back to the caller via a oneshot
+/// channel. The owning primary session consumes permission events through its
+/// local audit bridge.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_session_on_thread(
     session_info: SessionInfo,
@@ -2679,6 +2980,7 @@ pub(crate) async fn spawn_session_on_thread(
     background_workflows_enabled: bool,
     subagents_enabled: bool,
     subagents_max_depth: u32,
+    subagent_classifier_input: crate::config::SubagentClassifierInput,
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
@@ -2707,15 +3009,7 @@ pub(crate) async fn spawn_session_on_thread(
         tools::implementations::grow_build::scheduler::types::SchedulerHandle,
     >,
     max_turns: Option<usize>,
-) -> Result<
-    (
-        SessionHandle,
-        mpsc::UnboundedReceiver<PermissionEvent>,
-        String,
-        SessionThread,
-    ),
-    acp::Error,
-> {
+) -> Result<(SessionHandle, String, SessionThread), acp::Error> {
     let (init_tx, init_rx) =
         tokio::sync::oneshot::channel::<Result<SessionInitResult, agent::AgentBuildError>>();
     let sid = session_info.id.0.to_string();
@@ -2759,111 +3053,110 @@ pub(crate) async fn spawn_session_on_thread(
             };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let (handle, permission_events_rx, system_prompt, session_done_rx) =
-                    match spawn_session_actor(
-                        session_info,
-                        gateway,
-                        sampling_config,
-                        credentials,
-                        auth_method_id,
-                        tool_context,
-                        mcp_servers,
-                        initial_client_mcp_servers,
-                        mcp_meta_config_map,
-                        parent_mcp_pool,
-                        acp_mcp_servers,
-                        support_permission,
-                        auto_update,
-                        persistence,
-                        conversation,
-                        rewind_points_path,
-                        initial_last_compaction,
-                        initial_prompt_texts,
-                        fs_notify_config,
-                        initial_total_tokens,
-                        startup_hints,
-                        client_type,
-                        permission_prompt_timeout,
-                        auto_compact_threshold_percent,
-                        system_prompt_label,
-                        compaction_mode,
-                        compaction_verbatim_input,
-                        compaction_tool_choice,
-                        two_pass_enabled,
-                        buffering_settings,
-                        origin_client,
-                        codebase_indexes,
-                        code_nav_enabled,
-                        fs_watch_caps,
-                        client_terminal_capable,
-                        client_fs_capable,
-                        gateway_enabled,
-                        agent_definition,
-                        skills_config,
-                        preloaded_skills,
-                        compat,
-                        incremental_bash_output,
-                        persisted_signals,
-                        persisted_behavior,
-                        persisted_goal_mode,
-                        persisted_goal_mode_rejected,
-                        persisted_control_revision,
-                        persisted_workflow_runs,
-                        persisted_announcement_state,
-                        memory_config,
-                        managed_mcp_handle,
-                        managed_mcp_proxy_base_url,
-                        session_model_id,
-                        session_yolo_mode,
-                        session_auto_mode,
-                        session_client_identifier,
-                        inference_idle_timeout_secs,
-                        max_retries,
-                        web_fetch_config,
-                        app_builder_deployer_config,
-                        write_file_enabled,
-                        goal_enabled,
-                        background_workflows_enabled,
-                        subagents_enabled,
-                        subagents_max_depth,
-                        ask_user_question_enabled,
-                        client_hooks,
-                        prompt_display_cwd,
-                        subagent_toggle,
-                        persona_summaries,
-                        prompt_audience,
-                        role_instructions,
-                        persona_instructions,
-                        respect_gitignore,
-                        path_not_found_hints,
-                        tool_params_json,
-                        plugin_registry,
-                        plugin_registry_handle,
-                        models_manager,
-                        inherited_permission_handle,
-                        api_key_provider,
-                        image_description_model,
-                        hook_registry_override,
-                        workspace_ops,
-                        cli_permission_rules,
-                        todo_gate,
-                        remote_settings,
-                        laziness_debug_log,
-                        parent_terminal_backend,
-                        parent_scheduler_handle,
-                        max_turns,
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
-                            let _ = init_tx.send(Err(e));
-                            return;
-                        }
-                    };
+                let (handle, system_prompt, session_done_rx) = match spawn_session_actor(
+                    session_info,
+                    gateway,
+                    sampling_config,
+                    credentials,
+                    auth_method_id,
+                    tool_context,
+                    mcp_servers,
+                    initial_client_mcp_servers,
+                    mcp_meta_config_map,
+                    parent_mcp_pool,
+                    acp_mcp_servers,
+                    support_permission,
+                    auto_update,
+                    persistence,
+                    conversation,
+                    rewind_points_path,
+                    initial_last_compaction,
+                    initial_prompt_texts,
+                    fs_notify_config,
+                    initial_total_tokens,
+                    startup_hints,
+                    client_type,
+                    permission_prompt_timeout,
+                    auto_compact_threshold_percent,
+                    system_prompt_label,
+                    compaction_mode,
+                    compaction_verbatim_input,
+                    compaction_tool_choice,
+                    two_pass_enabled,
+                    buffering_settings,
+                    origin_client,
+                    codebase_indexes,
+                    code_nav_enabled,
+                    fs_watch_caps,
+                    client_terminal_capable,
+                    client_fs_capable,
+                    gateway_enabled,
+                    agent_definition,
+                    skills_config,
+                    preloaded_skills,
+                    compat,
+                    incremental_bash_output,
+                    persisted_signals,
+                    persisted_behavior,
+                    persisted_goal_mode,
+                    persisted_goal_mode_rejected,
+                    persisted_control_revision,
+                    persisted_workflow_runs,
+                    persisted_announcement_state,
+                    memory_config,
+                    managed_mcp_handle,
+                    managed_mcp_proxy_base_url,
+                    session_model_id,
+                    session_yolo_mode,
+                    session_auto_mode,
+                    session_client_identifier,
+                    inference_idle_timeout_secs,
+                    max_retries,
+                    web_fetch_config,
+                    app_builder_deployer_config,
+                    write_file_enabled,
+                    goal_enabled,
+                    background_workflows_enabled,
+                    subagents_enabled,
+                    subagents_max_depth,
+                    subagent_classifier_input,
+                    ask_user_question_enabled,
+                    client_hooks,
+                    prompt_display_cwd,
+                    subagent_toggle,
+                    persona_summaries,
+                    prompt_audience,
+                    role_instructions,
+                    persona_instructions,
+                    respect_gitignore,
+                    path_not_found_hints,
+                    tool_params_json,
+                    plugin_registry,
+                    plugin_registry_handle,
+                    models_manager,
+                    inherited_permission_handle,
+                    api_key_provider,
+                    image_description_model,
+                    hook_registry_override,
+                    workspace_ops,
+                    cli_permission_rules,
+                    todo_gate,
+                    remote_settings,
+                    laziness_debug_log,
+                    parent_terminal_backend,
+                    parent_scheduler_handle,
+                    max_turns,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e));
+                        return;
+                    }
+                };
                 let _ = init_tx.send(Ok(SessionInitResult {
                     handle,
-                    permission_events_rx,
                     system_prompt,
                 }));
                 let _ = session_done_rx.await;
@@ -2892,7 +3185,6 @@ pub(crate) async fn spawn_session_on_thread(
         })?;
     Ok((
         init.handle,
-        init.permission_events_rx,
         init.system_prompt,
         SessionThread { join_handle },
     ))

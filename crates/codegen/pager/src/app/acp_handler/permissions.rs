@@ -4,12 +4,14 @@ use super::*;
 // Permission request handling
 // ---------------------------------------------------------------------------
 
-/// Route a permission request to the agent that owns its `session_id`, queue
-/// it on that agent's view, and return whether the active view needs a redraw.
+/// Route a permission request to the primary agent that owns its `session_id`,
+/// queue it on that task's root interaction layer, and return whether the
+/// active task needs a redraw.
 ///
 /// Permissions are routed by `session_id` so that requests for an inactive
-/// agent still queue on the owning agent's view. When the user switches back
-/// to that agent, the queued permission is visible and can be answered.
+/// task still queue on the owning task. Child prompts deliberately share the
+/// root interaction layer: a background child must not start a hidden timeout
+/// merely because its fullscreen transcript is not open.
 ///
 /// If no agent owns the `session_id` (e.g. session was just cleaned up), the
 /// request is cancelled rather than left dangling.
@@ -34,8 +36,7 @@ pub(super) fn handle_permission_request(
         }
     };
     let owning_agent_id = matched.agent_id();
-    let session_id = perm.request.session_id.0.to_string();
-    let is_active = is_matched_view_active(app, matched, &session_id);
+    let is_active = is_matched_agent_active(app, owning_agent_id);
 
     // 2. Root YOLO mode: auto-approve immediately on the owning agent so
     //    background root turns aren't blocked waiting for a view switch.
@@ -86,18 +87,16 @@ pub(super) fn handle_permission_request(
         app.notification_service.mark_permission_notified();
     }
 
-    // 4. Queue on the concrete session view. Child state must live on the
-    //    child AgentView so fullscreen input/render and sibling concurrency
-    //    use the same ordinary interaction path as roots.
+    // 4. Queue on the owning primary task. The PermissionViewState retains
+    //    the requesting child session id, so concurrent children remain
+    //    distinguishable and responses still return to the correct request.
+    //    Root ownership makes the modal penetrate the normal parent view and
+    //    an attached child transcript instead of silently waiting off-screen.
     let Some(parent) = app.agents.get_mut(&owning_agent_id) else {
         cancel_permission(perm);
         return false;
     };
-    let Some(agent) = resolve_target_agent_view(parent, matched, &session_id) else {
-        cancel_permission(perm);
-        return false;
-    };
-    let needs_redraw = enqueue_permission(perm, agent);
+    let needs_redraw = enqueue_permission(perm, parent);
     needs_redraw && is_active
 }
 
@@ -211,9 +210,8 @@ fn enqueue_permission(
 ///
 /// Two tiers of provenance quality:
 ///
-/// 1. **Tracked provenance** (`SubagentSpawned` was received): renders as
-///    `Subagent "Find endpoints" (explore):` with description and type
-///    from the tracked `SubagentInfo`. This is the trusted path.
+/// 1. **Tracked provenance** (`SubagentSpawned` was received): reuses the
+///    canonical title rendered by the Subagents panel.
 ///
 /// 2. **Opaque non-root session**: the session_id does not match root and
 ///    is not in the tracked subagent map. Renders as
@@ -231,8 +229,8 @@ fn resolve_subagent_label(agent: &AgentView, session_id: &acp::SessionId) -> Opt
     // Tier 1: tracked subagent with full metadata.
     if let Some(info) = agent.subagent_sessions.get(sid) {
         return Some(format!(
-            "Subagent \"{}\" ({}):",
-            info.description, info.subagent_type
+            "Subagent {}:",
+            crate::app::subagent::format_subagent_title(info)
         ));
     }
     // Tier 2: non-root session with no tracked info.

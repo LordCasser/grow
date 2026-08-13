@@ -77,6 +77,7 @@ fn wrapper_prefix_in_non_first_content_part_returns_false() {
                 },
             ],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         }),
     ];

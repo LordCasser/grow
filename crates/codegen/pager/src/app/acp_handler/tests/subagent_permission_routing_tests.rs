@@ -5,8 +5,9 @@
 //! permission approved but tool does not execute" investigation:
 //!
 //! 1. A `request_permission` carrying the **child** session id is routed to
-//!    that child AgentView. This makes fullscreen render/input work and keeps
-//!    sibling child queues independent.
+//!    the owning primary task's interaction layer. This makes it visible even
+//!    when the child is running in the background; the request retains the
+//!    child session id for provenance and response routing.
 //! 2. A request whose session id is neither a root agent nor a registered
 //!    child view is cancelled (never left dangling in a queue nobody can
 //!    answer).
@@ -19,10 +20,11 @@
 
 use super::*;
 
-/// A child-session permission request must queue on the child view and the
-/// ordinary fullscreen approval path must resolve its response channel.
+/// A child-session permission request must penetrate the primary task and the
+/// ordinary approval path must resolve its response channel even while a
+/// child transcript is attached.
 #[test]
-fn child_permission_queues_on_child_and_fullscreen_approval_resolves() {
+fn child_permission_queues_on_primary_and_approval_resolves() {
     let mut app = make_app_with_agent("sess-parent");
     // Register the child view exactly as the SubagentSpawned notification
     // does (leader forwards it to the pager before any child activity).
@@ -51,14 +53,12 @@ fn child_permission_queues_on_child_and_fullscreen_approval_resolves() {
     );
 
     let parent = app.agents.get(&AgentId(0)).unwrap();
-    assert!(parent.permission_queue.is_empty());
-    let agent = parent.subagent_views.get("child-1").unwrap();
     assert_eq!(
-        agent.permission_queue.len(),
+        parent.permission_queue.len(),
         1,
-        "the child request must queue on the child AgentView"
+        "the child request must queue on the primary interaction layer"
     );
-    let queued = agent.permission_queue.front().unwrap();
+    let queued = parent.permission_queue.front().unwrap();
     assert_eq!(
         queued.request.request.session_id.0.as_ref(),
         "child-1",
@@ -91,9 +91,7 @@ fn child_permission_queues_on_child_and_fullscreen_approval_resolves() {
         ),
     }
     assert!(
-        app.agents[&AgentId(0)].subagent_views["child-1"]
-            .permission_queue
-            .is_empty(),
+        app.agents[&AgentId(0)].permission_queue.is_empty(),
         "approval must pop the queue"
     );
 }

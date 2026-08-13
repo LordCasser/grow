@@ -48,6 +48,126 @@
         assert!(app.agents[&AgentId(0)].subagent_sessions["grandchild-session"].finished);
     }
 
+    #[test]
+    fn subagent_permission_decision_renders_in_parent_scrollback_only() {
+        let mut app = make_app_with_agent("root-session");
+        handle(
+            make_ext_session_notification(
+                "root-session",
+                test_subagent_spawned("root-session", "019ff8d7-child"),
+            ),
+            &mut app,
+        );
+        handle(
+            make_ext_session_notification(
+                "root-session",
+                GrowSessionUpdate::SubagentPermissionDecision {
+                    child_session_id: "019ff8d7-child".into(),
+                    subagent_type: Some("software-coder".into()),
+                    description: Some("run tests".into()),
+                    tool_call_id: "tool-7".into(),
+                    tool_name: "run_terminal_command".into(),
+                    access_kind: "bash".into(),
+                    access_summary: Some("cargo test -p shell".into()),
+                    access_detail: Some("cargo test -p shell -- --nocapture".into()),
+                    outcome: shell::extensions::notification::SubagentPermissionOutcome::Unavailable,
+                    source: "main_agent".into(),
+                    reason: Some("main-agent judgment timed out".into()),
+                    classifier_reason: Some("provider did not respond".into()),
+                    latency_ms: Some(30_000),
+                },
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let first = agent
+            .scrollback
+            .entries_mut()
+            .find_map(|entry| match &entry.block {
+                crate::scrollback::block::RenderBlock::SubagentPermission(block) => block.member(0),
+                _ => None,
+            })
+            .expect("structured permission audit block");
+        assert!(first.compact_text().contains(
+            "Subagent permission · Explore scan src/ · unavailable → denied"
+        ));
+        assert!(
+            !first.compact_text().contains("019ff8d7"),
+            "compact identity must match the Subagents pane instead of exposing a session id"
+        );
+        assert!(
+            first
+                .compact_text()
+                .contains("run_terminal_command [bash: cargo test -p shell]")
+        );
+        assert!(
+            first
+                .detail_text()
+                .contains("Reason: main-agent judgment timed out")
+        );
+        for (outcome, expected) in [
+            (
+                shell::extensions::notification::SubagentPermissionOutcome::Approved,
+                "approved",
+            ),
+            (
+                shell::extensions::notification::SubagentPermissionOutcome::Denied,
+                "denied",
+            ),
+            (
+                shell::extensions::notification::SubagentPermissionOutcome::TimedOut,
+                "timed out → denied",
+            ),
+        ] {
+            handle(
+                make_ext_session_notification(
+                    "root-session",
+                    GrowSessionUpdate::SubagentPermissionDecision {
+                        child_session_id: "019ff8d7-child".into(),
+                        subagent_type: Some("software-coder".into()),
+                        description: None,
+                        tool_call_id: format!("tool-{expected}"),
+                        tool_name: "run_terminal_command".into(),
+                        access_kind: "bash".into(),
+                        access_summary: None,
+                        access_detail: None,
+                        outcome,
+                        source: "main_agent".into(),
+                        reason: None,
+                        classifier_reason: None,
+                        latency_ms: Some(1),
+                    },
+                ),
+                &mut app,
+            );
+        }
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let labels = agent
+            .scrollback
+            .entries_mut()
+            .filter_map(|entry| match &entry.block {
+                crate::scrollback::block::RenderBlock::SubagentPermission(block) => Some(
+                    block
+                        .members()
+                        .iter()
+                        .map(|member| member.outcome_label())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"approved"));
+        assert!(labels.contains(&"denied"));
+        assert!(labels.contains(&"timed out → denied"));
+        assert_eq!(
+            labels.len(),
+            4,
+            "each audit update must project as exactly one structured UI block"
+        );
+    }
+
     /// Fresh root restore discovers the direct child's durable transcript via
     /// the parent's real `subagents/<subagent_id>/meta.json` ownership record.
     /// The persisted eventId seeds the immediate-parent highwater, so the same

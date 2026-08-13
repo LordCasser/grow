@@ -533,6 +533,7 @@ impl SessionActor {
                     )),
                 }],
                 synthetic_reason: None,
+                permission_evidence: None,
                 ..Default::default()
             }),
         ];

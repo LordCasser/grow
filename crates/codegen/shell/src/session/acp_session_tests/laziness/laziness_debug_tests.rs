@@ -20,6 +20,7 @@ fn user_text(text: &str) -> ConversationItem {
     ConversationItem::User(UserItem {
         content: vec![ContentPart::Text { text: text.into() }],
         synthetic_reason: None,
+        permission_evidence: None,
         ..Default::default()
     })
 }
@@ -371,6 +372,7 @@ fn synthetic_user_text(text: &str, reason: sampling_types::SyntheticReason) -> C
     ConversationItem::User(UserItem {
         content: vec![ContentPart::Text { text: text.into() }],
         synthetic_reason: Some(reason),
+        permission_evidence: None,
         ..Default::default()
     })
 }

@@ -45,7 +45,7 @@ ACP clients can set `"_meta": { "yoloMode": true }` on `session/new`. See [Agent
 
 **Interactive TUI:** `Ctrl+X P` or `/permission` opens the current-session selector; `/ask`, `/auto`, and `/always-approve` select directly. `/settings` changes defaults for future sessions ([shortcuts](03-keyboard-shortcuts.md), [commands](04-slash-commands.md)).
 
-Permission prompts always have a response deadline so a disconnected pager, gateway, or leader cannot block the session forever. Configure `[session] permission_prompt_timeout_secs` for interactive sessions (default `60`) and `[session] non_interactive_permission_prompt_timeout_secs` for headless/CI sessions (default `10`). Both values must be positive; a timeout cancels the current turn without running the tool, and a late approval is ignored.
+Permission prompts always have a response deadline so a disconnected pager, gateway, or leader cannot block the session forever. Configure `[session] permission_prompt_timeout_secs` for interactive sessions (default `60`) and `[session] non_interactive_permission_prompt_timeout_secs` for headless/CI sessions (default `10`). Both values must be positive. In a primary session, a timeout cancels the current turn without running the tool. In a subagent, it fails only that tool call and returns the failure to the child so it can continue with another approach. A late approval is ignored in either case.
 
 **CLI:**
 
@@ -101,7 +101,7 @@ Deny always wins over allow and over always-approve’s normal pass-through. See
 
 Reduces interactive prompts by checking many tool calls before they run. Routine local work often proceeds; other calls may be blocked or escalated. In non-interactive sessions, a blocked call fails and is reported to the model (for example `Auto mode blocked this action …`). Behavior is the same for `grow -p`, `agent stdio`, and `agent serve`.
 
-The classifier can use a dedicated BYOK model:
+The primary session's own Auto classifier can use a dedicated BYOK model:
 
 ```toml
 [auto_mode]
@@ -117,6 +117,12 @@ silently substitutes the session model: resolution, credential, or initializatio
 classifier unavailable and uses the normal user-approval fallback. If `classifier_model` is omitted,
 the current primary-session model is used. With no explicit effort, Grow uses model configuration
 when present and otherwise omits the field for the upstream service.
+
+Subagent Auto is not a classifier on every tool call. A child first receives a session-local capability fence from its Agent definition and delegated mode. Ordinary Bash, edit, read, and MCP calls already admitted by that fence do not invoke the primary model and do not produce approval audit rows. A rare secondary shell risk signal can request another decision without changing permission modes: always-approve passes it, Auto sends it through the primary-context judgment branch, and Ask displays it on the owning primary task. Managed deny/ask rules and protected or interactive hard boundaries remain binding. `request_tool_access` uses the same effective mode when it asks to widen the live fence, for one eligible native capability or one MCP server. One MCP-server grant covers every eligible tool on that server for the remainder of that child session, without per-tool reapproval.
+
+An unresolved Auto boundary request is judged by the primary session's current model. `[subagents].classifier_input = "context"` (the default) uses a read-only authorization view of the primary task: genuine user prompts and user interjections are retained, while assistant text, tool results, compaction summaries, and synthetic user-role messages are excluded. `"request_only"` sends only the structured proposed action to reduce token use. The temporary judgment message and its structured result are never added to chat history, memory, compaction, or future subagent context. `classifier_model` does not override this child path. Responses and Messages use their native JSON Schema output; the provider-neutral Chat Completions path uses JSON Object mode so OpenAI-compatible providers such as DeepSeek and BigModel receive the wire shape they support, followed by the same strict local schema check. The response must be exactly `{"decision":"allow"|"deny","reason":"..."}` with a non-empty reason and no extra fields, Markdown fence, prose, or trailing content. An empty response, schema-invalid response, recoverable API/transport failure, or per-attempt timeout is retransmitted at most once; both attempts share one total judgment deadline, so retry cannot double the time the child waits. Authentication, invalid-request, and other non-retryable errors fail immediately. Exhaustion fails closed for that grant without opening an ordinary approval prompt or terminating the child.
+
+The parent TUI persists these decisions as structured UI-only audit rows. Every permission received before the primary agent's next real `TurnCompleted` joins one stable summary even when status and tool rows appear between events. Expand the group to see one line per decision, then double-click a row for the complete live request, complete classifier reason, outcome, and latency. The durable replay copy deliberately contains only a labeled, redacted replay-safe summary so commands, MCP arguments, and URL secrets never enter `updates.jsonl`. Audit details do not become conversation items.
 
 For automation that must run tools without interactive approval, use always-approve (and deny rules if you need hard blocks) rather than auto alone.
 
@@ -143,7 +149,7 @@ For a subagent, authorization has one additional boundary before this per-call p
 hard eligibility ∩ current child grant ∩ permission decision
 ```
 
-Hard eligibility comes from the registered host tools, the Agent's authored preset/additional tools and allow/deny configuration, session clamps, Behavior/Goal/depth/plugin rules, and MCP inheritance. Runtime-injected native tools cannot enlarge requestable Execute/ReadWrite eligibility. `capability_mode` seeds the current child grant rather than deleting tools. `request_tool_access` can expose one eligible native capability or MCP server for that live child, but cannot cross the hard ceiling. The eventual Shell, edit, or MCP call then follows the normal checks below. Child remembered approvals stay in that child session and are never persisted or shared.
+Hard eligibility comes from the registered host tools, the Agent's authored preset/additional tools and allow/deny configuration, session clamps, Behavior/Goal/depth/plugin rules, and MCP inheritance. Runtime-injected native tools cannot enlarge requestable Execute/ReadWrite eligibility. `capability_mode` seeds the current child grant rather than deleting tools. `request_tool_access` can expose one eligible native capability or MCP server for that live child, but cannot cross the hard ceiling. Once admitted, ordinary calls remain inside that child-session fence and skip repeated Auto judgment; managed rules and hard safety boundaries still apply. Child grants are never persisted or shared with the parent, siblings, descendants, or a new session.
 
 When the model requests a tool, the following checks happen in order:
 

@@ -779,6 +779,30 @@ impl AgentView {
                 if self.active_pane == AgentPane::Scrollback {
                     if let Some((click_col, click_row)) = self.pending_scrollback_click.take() {
                         let now = Instant::now();
+                        // Permission audit members own their double-click
+                        // gesture. Resolve them before global word selection;
+                        // otherwise an exact text hit returns early and the
+                        // detail modal can only flash or never open when
+                        // `keep_text_selection = "word_select"`.
+                        let permission_hit = self
+                            .scrollback
+                            .entry_index_at_screen_row(click_row, self.pane_areas.scrollback)
+                            .and_then(|idx| {
+                                self.scrollback
+                                    .permission_member_at_screen_row(
+                                        idx,
+                                        click_row,
+                                        self.pane_areas.scrollback,
+                                    )
+                                    .map(|member| (idx, member))
+                            });
+                        if let Some((idx, member)) = permission_hit {
+                            self.last_text_click = None;
+                            let (last_click, _) =
+                                self.handle_scrollback_click(now, idx, false, Some(member));
+                            self.last_click = last_click;
+                            return InputOutcome::Changed;
+                        }
                         if is_text_selection_on_double_click() {
                             let exact_text_hit = self
                                 .last_scrollback_selection_model
@@ -847,8 +871,17 @@ impl AgentView {
                                         .scrollback
                                         .entry_screen_area(idx, self.pane_areas.scrollback)
                                         .is_some_and(|(a, _, _)| click_row == a.y);
-                                let (last_click, show_word_select_tip) =
-                                    self.handle_scrollback_click(now, idx, header_row_click);
+                                let (last_click, show_word_select_tip) = self
+                                    .handle_scrollback_click(
+                                        now,
+                                        idx,
+                                        header_row_click,
+                                        self.scrollback.permission_member_at_screen_row(
+                                            idx,
+                                            click_row,
+                                            self.pane_areas.scrollback,
+                                        ),
+                                    );
                                 self.last_click = last_click;
                                 if show_word_select_tip {
                                     return InputOutcome::Action(Action::ShowWordSelectTip);
@@ -860,7 +893,7 @@ impl AgentView {
                             && last_count >= 2
                         {
                             let (last_click, show_word_select_tip) =
-                                self.handle_scrollback_click(now, last_idx, false);
+                                self.handle_scrollback_click(now, last_idx, false, None);
                             self.last_click = last_click;
                             if show_word_select_tip {
                                 return InputOutcome::Action(Action::ShowWordSelectTip);

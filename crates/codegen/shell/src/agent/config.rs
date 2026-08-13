@@ -1036,6 +1036,9 @@ pub struct Config {
     /// Independent permission route used by every subagent session.
     #[serde(skip)]
     pub subagent_permission_mode: workspace::permission::types::RequestPermissionMode,
+    /// Context scope used by the primary-owned child Auto classifier.
+    #[serde(skip)]
+    pub subagent_classifier_input: crate::config::SubagentClassifierInput,
     /// Per-subagent model ID overrides from `[subagents.models]` in config.toml.
     /// Keys are agent names, values are model IDs. Set alongside `subagents_enabled`
     /// from `SubagentsConfig::resolve()`.
@@ -1381,6 +1384,7 @@ impl Default for Config {
             subagents_enabled: true,
             subagents_max_depth: crate::config::SubagentsConfig::DEFAULT_MAX_DEPTH,
             subagent_permission_mode: Default::default(),
+            subagent_classifier_input: Default::default(),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
             subagent_roles: std::collections::HashMap::new(),
@@ -1708,6 +1712,7 @@ impl Config {
         let sa = crate::config::SubagentsConfig::resolve(cli_flag, raw_config);
         self.subagents_enabled = sa.enabled;
         self.subagent_permission_mode = sa.permission_mode;
+        self.subagent_classifier_input = sa.classifier_input;
         self.subagent_model_overrides = sa.models;
         self.subagent_toggle = sa.toggle;
         self.subagent_roles = sa.roles;

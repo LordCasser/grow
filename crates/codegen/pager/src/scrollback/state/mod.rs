@@ -190,6 +190,15 @@ pub struct ScrollbackState {
     /// its span expanded instead of hiding entries.
     expanded_groups: HashSet<EntryId>,
 
+    /// Stable permission audit entity that remains open until the primary
+    /// agent completes a turn. New decisions mutate this one entry, so
+    /// unrelated transcript rows stay in order and cannot split the group.
+    active_permission_group: Option<EntryId>,
+    /// Monotonic primary-turn boundary for permission aggregation. Unlike an
+    /// entry ID this survives cursor-found reconnect staging even when the
+    /// staging half contains no permission block of its own.
+    permission_epoch: u64,
+
     // Link map
     /// Monotonically increasing counter, bumped when visible link positions or
     /// policy inputs change. Used by `VisibleLinkMap::is_stale()` to skip rebuilds.
@@ -251,6 +260,8 @@ impl ScrollbackState {
             gaps_may_be_dirty: false,
             warm_above: DeferredWarmAbove::Idle,
             expanded_groups: HashSet::new(),
+            active_permission_group: None,
+            permission_epoch: 0,
             generation: 0,
             content_generation: 0,
             #[cfg(test)]
@@ -302,6 +313,7 @@ impl ScrollbackState {
         fresh.view_mode = self.view_mode;
         fresh.follow_mode = self.follow_mode;
         fresh.cwd = self.cwd.clone();
+        fresh.permission_epoch = self.permission_epoch;
         fresh.generation = self.generation.wrapping_add(1);
         fresh.content_generation = self.content_generation.wrapping_add(1);
         fresh
@@ -354,6 +366,16 @@ impl ScrollbackState {
             tail.next_id >= self.next_id,
             "append_entries_from requires a fresh_continuation sibling (shared id space)"
         );
+        let tail_permission_groups = tail
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| match &entry.block {
+                RenderBlock::SubagentPermission(group) => Some((*id, group.epoch())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tail_permission_epoch = tail.permission_epoch;
+        let tail_active_permission_group = tail.active_permission_group;
         self.entries.extend(tail.entries);
         self.running.extend(tail.running);
         self.dirty_heights.extend(tail.dirty_heights);
@@ -362,6 +384,11 @@ impl ScrollbackState {
         // already-committed tail blocks are not re-emitted after the reload.
         self.committed.extend(tail.committed);
         self.expanded_groups.extend(tail.expanded_groups);
+        self.merge_permission_groups_from_tail(
+            tail_permission_groups,
+            tail_permission_epoch,
+            tail_active_permission_group,
+        );
         self.next_id = self.next_id.max(tail.next_id);
         // The tail (live during the window) is what equality-cached consumers
         // last saw — the merged state must read as newer than both halves.
@@ -599,6 +626,99 @@ impl ScrollbackState {
         self.push(ScrollbackEntry::new(block))
     }
 
+    /// Append a permission audit event to the primary turn's current audit
+    /// group. Intervening UI entries do not end the group: the group is one
+    /// stable aggregate entity whose member list remains mutable until a real
+    /// primary turn completion seals it.
+    pub fn push_subagent_permission(
+        &mut self,
+        event: super::blocks::SubagentPermissionEvent,
+    ) -> EntryId {
+        if let Some(id) = self.active_permission_group
+            && let Some(entry) = self.entries.get_mut(&id)
+            && let RenderBlock::SubagentPermission(group) = &mut entry.block
+            && group.epoch() == self.permission_epoch
+        {
+            group.push(event);
+            entry.invalidate_cache();
+            self.mark_structurally_dirty(id);
+            self.bump_content_generation();
+            return id;
+        }
+
+        let entry = ScrollbackEntry::running(RenderBlock::subagent_permission(
+            super::blocks::SubagentPermissionBlock::new_in_epoch(event, self.permission_epoch),
+        ));
+        let id = self.push(entry);
+        self.active_permission_group = Some(id);
+        id
+    }
+
+    /// Close the current permission audit group after the primary agent's
+    /// turn has genuinely completed. Starting a turn alone does not close it:
+    /// permission events that arrive while that turn is in flight still belong
+    /// to the prior audit period until the terminal signal wins.
+    pub fn seal_subagent_permission_group(&mut self) {
+        if let Some(id) = self.active_permission_group.take() {
+            self.finish_running(id);
+        }
+        self.permission_epoch = self.permission_epoch.saturating_add(1);
+    }
+
+    fn merge_permission_groups_from_tail(
+        &mut self,
+        tail_groups: Vec<(EntryId, u64)>,
+        tail_epoch: u64,
+        tail_active: Option<EntryId>,
+    ) {
+        let original_epoch = self.permission_epoch;
+        let original_active = self.active_permission_group;
+
+        if let Some(current_id) = original_active {
+            for (tail_id, _epoch) in tail_groups
+                .iter()
+                .copied()
+                .filter(|(_, epoch)| *epoch == original_epoch)
+            {
+                let Some(tail_entry) = self.entries.shift_remove(&tail_id) else {
+                    continue;
+                };
+                let RenderBlock::SubagentPermission(tail_block) = tail_entry.block else {
+                    continue;
+                };
+                if let Some(current) = self.entries.get_mut(&current_id)
+                    && let RenderBlock::SubagentPermission(current_block) = &mut current.block
+                {
+                    current_block.extend(tail_block.take_members());
+                    current.invalidate_cache();
+                    self.running.remove(&tail_id);
+                    self.dirty_heights.remove(&tail_id);
+                    self.mark_structurally_dirty(current_id);
+                }
+            }
+        }
+
+        if tail_epoch > original_epoch {
+            if let Some(id) = original_active {
+                self.finish_running(id);
+            }
+            self.active_permission_group = None;
+        }
+        self.permission_epoch = self.permission_epoch.max(tail_epoch);
+
+        if let Some(tail_active) = tail_active
+            && let Some(RenderBlock::SubagentPermission(group)) =
+                self.entries.get(&tail_active).map(|entry| &entry.block)
+            && group.epoch() == self.permission_epoch
+        {
+            self.active_permission_group = Some(tail_active);
+        } else if tail_epoch == original_epoch && original_active.is_none() {
+            self.active_permission_group = tail_groups.iter().find_map(|(id, epoch)| {
+                (*epoch == self.permission_epoch && self.entries.contains_key(id)).then_some(*id)
+            });
+        }
+    }
+
     /// Add a finalized block positioned immediately **before** the entry `anchor`,
     /// instead of at the end. Falls back to [`Self::push_block`] when `anchor` is
     /// no longer present.
@@ -677,6 +797,9 @@ impl ScrollbackState {
         self.dirty_heights.remove(&id);
         self.committed.remove(&id);
         self.expanded_groups.remove(&id);
+        if self.active_permission_group == Some(id) {
+            self.active_permission_group = None;
+        }
         if let Some(sel) = self.selected
             && sel >= self.entries.len()
         {
@@ -704,6 +827,9 @@ impl ScrollbackState {
                 self.dirty_heights.remove(&id);
                 self.committed.remove(&id);
                 self.expanded_groups.remove(&id);
+                if self.active_permission_group == Some(id) {
+                    self.active_permission_group = None;
+                }
                 removed.push(entry);
             }
         }
@@ -1039,6 +1165,8 @@ impl ScrollbackState {
         self.dirty_heights.clear();
         self.committed.clear();
         self.expanded_groups.clear();
+        self.active_permission_group = None;
+        self.permission_epoch = self.permission_epoch.saturating_add(1);
         // Note: we don't reset next_id to avoid ID reuse
         self.selected = None;
         self.turns.clear();
@@ -1990,6 +2118,25 @@ mod tests {
 
     fn edit_block(block: EditToolCallBlock) -> RenderBlock {
         RenderBlock::ToolCall(ToolCallBlock::Edit(block))
+    }
+
+    fn permission_block(tool_call_id: &str) -> crate::scrollback::blocks::SubagentPermissionEvent {
+        crate::scrollback::blocks::SubagentPermissionEvent {
+            child_session_id: "child".into(),
+            subagent_title: Some("Coder task".into()),
+            subagent_type: Some("software-engineering/coder".into()),
+            description: Some("task".into()),
+            tool_call_id: tool_call_id.into(),
+            tool_name: "run_terminal_command".into(),
+            access_kind: "bash".into(),
+            access_summary: Some("cargo test".into()),
+            access_detail: None,
+            outcome: shell::extensions::notification::SubagentPermissionOutcome::Approved,
+            source: "main_agent".into(),
+            reason: None,
+            classifier_reason: None,
+            latency_ms: Some(1),
+        }
     }
 
     /// `push` owns the Edit materialize policy: the explicit
@@ -3108,6 +3255,124 @@ mod tests {
         assert_eq!(state.index_of_id(c), Some(2));
         assert_ne!(b, a);
         assert_ne!(b, c);
+    }
+
+    #[test]
+    fn permission_updates_rejoin_the_open_primary_turn_group() {
+        let mut state = ScrollbackState::new();
+        let first = state.push_subagent_permission(permission_block("first"));
+        let status = state.push_block(stub_block("subagent status"));
+        let second = state.push_subagent_permission(permission_block("second"));
+
+        assert_eq!(first, second, "one stable group entry owns the epoch");
+        assert_eq!(state.index_of_id(first), Some(0));
+        assert_eq!(state.index_of_id(status), Some(1));
+        let RenderBlock::SubagentPermission(group) = &state.get_by_id(first).unwrap().block else {
+            panic!("permission group block");
+        };
+        assert_eq!(group.len(), 2);
+    }
+
+    #[test]
+    fn completed_primary_turn_seals_the_permission_group() {
+        let mut state = ScrollbackState::new();
+        let first = state.push_subagent_permission(permission_block("first"));
+        state.push_block(stub_block("subagent status"));
+        state.seal_subagent_permission_group();
+        let next_turn = state.push_subagent_permission(permission_block("next-turn"));
+
+        assert_eq!(state.index_of_id(first), Some(0));
+        assert_eq!(state.index_of_id(next_turn), Some(2));
+        assert_ne!(first, next_turn);
+    }
+
+    fn permission_groups(state: &ScrollbackState) -> Vec<(u64, usize, bool)> {
+        state
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                let RenderBlock::SubagentPermission(group) = &entry.block else {
+                    return None;
+                };
+                Some((group.epoch(), group.len(), state.running.contains(id)))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reconnect_merges_permissions_from_the_same_epoch() {
+        let mut original = ScrollbackState::new();
+        original.push_subagent_permission(permission_block("old"));
+        let mut tail = original.fresh_continuation();
+        tail.push_subagent_permission(permission_block("same-turn"));
+
+        original.append_entries_from(tail);
+
+        assert_eq!(permission_groups(&original), vec![(0, 2, true)]);
+    }
+
+    #[test]
+    fn reconnect_terminal_seals_the_original_permission_epoch() {
+        let mut original = ScrollbackState::new();
+        original.push_subagent_permission(permission_block("old"));
+        let mut tail = original.fresh_continuation();
+        tail.seal_subagent_permission_group();
+
+        original.append_entries_from(tail);
+
+        assert_eq!(permission_groups(&original), vec![(0, 1, false)]);
+        let next = original.push_subagent_permission(permission_block("next-turn"));
+        assert_eq!(
+            permission_groups(&original),
+            vec![(0, 1, false), (1, 1, true)]
+        );
+        assert_eq!(original.active_permission_group, Some(next));
+    }
+
+    #[test]
+    fn reconnect_merges_same_epoch_members_before_terminal() {
+        let mut original = ScrollbackState::new();
+        original.push_subagent_permission(permission_block("old"));
+        let mut tail = original.fresh_continuation();
+        tail.push_subagent_permission(permission_block("same-turn"));
+        tail.seal_subagent_permission_group();
+
+        original.append_entries_from(tail);
+
+        assert_eq!(permission_groups(&original), vec![(0, 2, false)]);
+    }
+
+    #[test]
+    fn reconnect_keeps_post_terminal_permissions_in_a_new_group() {
+        let mut original = ScrollbackState::new();
+        original.push_subagent_permission(permission_block("old"));
+        let mut tail = original.fresh_continuation();
+        tail.seal_subagent_permission_group();
+        tail.push_subagent_permission(permission_block("new"));
+
+        original.append_entries_from(tail);
+
+        assert_eq!(
+            permission_groups(&original),
+            vec![(0, 1, false), (1, 1, true)]
+        );
+    }
+
+    #[test]
+    fn reconnect_merges_before_and_splits_after_terminal() {
+        let mut original = ScrollbackState::new();
+        original.push_subagent_permission(permission_block("old"));
+        let mut tail = original.fresh_continuation();
+        tail.push_subagent_permission(permission_block("same-turn"));
+        tail.seal_subagent_permission_group();
+        tail.push_subagent_permission(permission_block("next-turn"));
+
+        original.append_entries_from(tail);
+
+        assert_eq!(
+            permission_groups(&original),
+            vec![(0, 2, false), (1, 1, true)]
+        );
     }
 
     #[test]

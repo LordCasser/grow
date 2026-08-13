@@ -220,6 +220,18 @@ pub enum PriorTurnInterrupt {
     Unknown,
 }
 
+/// Explicit first-party authority carried by a user-role conversation item.
+///
+/// User role is also used for runtime feedback and provider-compatible
+/// reminders, so it is not itself permission evidence. Only the foreground
+/// user prompt and a user-authored mid-turn interjection receive this tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionEvidence {
+    DirectUser,
+    Interjection,
+}
+
 /// User message with text and optional images
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserItem {
@@ -231,6 +243,10 @@ pub struct UserItem {
     /// deserialize correctly (`serde(default)` fills in `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthetic_reason: Option<SyntheticReason>,
+    /// Whether this content is first-party user evidence that may authorize a
+    /// child capability-fence expansion. Kept orthogonal to model message role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_evidence: Option<PermissionEvidence>,
     /// Goal ownership and lifecycle role for Goal-generated synthetic input.
     /// `None` for real user input and non-Goal runtime reminders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -706,6 +722,17 @@ impl From<ToolDefinition> for ToolSpec {
 // Conversation Request
 // ============================================================================
 
+/// Provider-facing constraint for a model's direct JSON response.
+///
+/// `JsonSchema` requests constrained decoding against an exact schema.  The
+/// older `JsonObject` mode only guarantees syntactically valid JSON and is the
+/// portable contract for OpenAI-compatible Chat Completions providers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonOutputFormat {
+    JsonObject,
+    JsonSchema(serde_json::Value),
+}
+
 /// A complete conversation request that can be sent to either API.
 #[derive(Debug, Clone, Default)]
 pub struct ConversationRequest {
@@ -725,8 +752,8 @@ pub struct ConversationRequest {
     pub top_p: Option<f32>,
     /// Reasoning effort level for reasoning models.
     pub reasoning_effort: Option<crate::ReasoningEffort>,
-    /// JSON Schema for structured output (strict mode).
-    pub json_schema: Option<serde_json::Value>,
+    /// Native JSON output constraint for the selected API backend.
+    pub json_output: Option<JsonOutputFormat>,
     /// Sticky routing key for prompt-cache reuse when supported by a provider.
     pub prompt_cache_key: Option<String>,
 }
@@ -1099,7 +1126,9 @@ impl ConversationItem {
 
     /// Create a user message with text content.
     ///
-    /// `synthetic_reason` is `None` — this represents real user input.
+    /// `synthetic_reason` is `None`, but the user role alone does not prove
+    /// first-party authorship. The session turn boundary attaches
+    /// [`PermissionEvidence::DirectUser`] to genuine foreground prompts.
     /// For synthetic injections, use a dedicated constructor such as
     /// [`ConversationItem::user_meta`] or [`ConversationItem::system_reminder`].
     pub fn user(content: impl Into<String>) -> Self {
@@ -1108,6 +1137,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: None,
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1122,6 +1152,7 @@ impl ConversationItem {
         Self::User(UserItem {
             content: parts,
             synthetic_reason: None,
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1140,6 +1171,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::CompactionMeta),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1159,6 +1191,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SystemReminder),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1177,6 +1210,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(synthetic_reason),
+            permission_evidence: None,
             goal_directive: Some(tag),
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1207,6 +1241,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::ProjectInstructions),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1221,6 +1256,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::WorkingDirectorySwitch),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: Some(cwd_generation),
             prior_turn_interrupt: None,
@@ -1239,6 +1275,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::AutoContinue),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1259,6 +1296,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::TruncationContinue),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1277,6 +1315,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::AutoRecovery),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1296,6 +1335,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::Interjection),
+            permission_evidence: Some(PermissionEvidence::Interjection),
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1310,6 +1350,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::TaskCompleted),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1324,6 +1365,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SubagentCompleted),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1338,6 +1380,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::NotificationDrain),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1352,6 +1395,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SchedulerFired),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1366,6 +1410,7 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::StopHookFeedback),
+            permission_evidence: None,
             goal_directive: None,
             cwd_generation: None,
             prior_turn_interrupt: None,
@@ -1848,6 +1893,14 @@ impl ConversationItem {
             u.prompt_index = Some(prompt_index);
         }
     }
+
+    /// Mark a user-role item as first-party permission evidence. No-op for
+    /// non-user variants.
+    pub fn set_permission_evidence(&mut self, evidence: PermissionEvidence) {
+        if let Self::User(u) = self {
+            u.permission_evidence = Some(evidence);
+        }
+    }
 }
 
 // ============================================================================
@@ -1877,6 +1930,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                 ConversationItem::User(UserItem {
                     content: parts,
                     synthetic_reason: None,
+                    permission_evidence: None,
                     ..Default::default()
                 })
             }
@@ -2359,9 +2413,9 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                 ConversationToolChoice::Function(name) => ToolChoice::function(name),
             });
 
-        let response_format = req
-            .json_schema
-            .map(|schema| rs::ResponseFormat::JsonSchema {
+        let response_format = req.json_output.map(|format| match format {
+            JsonOutputFormat::JsonObject => rs::ResponseFormat::JsonObject,
+            JsonOutputFormat::JsonSchema(schema) => rs::ResponseFormat::JsonSchema {
                 json_schema: rs::ResponseFormatJsonSchema {
                     description: None,
                     name: STRUCTURED_OUTPUT_SCHEMA_NAME.to_string(),
@@ -2369,7 +2423,8 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                     schema,
                     strict: Some(true),
                 },
-            });
+            },
+        });
 
         ChatCompletionRequest {
             model: req.model,
@@ -2409,18 +2464,23 @@ impl From<&ConversationRequest> for rs::CreateResponse {
         });
 
         let text = req
-            .json_schema
+            .json_output
             .as_ref()
-            .map(|schema| rs::ResponseTextParam {
-                format: rs::TextResponseFormatConfiguration::JsonSchema(
-                    rs::ResponseFormatJsonSchema {
-                        description: None,
-                        name: STRUCTURED_OUTPUT_SCHEMA_NAME.to_string(),
-                        // async-openai >= 0.41: `schema` is a plain `Value`.
-                        schema: schema.clone(),
-                        strict: Some(true),
-                    },
-                ),
+            .map(|format| rs::ResponseTextParam {
+                format: match format {
+                    JsonOutputFormat::JsonObject => rs::TextResponseFormatConfiguration::JsonObject,
+                    JsonOutputFormat::JsonSchema(schema) => {
+                        rs::TextResponseFormatConfiguration::JsonSchema(
+                            rs::ResponseFormatJsonSchema {
+                                description: None,
+                                name: STRUCTURED_OUTPUT_SCHEMA_NAME.to_string(),
+                                // async-openai >= 0.41: `schema` is a plain `Value`.
+                                schema: schema.clone(),
+                                strict: Some(true),
+                            },
+                        )
+                    }
+                },
                 verbosity: None,
             });
 
@@ -2712,7 +2772,12 @@ impl ConversationRequest {
     }
 
     pub fn with_json_schema(mut self, schema: serde_json::Value) -> Self {
-        self.json_schema = Some(schema);
+        self.json_output = Some(JsonOutputFormat::JsonSchema(schema));
+        self
+    }
+
+    pub fn with_json_object(mut self) -> Self {
+        self.json_output = Some(JsonOutputFormat::JsonObject);
         self
     }
 }
@@ -3517,18 +3582,20 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         .map(|s| s.to_string());
 
     // Faithful native mapping for callers that opt into Anthropic structured
-    // output without tools. The shell agent does NOT use this path — a
-    // wire schema here suppresses tool calls, so it routes Messages-backend
-    // structured output through the StructuredOutput tool instead (see
-    // `ApiBackend::supports_native_schema`).
+    // output without tools. Anthropic exposes JSON Schema rather than a
+    // separate JSON Object mode, so a generic object schema is the semantic
+    // equivalent when a caller asks only for valid JSON.
     let format = req
-        .json_schema
+        .json_output
         .as_ref()
-        .map(|schema| crate::messages::OutputFormat::JsonSchema {
-            schema: schema.clone(),
+        .map(|format| crate::messages::OutputFormat::JsonSchema {
+            schema: match format {
+                JsonOutputFormat::JsonObject => serde_json::json!({ "type": "object" }),
+                JsonOutputFormat::JsonSchema(schema) => schema.clone(),
+            },
         });
 
-    // thinking is driven by reasoning_effort only, not by json_schema.
+    // thinking is driven by reasoning_effort only, not by JSON output mode.
     let thinking = effort
         .as_ref()
         .map(|_| crate::messages::ThinkingConfig::Adaptive {
@@ -3956,6 +4023,31 @@ mod tests {
         assert_eq!(s, schema);
         assert!(msgs_req.thinking.is_none());
         assert!(output_config.effort.is_none());
+    }
+
+    #[test]
+    fn json_object_converts_to_each_backends_native_wire_shape() {
+        let req =
+            ConversationRequest::from_items(vec![ConversationItem::user("Return one JSON object")])
+                .with_json_object();
+
+        let chat_req: ChatCompletionRequest = req.clone().into();
+        let chat_format = serde_json::to_value(chat_req.response_format.unwrap()).unwrap();
+        assert_eq!(chat_format, serde_json::json!({ "type": "json_object" }));
+
+        let responses_req: rs::CreateResponse = (&req).into();
+        assert!(matches!(
+            responses_req.text.unwrap().format,
+            rs::TextResponseFormatConfiguration::JsonObject
+        ));
+
+        let messages_req = build_messages_request(&req);
+        let crate::messages::OutputFormat::JsonSchema { schema } = messages_req
+            .output_config
+            .expect("output config")
+            .format
+            .expect("output format");
+        assert_eq!(schema, serde_json::json!({ "type": "object" }));
     }
 
     #[test]

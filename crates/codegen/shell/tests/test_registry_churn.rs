@@ -44,7 +44,6 @@ struct Counts {
     retained_resources: usize,
     dispatch_locks: usize,
     session_turn_numbers: usize,
-    permission_event_receivers: usize,
     model_unavailable_sessions: usize,
     session_live_state: usize,
     session_index_claims: usize,

@@ -219,6 +219,18 @@ impl MemoryConfig {
 /// `.grow/config.toml`. Enabled by default; can be disabled via
 /// `GROW_SUBAGENTS=0` env var or `[subagents] enabled = false`
 /// in config.toml.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentClassifierInput {
+    /// Include the primary Agent's trusted task context in the ephemeral
+    /// judgment branch. This is the safer default for rare fence escalation.
+    #[default]
+    Context,
+    /// Send only the structured proposed action and classifier policy. This
+    /// reduces tokens when deployments intentionally do not need task intent.
+    RequestOnly,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SubagentsConfig {
@@ -232,6 +244,9 @@ pub struct SubagentsConfig {
     /// to `follow`.
     #[serde(default)]
     pub permission_mode: workspace::permission::types::RequestPermissionMode,
+    /// Input scope for child Auto escalation judgments.
+    #[serde(default)]
+    pub classifier_input: SubagentClassifierInput,
     /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
     /// available models registry. Parsed from `[subagents.models]` in config.toml.

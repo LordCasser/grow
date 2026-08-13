@@ -6,6 +6,11 @@ use tokio::sync::oneshot;
 /// Used for diagnostics to track permission patterns and user behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionEvent {
+    /// Process-local sequence used to order the asynchronous audit bridge
+    /// before a primary TurnCompleted boundary. It is transport metadata, not
+    /// part of the durable diagnostic schema.
+    #[serde(skip)]
+    pub audit_sequence: u64,
     /// Tool call ID from the model
     pub tool_id: String,
     /// Name of the tool being executed
@@ -73,6 +78,14 @@ pub struct PermissionEvent {
     /// Absent when auto mode did not classify or take its fast path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classifier_source: Option<String>,
+    /// Structured classifier verdict before it is mapped to the final
+    /// permission decision: "allow" | "block" | "unavailable".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_verdict: Option<String>,
+    /// Concise model/failure reason. The model's hidden reasoning is never
+    /// retained in permission events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_reason: Option<String>,
     /// Elapsed milliseconds spent in classification alone, including heuristic work;
     /// absent when no classifier ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -263,6 +276,11 @@ impl PermissionRequestSource {
 pub struct PermissionRequestContext {
     pub source: PermissionRequestSource,
     pub request_mode: Option<RequestPermissionMode>,
+    /// The child capability authority already admitted this concrete tool
+    /// call. The permission manager still enforces managed deny/ask rules and
+    /// hard safety floors, but ordinary in-fence calls must not invoke the
+    /// child Auto classifier or produce approval audit noise.
+    pub within_capability_fence: bool,
     /// Filesystem base used by the eventual tool call. Child sessions may run
     /// in a worktree or explicit cwd that differs from the shared manager's.
     pub execution_cwd: Option<std::path::PathBuf>,
@@ -286,8 +304,8 @@ pub enum Decision {
     /// Distinguished from `Reject` so the caller can return `StopReason::Cancelled`.
     Cancelled,
     /// The permission client did not answer before the session deadline.
-    /// The tool must not execute and the current turn is cancelled without
-    /// attributing the cancellation to the user.
+    /// The tool must not execute. Primary turns treat this as terminal; child
+    /// turns convert it to a failed tool result and continue sampling.
     TimedOut,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -354,12 +372,15 @@ pub enum PermissionCommand {
     SetProjectInstructions(Option<String>),
     /// Drop every child-local permission and classifier state when the live
     /// child session ends.
-    ReleaseChild {
-        session_id: String,
-    },
+    ReleaseChild { session_id: String },
     /// Reset per-tool permission state back to defaults.
     ResetState,
-    Shutdown,
+    /// Stop accepting requests. The shared shutdown token cancels an active
+    /// judgment/prompt immediately; requests already queued before this
+    /// command are returned as cancelled rather than approved during teardown.
+    /// The acknowledgement means the actor reached its drain boundary;
+    /// dropping its event sender then lets the audit bridge reach EOF.
+    Shutdown { respond_to: oneshot::Sender<()> },
 }
 impl From<&tools::types::ToolInput> for AccessKind {
     fn from(input: &tools::types::ToolInput) -> Self {
@@ -554,6 +575,7 @@ mod tests {
     #[test]
     fn permission_event_with_subagent_attribution() {
         let event = PermissionEvent {
+            audit_sequence: 0,
             tool_id: "tc1".into(),
             tool_name: "bash".into(),
             access_kind: "bash".into(),
@@ -574,6 +596,8 @@ mod tests {
             capability_purpose: None,
             decision_reason: Some("needs_user".into()),
             classifier_source: Some("llm".into()),
+            classifier_verdict: Some("allow".into()),
+            classifier_reason: Some("required for the task".into()),
             classifier_latency_ms: Some(42),
             auto_denials_consecutive: Some(2),
             auto_denials_total: Some(5),
@@ -588,6 +612,8 @@ mod tests {
         assert_eq!(json["requested_permission_mode"], "follow");
         assert_eq!(json["decision_reason"], "needs_user");
         assert_eq!(json["classifier_source"], "llm");
+        assert_eq!(json["classifier_verdict"], "allow");
+        assert_eq!(json["classifier_reason"], "required for the task");
         assert_eq!(json["classifier_latency_ms"], 42);
         assert_eq!(json["auto_denials_consecutive"], 2);
         assert_eq!(json["auto_denials_total"], 5);
@@ -597,6 +623,7 @@ mod tests {
     #[test]
     fn permission_event_skips_none_optional_fields() {
         let event = PermissionEvent {
+            audit_sequence: 0,
             tool_id: "tc1".into(),
             tool_name: "bash".into(),
             access_kind: "bash".into(),
@@ -617,6 +644,8 @@ mod tests {
             capability_purpose: None,
             decision_reason: None,
             classifier_source: None,
+            classifier_verdict: None,
+            classifier_reason: None,
             classifier_latency_ms: None,
             auto_denials_consecutive: None,
             auto_denials_total: None,

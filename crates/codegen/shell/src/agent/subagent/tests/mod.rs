@@ -942,6 +942,7 @@ fn verbatim_fork_keeps_items_byte_for_byte_when_small() {
                     text: "SYNTHETIC_KEEP_ME".into(),
                 }],
                 synthetic_reason: Some(SyntheticReason::SystemReminder),
+                permission_evidence: None,
                 ..Default::default()
             }),
             ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(

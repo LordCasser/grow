@@ -580,6 +580,7 @@ pub fn build_classifier_request(
                 )),
             }],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         }),
     ];
@@ -1801,6 +1802,7 @@ mod tests {
                     text: format!("u{i}").into(),
                 }],
                 synthetic_reason: None,
+                permission_evidence: None,
                 ..Default::default()
             }));
             hist.push(ConversationItem::Assistant(AssistantItem {
@@ -1816,6 +1818,7 @@ mod tests {
                 text: "ulast-MARKER-tail".into(),
             }],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         }));
 
@@ -2082,6 +2085,7 @@ mod tests {
                     text: format!("u{i}").into(),
                 }],
                 synthetic_reason: None,
+                permission_evidence: None,
                 ..Default::default()
             }));
             hist.push(ConversationItem::Assistant(AssistantItem {
@@ -2097,6 +2101,7 @@ mod tests {
                 text: "ulast".into(),
             }],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         }));
 
@@ -2478,6 +2483,7 @@ mod tests {
                     after_state_history: vec![ConversationItem::User(UserItem {
                         content: vec![ContentPart::Text { text: "hi".into() }],
                         synthetic_reason: None,
+                        permission_evidence: None,
                         ..Default::default()
                     })],
                 },
@@ -2494,6 +2500,7 @@ mod tests {
                     after_state_history: vec![ConversationItem::User(UserItem {
                         content: vec![ContentPart::Text { text: "hi".into() }],
                         synthetic_reason: None,
+                        permission_evidence: None,
                         ..Default::default()
                     })],
                 },

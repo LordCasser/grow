@@ -746,6 +746,7 @@ async fn atomic_image_rewrite_preserves_message_metadata_and_tool_pairing() {
             },
         ],
         synthetic_reason: Some(SyntheticReason::Interjection),
+        permission_evidence: None,
         prompt_index: Some(7),
         ..Default::default()
     });
@@ -3018,6 +3019,7 @@ async fn get_first_user_text_image_first_returns_none() {
             url: "data:image/png;base64,abc".into(),
         }],
         synthetic_reason: None,
+        permission_evidence: None,
         ..Default::default()
     }));
 
@@ -3042,6 +3044,7 @@ async fn get_first_user_text_image_then_text_returns_none() {
             },
         ],
         synthetic_reason: None,
+        permission_evidence: None,
         ..Default::default()
     }));
 
@@ -3065,6 +3068,7 @@ async fn get_first_user_text_text_then_image_returns_text() {
             },
         ],
         synthetic_reason: None,
+        permission_evidence: None,
         ..Default::default()
     }));
 
@@ -4162,6 +4166,7 @@ async fn prefix_stable_after_image_pruning() {
                 },
             ],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         }),
         ConversationItem::assistant("I see it"),
@@ -4183,6 +4188,7 @@ async fn prefix_stable_after_image_pruning() {
                 },
             ],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         }));
 
@@ -4254,6 +4260,7 @@ async fn build_request_preserves_small_old_images() {
                 },
             ],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         }),
         ConversationItem::assistant("I see it"),

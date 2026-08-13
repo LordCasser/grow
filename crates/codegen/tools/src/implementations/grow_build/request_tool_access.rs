@@ -95,9 +95,8 @@ pub trait ToolAccessGrantBackend: Send + Sync {
     }
 
     /// Final dispatch-time authorization check. This is intentionally read
-    /// again after the ordinary tool permission decision, because the
-    /// inherited server transport or child-local grant can change while that
-    /// permission request is awaiting a response.
+    /// again at the common dispatch boundary because the inherited server
+    /// transport or child-local grant can change after tool discovery.
     fn is_mcp_tool_granted(&self, qualified_tool: &str) -> bool {
         let Some((server, tool)) = qualified_tool.split_once("__") else {
             return false;
@@ -114,6 +113,13 @@ pub trait ToolAccessGrantBackend: Send + Sync {
     /// tool result is recorded.
     fn take_followup(&self, _tool_call_id: &str) -> Option<String> {
         None
+    }
+
+    /// Consume an explicit user cancellation resolved while this capability
+    /// request was executing. Denials and timeouts remain ordinary tool
+    /// results; only this signal terminates the child turn.
+    fn take_cancelled(&self, _tool_call_id: &str) -> bool {
+        false
     }
 }
 
@@ -168,7 +174,7 @@ impl crate::types::tool_metadata::ToolMetadata for RequestToolAccessTool {
     }
 
     fn description_template(&self) -> &str {
-        "Request one additional capability for this subagent session. The capability catalog in the system prompt is only an eligibility list, not a grant. Provide a concrete purpose tied to the assigned task. Request `execute` for shell execution, `read-write` for workspace mutation, or one eligible MCP server before calling its tools. A successful capability grant does not bypass permission checks on the eventual tool call."
+        "Request one additional capability for this subagent session. The capability catalog in the system prompt is only an eligibility list, not a grant. Provide a concrete purpose tied to the assigned task. Request `execute` for shell execution, `read-write` for workspace mutation, or one eligible MCP server before calling its tools. A successful grant authorizes ordinary calls inside that capability fence for this live session; managed policy and hard safety boundaries still apply."
     }
 }
 

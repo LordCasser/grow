@@ -73,7 +73,7 @@ use tools::types::output::{
     BashOutput, ReadFileOutput, ToolOutput as ToolsToolOutput, ToolRunResult,
 };
 use workspace::file_system::CodebaseIndexManager;
-use workspace::permission::{AccessKind, ClientType, Decision, PermissionEvent, PermissionHandle};
+use workspace::permission::{AccessKind, ClientType, Decision, PermissionHandle};
 use workspace::session::file_state::{FileStateHandle, FileStateTracker};
 const SESSION_LOG: &str = "grow_session";
 #[path = "compaction.rs"]
@@ -481,6 +481,10 @@ pub(crate) struct SessionActor {
     /// Resolved at construction: per-model config.toml → remote settings → 300s default.
     pub(crate) inference_idle_timeout: std::cell::Cell<Duration>,
     pub(crate) max_retries: std::cell::Cell<u32>,
+    /// Immutable session snapshot of `[subagents].classifier_input`. Permission
+    /// judgments are latency-bounded and must never launch uncancellable
+    /// blocking config reads on the session runtime.
+    pub(crate) subagent_classifier_input: crate::config::SubagentClassifierInput,
     /// Maximum tool-use turns before the session stops. `None` = unlimited.
     pub(crate) max_turns: Option<usize>,
     /// Pending mid-turn interjections from the user (Ctrl+Enter).
@@ -528,6 +532,12 @@ pub(crate) struct SessionActor {
     git_head_enabled: bool,
     /// Shared models manager for etag-triggered refresh from response headers.
     pub(crate) models_manager: crate::agent::models::ModelsManager,
+    /// Only the primary that created the shared permission manager may stop
+    /// it. Children merely clone the handle.
+    pub(crate) owns_permission_manager: bool,
+    /// Primary-owned receiver bridge. Shutdown joins it after the permission
+    /// actor closes its event sender and before the final persistence flush.
+    pub(crate) permission_audit_bridge: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Stable display path for forked sessions (original project path).
     ///
     /// Used by `build_user_message_prefix` (user-message `Workspace Path`),

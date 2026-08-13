@@ -201,6 +201,7 @@ mod tests {
         ConversationItem::User(UserItem {
             content: vec![ContentPart::Text { text: text.into() }],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         })
     }

@@ -21,7 +21,7 @@
     }
 
     #[test]
-    fn child_interaction_resolved_dismisses_child_owned_permission() {
+    fn child_interaction_resolved_dismisses_primary_owned_permission() {
         let mut app = make_app_with_agent("sess-parent");
         app.agents
             .get_mut(&AgentId(0))
@@ -32,12 +32,12 @@
         let (child_msg, _child_rx) = make_permission_message("sess-child");
         handle(root_msg, &mut app);
         handle(child_msg, &mut app);
-        assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 1);
+        assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 2);
         assert_eq!(
             app.agents[&AgentId(0)].subagent_views["sess-child"]
                 .permission_queue
                 .len(),
-            1
+            0
         );
 
         let changed = handle_session_notification(
@@ -54,12 +54,7 @@
             "sess-parent",
             "same tool-call id in the root session must remain queued"
         );
-        assert!(
-            parent.subagent_views["sess-child"]
-                .permission_queue
-                .is_empty(),
-            "resolved child request must be removed from the child queue"
-        );
+        assert!(parent.subagent_views["sess-child"].permission_queue.is_empty());
     }
 
     #[test]
@@ -349,13 +344,16 @@
         let _affected = handle(msg, &mut app);
 
         assert_eq!(
-            app.agents
-                .get(&AgentId(0))
-                .unwrap()
-                .subagent_views["sess-child"]
+            app.agents.get(&AgentId(0)).unwrap().permission_queue.len(),
+            1,
+            "child Ask must penetrate to the owning primary interaction layer"
+        );
+        assert_eq!(
+            app.agents.get(&AgentId(0)).unwrap().subagent_views["sess-child"]
                 .permission_queue
                 .len(),
-            1
+            0,
+            "the child transcript must not own a hidden permission timeout"
         );
         assert!(
             matches!(

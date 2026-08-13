@@ -2228,6 +2228,7 @@ fn fork_filter_removes_synthetic_user_messages() {
                     text: "doom loop".into(),
                 }],
                 synthetic_reason: Some(SyntheticReason::SystemReminder),
+                permission_evidence: None,
                 ..Default::default()
             }),
             ConversationItem::assistant("response"),

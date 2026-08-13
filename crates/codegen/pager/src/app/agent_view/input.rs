@@ -488,7 +488,9 @@ impl AgentView {
                 self.clear_stuck_scrollback_drag();
             }
         }
-        if let Some(ref child_sid) = self.active_subagent.clone() {
+        if self.permission_queue.is_empty()
+            && let Some(ref child_sid) = self.active_subagent.clone()
+        {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
                 && key!('q', CONTROL).matches(key)

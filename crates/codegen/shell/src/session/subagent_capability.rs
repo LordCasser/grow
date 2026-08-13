@@ -1,6 +1,6 @@
 //! Child-local dynamic capability state and permission-backed grant backend.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use agent_client_protocol as acp;
@@ -13,14 +13,55 @@ use tools::types::tool::ToolKind;
 
 pub(crate) const CAPABILITY_CATALOG_TAG: &str = "subagent-capability-catalog";
 
+/// Immutable authority a live child may delegate to its descendants. Runtime
+/// grants intentionally never mutate this value. MCP authority is bound to the
+/// exact inherited transport incarnation, so a same-name reconnect cannot
+/// revive an old delegation grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DelegableCapabilityCeiling {
+    initial_mode: tool_types::SubagentCapabilityMode,
+    initial_mcp_bindings: HashMap<String, u64>,
+}
+
+impl DelegableCapabilityCeiling {
+    pub(crate) fn new(
+        initial_mode: tool_types::SubagentCapabilityMode,
+        initial_mcp_bindings: HashMap<String, u64>,
+    ) -> Self {
+        Self {
+            initial_mode,
+            initial_mcp_bindings: if initial_mode == tool_types::SubagentCapabilityMode::All {
+                initial_mcp_bindings
+            } else {
+                HashMap::new()
+            },
+        }
+    }
+
+    pub(crate) fn permits_mode(&self, requested: tool_types::SubagentCapabilityMode) -> bool {
+        requested.is_subset_of(self.initial_mode)
+    }
+
+    pub(crate) fn permits_mcp_binding(&self, server: &str, client_id: u64) -> bool {
+        self.initial_mcp_bindings.get(server) == Some(&client_id)
+    }
+
+    #[cfg(test)]
+    fn initial_mode(&self) -> tool_types::SubagentCapabilityMode {
+        self.initial_mode
+    }
+}
+
 #[derive(Debug)]
 struct CapabilityGrants {
     initial_mode: tool_types::SubagentCapabilityMode,
     eligible_native: HashSet<NativeCapability>,
     granted_native: HashSet<NativeCapability>,
     pending_native: HashSet<NativeCapability>,
-    granted_mcp_servers: HashSet<String>,
-    pending_mcp_servers: HashSet<String>,
+    /// Explicit authorization bound to the inherited transport incarnation
+    /// that was current when the grant was issued.
+    granted_mcp_servers: HashMap<String, u64>,
+    pending_mcp_servers: HashMap<String, u64>,
     mcp_eligibility: Option<mcp::servers::SharedMcpEligibility>,
     bound_mcp_client_ids: std::collections::HashMap<String, u64>,
     observed_mcp_generation: u64,
@@ -71,13 +112,18 @@ impl SubagentCapabilityState {
         let observed_mcp_generation = mcp_eligibility
             .as_ref()
             .map_or(0, mcp::servers::SharedMcpEligibility::generation);
+        let granted_mcp_servers = if initial_mode == tool_types::SubagentCapabilityMode::All {
+            bound_mcp_client_ids.clone()
+        } else {
+            HashMap::new()
+        };
         Self(Arc::new(parking_lot::RwLock::new(CapabilityGrants {
             initial_mode,
             eligible_native,
             granted_native: HashSet::new(),
             pending_native: HashSet::new(),
-            granted_mcp_servers: HashSet::new(),
-            pending_mcp_servers: HashSet::new(),
+            granted_mcp_servers,
+            pending_mcp_servers: HashMap::new(),
             mcp_eligibility,
             bound_mcp_client_ids,
             observed_mcp_generation,
@@ -163,9 +209,11 @@ impl SubagentCapabilityState {
 
     pub(crate) fn mcp_server_granted(&self, server: &str) -> bool {
         let state = self.0.read();
+        let Some(current_client_id) = state.bound_mcp_client_ids.get(server) else {
+            return false;
+        };
         Self::mcp_server_eligible_locked(&state, server)
-            && (state.initial_mode == tool_types::SubagentCapabilityMode::All
-                || state.granted_mcp_servers.contains(server))
+            && state.granted_mcp_servers.get(server) == Some(current_client_id)
     }
 
     pub(crate) fn mcp_server_eligible(&self, server: &str) -> bool {
@@ -218,7 +266,12 @@ impl SubagentCapabilityState {
     }
 
     fn mcp_server_requested_or_granted(&self, server: &str) -> bool {
-        self.mcp_server_granted(server) || self.0.read().pending_mcp_servers.contains(server)
+        if self.mcp_server_granted(server) {
+            return true;
+        }
+        let state = self.0.read();
+        state.pending_mcp_servers.get(server) == state.bound_mcp_client_ids.get(server)
+            && Self::mcp_server_eligible_locked(&state, server)
     }
 
     pub(crate) fn mcp_tool_granted(&self, qualified_tool: &str) -> bool {
@@ -261,7 +314,7 @@ impl SubagentCapabilityState {
             ));
         }
         lines.push(
-            "For MCP, search_tool lists eligible server tools and their grant status. Request one mcp_server before use_tool. Every eventual Shell/Edit/MCP call still goes through permission checks."
+            "For MCP, search_tool lists eligible server tools and their grant status. Request one mcp_server before use_tool. A grant covers every eligible tool on that server for this live subagent session; ordinary in-fence calls do not request Auto permission again."
                 .to_owned(),
         );
         lines.join("\n")
@@ -274,7 +327,11 @@ impl SubagentCapabilityState {
                 state.pending_native.insert(*capability);
             }
             ToolAccessTarget::McpServer { server } => {
-                state.pending_mcp_servers.insert(server.clone());
+                if let Some(client_id) = state.bound_mcp_client_ids.get(server).copied()
+                    && Self::mcp_server_eligible_locked(&state, server)
+                {
+                    state.pending_mcp_servers.insert(server.clone(), client_id);
+                }
             }
         }
     }
@@ -283,6 +340,25 @@ impl SubagentCapabilityState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegation_ceiling_keeps_only_initial_all_mode_mcp_bindings() {
+        let bindings = HashMap::from([("github".to_owned(), 7), ("linear".to_owned(), 9)]);
+        let all = DelegableCapabilityCeiling::new(
+            tool_types::SubagentCapabilityMode::All,
+            bindings.clone(),
+        );
+        assert_eq!(all.initial_mode(), tool_types::SubagentCapabilityMode::All);
+        assert!(all.permits_mode(tool_types::SubagentCapabilityMode::Execute));
+        assert!(all.permits_mcp_binding("github", 7));
+        assert!(!all.permits_mcp_binding("github", 8));
+
+        let read_only =
+            DelegableCapabilityCeiling::new(tool_types::SubagentCapabilityMode::ReadOnly, bindings);
+        assert!(read_only.permits_mode(tool_types::SubagentCapabilityMode::ReadOnly));
+        assert!(!read_only.permits_mode(tool_types::SubagentCapabilityMode::Execute));
+        assert!(!read_only.permits_mcp_binding("github", 7));
+    }
 
     fn state(
         initial_mode: tool_types::SubagentCapabilityMode,
@@ -293,8 +369,8 @@ mod tests {
             eligible_native: eligible_native.into_iter().collect(),
             granted_native: HashSet::new(),
             pending_native: HashSet::new(),
-            granted_mcp_servers: HashSet::new(),
-            pending_mcp_servers: HashSet::new(),
+            granted_mcp_servers: HashMap::new(),
+            pending_mcp_servers: HashMap::new(),
             mcp_eligibility: None,
             bound_mcp_client_ids: Default::default(),
             observed_mcp_generation: 0,
@@ -366,7 +442,10 @@ mod tests {
         parent
             .owned_clients
             .insert("github".to_owned(), Arc::clone(&original));
-        parent.publish_eligibility(HashSet::from(["github__search".to_owned()]));
+        parent.publish_eligibility(HashSet::from([
+            "github__search".to_owned(),
+            "github__create_issue".to_owned(),
+        ]));
         let pool = mcp::servers::SharedMcpPool::from_state(&parent);
         let capability =
             SubagentCapabilityState(Arc::new(parking_lot::RwLock::new(CapabilityGrants {
@@ -374,8 +453,8 @@ mod tests {
                 eligible_native: HashSet::new(),
                 granted_native: HashSet::new(),
                 pending_native: HashSet::new(),
-                granted_mcp_servers: HashSet::new(),
-                pending_mcp_servers: HashSet::new(),
+                granted_mcp_servers: HashMap::new(),
+                pending_mcp_servers: HashMap::new(),
                 mcp_eligibility: Some(pool.eligibility()),
                 bound_mcp_client_ids: std::collections::HashMap::from([(
                     "github".to_owned(),
@@ -388,17 +467,101 @@ mod tests {
         });
         capability.activate_pending();
         assert!(capability.mcp_tool_granted("github__search"));
-
-        parent.owned_clients.insert(
-            "github".to_owned(),
-            Arc::new(mcp::servers::McpClient::stub("github")),
+        assert!(capability.mcp_tool_granted("github__create_issue"));
+        assert!(
+            capability.mcp_server_requested_or_granted("github"),
+            "one server grant must cover every eligible tool for this child session"
         );
+
+        let replacement = Arc::new(mcp::servers::McpClient::stub("github"));
+        parent
+            .owned_clients
+            .insert("github".to_owned(), Arc::clone(&replacement));
         parent.publish_eligibility(HashSet::from(["github__search".to_owned()]));
 
         assert!(
             !capability.mcp_tool_granted("github__search"),
             "a same-name parent reconnect must revoke the old child transport binding"
         );
+        capability.replace_bound_mcp_client_ids(HashMap::from([(
+            "github".to_owned(),
+            replacement.client_id(),
+        )]));
+        assert!(capability.mcp_server_eligible("github"));
+        assert!(
+            !capability.mcp_tool_granted("github__search"),
+            "reconciliation must not transplant the old grant onto the replacement transport"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn denied_boundary_request_is_a_structured_nonterminal_result() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = paths::AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let gateway = acp_transport::AcpAgentGatewaySender::new(gateway_tx);
+                let (permissions, _events) = workspace::permission::spawn_permission_manager(
+                    acp::SessionId::new("primary"),
+                    gateway.clone(),
+                    cwd,
+                    workspace::permission::ClientType::Generic,
+                    std::time::Duration::from_secs(1),
+                    None,
+                    vec![],
+                    vec![],
+                    false,
+                    None,
+                    false,
+                );
+                permissions.set_classifier(Some(
+                    workspace::permission::LlmPermissionClassifier::with_fixed_model_text(
+                        r#"{"decision":"deny","reason":"outside the assigned task"}"#,
+                    ),
+                ));
+                let state = state(
+                    tool_types::SubagentCapabilityMode::ReadOnly,
+                    [NativeCapability::Execute],
+                );
+                let cancelled_requests = Arc::new(std::sync::Mutex::new(HashSet::new()));
+                let backend = ShellToolAccessGrantBackend {
+                    state: state.clone(),
+                    permissions,
+                    request_mode: workspace::permission::types::RequestPermissionMode::Auto,
+                    session_id: "child".into(),
+                    acp_session_id: acp::SessionId::new("child"),
+                    execution_cwd: tmp.path().to_path_buf(),
+                    subagent_type: Some("explore".into()),
+                    subagent_description: Some("inspect one subsystem".into()),
+                    mcp_tool_metadata: Arc::new(std::sync::Mutex::new(Default::default())),
+                    pending_interactions: Arc::new(std::sync::Mutex::new(Default::default())),
+                    gateway,
+                    followup_messages: Arc::new(std::sync::Mutex::new(Default::default())),
+                    cancelled_requests: Arc::clone(&cancelled_requests),
+                };
+
+                let output = backend
+                    .request(
+                        RequestToolAccessInput {
+                            target: ToolAccessTarget::Native {
+                                capability: NativeCapability::Execute,
+                            },
+                            purpose: "run an unrelated command".into(),
+                        },
+                        "grant-tool-call",
+                    )
+                    .await
+                    .expect("a denied grant is a tool result, not a tool error");
+
+                assert_eq!(output.status, ToolAccessGrantStatus::Denied);
+                assert_eq!(output.reason, ToolAccessGrantReason::PolicyDenied);
+                assert!(output.message.contains("final report"));
+                assert!(!state.native_requested_or_granted(NativeCapability::Execute));
+                assert!(cancelled_requests.lock().unwrap().is_empty());
+            })
+            .await;
     }
 }
 
@@ -415,6 +578,14 @@ pub(crate) struct ShellToolAccessGrantBackend {
     pub pending_interactions: crate::session::pending_interaction::PendingInteractions,
     pub gateway: acp_transport::AcpAgentGatewaySender,
     pub followup_messages: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    pub cancelled_requests: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+fn nonterminal_permission_guidance(message: impl AsRef<str>) -> String {
+    format!(
+        "{} Continue with the capabilities that remain available. Do not retry this exact request blindly; if the missing permission prevents completion, explain the limitation in your final report.",
+        message.as_ref().trim_end_matches('.')
+    )
 }
 
 impl ShellToolAccessGrantBackend {
@@ -461,9 +632,9 @@ impl ToolAccessGrantBackend for ShellToolAccessGrantBackend {
                 status: ToolAccessGrantStatus::Unavailable,
                 reason: ToolAccessGrantReason::OutsideEligibility,
                 target: input.target,
-                message:
-                    "Requested capability is outside this subagent's hard eligibility ceiling."
-                        .to_owned(),
+                message: nonterminal_permission_guidance(
+                    "Requested capability is outside this subagent's hard eligibility ceiling.",
+                ),
             });
         }
         if self.target_granted(&input.target) {
@@ -517,6 +688,7 @@ impl ToolAccessGrantBackend for ShellToolAccessGrantBackend {
                             subagent_description: self.subagent_description.clone(),
                         },
                         request_mode: Some(self.request_mode),
+                        within_capability_fence: false,
                         execution_cwd: Some(self.execution_cwd.clone()),
                         // The assigned task and purpose are carried explicitly;
                         // never reuse another request's mutable transcript.
@@ -531,8 +703,9 @@ impl ToolAccessGrantBackend for ShellToolAccessGrantBackend {
                     status: ToolAccessGrantStatus::Unavailable,
                     reason: ToolAccessGrantReason::OutsideEligibility,
                     target: input.target,
-                    message: "Requested capability became unavailable while permission was pending. Refresh the live capability catalog before retrying."
-                        .to_owned(),
+                    message: nonterminal_permission_guidance(
+                        "Requested capability became unavailable while permission was pending.",
+                    ),
                 });
             }
             self.state.grant(&input.target);
@@ -540,17 +713,19 @@ impl ToolAccessGrantBackend for ShellToolAccessGrantBackend {
                 status: ToolAccessGrantStatus::Granted,
                 reason: ToolAccessGrantReason::Approved,
                 target: input.target,
-                message: "Capability granted for this live subagent session. It becomes visible at the next model sample; actual tool calls still require permission."
+                message: "Capability granted for this live subagent session. It becomes visible at the next model sample; ordinary calls inside the granted fence do not request Auto permission again."
                     .to_owned(),
             });
         }
         let (reason, message) = match decision {
-            workspace::permission::Decision::Reject(message) => {
-                (ToolAccessGrantReason::UserDenied, message)
-            }
-            workspace::permission::Decision::PolicyDeny(message) => {
-                (ToolAccessGrantReason::PolicyDenied, message)
-            }
+            workspace::permission::Decision::Reject(message) => (
+                ToolAccessGrantReason::UserDenied,
+                nonterminal_permission_guidance(message),
+            ),
+            workspace::permission::Decision::PolicyDeny(message) => (
+                ToolAccessGrantReason::PolicyDenied,
+                nonterminal_permission_guidance(message),
+            ),
             workspace::permission::Decision::FollowupMessage(message) => {
                 self.followup_messages
                     .lock()
@@ -558,17 +733,23 @@ impl ToolAccessGrantBackend for ShellToolAccessGrantBackend {
                     .insert(tool_call_id.to_owned(), message.clone());
                 (ToolAccessGrantReason::FollowupRequired, message)
             }
-            workspace::permission::Decision::Cancelled => (
-                ToolAccessGrantReason::Cancelled,
-                "Permission request cancelled.".to_owned(),
-            ),
+            workspace::permission::Decision::Cancelled => {
+                self.cancelled_requests
+                    .lock()
+                    .expect("capability cancellation lock poisoned")
+                    .insert(tool_call_id.to_owned());
+                (
+                    ToolAccessGrantReason::Cancelled,
+                    "Permission request cancelled.".to_owned(),
+                )
+            }
             workspace::permission::Decision::TimedOut => (
                 ToolAccessGrantReason::TimedOut,
-                "Permission request timed out.".to_owned(),
+                nonterminal_permission_guidance("Permission request timed out."),
             ),
             workspace::permission::Decision::Ask => (
                 ToolAccessGrantReason::Unresolved,
-                "Permission request was not resolved.".to_owned(),
+                nonterminal_permission_guidance("Permission request was not resolved."),
             ),
             workspace::permission::Decision::Allow => unreachable!(),
         };
@@ -600,6 +781,13 @@ impl ToolAccessGrantBackend for ShellToolAccessGrantBackend {
         self.followup_messages
             .lock()
             .expect("capability followup lock poisoned")
+            .remove(tool_call_id)
+    }
+
+    fn take_cancelled(&self, tool_call_id: &str) -> bool {
+        self.cancelled_requests
+            .lock()
+            .expect("capability cancellation lock poisoned")
             .remove(tool_call_id)
     }
 }

@@ -53,6 +53,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_cwd: PathBuf::from("/tmp"),
         parent_session_id: "test-parent".into(),
         subagent_permission_mode: workspace::permission::types::RequestPermissionMode::Auto,
+        parent_capability_ceiling: None,
         yolo_mode: false,
         subagent_event_tx: tx,
         hunk_tracker_handle: hunk_tracker::HunkTrackerHandle::noop(),

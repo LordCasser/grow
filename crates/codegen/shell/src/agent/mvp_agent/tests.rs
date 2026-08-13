@@ -1,5 +1,40 @@
 use super::*;
 
+#[test]
+fn complete_jsonl_snapshot_never_returns_a_partial_record_offset() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("updates.jsonl");
+    let first = br#"{"eventId":"a","text":"complete"}
+"#;
+    let second = "{\"eventId\":\"b\",\"text\":\"权限审批完整内容\"}\n".as_bytes();
+
+    for cut in 0..second.len() {
+        let mut prefix = first.to_vec();
+        prefix.extend_from_slice(&second[..cut]);
+        std::fs::write(&path, prefix).unwrap();
+
+        let (snapshot, offset) = read_complete_jsonl_snapshot(&path).unwrap();
+        assert_eq!(snapshot.as_bytes(), first, "cut={cut}");
+        assert_eq!(offset, first.len() as u64, "cut={cut}");
+
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&second[cut..]).unwrap();
+        drop(file);
+        let mut file = std::fs::File::open(&path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut delta = Vec::new();
+        file.read_to_end(&mut delta).unwrap();
+        assert_eq!(delta, second, "cut={cut}");
+    }
+
+    std::fs::write(&path, second).unwrap();
+    let (snapshot, offset) = read_complete_jsonl_snapshot(&path).unwrap();
+    assert_eq!(snapshot.as_bytes(), second);
+    assert_eq!(offset, second.len() as u64);
+}
+
 fn valid_agent_config() -> crate::agent::config::Config {
     let raw: toml::Value = toml::from_str(
         r#"
@@ -593,6 +628,7 @@ fn make_test_handle(
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: workspace::permission::PermissionHandle::allow_all(),
+        delegable_capability_ceiling: None,
         agent_name: "grow-build".to_string(),
         subagent_filter: Default::default(),
         managed_mcp_proxy_base_url: String::new(),
@@ -1725,14 +1761,6 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
         acp::ModelId::new(std::sync::Arc::from("gone-model")),
     );
     agent.set_turn_number(&sid, 3);
-    let (_permission_tx, permission_rx) =
-        tokio::sync::mpsc::unbounded_channel::<workspace::permission::PermissionEvent>();
-    agent
-        .retained_resources
-        .borrow_mut()
-        .entry(sid.clone())
-        .or_default()
-        .permission_event_receiver = Some(permission_rx);
     agent
         .resident_resources
         .borrow_mut()

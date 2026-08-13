@@ -287,6 +287,47 @@ impl ScrollbackState {
         cache.entry_at_content_y(content_y, visible_range)
     }
 
+    /// Resolve a click inside a permission audit block to one structured
+    /// member. A multi-member collapsed row is the group header (`None`);
+    /// expanded row zero is also the header and rows one-based below it map to
+    /// members. A singleton row maps directly to its only member.
+    pub fn permission_member_at_screen_row(
+        &self,
+        entry_idx: usize,
+        screen_row: u16,
+        scrollback_area: Rect,
+    ) -> Option<usize> {
+        let entry = self.entry(entry_idx)?;
+        let RenderBlock::SubagentPermission(group) = &entry.block else {
+            return None;
+        };
+        let cache = self.layout_cache.as_ref()?;
+        let visible_range = self.visible_entry_range();
+        if !visible_range.contains(&entry_idx) {
+            return None;
+        }
+        let row_in_viewport = screen_row.checked_sub(scrollback_area.y)? as usize;
+        let sticky = self.current_sticky_layout(cache, &visible_range);
+        if row_in_viewport < sticky.header_screen_rows() as usize {
+            return None;
+        }
+        let base_y = cache.virtual_y[visible_range.start];
+        let content_y = base_y + row_in_viewport + self.scroll_offset;
+        let row_in_entry = content_y.checked_sub(cache.virtual_y[entry_idx])?;
+        // Permission blocks deliberately have one row of vertical padding on
+        // each side. Only content rows are actionable.
+        let content_row = row_in_entry.checked_sub(1)?;
+        if group.len() == 1 {
+            return (content_row == 0).then_some(0);
+        }
+        if entry.display_mode != DisplayMode::Expanded {
+            return None;
+        }
+        content_row
+            .checked_sub(1)
+            .filter(|member| *member < group.len())
+    }
+
     /// Compute the screen area for an entry at the given index.
     ///
     /// Returns `(area, top_clipped, bottom_clipped)` where `area` is the
@@ -1448,10 +1489,10 @@ impl ScrollbackState {
     ///   the truncation pass's claimed-entry breaks (leading hidden thinking
     ///   can still skew `start` off the truncation header — pre-existing).
     pub fn group_range_of(&self, idx: usize, collapsed_only: bool) -> Range<usize> {
-        // A verb-group run is its own group regardless of `collapsed_only`
+        // An eager run is its own group regardless of `collapsed_only`
         // (members are collapsed by construction; the run stays the toggle /
         // collapse / selection unit while expanded).
-        if let Some(range) = self.verb_group_span_range(idx) {
+        if let Some(range) = self.eager_group_span_range(idx) {
             return range;
         }
 
@@ -1490,13 +1531,13 @@ impl ScrollbackState {
         if let Some((_, e)) = self.entries.get_index(i) {
             e.block.is_groupable()
                 && (!collapsed_only || e.display_mode == DisplayMode::Collapsed)
-                && self.verb_group_range_of(i).is_none()
+                && self.eager_group_range_of(i).is_none()
         } else {
             false
         }
     }
 
-    /// The folded verb run containing the claimed entry at `idx`, read from
+    /// The folded eager run containing the claimed entry at `idx`, read from
     /// the last fold pass's spans ([`Self::span_at`]). Transparent entries
     /// inside the span (live/opened thinking, opened members) keep their own
     /// rows and stay outside the toggle unit, mirroring the walk's anchor
@@ -1505,17 +1546,26 @@ impl ScrollbackState {
     /// run mid-mutation, before the next fold — `rekey_verb_group_expansion`,
     /// `joins_dense_run` — keep the walk, which predicts the NEXT fold from
     /// current entry state.
-    fn verb_group_span_range(&self, idx: usize) -> Option<Range<usize>> {
+    fn eager_group_span_range(&self, idx: usize) -> Option<Range<usize>> {
         let span = self.span_at(idx)?;
-        let groups::GroupKind::VerbRun { .. } = span.kind else {
-            return None;
-        };
         let (_, entry) = self.entries.get_index(idx)?;
-        let show_thinking = crate::appearance::cache::load_show_thinking_blocks();
-        match run_step(entry, show_thinking) {
-            RunStep::Member(_) | RunStep::ThoughtMember => Some(span.range.clone()),
-            RunStep::Transparent | RunStep::Break => None,
+        match span.kind {
+            groups::GroupKind::VerbRun { .. } => {
+                let show_thinking = crate::appearance::cache::load_show_thinking_blocks();
+                match run_step(entry, show_thinking) {
+                    RunStep::Member(_) | RunStep::ThoughtMember => Some(span.range.clone()),
+                    RunStep::Transparent | RunStep::Break => None,
+                }
+            }
+            groups::GroupKind::Truncation { .. } => None,
         }
+    }
+
+    /// Predict the eager fold containing `idx` from current entry state.
+    /// Permission audits are stable turn-scoped blocks, outside this generic
+    /// eager-fold model.
+    fn eager_group_range_of(&self, idx: usize) -> Option<Range<usize>> {
+        self.verb_group_range_of(idx)
     }
 
     /// The folding verb-group run (per `RunScan::folds`, `group_tool_verbs`

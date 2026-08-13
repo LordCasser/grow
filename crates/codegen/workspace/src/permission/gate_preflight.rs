@@ -19,6 +19,11 @@ pub(crate) struct GatePreflight {
     direct: Option<Decision>,
     bash_command: Option<GateDecision>,
     shell_file: Option<GateDecision>,
+    /// A gate could not decompose the command and therefore asked
+    /// fail-closed, with no actual managed Ask rule match. Child permission
+    /// modes route this heuristic as AlwaysApprove/Auto/Ask; it is not itself
+    /// an authoritative managed-policy Ask.
+    shell_heuristic_ask: bool,
     /// Auto mode + a fail-closed gate Ask with no rule match: the classifier
     /// arbitrates (Allow runs, Block prompts). A rule-match Ask never defers.
     defers_gate_ask: bool,
@@ -52,6 +57,7 @@ impl GatePreflight {
             direct,
             bash_command,
             shell_file,
+            shell_heuristic_ask: fail_closed_ask && !rule_match_ask,
             defers_gate_ask,
         }
     }
@@ -93,6 +99,11 @@ impl GatePreflight {
     /// deny, no denial-budget consumption).
     pub(crate) fn defers_gate_ask(&self) -> bool {
         self.defers_gate_ask
+    }
+
+    /// A parser/gate uncertainty rather than a matched managed Ask rule.
+    pub(crate) fn shell_heuristic_ask(&self) -> bool {
+        self.shell_heuristic_ask
     }
 
     /// The gate-owned prompt trigger for diagnostics, or `None` when a bash floor

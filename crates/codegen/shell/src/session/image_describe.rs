@@ -384,6 +384,7 @@ pub async fn describe_images(
             text: std::sync::Arc::<str>::from(prompt_text),
         }],
         synthetic_reason: None,
+        permission_evidence: None,
         ..Default::default()
     });
     if let ConversationItem::User(u) = &mut user_item {
@@ -453,6 +454,7 @@ mod tests {
         ConversationItem::User(UserItem {
             content: vec![sampling_types::conversation::ContentPart::Text { text: text.into() }],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         })
     }

@@ -627,40 +627,14 @@ impl AgentView {
                 badge.width() as u16,
             );
         }
-        // Parent-agent permission requests are invisible while the subagent
-        // fills the screen (input routes to the child view and the parent's
-        // modal/banner is not drawn). Surface them as a banner on the first
-        // content row and shrink the child view by one row so the banner
-        // survives the child's own draw.
-        let pending_permissions = self.permission_queue.len();
-        let child_area = if pending_permissions > 0 && inner.height > 4 {
-            let banner = format!(
-                " {pending_permissions} permission request(s) pending — press Esc to return \
-                 and answer"
-            );
-            buf.set_span_safe(
-                inner.x,
-                inner.y,
-                &Span::styled(banner, Style::default().fg(theme.warning).bg(theme.bg_base)),
-                inner.width,
-            );
-            Rect {
-                x: inner.x,
-                y: inner.y + 1,
-                width: inner.width,
-                height: inner.height - 1,
-            }
-        } else {
-            inner
-        };
         let mut child_post_flush = None;
-        if child_area.width > 5
-            && child_area.height > 3
+        if inner.width > 5
+            && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
         {
             child_view.mark_as_subagent_view();
             let (_, post_flush) = child_view.draw(
-                child_area,
+                inner,
                 buf,
                 registry,
                 scratch,
@@ -766,7 +740,9 @@ impl AgentView {
             self.inline_media_ids.clear();
             self.inline_media_iterm_emitted.clear();
         }
-        if let Some(ref child_sid) = self.active_subagent.clone() {
+        if self.permission_queue.is_empty()
+            && let Some(ref child_sid) = self.active_subagent.clone()
+        {
             if let Some(esc) = self.take_own_inline_media_clear_escapes() {
                 shell::util::with_locked_stderr(|stderr| {
                     let _ = std::io::Write::write_all(stderr, esc.as_bytes());

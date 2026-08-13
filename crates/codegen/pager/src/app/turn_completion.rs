@@ -232,6 +232,7 @@ pub(super) fn finalize_prompt_terminal(
 
     agent.session.finish_turn(&mut agent.scrollback);
     push_turn_terminal_marker(agent, event, ending_prompt_id.as_deref());
+    agent.scrollback.seal_subagent_permission_group();
 
     // ── Full turn-end teardown (the PR rail's sequence, now shared) ──
     agent.mark_turn_finished();

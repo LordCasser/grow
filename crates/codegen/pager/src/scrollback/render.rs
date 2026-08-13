@@ -396,19 +396,25 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         // classification.
         let header_label = if entry_layout_info.verb_group_header {
             let show_thinking = crate::appearance::cache::load_show_thinking_blocks();
-            let end = group_spans
-                .and_then(|(spans, base)| {
-                    let span = span_containing(spans, base + i)?;
-                    Some(span.range.end.saturating_sub(base))
-                })
-                .unwrap_or(entries.len());
-            Some(GroupHeaderLabel::VerbRun(verb_group_header_label(
-                entries,
-                i,
-                end,
-                show_thinking,
-                theme,
-            )))
+            let span = group_spans.and_then(|(spans, base)| {
+                span_containing(spans, base + i).map(|span| (span, base))
+            });
+            match span {
+                Some((span, base)) => Some(GroupHeaderLabel::VerbRun(verb_group_header_label(
+                    entries,
+                    i,
+                    span.range.end.saturating_sub(base),
+                    show_thinking,
+                    theme,
+                ))),
+                None => Some(GroupHeaderLabel::VerbRun(verb_group_header_label(
+                    entries,
+                    i,
+                    entries.len(),
+                    show_thinking,
+                    theme,
+                ))),
+            }
         } else if entry_layout_info.is_group_header()
             && crate::appearance::cache::load_group_tool_verbs()
         {

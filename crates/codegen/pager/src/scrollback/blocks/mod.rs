@@ -11,6 +11,7 @@ pub mod mermaid_content;
 mod quote_bar;
 mod session_event;
 mod subagent;
+mod subagent_permission;
 mod system;
 mod thinking;
 pub mod tool;
@@ -23,6 +24,7 @@ pub use btw::BtwBlock;
 pub use context_info::ContextInfoBlock;
 pub use session_event::{SessionEvent, SessionEventBlock};
 pub use subagent::{SubagentBlock, SubagentBlockKind};
+pub use subagent_permission::{SubagentPermissionBlock, SubagentPermissionEvent};
 pub use system::SystemMessageBlock;
 pub use thinking::ThinkingBlock;
 pub use tool::{

@@ -57,6 +57,7 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
             // but security inheritance must follow the immediate spawning
             // child's live authority.
             if let Some(handle) = security_parent.or(parent_handle) {
+                ctx.parent_capability_ceiling = handle.delegable_capability_ceiling.clone();
                 ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
                 ctx.client_hooks = handle.snapshot_client_hooks().await;
             }
@@ -351,6 +352,7 @@ impl MvpAgent {
             inference_idle_timeout_secs,
             permission_prompt_timeout,
             subagent_permission_mode: self.cfg.borrow().subagent_permission_mode,
+            parent_capability_ceiling: None,
             auto_compact_threshold_tiers:
                 crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),
             hunk_tracker_handle,

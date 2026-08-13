@@ -1,7 +1,7 @@
 //! Derived group model for the scrollback's view-time folds.
 //!
-//! One scan owns every grouping decision: verb-group runs claim their
-//! entries first, then group truncation ("N more") runs over the rest. The
+//! One scan owns every grouping decision: verb-group runs claim their entries
+//! first, then group truncation ("N more") runs over the rest. The
 //! scan produces [`GroupSpan`]s — the authoritative description of every
 //! fold — and [`project_to_layout`] is the single writer that turns spans
 //! into the per-entry `EntryLayoutInfo` flags the renderer and navigation
@@ -43,7 +43,7 @@ pub struct GroupSpan {
     pub expanded: bool,
 }
 
-/// The two fold families. Both render a synthetic header row; they differ in
+/// The fold families. All render a synthetic header row; they differ in
 /// when they fold and what the header says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupKind {
@@ -96,7 +96,8 @@ pub(super) fn apply(
 }
 
 /// Scan the transcript for every fold, in the order the folds take
-/// precedence: verb runs claim entries first, truncation runs over the
+/// precedence: permission runs claim entries first, verb runs next, and
+/// truncation runs over the
 /// rest (claimed entries break truncation runs). Returns spans sorted by
 /// start index; spans never overlap.
 pub(super) fn scan(
@@ -106,8 +107,14 @@ pub(super) fn scan(
     group_tool_verbs: bool,
     show_thinking: bool,
 ) -> Vec<GroupSpan> {
-    let (mut spans, claimed) =
+    let mut spans = Vec::new();
+    let mut claimed = vec![false; entries.len()];
+    let (verb_spans, verb_claimed) =
         scan_verb_runs(entries, expanded_groups, group_tool_verbs, show_thinking);
+    spans.extend(verb_spans);
+    for (claimed, verb_claimed) in claimed.iter_mut().zip(verb_claimed) {
+        *claimed |= verb_claimed;
+    }
     spans.extend(scan_truncations(
         entries,
         max_visible,

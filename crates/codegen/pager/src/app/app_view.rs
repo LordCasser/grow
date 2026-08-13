@@ -3856,17 +3856,31 @@ impl AppView {
     fn tick_agent_block_viewer(agent: &mut AgentView) -> bool {
         let mut needs_redraw = false;
         if let Some(ref mut viewer) = agent.block_viewer {
-            if viewer.kind == crate::views::block_viewer::ViewerKind::BgTask
-                && let Some(ref task_id) = viewer.bg_task_id.clone()
-                && let Some(task) = agent.session.bg_tasks.get(task_id)
-            {
-                let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
-                needs_redraw |= viewer.tick_bg_task(&task.stdout, is_running);
-            } else if let Some(entry) = agent.scrollback.get_by_id(viewer.entry_id) {
-                needs_redraw |= viewer.tick(entry);
-            } else {
-                agent.block_viewer = None;
-                needs_redraw = true;
+            match viewer.kind {
+                crate::views::block_viewer::ViewerKind::PlainText => {
+                    // Static viewers are not backed by a scrollback entry.
+                    // Treating their sentinel EntryId as a live source made
+                    // the next animation tick close a just-opened modal.
+                }
+                crate::views::block_viewer::ViewerKind::BgTask => {
+                    if let Some(ref task_id) = viewer.bg_task_id.clone()
+                        && let Some(task) = agent.session.bg_tasks.get(task_id)
+                    {
+                        let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
+                        needs_redraw |= viewer.tick_bg_task(&task.stdout, is_running);
+                    } else {
+                        agent.block_viewer = None;
+                        needs_redraw = true;
+                    }
+                }
+                _ => {
+                    if let Some(entry) = agent.scrollback.get_by_id(viewer.entry_id) {
+                        needs_redraw |= viewer.tick(entry);
+                    } else {
+                        agent.block_viewer = None;
+                        needs_redraw = true;
+                    }
+                }
             }
         }
         needs_redraw
@@ -4298,6 +4312,25 @@ pub(crate) mod tests {
             super::super::dispatch::SwitchCause::Load,
         );
         app
+    }
+
+    #[test]
+    fn plain_text_block_viewer_survives_animation_tick() {
+        let mut app = test_app_with_agent();
+        let agent = app
+            .agents
+            .get_mut(&super::super::agent::AgentId(0))
+            .unwrap();
+        agent.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
+            "Subagent permission · Coder W4-C",
+            "Outcome: approved",
+        ));
+
+        assert!(!AppView::tick_agent_block_viewer(agent));
+        assert!(
+            agent.block_viewer.is_some(),
+            "a static permission detail modal must not be mistaken for a deleted transcript entry"
+        );
     }
     /// Give the test agent a non-empty scrollback so the empty-state logo
     /// shimmer does not demand Slow ticks — for tests that exercise other

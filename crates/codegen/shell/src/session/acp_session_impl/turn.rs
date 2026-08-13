@@ -541,6 +541,12 @@ impl SessionActor {
             serde_json::json!(current_prompt_index),
         );
         chunk_meta.insert("messageId".into(), serde_json::json!(prompt_id));
+        if matches!(origin, super::super::PromptOrigin::User) {
+            chunk_meta.insert(
+                "permissionEvidence".into(),
+                serde_json::json!("direct_user"),
+            );
+        }
         if origin.hide_user_echo_from_scrollback() {
             chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
         }
@@ -770,9 +776,12 @@ impl SessionActor {
                 super::super::PromptOrigin::SchedulerFired => {
                     ConversationItem::scheduler_fired(user_message)
                 }
-                super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
+                super::super::PromptOrigin::PlanResume => {
+                    ConversationItem::system_reminder(user_message)
+                }
                 super::super::PromptOrigin::User => {
                     let mut item = ConversationItem::user(user_message);
+                    item.set_permission_evidence(sampling_types::PermissionEvidence::DirectUser);
                     if let Some(interrupt) = self
                         .events
                         .take_prior_interrupt_category()
@@ -2003,7 +2012,9 @@ impl SessionActor {
             );
             let mut request = request;
             if structured_output_native {
-                request.json_schema = json_schema.clone();
+                request.json_output = json_schema
+                    .clone()
+                    .map(sampling_types::JsonOutputFormat::JsonSchema);
             }
             let defensive_strip_count = if request.image_count() > 0
                 && self.unsupported_current_model_for_images().await.is_some()

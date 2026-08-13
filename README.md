@@ -222,6 +222,10 @@ permission_mode = "ask" # ask | auto | always-approve
 permission_prompt_timeout_secs = 60
 non_interactive_permission_prompt_timeout_secs = 10
 
+[subagents]
+permission_mode = "auto" # auto | ask | always-approve | follow
+classifier_input = "context" # context | request_only
+
 [sandbox]
 profile = "workspace" # off | workspace | devbox | read-only | strict
 

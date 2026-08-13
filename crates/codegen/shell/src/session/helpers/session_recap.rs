@@ -388,6 +388,7 @@ mod tests {
                     text: Arc::from("injected"),
                 }],
                 synthetic_reason: Some(SyntheticReason::SystemReminder),
+                permission_evidence: None,
                 ..Default::default()
             }),
         ];

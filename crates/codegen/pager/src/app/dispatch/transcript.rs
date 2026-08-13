@@ -360,6 +360,9 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
                     is_running,
                 ))
             }
+            RenderBlock::SubagentPermission(block) => block.member(0).map(|member| {
+                BlockViewerPane::for_plain_text(&member.detail_title(), &member.detail_text())
+            }),
             _ => None,
         };
 

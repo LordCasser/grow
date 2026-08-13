@@ -587,6 +587,17 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
     };
     (label, clean_desc.to_string())
 }
+
+/// Canonical visible identity shared by the Subagents pane and any secondary
+/// surface that refers to the same live child.
+pub(crate) fn format_subagent_title(info: &SubagentInfo) -> String {
+    let (label, description) = format_subagent_label(info);
+    if description.is_empty() {
+        label
+    } else {
+        format!("{label} {description}")
+    }
+}
 pub(crate) fn format_subagent_meta(
     persona: Option<&str>,
     role: Option<&str>,

@@ -178,6 +178,19 @@ impl SubagentCapabilityMode {
             Self::All => "all",
         }
     }
+
+    /// Capability confinement order used for nested delegation. Read/write
+    /// and execute are independent branches: neither may silently grant the
+    /// other, while read-only is their common minimum and all is the maximum.
+    pub const fn is_subset_of(self, ceiling: Self) -> bool {
+        matches!(
+            (self, ceiling),
+            (Self::ReadOnly, _)
+                | (Self::ReadWrite, Self::ReadWrite | Self::All)
+                | (Self::Execute, Self::Execute | Self::All)
+                | (Self::All, Self::All)
+        )
+    }
 }
 
 /// Isolation mode for subagent execution.
@@ -1094,6 +1107,27 @@ pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_capability_subset_matrix_is_non_escalating() {
+        use SubagentCapabilityMode::{All, Execute, ReadOnly, ReadWrite};
+        for requested in [ReadOnly, ReadWrite, Execute, All] {
+            for ceiling in [ReadOnly, ReadWrite, Execute, All] {
+                let expected = matches!(
+                    (requested, ceiling),
+                    (ReadOnly, _)
+                        | (ReadWrite, ReadWrite | All)
+                        | (Execute, Execute | All)
+                        | (All, All)
+                );
+                assert_eq!(
+                    requested.is_subset_of(ceiling),
+                    expected,
+                    "requested={requested:?}, ceiling={ceiling:?}"
+                );
+            }
+        }
+    }
 
     fn result_with_status(status: &str) -> TaskOutputOutput {
         TaskOutputOutput::Result(TaskOutputResult {

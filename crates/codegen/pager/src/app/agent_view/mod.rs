@@ -980,6 +980,10 @@ pub struct AgentView {
     pub last_mouse_moved_at: Option<Instant>,
     /// Last click info for multi-click detection: (timestamp, entry_index, click_count).
     pub last_click: Option<(Instant, usize, u8)>,
+    /// Member-level identity for an expanded permission aggregate. Block-level
+    /// click state alone would treat two different one-line members as a
+    /// double-click and briefly open/close the wrong detail modal.
+    last_permission_click_target: Option<(usize, usize)>,
     /// Text-level multi-click state (finer-grained than block-level `last_click`).
     /// Mutually exclusive with `last_click`: one is cleared when the other is set.
     pub last_text_click: Option<TextClickState>,

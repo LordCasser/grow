@@ -193,6 +193,8 @@ struct ReplayState {
 
     current_user_prompt_index: Option<usize>,
 
+    current_user_permission_evidence: Option<sampling_types::PermissionEvidence>,
+
     /// True once any user chunk with `_meta.promptIndex` has been seen.
     /// Unnumbered user runs after that are mid-turn phantoms (not turns).
     seen_prompt_index_marker: bool,
@@ -229,6 +231,7 @@ impl ReplayState {
             in_user_message: false,
             current_user_text: String::new(),
             current_user_prompt_index: None,
+            current_user_permission_evidence: None,
             seen_prompt_index_marker: false,
             current_agent_text: String::new(),
             has_pending_agent: false,
@@ -517,6 +520,12 @@ impl ReplayState {
             .and_then(|m| m.get("promptIndex"))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
+        let chunk_permission_evidence = chunk
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("permissionEvidence"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         if chunk_prompt_index.is_some() {
             self.seen_prompt_index_marker = true;
         }
@@ -526,13 +535,16 @@ impl ReplayState {
             self.in_user_message = true;
             self.current_user_text.clear();
             self.current_user_prompt_index = chunk_prompt_index;
-        } else if chunk_prompt_index != self.current_user_prompt_index
-            && (chunk_prompt_index.is_some() || self.current_user_prompt_index.is_some())
+            self.current_user_permission_evidence = chunk_permission_evidence;
+        } else if (chunk_prompt_index != self.current_user_prompt_index
+            && (chunk_prompt_index.is_some() || self.current_user_prompt_index.is_some()))
+            || chunk_permission_evidence != self.current_user_permission_evidence
         {
             // New run: promptIndex changed, or transition between marked/unmarked.
             self.flush_pending_user();
             self.in_user_message = true;
             self.current_user_text.clear();
+            self.current_user_permission_evidence = chunk_permission_evidence;
             self.current_user_prompt_index = chunk_prompt_index;
         } else if self.current_user_prompt_index.is_none() {
             self.current_user_prompt_index = chunk_prompt_index;
@@ -596,21 +608,34 @@ impl ReplayState {
     fn flush_pending_user(&mut self) {
         if self.current_user_text.is_empty() {
             self.current_user_prompt_index = None;
+            self.current_user_permission_evidence = None;
             return;
         }
         let text = std::mem::take(&mut self.current_user_text);
         let pi = self.current_user_prompt_index.take();
+        let permission_evidence = self.current_user_permission_evidence.take();
         if let Some(pi) = pi {
             let mut item = ConversationItem::user(text);
             item.set_prompt_index(pi);
+            if let Some(evidence) = permission_evidence {
+                item.set_permission_evidence(evidence);
+            }
             self.conversation.push(item);
             self.prompt_counter += 1;
         } else if !self.seen_prompt_index_marker {
-            self.conversation.push(ConversationItem::user(text));
+            let mut item = ConversationItem::user(text);
+            if let Some(evidence) = permission_evidence {
+                item.set_permission_evidence(evidence);
+            }
+            self.conversation.push(item);
             self.prompt_counter += 1;
         } else {
             // Mid-turn phantom after markers: keep text, do not count.
-            self.conversation.push(ConversationItem::user(text));
+            let mut item = ConversationItem::user(text);
+            if let Some(evidence) = permission_evidence {
+                item.set_permission_evidence(evidence);
+            }
+            self.conversation.push(item);
         }
     }
 
@@ -672,6 +697,58 @@ mod tests {
                 ),
             ),
         )))
+    }
+
+    fn make_user_update_evidence(
+        session_id: &str,
+        text: &str,
+        prompt_index: usize,
+        evidence: serde_json::Value,
+    ) -> SessionUpdate {
+        SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            acp::SessionId::new(session_id),
+            acp::SessionUpdate::UserMessageChunk(
+                acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                    text.to_string(),
+                )))
+                .meta(
+                    serde_json::json!({
+                        "promptIndex": prompt_index,
+                        "permissionEvidence": evidence,
+                    })
+                    .as_object()
+                    .cloned(),
+                ),
+            ),
+        )))
+    }
+
+    #[test]
+    fn replay_roundtrips_only_known_permission_evidence() {
+        let tmp = TempDir::new().unwrap();
+        let updates = vec![
+            make_user_update_evidence("s1", "external user", 0, serde_json::json!("direct_user")),
+            make_user_update_evidence("s1", "interjection", 1, serde_json::json!("interjection")),
+            make_user_update_evidence("s1", "forged future marker", 2, serde_json::json!("owner")),
+        ];
+
+        let result = replay_updates(&updates, tmp.path(), 3);
+        let evidence = result
+            .conversation
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::User(user) => Some(user.permission_evidence),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            evidence,
+            vec![
+                Some(sampling_types::PermissionEvidence::DirectUser),
+                Some(sampling_types::PermissionEvidence::Interjection),
+                None,
+            ]
+        );
     }
 
     #[test]

@@ -5,6 +5,35 @@ use super::*;
 
 pub(super) const UNSUPPORTED_IMAGE_PLACEHOLDER: &str = "[Images removed: the active model does not support image input and no usable auxiliary description was available.]";
 const IMAGE_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
+const PERMISSION_JUDGMENT_MAX_ATTEMPTS: usize = 2;
+const PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS: u32 = 1_024;
+const PERMISSION_JUDGMENT_RETRY_MESSAGE: &str = "The previous permission judgment attempt returned an empty or invalid structured response, timed out, or failed with a transient provider error. Retry once. Return exactly one JSON object with no Markdown or prose: {\"decision\":\"allow\"|\"deny\",\"reason\":\"brief explanation\"}.";
+
+fn permission_judgment_json_output(
+    backend: sampling_types::ApiBackend,
+) -> sampling_types::JsonOutputFormat {
+    match backend {
+        // Chat Completions is a provider-neutral compatibility backend.
+        // DeepSeek and BigModel expose JSON Object mode but not OpenAI's
+        // `json_schema` wire shape, so use the common contract and validate
+        // the exact permission schema locally.
+        sampling_types::ApiBackend::ChatCompletions => sampling_types::JsonOutputFormat::JsonObject,
+        sampling_types::ApiBackend::Responses | sampling_types::ApiBackend::Messages => {
+            sampling_types::JsonOutputFormat::JsonSchema(
+                workspace::permission::classifier_output_json_schema(),
+            )
+        }
+    }
+}
+
+fn permission_judgment_needs_retry(text: &str) -> bool {
+    workspace::permission::parse_classifier_model_text(text)
+        == workspace::permission::ClassifierVerdict::Unavailable
+}
+
+fn permission_judgment_error_needs_retry(error: &sampling_types::SamplingError) -> bool {
+    error.is_retryable() && !error.is_retry_vetoed()
+}
 
 /// Match a provider's unconditional model-capability claim without treating
 /// an open-ended format/size qualifier as a permanent text-only capability.
@@ -784,11 +813,97 @@ impl SessionActor {
             doom_loop_recovery: self.doom_loop_recovery,
         }
     }
+    /// Build the provider-valid, read-only authorization view used for a child
+    /// permission judgment. Only genuine user-origin task turns cross the
+    /// trust boundary; assistant/tool/synthetic content cannot authorize a
+    /// fence widening. The source chat state is never mutated or compacted.
+    pub(super) async fn child_permission_judgment_items(
+        &self,
+        judgment: &workspace::permission::PermissionJudgmentRequest,
+        input: crate::config::SubagentClassifierInput,
+    ) -> Vec<ConversationItem> {
+        if input == crate::config::SubagentClassifierInput::RequestOnly {
+            let mut request_only = judgment.clone();
+            request_only.prompt_type = workspace::permission::ClassifierPromptType::JustCommand;
+            return request_only
+                .classifier_messages()
+                .into_iter()
+                .map(|message| match message.role {
+                    workspace::permission::ClassifierMessageRole::System => {
+                        ConversationItem::system(message.text)
+                    }
+                    workspace::permission::ClassifierMessageRole::User => {
+                        ConversationItem::user(message.text)
+                    }
+                })
+                .collect();
+        }
+
+        const BUDGET_PERCENT: u64 = 85;
+        const BUDGET_HEADROOM_TOKENS: u64 = 4_000;
+        let judgment_message =
+            workspace::permission::build_primary_context_judgment_message(judgment);
+        let policy = workspace::permission::primary_context_judgment_system_prompt(judgment);
+        let mut items = vec![ConversationItem::system(policy)];
+        items.extend(
+            self.chat_state_handle
+                .get_conversation()
+                .await
+                .into_iter()
+                .filter(|item| match item {
+                    ConversationItem::User(user) => user.permission_evidence.is_some(),
+                    _ => false,
+                }),
+        );
+
+        // Apply the normal 85%-with-headroom budget to the snapshot copy only.
+        // Keep the dedicated authorization policy, then spend the remainder
+        // only on recent genuine user-origin task context. Model/tool output
+        // and synthetic summaries are deliberately absent from this branch.
+        let context_window = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|config| config.context_window.get())
+            .unwrap_or(256_000);
+        let judgment_tokens = (judgment_message.len() as u64).div_ceil(4);
+        let snapshot_budget = (context_window.saturating_mul(BUDGET_PERCENT) / 100)
+            .saturating_sub(BUDGET_HEADROOM_TOKENS)
+            .saturating_sub(judgment_tokens);
+        let estimated_tokens = serde_json::to_vec(&items)
+            .map(|json| (json.len() as u64).div_ceil(4))
+            .unwrap_or(u64::MAX);
+        if estimated_tokens > snapshot_budget {
+            let system_index = Some(0usize);
+            let mut retained = Vec::new();
+            let mut recent = Vec::new();
+            for (index, item) in items.into_iter().enumerate() {
+                if Some(index) == system_index {
+                    retained.push(item);
+                } else {
+                    recent.push(item);
+                }
+            }
+            let retained_tokens = serde_json::to_vec(&retained)
+                .map(|json| (json.len() as u64).div_ceil(4))
+                .unwrap_or(snapshot_budget);
+            let recent = chat_state::compaction_utils::fit_conversation_to_budget(
+                recent,
+                snapshot_budget.saturating_sub(retained_tokens),
+            );
+            retained.extend(recent);
+            items = retained;
+        }
+        items.push(ConversationItem::user(judgment_message));
+        items
+    }
+
     /// Install auto-mode permission classifier with a live LLM side-query
     /// (laziness-classifier pattern: `prepare_chat_completion` +
     /// `conversation_collect` on a LocalSet task; channel bridges the
-    /// `Send` permission actor). Heuristic runs only when the side-query
-    /// errors or returns unparseable text.
+    /// `Send` permission actor). Child requests branch from a read-only
+    /// snapshot of the primary conversation; the ephemeral judgment turn and
+    /// response are never written back to chat state.
     pub(crate) async fn wire_permission_auto_llm_classifier(self: &Arc<Self>) {
         if self.permissions.has_llm_side_query() {
             return;
@@ -812,69 +927,204 @@ impl SessionActor {
             crate::util::config::auto_mode_classifier_defaults(&auto_cfg);
         let classify_timeout = crate::util::config::auto_mode_classify_timeout(&auto_cfg);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
-            Vec<workspace::permission::ClassifierMessage>,
+            workspace::permission::PermissionJudgmentRequest,
             tokio::sync::oneshot::Sender<Result<String, workspace::permission::ClassifierFailure>>,
         )>();
-        let session = Arc::clone(self);
+        // Do not let the classifier channel keep the primary session alive.
+        // The permission actor owns `tx`; a strong SessionActor capture here
+        // would form a cycle and keep both the side-query worker and audit
+        // bridge alive after session teardown.
+        let weak_session = Arc::downgrade(self);
         tokio::task::spawn_local(async move {
-            while let Some((messages, respond_to)) = rx.recv().await {
-                let result = async {
-                    let (sampling_client, model) = match &aux_classifier_sampler {
-                        Ok(Some((client, model))) => (client.clone(), model.clone()),
-                        Ok(None) => {
+            while let Some((judgment, mut respond_to)) = rx.recv().await {
+                if respond_to.is_closed() {
+                    tracing::debug!("permission judgment requester disappeared before dispatch");
+                    continue;
+                }
+                let Some(session) = weak_session.upgrade() else {
+                    let _ = respond_to.send(Err(
+                        workspace::permission::ClassifierFailure::TransportError(
+                            "primary session ended before permission judgment".to_owned(),
+                        ),
+                    ));
+                    break;
+                };
+                let judgment_future = async {
+                    // The total deadline starts before config, credential, and
+                    // client preparation so setup latency cannot escape the
+                    // bounded time charged to the child tool call.
+                    let judgment_deadline = tokio::time::Instant::now() + classify_timeout;
+                    let is_child_judgment = judgment.uses_primary_context();
+                    let setup = async {
+                        let classifier_input = if is_child_judgment {
+                            session.subagent_classifier_input
+                        } else {
+                            crate::config::SubagentClassifierInput::RequestOnly
+                        };
+                        let (sampling_client, model, reasoning_effort) = if is_child_judgment {
                             let client =
                                 session.prepare_chat_completion(false).await.map_err(|e| {
                                     workspace::permission::ClassifierFailure::TransportError(
                                         e.to_string(),
                                     )
                                 })?;
-                            let model = session
-                                .chat_state_handle
-                                .get_sampling_config()
-                                .await
-                                .map(|c| c.model)
+                            let sampling_config =
+                                session.chat_state_handle.get_sampling_config().await;
+                            let model = sampling_config
+                                .as_ref()
+                                .map(|config| config.model.clone())
                                 .unwrap_or_default();
-                            (client, model)
-                        }
-                        Err(reason) => {
-                            return Err(workspace::permission::ClassifierFailure::TransportError(
-                                reason.clone(),
-                            ));
-                        }
+                            let reasoning_effort =
+                                sampling_config.and_then(|config| config.reasoning_effort);
+                            (client, model, reasoning_effort)
+                        } else {
+                            let (client, model) = match &aux_classifier_sampler {
+                                Ok(Some((client, model))) => (client.clone(), model.clone()),
+                                Ok(None) => {
+                                    let client =
+                                    session.prepare_chat_completion(false).await.map_err(|e| {
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            e.to_string(),
+                                        )
+                                    })?;
+                                    let model = session
+                                        .chat_state_handle
+                                        .get_sampling_config()
+                                        .await
+                                        .map(|config| config.model)
+                                        .unwrap_or_default();
+                                    (client, model)
+                                }
+                                Err(reason) => {
+                                    return Err(
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            reason.clone(),
+                                        ),
+                                    );
+                                }
+                            };
+                            (client, model, classifier_reasoning_effort)
+                        };
+                        let items = if is_child_judgment {
+                            session
+                                .child_permission_judgment_items(&judgment, classifier_input)
+                                .await
+                        } else {
+                            judgment
+                                .classifier_messages()
+                                .into_iter()
+                                .map(|message| match message.role {
+                                    workspace::permission::ClassifierMessageRole::System => {
+                                        ConversationItem::system(message.text)
+                                    }
+                                    workspace::permission::ClassifierMessageRole::User => {
+                                        ConversationItem::user(message.text)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let json_output =
+                            permission_judgment_json_output(sampling_client.api_backend());
+                        Ok::<_, workspace::permission::ClassifierFailure>((
+                            sampling_client,
+                            model,
+                            reasoning_effort,
+                            items,
+                            json_output,
+                        ))
                     };
-                    let session_id = session.session_info.id.to_string();
-                    let items = messages
-                        .into_iter()
-                        .map(|m| match m.role {
-                            workspace::permission::ClassifierMessageRole::System => {
-                                ConversationItem::system(m.text)
+                    let (sampling_client, model, reasoning_effort, items, json_output) =
+                        tokio::time::timeout_at(judgment_deadline, setup)
+                            .await
+                            .map_err(|_| workspace::permission::ClassifierFailure::Timeout)??;
+                    // One total deadline covers every attempt. Dividing the
+                    // remaining budget by the remaining attempts lets a hung
+                    // first call retry once without doubling the permission
+                    // latency seen by the child.
+                    for attempt in 1..=PERMISSION_JUDGMENT_MAX_ATTEMPTS {
+                        let mut attempt_items = items.clone();
+                        if attempt > 1 {
+                            // The failed provider payload is deliberately not
+                            // added to the branch. Only the failure category is
+                            // carried forward, so untrusted output cannot become
+                            // new permission evidence.
+                            attempt_items
+                                .push(ConversationItem::user(PERMISSION_JUDGMENT_RETRY_MESSAGE));
+                        }
+                        let request = ConversationRequest {
+                            items: attempt_items,
+                            tools: vec![],
+                            tool_choice: None,
+                            model: Some(model.clone()),
+                            temperature: None,
+                            max_output_tokens: Some(PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS),
+                            json_output: Some(json_output.clone()),
+                            reasoning_effort,
+                            ..ConversationRequest::default()
+                        };
+                        let fut = sampling_client.conversation_collect(request);
+                        let attempts_remaining = PERMISSION_JUDGMENT_MAX_ATTEMPTS - attempt + 1;
+                        let remaining = judgment_deadline
+                            .saturating_duration_since(tokio::time::Instant::now());
+                        let attempt_budget = remaining / attempts_remaining as u32;
+                        let response = match tokio::time::timeout(attempt_budget, fut).await {
+                            Ok(Ok(response)) => response,
+                            Ok(Err(error))
+                                if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS
+                                    && permission_judgment_error_needs_retry(&error) =>
+                            {
+                                tracing::warn!(
+                                    attempt,
+                                    max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
+                                    backend = ?sampling_client.api_backend(),
+                                    "permission judgment hit a transient provider error; retransmitting once"
+                                );
+                                continue;
                             }
-                            workspace::permission::ClassifierMessageRole::User => {
-                                ConversationItem::user(m.text)
+                            Ok(Err(error)) => {
+                                return Err(
+                                    workspace::permission::ClassifierFailure::TransportError(
+                                        error.to_string(),
+                                    ),
+                                );
                             }
-                        })
-                        .collect::<Vec<_>>();
-                    let request = ConversationRequest {
-                        items,
-                        tools: vec![],
-                        tool_choice: None,
-                        model: Some(model),
-                        temperature: None,
-                        max_output_tokens: None,
-                        json_schema: Some(workspace::permission::classifier_output_json_schema()),
-                        reasoning_effort: classifier_reasoning_effort,
-                        ..ConversationRequest::default()
-                    };
-                    let fut = sampling_client.conversation_collect(request);
-                    let response = tokio::time::timeout(classify_timeout, fut)
-                        .await
-                        .map_err(|_| workspace::permission::ClassifierFailure::Timeout)?
-                        .map_err(|e| {
-                            workspace::permission::ClassifierFailure::TransportError(e.to_string())
-                        })?;
-                    Ok(response.assistant_text())
-                }
-                .await;
+                            Err(_) if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS => {
+                                tracing::warn!(
+                                    attempt,
+                                    max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
+                                    backend = ?sampling_client.api_backend(),
+                                    "permission judgment attempt timed out; retransmitting once within the total deadline"
+                                );
+                                continue;
+                            }
+                            Err(_) => {
+                                return Err(workspace::permission::ClassifierFailure::Timeout);
+                            }
+                        };
+                        let model_text = response.assistant_text();
+                        if !permission_judgment_needs_retry(&model_text)
+                            || attempt == PERMISSION_JUDGMENT_MAX_ATTEMPTS
+                        {
+                            return Ok(model_text);
+                        }
+                        tracing::warn!(
+                            attempt,
+                            max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
+                            backend = ?sampling_client.api_backend(),
+                            "permission judgment returned invalid structured output; retransmitting once"
+                        );
+                    }
+                    unreachable!("permission judgment attempt loop always returns")
+                };
+                tokio::pin!(judgment_future);
+                let result = tokio::select! {
+                    biased;
+                    _ = respond_to.closed() => {
+                        tracing::debug!("permission judgment requester disappeared; cancelling side-query");
+                        continue;
+                    }
+                    result = &mut judgment_future => result,
+                };
                 if let Err(error) = &result {
                     tracing::warn!(%error, "permission auto classifier side-query failed");
                 }
@@ -1480,6 +1730,35 @@ impl SessionActor {
 #[cfg(test)]
 mod image_input_rejection_tests {
     use super::*;
+
+    fn sampling_api_error(
+        status: reqwest::StatusCode,
+        should_retry: Option<bool>,
+    ) -> sampling_types::SamplingError {
+        sampling_types::SamplingError::Api {
+            status,
+            message: "provider error".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry,
+        }
+    }
+
+    #[test]
+    fn permission_judgment_retries_only_recoverable_provider_errors() {
+        assert!(permission_judgment_error_needs_retry(&sampling_api_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            None,
+        )));
+        assert!(!permission_judgment_error_needs_retry(&sampling_api_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            None,
+        )));
+        assert!(!permission_judgment_error_needs_retry(&sampling_api_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            Some(false),
+        )));
+    }
 
     fn api_400(message: &str) -> sampler::SamplingErrorInfo {
         sampler::SamplingErrorInfo {

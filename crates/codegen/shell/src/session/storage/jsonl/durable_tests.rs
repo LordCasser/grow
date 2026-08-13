@@ -338,3 +338,28 @@ async fn cwd_switch_reappend_after_history_replacement_restores_message_count() 
 fn darwin_fullfsync_seam_reports_invalid_descriptor() {
     assert!(super::super::fullfsync_raw(-1).is_err());
 }
+
+#[test]
+fn append_lock_wait_is_bounded() {
+    use fs2::FileExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("updates.jsonl");
+    let lock_path = path.with_extension("jsonl.lock");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .unwrap();
+    held.lock_exclusive().unwrap();
+
+    let started = std::time::Instant::now();
+    let error =
+        JsonlStorageAdapter::lock_append_with_timeout(&path, std::time::Duration::from_millis(25))
+            .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    held.unlock().unwrap();
+}

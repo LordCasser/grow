@@ -1017,6 +1017,24 @@ fn subagents_permission_mode_defaults_to_auto() {
         workspace::permission::types::RequestPermissionMode::Auto
     );
 }
+
+#[test]
+fn subagents_classifier_input_defaults_to_context_and_parses_request_only() {
+    let default: SubagentsConfig = toml::from_str("").unwrap();
+    assert_eq!(
+        default.classifier_input,
+        crate::config::SubagentClassifierInput::Context
+    );
+    let lean: SubagentsConfig = toml::from_str("classifier_input = \"request_only\"\n").unwrap();
+    assert_eq!(
+        lean.classifier_input,
+        crate::config::SubagentClassifierInput::RequestOnly
+    );
+    assert!(
+        toml::from_str::<SubagentsConfig>("classifier_input = \"full\"\n").is_err(),
+        "unknown classifier input modes must fail config parsing"
+    );
+}
 #[test]
 fn subagents_permission_modes_parse() {
     use workspace::permission::types::RequestPermissionMode;

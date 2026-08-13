@@ -341,6 +341,12 @@ impl SessionActor {
                 .collect()
         });
         self.close_rewind_window().await;
+        // Permission decisions and TurnCompleted use different async rails.
+        // Seal the primary permission epoch only after every decision that was
+        // emitted before this boundary is durable and queued to the client.
+        if self.owns_permission_manager {
+            self.permissions.flush_audit_events().await;
+        }
         let notification = self.build_grow_notification(
             crate::session::turn_completion::build_turn_completed(
                 prompt_id,

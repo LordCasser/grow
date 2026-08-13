@@ -1171,6 +1171,7 @@ fn token_estimation_accounts_for_images() {
                 text: "describe this".into(),
             }],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         })];
     let text_tokens = chat_state::estimate_conversation_tokens(&text_only);
@@ -1184,6 +1185,7 @@ fn token_estimation_accounts_for_images() {
                 },
             ],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         })];
     let image_tokens = chat_state::estimate_conversation_tokens(&with_image);
@@ -1199,6 +1201,7 @@ fn token_estimation_accounts_for_images() {
                 ContentPart::Image { url: "img3".into() },
             ],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         })];
     let multi_tokens = chat_state::estimate_conversation_tokens(&multi_image);

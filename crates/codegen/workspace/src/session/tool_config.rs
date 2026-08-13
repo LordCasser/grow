@@ -875,7 +875,7 @@ mod tests {
             let counter = res.get_or_default::<State<WebCitationCounter>>();
             counter.counter = 123;
         }
-        ts_a.save_and_flush_persistence().await;
+        ts_a.save_and_flush_persistence().await.unwrap();
         drop(ts_a);
         let (_eff, ts_b, _backend_b) = resolve_session_toolset(
             test_support::baseline_config(),

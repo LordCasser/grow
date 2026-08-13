@@ -64,7 +64,7 @@ use crate::agent::update_chunk_merge;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use ::diagnostics::session_ctx::log_event;
 use workspace::file_system::{AcpSessionFs, CodebaseIndexManager, LocalFs};
-use workspace::permission::{ClientType, PermissionEvent};
+use workspace::permission::ClientType;
 use crate::sampling::Client as OaiCompatClient;
 use crate::sampling::error::map_sampling_err_to_acp;
 use crate::session::mcp_servers::{McpMetaConfigMap, parse_mcp_meta_config};
@@ -398,9 +398,6 @@ struct ResidentResources {
 struct RetainedResources {
     turn_number: Option<u64>,
     dispatch_lock: Option<std::rc::Rc<tokio::sync::Mutex<()>>>,
-    permission_event_receiver: Option<
-        tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>,
-    >,
 }
 pub struct MvpAgent {
     /// LEADER-SAFE(per-session). Removed by `remove_session` / `sweep_dead_sessions`.
@@ -832,6 +829,22 @@ pub(crate) struct OrphanedTask {
     command: String,
     cwd: String,
 }
+
+/// Read only complete newline-framed JSONL records and return the byte offset
+/// immediately after the last complete record. A concurrent append may leave
+/// a partial UTF-8/JSON tail; delta replay must restart at that record's first
+/// byte after the writer flushes, rather than seek into its middle and lose it.
+fn read_complete_jsonl_snapshot(path: &std::path::Path) -> std::io::Result<(String, u64)> {
+    let bytes = std::fs::read(path)?;
+    let complete_end = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    let contents = String::from_utf8(bytes[..complete_end].to_vec())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok((contents, complete_end as u64))
+}
+
 impl MvpAgent {
     /// Forward one raw JSONL replay line and collect its completion receiver.
     ///
@@ -996,11 +1009,10 @@ impl MvpAgent {
             return Ok((0, 0, Vec::new()));
         };
         let file_size = std::fs::metadata(&updates_path).map(|m| m.len()).unwrap_or(0);
-        let raw_contents = match std::fs::read_to_string(&updates_path) {
-            Ok(s) if !s.is_empty() => s,
+        let (raw_contents, end_offset) = match read_complete_jsonl_snapshot(&updates_path) {
+            Ok((contents, end_offset)) if !contents.is_empty() => (contents, end_offset),
             _ => return Ok((0, 0, Vec::new())),
         };
-        let end_offset = raw_contents.len() as u64;
         let mut prepared = {
             let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
             crate::session::storage::prepare_replay_lines(&raw_contents, cursor)

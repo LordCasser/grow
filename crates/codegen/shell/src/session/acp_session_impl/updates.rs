@@ -719,6 +719,29 @@ impl SessionActor {
         self.send_grow_notification_with_extra_meta(update, None)
             .await;
     }
+
+    /// Persist and forward a passive UI/audit update without changing rewind
+    /// interaction state. Permission audit projection must be observable only;
+    /// it is not a conversation or user-action boundary.
+    pub(super) async fn send_grow_passive_notification(
+        &self,
+        durable_update: GrowSessionUpdate,
+        live_update: GrowSessionUpdate,
+    ) -> Result<(), crate::session::persistence::DurableAppendError> {
+        let durable_notification = self.build_grow_notification(durable_update, None);
+        // Both projections are one logical event. Reusing the stamped metadata
+        // keeps the live reconnect cursor resolvable against the durable line.
+        let mut live_notification = durable_notification.clone();
+        live_notification.update = live_update;
+        let persist_result = self
+            .notifications
+            .append_update_durably(crate::session::storage::SessionUpdate::Grow(Box::new(
+                durable_notification,
+            )))
+            .await;
+        self.forward_grow_notification(live_notification).await;
+        persist_result
+    }
     /// [`Self::send_grow_notification`] with caller-supplied `_meta` keys merged
     /// Build the per-response boundary update, projecting the response's usage
     /// into the Messages API `message.usage` shape (uncached `input_tokens`).

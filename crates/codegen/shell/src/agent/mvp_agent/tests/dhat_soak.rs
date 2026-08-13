@@ -3,7 +3,6 @@
 //!   cargo test -p shell --features dhat-heap \
 //!     leader_session_lifecycle_heap_steady_state -- --ignored --nocapture
 use super::*;
-use workspace::permission::PermissionEvent;
 
 // Chosen between a healthy build (about zero retained allocations per
 // session) and the smallest deliberately introduced leak (one per session);
@@ -36,13 +35,6 @@ fn populate_and_evict(agent: &MvpAgent, i: usize) {
         .expect("bind_local_session must succeed");
     }
 
-    let (_ptx, prx) = tokio::sync::mpsc::unbounded_channel::<PermissionEvent>();
-    agent
-        .retained_resources
-        .borrow_mut()
-        .entry(sid.clone())
-        .or_default()
-        .permission_event_receiver = Some(prx);
     agent.set_turn_number(&sid, i as u64);
     agent.model_unavailable_sessions.borrow_mut().insert(
         sid.0.to_string(),

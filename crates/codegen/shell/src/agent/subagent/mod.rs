@@ -131,6 +131,11 @@ pub(crate) struct SubagentSpawnContext {
     pub permission_prompt_timeout: std::time::Duration,
     /// Global child permission route resolved from `[subagents]`.
     pub subagent_permission_mode: workspace::permission::types::RequestPermissionMode,
+    /// Immutable delegation ceiling copied from the immediate security
+    /// parent. Root sessions have no ceiling; nested children must stay within
+    /// this value before any worktree/session side effect is created.
+    pub parent_capability_ceiling:
+        Option<crate::session::subagent_capability::DelegableCapabilityCeiling>,
     /// Tier inputs for resolving `auto_compact_threshold_percent` at
     /// spawn time — once the subagent's actual model id is known.
     /// Lazy because the subagent may be assigned a different model from

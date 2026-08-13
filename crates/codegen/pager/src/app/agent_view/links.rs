@@ -882,20 +882,19 @@ mod link_click_tests {
         assert!(agent.hit_announcement_hide.rect.is_none());
         assert!(agent.hit_promo_cta.rect.is_none());
     }
-    /// Subagent fullscreen takeover hides the parent's permission modal and
-    /// routes input to the child view — pending parent permission requests
-    /// must be advertised as a banner inside the subagent frame so the user
-    /// knows to press Esc and answer.
+    /// A child Ask is queued on the owning primary interaction layer. A
+    /// pending request therefore takes precedence over fullscreen child
+    /// rendering and exposes the ordinary permission modal immediately.
     #[test]
-    fn subagent_fullscreen_shows_parent_permission_pending_banner() {
+    fn subagent_permission_preempts_fullscreen_with_primary_modal() {
         let reg = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.last_terminal_size = (120, 30);
         agent.active_subagent = Some("child-sid".into());
 
-        // No pending permissions → no banner.
+        // No pending permissions → the child remains fullscreen.
         let buf = draw_frame_sized(&mut agent, &reg, &[], 0, 120);
-        let rows: Vec<String> = (0..8)
+        let rows: Vec<String> = (0..30)
             .map(|y| {
                 (0..120)
                     .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
@@ -903,18 +902,22 @@ mod link_click_tests {
             })
             .collect();
         assert!(
-            !rows
-                .iter()
-                .any(|r| r.contains("permission request(s) pending")),
-            "no banner without pending permissions; rows={rows:?}"
+            !rows.iter().any(|r| r.contains("Permission required")),
+            "no permission modal without pending permissions; rows={rows:?}"
         );
 
-        // Pending parent permission → banner on the frame's top content row.
-        agent
-            .permission_queue
-            .push_back(paste_key_tests::make_followup_permission_state());
+        // Pending child permission → the primary modal replaces fullscreen.
+        let mut permission = paste_key_tests::make_followup_permission_state();
+        permission.focus = crate::views::permission_view::PermissionFocus::Options;
+        permission.title = "Permission required".to_string();
+        permission.options = vec![agent_client_protocol::PermissionOption::new(
+            agent_client_protocol::PermissionOptionId::new(std::sync::Arc::from("allow-once")),
+            "Allow once".to_string(),
+            agent_client_protocol::PermissionOptionKind::AllowOnce,
+        )];
+        agent.permission_queue.push_back(permission);
         let buf = draw_frame_sized(&mut agent, &reg, &[], 0, 120);
-        let rows: Vec<String> = (0..8)
+        let rows: Vec<String> = (0..30)
             .map(|y| {
                 (0..120)
                     .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
@@ -922,13 +925,8 @@ mod link_click_tests {
             })
             .collect();
         assert!(
-            rows.iter()
-                .any(|r| r.contains("1 permission request(s) pending")),
-            "pending parent permissions must be advertised in the subagent frame; rows={rows:?}"
-        );
-        assert!(
-            rows.iter().any(|r| r.contains("Esc")),
-            "banner must point at Esc to return; rows={rows:?}"
+            rows.iter().any(|r| r.contains("Permission required")),
+            "pending child permission must render on the primary interaction layer; rows={rows:?}"
         );
     }
     /// In-session header promo CTA: a promo owning the slot arms
@@ -1648,8 +1646,13 @@ mod link_click_tests {
             .push_block(crate::scrollback::block::RenderBlock::agent_message("done"));
         agent.scrollback.prepare_layout(80, 40);
         let now = std::time::Instant::now();
-        (agent.last_click, _) = agent.handle_scrollback_click(now, 0, false);
-        let _ = agent.handle_scrollback_click(now + std::time::Duration::from_millis(10), 0, false);
+        (agent.last_click, _) = agent.handle_scrollback_click(now, 0, false, None);
+        let _ = agent.handle_scrollback_click(
+            now + std::time::Duration::from_millis(10),
+            0,
+            false,
+            None,
+        );
         if crate::app::inline_edit::INLINE_EDIT_ENABLED {
             assert!(
                 agent.inline_edit.is_some(),
@@ -1740,7 +1743,7 @@ mod link_click_tests {
             }
         }
         agent.scrollback.prepare_layout(80, 40);
-        let _ = agent.handle_scrollback_click(std::time::Instant::now(), 0, false);
+        let _ = agent.handle_scrollback_click(std::time::Instant::now(), 0, false, None);
         assert!(agent.scrollback.is_selected_group_header());
         assert!(
             agent.toast.is_none(),

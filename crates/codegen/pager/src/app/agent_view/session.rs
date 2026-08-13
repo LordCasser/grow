@@ -173,6 +173,7 @@ impl AgentView {
             last_mouse_pos: (0, 0),
             last_mouse_moved_at: None,
             last_click: None,
+            last_permission_click_target: None,
             last_text_click: None,
             last_clipboard_toast_at: None,
             last_context_click_at: None,

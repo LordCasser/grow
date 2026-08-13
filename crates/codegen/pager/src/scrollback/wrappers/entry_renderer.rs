@@ -253,7 +253,7 @@ impl<'a> EntryRenderer<'a> {
         let display_cfg = &self.appearance().scrollback.display;
         let bg = self.theme.bg_base;
 
-        // Verb-group header: aggregated "Verb N noun" label with run-state
+        // Eager-group header: an aggregated verb or permission label with run-state
         // accent (error > running wave > dimmed tool accent). The diamond
         // shares the accent color, so an active group's glyph animates with
         // the same wave as a running tool row's bullet.
@@ -333,7 +333,7 @@ impl<'a> EntryRenderer<'a> {
             group_header_chrome_prefix(),
             diamond_style,
         )];
-        // The VerbRun variant returned above, so only a truncation label can
+        // The eager-run variants returned above, so only a truncation label can
         // reach this row's span assembly.
         if let Some(GroupHeaderLabel::Truncation(label)) = self.group_header_label {
             spans.extend(label.line.spans.iter().cloned());

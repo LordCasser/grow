@@ -19,8 +19,9 @@
 //! must still attribute the `PermissionEvent` to that child, and after
 //! approval the bash tool must actually execute.
 //!
-//! A second test pins the reject path: `reject-once` must not execute the
-//! command and must surface as `ToolLoop::PermissionReject`.
+//! The remaining tests pin the non-terminal failure contract: reject and
+//! timeout do not execute the command, but both return failed tool results and
+//! let the child continue sampling.
 
 use std::sync::Arc;
 
@@ -60,10 +61,11 @@ struct GatewayLog {
 /// bash path never blocks on those).
 fn spawn_gateway_responder(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<AcpClientMessage>,
-    reply_option: Option<&'static str>,
+    reply_options: Vec<Option<&'static str>>,
     log: Arc<std::sync::Mutex<GatewayLog>>,
 ) {
     tokio::task::spawn_local(async move {
+        let mut reply_options = std::collections::VecDeque::from(reply_options);
         let mut pending_permissions = Vec::new();
         while let Some(msg) = rx.recv().await {
             match msg {
@@ -72,6 +74,11 @@ fn spawn_gateway_responder(
                         .expect("gateway log lock")
                         .permission_requests
                         .push(args.request.clone());
+                    let reply_option = if reply_options.len() > 1 {
+                        reply_options.pop_front().flatten()
+                    } else {
+                        reply_options.front().copied().flatten()
+                    };
                     if let Some(reply_option) = reply_option {
                         let resp = acp::RequestPermissionResponse::new(
                             acp::RequestPermissionOutcome::Selected(
@@ -125,12 +132,24 @@ async fn make_subagent_fixture(
     Arc<std::sync::Mutex<GatewayLog>>,
     tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>,
 ) {
+    make_subagent_fixture_with_replies(vec![reply_option], prompt_timeout).await
+}
+
+async fn make_subagent_fixture_with_replies(
+    reply_options: Vec<Option<&'static str>>,
+    prompt_timeout: std::time::Duration,
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+    Arc<std::sync::Mutex<GatewayLog>>,
+    tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>,
+) {
     let (gateway_tx, gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let log = Arc::new(std::sync::Mutex::new(GatewayLog::default()));
-    spawn_gateway_responder(gateway_rx, reply_option, Arc::clone(&log));
+    spawn_gateway_responder(gateway_rx, reply_options, Arc::clone(&log));
 
     let (mut actor, event_rx) =
         create_test_actor_ex(0, 256_000, 85, gateway_tx.clone(), persistence_tx).await;
@@ -234,10 +253,14 @@ async fn wait_for_gateway_log(
 
 /// One `ToolInput::Bash` tool call, as the model would emit it.
 fn bash_call() -> crate::sampling::types::ToolCallResponse {
+    bash_call_with(TOOL_CALL_ID, BASH_ARGS)
+}
+
+fn bash_call_with(id: &str, args: &str) -> crate::sampling::types::ToolCallResponse {
     crate::sampling::types::ToolCallResponse {
-        id: TOOL_CALL_ID.to_string(),
+        id: id.to_string(),
         kind: "function".to_string(),
-        function: crate::sampling::types::ToolCallFunction::new("run_terminal_cmd", BASH_ARGS),
+        function: crate::sampling::types::ToolCallFunction::new("run_terminal_cmd", args),
     }
 }
 
@@ -320,8 +343,8 @@ async fn subagent_inherited_handle_bash_approved_after_prompt_executes() {
         .await;
 }
 
-/// Reject path regression: `reject-once` must NOT execute the command and
-/// must surface as `ToolLoop::PermissionReject`.
+/// Reject path regression: `reject-once` must NOT execute the command, but the
+/// failed tool result must be returned to the child so its model loop can adapt.
 #[tokio::test(flavor = "current_thread")]
 async fn subagent_bash_rejected_after_prompt_does_not_execute() {
     let local = tokio::task::LocalSet::new();
@@ -340,8 +363,8 @@ async fn subagent_bash_rejected_after_prompt_does_not_execute() {
             .expect("execute_tool_calls must not error");
 
             assert!(
-                matches!(result, ToolLoop::PermissionReject { .. }),
-                "a rejected bash call must surface as PermissionReject, got {result:?}"
+                matches!(result, ToolLoop::Continue),
+                "a rejected child bash call must continue the turn, got {result:?}"
             );
 
             // Deliver the queued SessionEvents (the rejection's Failed
@@ -382,6 +405,12 @@ async fn subagent_bash_rejected_after_prompt_does_not_execute() {
                 !conv.iter().any(|c| c.text_content().contains("repro-ok")),
                 "a rejected bash call must not produce output"
             );
+            assert!(
+                conv.iter().any(|c| c
+                    .text_content()
+                    .contains("explain the limitation in your final report")),
+                "the child must receive actionable non-terminal denial guidance"
+            );
 
             let events = drain_permission_events(&mut permission_events);
             let event = events
@@ -399,8 +428,8 @@ async fn subagent_bash_rejected_after_prompt_does_not_execute() {
         .await;
 }
 
-/// Lost permission responses must cancel the tool and clear the pending
-/// interaction instead of leaving the shared subagent session blocked.
+/// Lost permission responses must fail only the tool and clear the pending
+/// interaction instead of terminating or blocking the shared subagent session.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn subagent_bash_permission_timeout_does_not_execute() {
     let local = tokio::task::LocalSet::new();
@@ -415,8 +444,8 @@ async fn subagent_bash_permission_timeout_does_not_execute() {
                 .await
                 .expect("execute_tool_calls must not error");
             assert!(
-                matches!(result, ToolLoop::PermissionTimedOut { .. }),
-                "a lost permission response must time out, got {result:?}"
+                matches!(result, ToolLoop::Continue),
+                "a lost child permission response must continue the turn, got {result:?}"
             );
             assert!(
                 actor
@@ -442,6 +471,11 @@ async fn subagent_bash_permission_timeout_does_not_execute() {
                 !conv.iter().any(|c| c.text_content().contains("repro-ok")),
                 "a timed-out bash call must not produce command output"
             );
+            assert!(
+                conv.iter()
+                    .any(|c| c.text_content().contains("Permission request timed out")),
+                "the child must receive the timeout as a failed tool result"
+            );
 
             let events = drain_permission_events(&mut permission_events);
             let event = events
@@ -452,6 +486,50 @@ async fn subagent_bash_permission_timeout_does_not_execute() {
             assert_eq!(event.prompt_outcome.as_deref(), Some("timed_out"));
             assert_eq!(event.decision_reason.as_deref(), Some("permission_timeout"));
             assert_eq!(event.wait_ms, Some(timeout.as_millis() as u64));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_child_tool_does_not_cancel_later_tool_in_same_batch() {
+    const SECOND_ID: &str = "call_bash_second";
+    const SECOND_ARGS: &str = r#"{"command":"sh -c 'echo batch-second-ok'","description":"second batch command","is_background":false}"#;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _event_rx, log, _permission_events) = make_subagent_fixture_with_replies(
+                vec![Some("reject-once"), Some("allow-once")],
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+
+            let result = actor
+                .execute_tool_calls(vec![bash_call(), bash_call_with(SECOND_ID, SECOND_ARGS)])
+                .await
+                .expect("execute_tool_calls must not error");
+            assert!(matches!(result, ToolLoop::Continue));
+
+            let conv = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                conv.iter()
+                    .any(|item| item.text_content().contains("batch-second-ok")),
+                "the approved sibling tool must still execute"
+            );
+            assert!(
+                !conv
+                    .iter()
+                    .any(|item| item.text_content().contains("repro-ok")),
+                "the rejected first tool must not execute"
+            );
+            assert_eq!(
+                log.lock()
+                    .expect("gateway log lock")
+                    .permission_requests
+                    .len(),
+                2,
+                "both tool calls must resolve permission independently"
+            );
         })
         .await;
 }

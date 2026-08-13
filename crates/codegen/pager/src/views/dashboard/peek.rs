@@ -1086,7 +1086,10 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
             // no agent response after it yet.
             RenderBlock::UserPrompt(_) => break,
             // Structural blocks carry no response type — keep scanning.
-            RenderBlock::System(_) | RenderBlock::SessionEvent(_) | RenderBlock::Stub(_) => {}
+            RenderBlock::System(_)
+            | RenderBlock::SessionEvent(_)
+            | RenderBlock::SubagentPermission(_)
+            | RenderBlock::Stub(_) => {}
         }
     }
     if running {
@@ -1207,6 +1210,7 @@ fn block_short_text(block: &crate::scrollback::block::RenderBlock) -> Option<Str
         RenderBlock::ToolCall(_) => Some("(tool call)".to_string()),
         RenderBlock::BgTask(_) => Some("(background task)".to_string()),
         RenderBlock::Subagent(_) => Some("(subagent)".to_string()),
+        RenderBlock::SubagentPermission(_) => Some("(subagent permission)".to_string()),
         RenderBlock::Workflow(_) => Some("(workflow)".to_string()),
         RenderBlock::Btw(_) => Some("(btw)".to_string()),
         RenderBlock::ContextInfo(_) => Some("(context info)".to_string()),

@@ -328,6 +328,45 @@ fn handle_session_notification_inner(
             ref images,
             ref message,
         } => apply_image_compressed(agent, images, message),
+        GrowSessionUpdate::SubagentPermissionDecision {
+            child_session_id,
+            subagent_type,
+            description,
+            tool_call_id,
+            tool_name,
+            access_kind,
+            access_summary,
+            access_detail,
+            outcome,
+            source,
+            reason,
+            classifier_reason,
+            latency_ms,
+        } => {
+            let subagent_title = agent
+                .subagent_sessions
+                .get(&child_session_id)
+                .map(crate::app::subagent::format_subagent_title);
+            agent.scrollback.push_subagent_permission(
+                crate::scrollback::blocks::SubagentPermissionEvent {
+                    child_session_id,
+                    subagent_title,
+                    subagent_type,
+                    description,
+                    tool_call_id,
+                    tool_name,
+                    access_kind,
+                    access_summary,
+                    access_detail,
+                    outcome,
+                    source,
+                    reason,
+                    classifier_reason,
+                    latency_ms,
+                },
+            );
+            true
+        }
         GrowSessionUpdate::TurnCompleted {
             prompt_id,
             stop_reason,
@@ -335,6 +374,7 @@ fn handle_session_notification_inner(
             ..
         } => {
             if agent.session.loading_replay {
+                agent.scrollback.seal_subagent_permission_group();
                 agent.replayed_terminal_prompts.insert(prompt_id);
                 false
             } else {
@@ -1117,12 +1157,16 @@ pub(super) fn handle_child_session_notification(
 ) -> bool {
     match update {
         GrowSessionUpdate::InteractionResolved { tool_call_id } => {
-            // Interactive state is owned by the concrete child AgentView so
-            // fullscreen input and sibling sessions remain independent.
-            agent
-                .subagent_views
-                .get_mut(child_sid)
-                .is_some_and(|child| child.dismiss_resolved_interaction(child_sid, &tool_call_id))
+            // Permission prompts from every child are centralized on the
+            // owning primary task so they cannot time out invisibly. Other
+            // child interactions keep their concrete fullscreen ownership.
+            agent.dismiss_resolved_interaction(child_sid, &tool_call_id)
+                || agent
+                    .subagent_views
+                    .get_mut(child_sid)
+                    .is_some_and(|child| {
+                        child.dismiss_resolved_interaction(child_sid, &tool_call_id)
+                    })
         }
         GrowSessionUpdate::AutoCompactStarted { .. }
         | GrowSessionUpdate::AutoCompactCompleted { .. }

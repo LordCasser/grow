@@ -189,7 +189,7 @@ Native targets are `execute` (shell execution and its lifecycle controls) and `r
 }
 ```
 
-The result is `granted`, `already_granted`, `denied`, or `unavailable`. `unavailable` means the target is outside the Agent's hard ceiling and does not open an approval prompt. A grant lasts only for that live child: it is not persisted, inherited by descendants, copied to siblings, or restored by recreating/resuming a child. Granting a capability only makes its tools visible on the next model sample; every actual Shell, edit, or MCP call is authorized again by the permission manager.
+The result is `granted`, `already_granted`, `denied`, or `unavailable`. `unavailable` means the target is outside the Agent's hard ceiling and does not open an approval prompt. A grant lasts only for that live child: it is not persisted, inherited by descendants, copied to siblings, or restored by recreating/resuming a child. Granting a capability makes its tools visible on the next model sample and admits ordinary calls inside that live fence. It enriches rather than replaces the child's permission mode: hooks and managed rules still apply, and a rare secondary shell-risk request is handled as always-approve, Auto judgment, or Ask according to that child session's effective mode. Managed policy and protected or explicitly interactive boundaries remain authoritative.
 
 ---
 
@@ -258,19 +258,20 @@ Grow manages worktrees through the `grow/git/worktree/*` extension methods, incl
 
 ### Permission Mode
 
-All subagent levels use one global decision route for both capability grants and eventual tool calls:
+All subagent levels use one global mode for requests that widen their current capability fence:
 
 ```toml
 [subagents]
 permission_mode = "auto" # auto | ask | always-approve | follow
+classifier_input = "context" # context | request_only
 ```
 
-- `auto` (default) uses the primary session's permission classifier chain. `[auto_mode].classifier_model` wins when configured; otherwise Grow uses the primary session's current model, never the child's model. Capability grants always require an LLM verdict rather than the ordinary safe-command fast path. A timeout or unavailable classifier falls back to user approval.
+- `auto` (default) judges only an explicit `request_tool_access` boundary expansion. Ordinary calls already admitted by the child's live capability fence skip the primary-model classifier and its audit noise, while managed policy and hard safety boundaries remain binding. With `[subagents].classifier_input = "context"` (the default), a boundary request uses a read-only snapshot of the primary task context. Set it to `"request_only"` to send only the proposed action and save tokens when task intent is not needed. In either mode the request and structured verdict are ephemeral and never enter primary model history. `[auto_mode].classifier_model` does not override this path. Empty/schema-invalid output, a recoverable provider error, or a per-attempt timeout can retransmit once inside one total deadline; exhaustion or a non-retryable error fails only that grant request. It does not open an ordinary approval prompt or terminate the child.
 - `ask` routes approval to the real child session UI and shows its Agent type, task, target, and purpose.
 - `always-approve` uses the same managed-policy clamps as the primary Always Approve mode.
 - `follow` reads the primary session's current mode for every request. It follows only the decision mode, not the primary session's remembered grants.
 
-An “Always allow” choice made for an actual child tool call is child-session memory only. It does not write project permission state or affect the parent, siblings, descendants, or a newly created child. Static permission rules and managed policy still apply globally.
+Native capability grants and MCP-server grants are child-session memory only. One MCP-server grant covers all eligible tools on that server for the live child, without repeated authorization. Grants do not write project permission state or affect the parent, siblings, descendants, or a newly created child. Static permission rules and managed policy still apply globally.
 
 ### Per-Type Toggles and Model Overrides
 
@@ -334,6 +335,8 @@ When a subagent is spawned, a compact lifecycle block is added to the *parent's*
 
 - `Subagent running: "do the thing" (Implementer · grow-3) — Thinking`
 - Or for background subagents: `Subagent started: "..."`
+
+Auto permission decisions are also recorded in the parent's scrollback as structured audit rows identifying the child, tool, access summary, and outcome. Consecutive permission rows fold into one summary (with per-outcome counts across all participating subagents); expanding the summary shows each decision as one compact line. Double-click an individual expanded row to open its full tool-call ID, source, reason, and judgment latency. These replayable audit rows are UI state only; they are never sent back to the primary model as conversation history.
 
 While running, the block shows a live activity suffix (e.g. "Running: cargo test", "Compacting", "Retrying (2/3)") pulled from the child's turn tracker. The bullet animates (or is colored) according to state.
 

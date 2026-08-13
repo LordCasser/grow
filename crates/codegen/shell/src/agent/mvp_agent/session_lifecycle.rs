@@ -457,10 +457,6 @@ impl MvpAgent {
             .values()
             .filter(|d| d.turn_number.is_some())
             .count();
-        let permission_event_receivers = retained
-            .values()
-            .filter(|d| d.permission_event_receiver.is_some())
-            .count();
         drop(retained);
         RegistrySnapshot {
             sessions: self.sessions.borrow().len(),
@@ -469,7 +465,6 @@ impl MvpAgent {
             retained_resources,
             dispatch_locks,
             session_turn_numbers,
-            permission_event_receivers,
             model_unavailable_sessions: self.model_unavailable_sessions.borrow().len(),
             session_live_state: self.session_live_state.borrow().len(),
             session_index_claims,
@@ -495,7 +490,6 @@ pub struct RegistrySnapshot {
     pub retained_resources: usize,
     pub dispatch_locks: usize,
     pub session_turn_numbers: usize,
-    pub permission_event_receivers: usize,
     pub model_unavailable_sessions: usize,
     pub session_live_state: usize,
     pub session_index_claims: usize,

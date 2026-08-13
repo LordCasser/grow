@@ -459,14 +459,38 @@ impl JsonlStorageAdapter {
     /// Lock tail healing, append, and barriers through `<target>.jsonl.lock`.
     /// Full-file [`Self::write_jsonl`] atomic-rename rewrites bypass this append-only lock.
     fn lock_append(path: &Path) -> io::Result<std::fs::File> {
+        Self::lock_append_with_timeout(path, std::time::Duration::from_secs(5))
+    }
+
+    fn lock_append_with_timeout(
+        path: &Path,
+        timeout: std::time::Duration,
+    ) -> io::Result<std::fs::File> {
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(path.with_extension("jsonl.lock"))?;
-        lock.lock_exclusive()?;
-        Ok(lock)
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match lock.try_lock_exclusive() {
+                Ok(()) => return Ok(lock),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "timed out waiting for JSONL append lock: {}",
+                                path.with_extension("jsonl.lock").display()
+                            ),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
     fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
         super::sync_file_durable(file)

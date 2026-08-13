@@ -23,6 +23,10 @@ pub(super) fn with_active_agent(app: &mut AppView, f: impl FnOnce(&mut AgentView
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
+        if !agent.permission_queue.is_empty() {
+            f(agent);
+            return;
+        }
         if let Some(child_sid) = agent.active_subagent.clone()
             && let Some(child) = agent.subagent_views.get_mut(&child_sid)
         {
@@ -62,6 +66,9 @@ pub(super) fn get_active_agent(app: &AppView) -> Option<&AgentView> {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
+        if !agent.permission_queue.is_empty() {
+            return Some(agent);
+        }
         if let Some(ref child_sid) = agent.active_subagent
             && let Some(child) = agent.subagent_views.get(child_sid)
         {
@@ -77,6 +84,9 @@ pub(super) fn get_active_agent_mut(app: &mut AppView) -> Option<&mut AgentView> 
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
+        if !agent.permission_queue.is_empty() {
+            return Some(agent);
+        }
         if let Some(child_sid) = agent.active_subagent.clone()
             && agent.subagent_views.contains_key(&child_sid)
         {

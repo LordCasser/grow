@@ -130,7 +130,7 @@ impl ChatStateActor {
             top_p: self.state.sampling_config.top_p,
             prompt_cache_key: None,
             reasoning_effort: self.state.sampling_config.reasoning_effort,
-            json_schema: None,
+            json_output: None,
         }
     }
 }

@@ -75,6 +75,12 @@ Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档�
 
 Deep Research foreground 只保留明确 `ToolScope::Read` 的工具；未分类工具同样被拒绝。Goal role/object权限见 [goal-continuation.md](./goal-continuation.md)。
 
+`SubagentCapabilityState` 是子 Agent 运行时授权的唯一能力围栏。Agent 定义和 delegated mode 初始化当前 session 的 native capability 与 MCP eligibility；围栏内的普通 Read/Grep/Bash/Edit/MCP 调用不进入 Auto classifier，也不产生权限审批审计。managed deny/ask、protected edit、交互工具和 Bash request floor 仍在统一 PermissionManager 中生效。只有 `request_tool_access` 可以申请扩大围栏，而且不能突破 authored hard ceiling；MCP 按 server 授权，一次 grant 覆盖该 child session 中这个 server 的所有 eligible tools，并绑定继承的 transport incarnation。每个 child handle 另外持有不可变 `DelegableCapabilityCeiling`：nested child 的初始 mode 必须是 immediate security parent 初始 mode 的偏序子集，且只能继承 ceiling 中同一 transport ID 的 MCP binding。运行时 fresh grant 只属于当前 child，永远不扩大其后代 ceiling。
+
+子 Agent 的 Auto 越界裁决由 primary session 承担。未被权威规则直接解决的 `CapabilityGrant` 按 `[subagents].classifier_input` 创建临时判断分支：默认 `context` 从主 ChatState 当前压缩状态中只提取带 first-party `PermissionEvidence` 的真实用户任务/插话，排除 assistant、tool result、summary 与 synthetic user-role 内容，再追加结构化权限消息；`request_only` 只携带待裁决的结构化动作以节省 token。`PermissionEvidence` 在真实 ingress 铸造并随 JSONL replay 原样恢复，缺失或未知值 fail closed，不能由 role 或 `promptIndex` 推导。两个分支都禁用工具、使用主会话 active model，并只返回严格的 `{decision, reason}`。Responses/Messages 使用 native JSON Schema，Chat Completions 使用跨 OpenAI-compatible provider 的 JSON Object wire contract后做相同的本地严格校验。空响应、schema 错误、可恢复 API/transport error 和单次 attempt timeout 共用最多两次的有限尝试器；两次 attempt 共享一个总 deadline，不可恢复的 auth/request error 立即 fail closed。临时消息、原始模型结果和结构化裁决都不得写回 ChatState、memory、compaction、fork context 或普通 ConversationItem。`[auto_mode].classifier_model` 只服务主会话自身分类路径，不覆盖子 Agent 的主上下文裁决模型。
+
+权限拒绝是子 Agent 的工具级结果，不是 turn 级终止：Auto deny/unavailable、人工 Reject/TimedOut 和 `request_tool_access` 失败都让当前工具 fail closed，并把可操作的失败结果交回下一次子模型采样；只有明确 Cancel、父任务终止或 session teardown 可以取消子 turn。最终 `PermissionEvent` 是审计事实源，经 primary session 的 audit bridge 持久化为 UI-only update。Pager 将同一主 Agent turn 内到达的事件保留在一个带 epoch 的稳定结构化权限块中；status、tool 等中间消息不会拆组，只有真实 `TurnCompleted` 推进 epoch 并封口。展开成员始终单行，双击成员读取完整 live 请求和 classifier reason；持久化 replay 只恢复脱敏安全摘要。该块不复用 tool-verb 分类或其设置，也不进入模型上下文。
+
 ## 原子 control snapshot
 
 `session-control.json` 包含 architecture version、control revision、Behavior snapshot、Plan phase/approval/artifact revision/hash、Goal state/receipt 与 Deep Research owned run id。

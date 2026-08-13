@@ -628,7 +628,25 @@ impl SessionActor {
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         if tool_calls.len() > 1 {
             let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
-            let (body, tail) = split_plan_control_tail(tool_calls, kind_of);
+            // Capability requests are authorization control calls, not
+            // ordinary parallel work. Resolve them sequentially before any
+            // sibling dispatch so an explicit user Cancel can prevent side
+            // effects that have not started yet. Child deny/timeout remains a
+            // nonterminal tool result and therefore does not block siblings.
+            let (capability_requests, remainder): (Vec<_>, Vec<_>) =
+                tool_calls.into_iter().partition(|call| {
+                    kind_of(&call.function.name)
+                        == Some(tools::types::tool::ToolKind::CapabilityRequest)
+                });
+            for request in capability_requests {
+                self.execute_tool_calls_batch(
+                    vec![request],
+                    &mut deferred_followups,
+                    &mut final_result,
+                )
+                .await?;
+            }
+            let (body, tail) = split_plan_control_tail(remainder, kind_of);
             if !body.is_empty() {
                 self.execute_tool_calls_batch(body, &mut deferred_followups, &mut final_result)
                     .await?;
@@ -742,6 +760,33 @@ impl SessionActor {
                     }
                 }
             }
+        }
+        if final_result.is_some() && !approved.is_empty() {
+            let reason = match final_result.as_ref() {
+                Some(ToolLoop::Cancelled) => {
+                    "Tool execution cancelled before batch dispatch by the user"
+                }
+                Some(ToolLoop::PermissionReject { .. }) => {
+                    "Tool execution cancelled before batch dispatch after permission rejection"
+                }
+                Some(ToolLoop::PermissionTimedOut { .. }) => {
+                    "Tool execution cancelled before batch dispatch after permission timeout"
+                }
+                Some(ToolLoop::FollowupMessage(_)) => {
+                    "Tool execution cancelled before batch dispatch by the user's follow-up"
+                }
+                _ => "Tool execution cancelled before batch dispatch",
+            };
+            for prepared in approved.drain(..) {
+                self.handle_tool_not_executed(
+                    &prepared.call_id,
+                    &prepared.tool_call_id,
+                    format!("{reason}: `{}` was not executed", prepared.tool_name),
+                )
+                .await?;
+                self.events.tool_finished();
+            }
+            return Ok(());
         }
         let write_paths: std::collections::HashSet<String> = approved
             .iter()
@@ -970,7 +1015,7 @@ impl SessionActor {
                         self.last_search_prompt_index
                             .store(pi, std::sync::atomic::Ordering::Relaxed);
                     }
-                    let capability_followup = if self
+                    let capability_control = if self
                         .agent
                         .borrow()
                         .tool_bridge()
@@ -982,13 +1027,20 @@ impl SessionActor {
                         let resources = toolset.resources.lock().await;
                         resources
                             .get::<tools::implementations::grow_build::request_tool_access::ToolAccessGrantBackendResource>()
-                            .and_then(|backend| backend.0.take_followup(&prepared.call_id))
+                            .and_then(|backend| {
+                                if backend.0.take_cancelled(&prepared.call_id) {
+                                    Some(ToolLoop::Cancelled)
+                                } else {
+                                    backend
+                                        .0
+                                        .take_followup(&prepared.call_id)
+                                        .map(ToolLoop::FollowupMessage)
+                                }
+                            })
                     } else {
                         None
                     };
-                    capability_followup
-                        .map(ToolLoop::FollowupMessage)
-                        .unwrap_or(ToolLoop::Continue)
+                    capability_control.unwrap_or(ToolLoop::Continue)
                 }
                 Err(err) => {
                     let err: anyhow::Error = err.into();
@@ -1506,6 +1558,7 @@ impl SessionActor {
                 None
             };
             let diagnostic_subagent_type = self.subagent_type_label();
+            let within_capability_fence = self.subagent_capabilities.is_some();
             let child_permission_mode = self
                 .startup_hints
                 .is_subagent
@@ -1525,20 +1578,26 @@ impl SessionActor {
                     ::diagnostics::enums::PermissionMode::Ask
                 }
             };
-            ::diagnostics::session_ctx::log_event(::diagnostics::events::PermissionPrompted {
-                tool_name: call.function.name.clone(),
-                access_kind: diagnostics_access_kind,
-                permission_mode: perm_mode,
-                subagent_session_id: subagent_session_id.clone(),
-                subagent_type: diagnostic_subagent_type.clone(),
-            });
-            let perm_start = self.events.permission_requested(&call.function.name);
+            let emit_permission_diagnostics = !within_capability_fence;
+            let perm_start = if emit_permission_diagnostics {
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::PermissionPrompted {
+                    tool_name: call.function.name.clone(),
+                    access_kind: diagnostics_access_kind,
+                    permission_mode: perm_mode,
+                    subagent_session_id: subagent_session_id.clone(),
+                    subagent_type: diagnostic_subagent_type.clone(),
+                });
+                self.events.permission_requested(&call.function.name)
+            } else {
+                std::time::Instant::now()
+            };
             debug_assert!(
                 !self.session_info.id.0.is_empty(),
                 "permission reverse-request must carry a non-empty sessionId (design §5.4)"
             );
             if effective_mode
                 != workspace::permission::types::EffectivePermissionMode::AlwaysApprove
+                && !within_capability_fence
             {
                 self.dispatch_notification_hook(
                     "permission_prompt",
@@ -1550,6 +1609,7 @@ impl SessionActor {
             }
             let classifier_turns = if effective_mode
                 == workspace::permission::types::EffectivePermissionMode::Auto
+                && !within_capability_fence
             {
                 let conv = self.chat_state_handle.get_conversation().await;
                 let turns = super::build_classifier_turns(&conv, super::CLASSIFIER_REFRESH_TURNS);
@@ -1596,6 +1656,7 @@ impl SessionActor {
                                 }
                             },
                             request_mode: child_permission_mode,
+                            within_capability_fence,
                             execution_cwd: Some(std::path::PathBuf::from(
                                 self.session_info.cwd.as_str(),
                             )),
@@ -1604,20 +1665,24 @@ impl SessionActor {
                     )
                     .await
             };
-            self.events.permission_resolved(
-                &call.function.name,
-                {
-                    use crate::session::event_types::PermissionDecision;
-                    match &decision {
-                        Decision::Allow | Decision::Ask => PermissionDecision::Allow,
-                        Decision::Reject(_) | Decision::PolicyDeny(_) => PermissionDecision::Deny,
-                        Decision::Cancelled => PermissionDecision::Cancelled,
-                        Decision::TimedOut => PermissionDecision::TimedOut,
-                        Decision::FollowupMessage(_) => PermissionDecision::Followup,
-                    }
-                },
-                perm_start,
-            );
+            if emit_permission_diagnostics {
+                self.events.permission_resolved(
+                    &call.function.name,
+                    {
+                        use crate::session::event_types::PermissionDecision;
+                        match &decision {
+                            Decision::Allow | Decision::Ask => PermissionDecision::Allow,
+                            Decision::Reject(_) | Decision::PolicyDeny(_) => {
+                                PermissionDecision::Deny
+                            }
+                            Decision::Cancelled => PermissionDecision::Cancelled,
+                            Decision::TimedOut => PermissionDecision::TimedOut,
+                            Decision::FollowupMessage(_) => PermissionDecision::Followup,
+                        }
+                    },
+                    perm_start,
+                );
+            }
             let wait_ms = perm_start.elapsed().as_millis() as u64;
             let (decision_outcome, _reject_reason) = match &decision {
                 Decision::Allow | Decision::Ask => {
@@ -1646,33 +1711,43 @@ impl SessionActor {
                 wait_ms = wait_ms as i64,
             )
             .in_scope(|| {});
-            ::diagnostics::session_ctx::log_event(
-                ::diagnostics::events::PermissionDecisionPayload {
-                    tool_name: call.function.name.clone(),
-                    access_kind: diagnostics_access_kind,
-                    decision: decision_outcome,
-                    wait_ms,
-                    permission_mode: perm_mode,
-                    source: Some(
-                        crate::session::diagnostics::permission_decision_source(
-                            &decision,
-                            effective_mode
-                                == workspace::permission::types::EffectivePermissionMode::AlwaysApprove,
-                        )
-                        .to_owned(),
-                    ),
-                    subagent_session_id: subagent_session_id.clone(),
-                    subagent_type: diagnostic_subagent_type,
-                },
-            );
+            if emit_permission_diagnostics {
+                ::diagnostics::session_ctx::log_event(
+                    ::diagnostics::events::PermissionDecisionPayload {
+                        tool_name: call.function.name.clone(),
+                        access_kind: diagnostics_access_kind,
+                        decision: decision_outcome,
+                        wait_ms,
+                        permission_mode: perm_mode,
+                        source: Some(
+                            crate::session::diagnostics::permission_decision_source(
+                                &decision,
+                                effective_mode
+                                    == workspace::permission::types::EffectivePermissionMode::AlwaysApprove,
+                            )
+                            .to_owned(),
+                        ),
+                        subagent_session_id: subagent_session_id.clone(),
+                        subagent_type: diagnostic_subagent_type,
+                    },
+                );
+            }
             match decision {
                 Decision::PolicyDeny(ref reason) | Decision::Reject(ref reason) => {
                     let is_policy_deny = matches!(&decision, Decision::PolicyDeny(_));
-                    let message = if is_policy_deny {
+                    let child_nonterminal = self.startup_hints.is_subagent;
+                    let mut message = if is_policy_deny {
                         format!("Tool `{}` was not executed: {reason}", call.function.name)
                     } else {
                         format!("{reason} for tool `{}`", call.function.name)
                     };
+                    if child_nonterminal {
+                        message.push_str(
+                            ". Continue with the tools and permissions that remain available. \
+                             Do not retry this exact action blindly; if the missing permission \
+                             prevents completion, explain the limitation in your final report",
+                        );
+                    }
                     self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                         .await?;
                     let (tool_input_value, tool_input_truncated) =
@@ -1689,7 +1764,7 @@ impl SessionActor {
                         Some(&resolved_tool_name),
                     )
                     .await;
-                    let loop_action = if is_policy_deny {
+                    let loop_action = if is_policy_deny || child_nonterminal {
                         ToolLoop::Continue
                     } else {
                         ToolLoop::PermissionReject {
@@ -1709,12 +1784,26 @@ impl SessionActor {
                     return Ok(Err(ToolLoop::Cancelled));
                 }
                 Decision::TimedOut => {
-                    let message = format!(
-                        "Permission request timed out; tool `{}` was not executed",
-                        call.function.name
-                    );
+                    let child_nonterminal = self.startup_hints.is_subagent;
+                    let message = if child_nonterminal {
+                        format!(
+                            "Permission request timed out; tool `{}` was not executed. \
+                             Continue with the tools and permissions that remain available. \
+                             Do not retry this exact action blindly; if the missing permission \
+                             prevents completion, explain the limitation in your final report",
+                            call.function.name
+                        )
+                    } else {
+                        format!(
+                            "Permission request timed out; tool `{}` was not executed",
+                            call.function.name
+                        )
+                    };
                     self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                         .await?;
+                    if child_nonterminal {
+                        return Ok(Err(ToolLoop::Continue));
+                    }
                     return Ok(Err(ToolLoop::PermissionTimedOut {
                         tool_name: call.function.name.clone(),
                     }));

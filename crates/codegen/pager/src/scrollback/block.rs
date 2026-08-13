@@ -16,8 +16,8 @@ use super::blocks::{
     AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, EditToolCallBlock,
     ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, OtherToolCallBlock, ReadToolCallBlock,
     SearchFileMatch, SearchToolCallBlock, SessionEvent, SessionEventBlock, SubagentBlock,
-    SubagentBlockKind, SystemMessageBlock, ThinkingBlock, ToolCallBlock, UserPromptBlock,
-    WorkflowBlock,
+    SubagentBlockKind, SubagentPermissionBlock, SystemMessageBlock, ThinkingBlock, ToolCallBlock,
+    UserPromptBlock, WorkflowBlock,
 };
 use super::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput,
@@ -382,6 +382,8 @@ pub enum RenderBlock {
     BgTask(BgTaskBlock),
     /// Subagent lifecycle (started / completed / failed).
     Subagent(SubagentBlock),
+    /// Durable UI-only audit record for one subagent permission decision.
+    SubagentPermission(SubagentPermissionBlock),
     Workflow(WorkflowBlock),
     /// /btw side-question response (golden accent).
     Btw(BtwBlock),
@@ -402,6 +404,7 @@ macro_rules! delegate_block {
             RenderBlock::SessionEvent(b) => b.$method($($arg),*),
             RenderBlock::BgTask(b) => b.$method($($arg),*),
             RenderBlock::Subagent(b) => b.$method($($arg),*),
+            RenderBlock::SubagentPermission(b) => b.$method($($arg),*),
             RenderBlock::Workflow(b) => b.$method($($arg),*),
             RenderBlock::Btw(b) => b.$method($($arg),*),
             RenderBlock::ContextInfo(b) => b.$method($($arg),*),
@@ -759,6 +762,11 @@ impl RenderBlock {
         RenderBlock::System(SystemMessageBlock::new(text))
     }
 
+    /// Create a structured subagent permission audit row.
+    pub fn subagent_permission(block: SubagentPermissionBlock) -> Self {
+        RenderBlock::SubagentPermission(block)
+    }
+
     /// Create a `/context` snapshot block.
     ///
     /// The block stores the raw `ContextInfo` snapshot + model name and
@@ -983,6 +991,7 @@ impl RenderBlock {
                     None
                 }
             }
+            RenderBlock::SubagentPermission(_) => None,
             RenderBlock::System(_) | RenderBlock::SessionEvent(_) | RenderBlock::ContextInfo(_) => {
                 None
             }
@@ -1001,7 +1010,8 @@ impl RenderBlock {
             | RenderBlock::ToolCall(ToolCallBlock::WebFetch(_))
             | RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_))
             | RenderBlock::ToolCall(ToolCallBlock::UseTool(_))
-            | RenderBlock::BgTask(_) => true,
+            | RenderBlock::BgTask(_)
+            | RenderBlock::SubagentPermission(_) => true,
             RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.has_content(),
             RenderBlock::ToolCall(ToolCallBlock::Search(b)) => b.error.is_none(),
             RenderBlock::ToolCall(ToolCallBlock::ListDir(b)) => {
@@ -1121,6 +1131,7 @@ impl RenderBlock {
                     error,
                 ])
             }
+            RenderBlock::SubagentPermission(b) => b.searchable_text(),
             RenderBlock::Btw(b) => join_searchable([
                 Some(b.question.clone()),
                 Some(b.content().rendered_plain_text()),

@@ -883,11 +883,16 @@ impl AgentView {
         now: Instant,
         idx: usize,
         header_row_click: bool,
+        permission_member: Option<usize>,
     ) -> (Option<(Instant, usize, u8)>, bool) {
+        let permission_target = permission_member.map(|member| (idx, member));
         let click_count = if let Some((last_time, last_idx, prev_count)) = self.last_click
             && last_idx == idx
             && now.duration_since(last_time).as_millis() < MULTI_CLICK_TIMEOUT_MS
-        {
+            && match permission_target {
+                Some(target) => self.last_permission_click_target == Some(target),
+                None => self.last_permission_click_target.is_none(),
+            } {
             prev_count + 1
         } else {
             1
@@ -898,6 +903,12 @@ impl AgentView {
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::BgTask(_)));
         let is_subagent = entry_block
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Subagent(_)));
+        let is_subagent_permission = entry_block.is_some_and(|b| {
+            matches!(
+                b,
+                crate::scrollback::block::RenderBlock::SubagentPermission(_)
+            )
+        });
         let is_workflow = entry_block
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Workflow(_)));
 
@@ -999,6 +1010,19 @@ impl AgentView {
                     }
                 }
             }
+            2 if is_subagent_permission && permission_member.is_some() => {
+                if let Some(entry) = self.scrollback.entry(idx)
+                    && let crate::scrollback::block::RenderBlock::SubagentPermission(block) =
+                        &entry.block
+                    && let Some(member) = permission_member.and_then(|i| block.member(i))
+                {
+                    self.block_viewer =
+                        Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
+                            &member.detail_title(),
+                            &member.detail_text(),
+                        ));
+                }
+            }
             2 if is_workflow => {
                 if let Some(entry) = self.scrollback.entry(idx)
                     && let crate::scrollback::block::RenderBlock::Workflow(ref wf) = entry.block
@@ -1041,6 +1065,7 @@ impl AgentView {
         } else {
             Some((now, idx, click_count))
         };
+        self.last_permission_click_target = last_click.and(permission_target);
         (last_click, show_word_select_tip)
     }
 
@@ -1632,13 +1657,162 @@ mod tests {
     /// `idx`, threading `last_click` the way the mouse caller does. Returns
     /// the tip flag of the second click.
     fn double_click_gesture(agent: &mut AgentView, t: Instant, idx: usize) -> bool {
-        let (last, tip1) = agent.handle_scrollback_click(t, idx, false);
+        double_click_gesture_at(agent, t, idx, None)
+    }
+
+    fn double_click_gesture_at(
+        agent: &mut AgentView,
+        t: Instant,
+        idx: usize,
+        permission_member: Option<usize>,
+    ) -> bool {
+        let (last, tip1) = agent.handle_scrollback_click(t, idx, false, permission_member);
         assert!(!tip1, "a single click must never tip");
         agent.last_click = last;
-        let (last, tip2) =
-            agent.handle_scrollback_click(t + Duration::from_millis(100), idx, false);
+        let (last, tip2) = agent.handle_scrollback_click(
+            t + Duration::from_millis(100),
+            idx,
+            false,
+            permission_member,
+        );
         agent.last_click = last;
         tip2
+    }
+
+    #[test]
+    fn subagent_permission_double_click_opens_its_detail_viewer() {
+        use crate::scrollback::blocks::{SubagentPermissionBlock, SubagentPermissionEvent};
+        use shell::extensions::notification::SubagentPermissionOutcome;
+
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::subagent_permission(
+                SubagentPermissionBlock::new(SubagentPermissionEvent {
+                    child_session_id: "019ff931-child".into(),
+                    subagent_title: Some("Coder edit docs".into()),
+                    subagent_type: Some("coder".into()),
+                    description: Some("edit docs".into()),
+                    tool_call_id: "tool-7".into(),
+                    tool_name: "search_replace".into(),
+                    access_kind: "edit".into(),
+                    access_summary: Some("docs/architecture/03-LM.md".into()),
+                    access_detail: None,
+                    outcome: SubagentPermissionOutcome::Unavailable,
+                    source: "main_agent".into(),
+                    reason: Some("invalid structured output".into()),
+                    classifier_reason: None,
+                    latency_ms: Some(3727),
+                }),
+            ));
+        assert!(agent.block_viewer.is_none());
+
+        assert!(!double_click_gesture_at(
+            &mut agent,
+            Instant::now(),
+            0,
+            Some(0),
+        ));
+        assert!(agent.block_viewer.is_some());
+    }
+
+    #[test]
+    fn word_select_mouse_pipeline_still_opens_permission_detail() {
+        use crate::appearance::TextSelection;
+        use crate::scrollback::blocks::{SubagentPermissionBlock, SubagentPermissionEvent};
+        use shell::extensions::notification::SubagentPermissionOutcome;
+
+        crate::appearance::cache::set_keep_text_selection(TextSelection::WordSelect);
+        let mut agent = make_agent();
+        agent.pane_areas.scrollback = Rect::new(0, 0, 100, 24);
+        agent.active_pane = AgentPane::Scrollback;
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::subagent_permission(
+                SubagentPermissionBlock::new(SubagentPermissionEvent {
+                    child_session_id: "child".into(),
+                    subagent_title: Some("Coder W4-B".into()),
+                    subagent_type: Some("coder".into()),
+                    description: Some("verify".into()),
+                    tool_call_id: "tool".into(),
+                    tool_name: "run_terminal_command".into(),
+                    access_kind: "bash".into(),
+                    access_summary: Some("command details redacted".into()),
+                    access_detail: Some("cargo test --workspace".into()),
+                    outcome: SubagentPermissionOutcome::Approved,
+                    source: "main_agent".into(),
+                    reason: Some("auto_classifier_allow".into()),
+                    classifier_reason: Some("required by the task".into()),
+                    latency_ms: Some(5),
+                }),
+            ));
+        agent.scrollback.prepare_layout(100, 24);
+        let (area, _, _) = agent
+            .scrollback
+            .entry_screen_area(0, agent.pane_areas.scrollback)
+            .expect("permission entry laid out");
+        let member_row = area.y + 1; // top vpad precedes the compact member row
+        // Reproduce the competing exact-text target that used to consume the
+        // mouse-up before permission member hit-testing.
+        agent.last_scrollback_selection_model = stacked_lines_model(0, member_row, 1);
+        let registry = ActionRegistry::defaults();
+        for _ in 0..2 {
+            let _ = agent.handle_input(&Event::Mouse(mouse_down(8, member_row)), &registry);
+            let _ = agent.handle_input(&Event::Mouse(mouse_up(8, member_row)), &registry);
+        }
+        assert!(
+            agent.block_viewer.is_some(),
+            "permission member double-click must win over word selection"
+        );
+        crate::appearance::cache::set_keep_text_selection(TextSelection::Flash);
+    }
+
+    #[test]
+    fn expanded_permission_run_opens_only_the_double_clicked_member_detail() {
+        use crate::scrollback::blocks::{SubagentPermissionBlock, SubagentPermissionEvent};
+        use shell::extensions::notification::SubagentPermissionOutcome;
+
+        let permission = |tool_call_id: &str, tool_name: &str| SubagentPermissionEvent {
+            child_session_id: "019ff931-child".into(),
+            subagent_title: Some("Coder edit docs".into()),
+            subagent_type: Some("coder".into()),
+            description: Some("edit docs".into()),
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            access_kind: "edit".into(),
+            access_summary: Some("docs/architecture/03-LM.md".into()),
+            access_detail: Some("full request details".into()),
+            outcome: SubagentPermissionOutcome::Approved,
+            source: "main_agent".into(),
+            reason: Some(format!("reason for {tool_call_id}")),
+            classifier_reason: Some(format!("classifier reason for {tool_call_id}")),
+            latency_ms: Some(7),
+        };
+        let mut agent = make_agent();
+        let mut group = SubagentPermissionBlock::new(permission("tool-1", "read_file"));
+        group.push(permission("tool-2", "search_replace"));
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::subagent_permission(
+                group,
+            ));
+        agent.scrollback.prepare_layout(120, 40);
+
+        assert!(!double_click_gesture(&mut agent, Instant::now(), 0));
+        assert!(agent.block_viewer.is_none(), "the run header only expands");
+        agent.scrollback.prepare_layout(120, 40);
+
+        assert!(!double_click_gesture_at(
+            &mut agent,
+            Instant::now() + Duration::from_secs(1),
+            0,
+            Some(1),
+        ));
+        assert!(
+            agent.block_viewer.is_some(),
+            "the selected member opens its detail modal"
+        );
+        assert_eq!(agent.scrollback.selected(), Some(0));
     }
 
     #[test]

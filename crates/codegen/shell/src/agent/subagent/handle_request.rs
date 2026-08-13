@@ -232,6 +232,24 @@ pub(crate) async fn run_shell_child(
             "Role prompt_file degraded, continuing without role prompt"
         );
     }
+    // Normalize the historical implicit default before any worktree, MCP, or
+    // session side effect. Nested authority is a strict subset relation, not a
+    // permission request: widening fails the spawn rather than prompting or
+    // silently clamping the requested child definition.
+    let initial_capability_mode = effective_runtime
+        .capability_mode
+        .unwrap_or(tool_types::SubagentCapabilityMode::All);
+    if let Some(ceiling) = ctx.parent_capability_ceiling.as_ref()
+        && !ceiling.permits_mode(initial_capability_mode)
+    {
+        let msg = format!(
+            "Nested subagent capability widening denied: requested '{}' exceeds the immediate \
+             parent's immutable delegation ceiling",
+            initial_capability_mode.as_str()
+        );
+        return child_run_output(failure_result(&request, &msg), completion_data, None);
+    }
+    effective_runtime.capability_mode = Some(initial_capability_mode);
     let resume_source = if let Some(resume_id) = request
         .resume_from
         .as_deref()
@@ -466,9 +484,8 @@ pub(crate) async fn run_shell_child(
             "Resolved runtime overrides for subagent"
         );
     }
-    // `capabilityMode` is the child's initial grant, not a permanent ceiling.
-    // The resolved spawn override already has precedence over the definition
-    // default; preserve it on the definition for session-state construction.
+    // Preserve the normalized, confinement-checked initial grant on the
+    // definition for session-state construction.
     definition.capability_mode = effective_runtime.capability_mode;
     let child_depth = request
         .runtime_overrides
@@ -886,8 +903,24 @@ pub(crate) async fn run_shell_child(
         );
     }
     let agent_mcp_servers: Vec<agent_client_protocol::McpServer> = Vec::new();
-    let parent_mcp_pool =
+    let mut parent_mcp_pool =
         resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &definition.mcp_inheritance);
+    if let (Some(pool), Some(ceiling)) = (
+        parent_mcp_pool.as_mut(),
+        ctx.parent_capability_ceiling.as_ref(),
+    ) {
+        let allowed = pool
+            .eligibility()
+            .current_clients()
+            .into_iter()
+            .filter_map(|(server, _, client_id)| {
+                ceiling
+                    .permits_mcp_binding(&server, client_id)
+                    .then_some(server)
+            })
+            .collect::<Vec<_>>();
+        pool.restrict_to_servers(allowed);
+    }
     let mcp_inherited_count = parent_mcp_pool
         .as_ref()
         .map(|p| p.len() as u32)
@@ -1045,6 +1078,7 @@ pub(crate) async fn run_shell_child(
         ctx.background_workflows_enabled && !request.owner.is_workflow(),
         true,
         ctx.subagents_max_depth,
+        crate::config::SubagentClassifierInput::Context,
         ctx.ask_user_question_enabled,
         ctx.client_hooks.clone(),
         None,
@@ -1077,7 +1111,7 @@ pub(crate) async fn run_shell_child(
         subagent_max_turns,
     )
     .await;
-    let (child_handle, _permission_rx, _system_prompt, child_thread) = match spawn_result {
+    let (child_handle, _system_prompt, child_thread) = match spawn_result {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("Failed to spawn child session: {e}");

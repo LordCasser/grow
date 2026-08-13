@@ -134,6 +134,11 @@ pub struct SessionHandle {
     /// Set via `grow/debug/arm_auto_compact`.
     pub force_compact: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub permission_handle: workspace::permission::PermissionHandle,
+    /// Immutable initial authority this session may pass to a nested child.
+    /// `None` identifies a primary/root session; runtime grants are held in the
+    /// child-local capability state and never update this ceiling.
+    pub(crate) delegable_capability_ceiling:
+        Option<super::subagent_capability::DelegableCapabilityCeiling>,
     /// The agent definition name for this session.
     pub agent_name: String,
     /// Peer-Agent visibility derived from the active Agent's task-tool policy.

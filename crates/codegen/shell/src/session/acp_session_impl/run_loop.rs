@@ -258,6 +258,39 @@ async fn shutdown_workflows(session: &SessionActor) {
         Err(_) => tracing::warn!("workflow shutdown persistence flush timed out"),
     }
 }
+
+/// Close the primary-owned permission authority at teardown entry and wait
+/// until its final audit event has crossed the bridge. End hooks and memory
+/// work may take time; no child permission request remains live while they run.
+async fn stop_permission_manager_and_drain_audit(session: &SessionActor) {
+    if session.owns_permission_manager {
+        session.permissions.shutdown_and_drain().await;
+        let bridge = session.permission_audit_bridge.lock().take();
+        if let Some(bridge) = bridge
+            && let Err(error) = bridge.await
+        {
+            tracing::warn!(%error, "permission audit bridge failed during session shutdown");
+        }
+    }
+}
+
+/// Cross the final persistence barrier after every teardown producer,
+/// including the drained permission bridge and session-end hooks, has stopped.
+async fn final_session_persistence_flush(session: &SessionActor) {
+    let (respond_to, ack) = tokio::sync::oneshot::channel();
+    if session
+        .notifications
+        .persistence_tx
+        .send(PersistenceMsg::FlushAndAck { respond_to })
+        .is_err()
+    {
+        tracing::warn!("permission audit persistence channel closed before final flush");
+        return;
+    }
+    if ack.await.is_err() {
+        tracing::warn!("permission audit persistence actor dropped flush ack");
+    }
+}
 pub(super) async fn run_session(
     session: Arc<SessionActor>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
@@ -553,7 +586,9 @@ pub(super) async fn run_session(
             maybe_completion = completion_rx.recv() => {
                 let Some((prompt_id, result)) = maybe_completion else {
                     // Channel closed.
+                    stop_permission_manager_and_drain_audit(&session).await;
                     shutdown_workflows(&session).await;
+                    final_session_persistence_flush(&session).await;
                     cleanup_session_scratch(&session);
                     return;
                 };
@@ -636,6 +671,7 @@ pub(super) async fn run_session(
             }
             maybe_cmd = cmd_rx.recv() => {
                 let Some(cmd) = maybe_cmd else {
+                    stop_permission_manager_and_drain_audit(&session).await;
                     // ── session_end hook (channel-closed path) ────
                     // Fires BEFORE memory auto-save per plan contract.
                     let envelope = session.fire_hook(
@@ -722,6 +758,7 @@ pub(super) async fn run_session(
                         }
                     }
                     shutdown_workflows(&session).await;
+                    final_session_persistence_flush(&session).await;
                     session.signals_handle.shutdown();
                     if !session.startup_hints.is_subagent {
                         session.persist_background_task_manifest().await;
@@ -2188,6 +2225,7 @@ pub(super) async fn run_session(
                         );
                     }
                     SessionCommand::Shutdown => {
+                        stop_permission_manager_and_drain_audit(&session).await;
                         shutdown_workflows(&session).await;
                         // Flush the actor-owned replay buffer so any
                         // streamed chunks still pending at shutdown
@@ -2278,6 +2316,7 @@ pub(super) async fn run_session(
                         // Structured diagnostics after dream so counters are populated
                         let telem = session.memory.diagnostics_snapshot();
                         session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
+                        final_session_persistence_flush(&session).await;
                         session.signals_handle.shutdown();
                         if !session.startup_hints.is_subagent {
                             session.persist_background_task_manifest().await;
