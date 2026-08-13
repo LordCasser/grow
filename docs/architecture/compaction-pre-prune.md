@@ -24,9 +24,18 @@ Insertion point: `run_compact_only` (shell `session/compaction.rs`), after the
 pre-compaction flush and **before** `run_compact_inner`. The ladder function is
 `maybe_pre_prune(&trigger_info) -> Result<bool, acp::Error>`:
 
-1. **Config gate**: `compaction.pre_prune == false`, or
-   `auto_compact_suppressed != SUPPRESS_NONE`, or the plan is empty → return
-   `false` (no pruning, summary path unchanged).
+1. **Config gate**: `compaction.pre_prune == false`, or the plan is empty →
+   return `false` (no pruning, summary path unchanged).
+
+   **Suppress gate**: account-state suppression (`SUPPRESS_UNTIL_SUCCESS`,
+   `SUPPRESS_AUTH`) and per-turn suppression (`SUPPRESS_TURN`) block the
+   ladder — account state is unrelated to model-free pruning, and per-turn
+   failures self-heal at the next turn start. `SUPPRESS_STICKY` (deterministic
+   size failures) and `SUPPRESS_NONE` let it through: pruning is exactly the
+   model-free remedy for the size failures STICKY marks, and a prune whose
+   strict gate passes clears the sticky bit (§5) — the existing
+   "context-budget change" STICKY clear condition. A gate that does not pass
+   never touches the suppress state.
 2. **Budget derivation**:
    - `item_budget = compaction.pre_prune_token_budget`
      or `context_window × 5%` (lower bound 1 token);
@@ -36,6 +45,15 @@ pre-compaction flush and **before** `run_compact_inner`. The ladder function is
 3. **Plan**: `compaction::plan_tool_result_pruning(&conversation,
    &EstimatedItemTokenCounter, item_budget, target)` — oldest oversized tool
    results first, stop as soon as the projected post-prune total is `<= target`.
+   While the fork's inherited prefix is still pinned
+   (`prefix_released == false`, see §5), planning runs over
+   `conversation[inherited_prefix_len..]` only (clamped to the conversation
+   length) and the returned plan indexes are re-based onto the full
+   conversation before applying. `target` and `item_budget` keep their
+   full-conversation derivation; the planner counts tokens over the slice it
+   receives, so its stop condition compares the slice's own total against
+   that absolute target. The strict gate (step 5) still re-checks the full
+   estimate before the summary is skipped, so this only leans conservative.
 4. **Apply**: `chat_state_handle.prune_tool_results(plan)` — actor-serialized,
    idempotent, persists via `replace_history` only.
    **Any `Err` fails open**: `warn` log + `false` (continue the summary path).
@@ -109,9 +127,21 @@ lives on `CompactionConfig` as `Cell<bool>` / `Cell<Option<u64>>` (the `!Send`
   original tool-result content, so rewind replay across a prune point restores
   the unpruned content. This is the intended time-travel semantics: replay
   rebuilds the conversation from the append log, which never saw the prune.
-- **Suppress state**: pruning never changes `auto_compact_suppressed`. Only the
-  summary path's own failure classification (or the convergence check, §6)
-  touches it.
+- **Suppress state**: a prune whose strict gate passes stores
+  `SUPPRESS_NONE` — pruning changed the effective context budget, which is
+  the existing STICKY clear condition (same rule as a successful compaction,
+  rewind, or model switch). Every gate failure leaves the suppress state
+  untouched; only the summary path's own failure classification (or the
+  convergence check, §6) sets suppression.
+- **Fork prefix protection**: while `prefix_released == false`, the fork's
+  inherited parent transcript (`conversation[..inherited_prefix_len]`) is
+  re-pinned verbatim at compaction time by `preserve_inherited_prefix`, so
+  pre-prune excludes that region from planning entirely: an oversized tool
+  result inside it is never trimmed, no matter how large. `prefix_released`
+  takes precedence over `inherited_prefix_len` — once the prefix is released
+  under compaction pressure, the whole conversation is prunable again. An
+  out-of-range `inherited_prefix_len` degrades to an empty plan (no pruning),
+  never a panic.
 
 ## 6. Post-Compaction Convergence (fail-safe)
 
@@ -139,6 +169,11 @@ turn** with a diagnostic message (`unified_log` +
 a still-over-window session resampled forever. All other error paths are
 unchanged. Compaction success that lands under the window continues the
 resample as before.
+
+Pre-prune runs **before** this path: when a prune alone resolves the pressure
+(§2/§5), the summary — and therefore this convergence check — is skipped, and
+the successful prune clears `SUPPRESS_STICKY` (§5). The convergence check's
+own sticky-suppress behavior is unchanged.
 
 ## 7. P2 Not Done (Deferred)
 

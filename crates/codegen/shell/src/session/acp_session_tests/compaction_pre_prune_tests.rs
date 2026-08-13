@@ -112,9 +112,27 @@ async fn actor_with_sampler_cw(
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
+    actor_with_sampler_cw_ex(server, api_backend, context_window, None).await
+}
+
+/// [`actor_with_sampler_cw`] variant for fork-scenario tests: sets
+/// `startup_hints.inherited_prefix_len` before the actor is shared behind the
+/// `Arc` (the field has no interior mutability).
+async fn actor_with_sampler_cw_ex(
+    server: &MockInferenceServer,
+    api_backend: sampling_types::ApiBackend,
+    context_window: u64,
+    inherited_prefix_len: Option<usize>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, context_window, 85, gateway_tx, persistence_tx).await;
+    if let Some(prefix_len) = inherited_prefix_len {
+        actor.startup_hints.inherited_prefix_len = Some(prefix_len);
+    }
     if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
         cfg.base_url = server.url();
         cfg.api_backend = api_backend.clone();
@@ -774,6 +792,347 @@ fn pre_prune_error_fails_open_to_summary() {
             assert!(
                 full_text.contains("compacted summary"),
                 "summary must land in history"
+            );
+        }));
+    });
+}
+
+// ─── Review-fix: suppress gating and fork prefix protection ───────────────
+
+/// Review fix A: sticky suppression (deterministic size failure) must not
+/// block pre-prune — pruning is the model-free remedy — and a prune whose
+/// strict gate passes clears the sticky bit (a context-budget change is the
+/// existing STICKY clear condition). A gate that does NOT pass leaves the
+/// suppress state untouched.
+#[test]
+fn pre_prune_under_sticky_suppress_clears_it_on_success() {
+    use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_STICKY};
+    use std::sync::atomic::Ordering;
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let (actor, _gateway_rx) =
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
+                    .await;
+            let trigger = compaction::AutoCompactTriggerInfo {
+                tokens_used: 105_000,
+                context_window: 100_000,
+                percentage: 105,
+                source: "test",
+            };
+            actor
+                .compaction
+                .auto_compact_suppressed
+                .store(SUPPRESS_STICKY, Ordering::Relaxed);
+
+            // Phase 0: one oversized tool result keeps the conversation under
+            // the plan target (≈50K <= 85K), so the plan is empty → `false`,
+            // and the failed gate must NOT clear the sticky bit.
+            seed_tool_result_rounds(&actor, 1).await;
+            actor.chat_state_handle.record_token_usage(86_000);
+            let _ = actor.chat_state_handle.get_conversation_len().await;
+            let pruned = actor
+                .maybe_pre_prune(&trigger)
+                .await
+                .expect("maybe_pre_prune must not error");
+            assert!(!pruned, "an empty plan must return false even under STICKY");
+            assert_eq!(
+                actor
+                    .compaction
+                    .auto_compact_suppressed
+                    .load(Ordering::Relaxed),
+                SUPPRESS_STICKY,
+                "a gate that does not pass must leave the suppress state unchanged"
+            );
+
+            // Phase 1: a second oversized round pushes the conversation over
+            // the plan target. STICKY must now let the prune through, and the
+            // passing gate clears the sticky bit to NONE.
+            actor
+                .chat_state_handle
+                .push_user_message(ConversationItem::user("u1"));
+            actor.chat_state_handle.push_assistant_response(
+                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                    id: "call-1".into(),
+                    name: "grep".to_string(),
+                    arguments: "{}".into(),
+                }]),
+            );
+            actor
+                .chat_state_handle
+                .push_tool_result(ConversationItem::tool_result("call-1", big_tool_text()));
+            // Re-record model truth so `since_model` is zeroed (otherwise the
+            // conservative gate refuses the summary skip; see §2.1).
+            actor.chat_state_handle.record_token_usage(105_000);
+            let _ = actor.chat_state_handle.get_conversation_len().await;
+
+            let (mut trace_rx, _guard) = capture_trace_events();
+            let pruned = actor
+                .maybe_pre_prune(&trigger)
+                .await
+                .expect("maybe_pre_prune must not error");
+            assert!(pruned, "STICKY must not block a non-empty prune plan");
+            assert_eq!(
+                actor
+                    .compaction
+                    .auto_compact_suppressed
+                    .load(Ordering::Relaxed),
+                SUPPRESS_NONE,
+                "a passing gate must clear the sticky bit"
+            );
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let tool_texts = tool_result_texts(&conversation);
+            assert_eq!(tool_texts.len(), 2);
+            assert_ne!(
+                &tool_texts[0],
+                &big_tool_text(),
+                "oldest tool result must be pruned"
+            );
+            assert_eq!(
+                &tool_texts[1],
+                &big_tool_text(),
+                "newer tool result must be untouched"
+            );
+
+            let mut raw_events = Vec::new();
+            while let Ok(e) = trace_rx.try_recv() {
+                raw_events.push(e);
+            }
+            let events = diagnostic_events(&raw_events);
+            let pruned_event = events
+                .iter()
+                .find(|(name, _)| name == "auto_compact_pruned")
+                .expect("auto_compact_pruned diagnostics event must fire");
+            assert_eq!(pruned_event.1["pruned_count"], 1);
+        }));
+    });
+}
+
+/// Review fix A: account-state suppression (provider quota / auth) and
+/// per-turn suppression keep blocking pre-prune — no model-free remedy
+/// applies to them — and the blocked gate must not touch the suppress state
+/// or the conversation.
+#[test]
+fn pre_prune_blocked_by_account_and_turn_suppress() {
+    use crate::session::compaction_config::{
+        SUPPRESS_AUTH, SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS,
+    };
+    use std::sync::atomic::Ordering;
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let (actor, _gateway_rx) =
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
+                    .await;
+            // Two oversized rounds: the plan would be non-empty (100K > 85K
+            // target), so these assertions really exercise the gate.
+            seed_tool_result_rounds(&actor, 2).await;
+            actor.chat_state_handle.record_token_usage(105_000);
+            let _ = actor.chat_state_handle.get_conversation_len().await;
+            let trigger = compaction::AutoCompactTriggerInfo {
+                tokens_used: 105_000,
+                context_window: 100_000,
+                percentage: 105,
+                source: "test",
+            };
+            for suppress in [SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS, SUPPRESS_AUTH] {
+                actor
+                    .compaction
+                    .auto_compact_suppressed
+                    .store(suppress, Ordering::Relaxed);
+                let pruned = actor
+                    .maybe_pre_prune(&trigger)
+                    .await
+                    .expect("maybe_pre_prune must not error");
+                assert!(
+                    !pruned,
+                    "suppression class {suppress} must keep blocking pre-prune"
+                );
+                assert_eq!(
+                    actor
+                        .compaction
+                        .auto_compact_suppressed
+                        .load(Ordering::Relaxed),
+                    suppress,
+                    "a blocked gate must leave the suppress state unchanged"
+                );
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                let tool_texts = tool_result_texts(&conversation);
+                assert_eq!(tool_texts.len(), 2);
+                assert_eq!(
+                    &tool_texts[0],
+                    &big_tool_text(),
+                    "no tool result may be pruned under suppression class {suppress}"
+                );
+                assert_eq!(
+                    &tool_texts[1],
+                    &big_tool_text(),
+                    "no tool result may be pruned under suppression class {suppress}"
+                );
+            }
+        }));
+    });
+}
+
+/// Review fix B: while the fork's inherited parent transcript is still
+/// pinned (`prefix_released == false`), pre-prune must never touch items
+/// inside `conversation[..inherited_prefix_len]` — `preserve_inherited_prefix`
+/// re-pins that region verbatim at compaction time. Only the child's own
+/// oversized tool results may be pruned. `prefix_released` takes precedence
+/// over `inherited_prefix_len`.
+#[test]
+fn pre_prune_never_touches_inherited_fork_prefix() {
+    use std::sync::atomic::Ordering;
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            // The fork hint covers the four parent items.
+            let (actor, _gateway_rx) =
+                actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, Some(4))
+                    .await;
+            // 40% threshold → target 40K tokens; default budget 5% = 5K tokens
+            // (20KB). The parent's 40KB tool result (≈10K tokens) is a prune
+            // candidate by size but lives inside the inherited prefix.
+            actor.compaction.threshold_percent.set(40);
+            let parent_tool_text = "x".repeat(40_000);
+            actor
+                .chat_state_handle
+                .replace_system_head("parent system prompt")
+                .await
+                .expect("system head must be replaceable");
+            actor
+                .chat_state_handle
+                .push_user_message(ConversationItem::user("parent u"));
+            actor.chat_state_handle.push_assistant_response(
+                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                    id: "call-parent".into(),
+                    name: "grep".to_string(),
+                    arguments: "{}".into(),
+                }]),
+            );
+            actor.chat_state_handle.push_tool_result(ConversationItem::tool_result(
+                "call-parent",
+                parent_tool_text.clone(),
+            ));
+            // Child turns (the prunable suffix): one oversized 200KB result.
+            actor
+                .chat_state_handle
+                .push_user_message(ConversationItem::user("child u"));
+            actor.chat_state_handle.push_assistant_response(
+                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                    id: "call-child".into(),
+                    name: "grep".to_string(),
+                    arguments: "{}".into(),
+                }]),
+            );
+            actor
+                .chat_state_handle
+                .push_tool_result(ConversationItem::tool_result("call-child", big_tool_text()));
+            actor.chat_state_handle.record_token_usage(60_000);
+            let _ = actor.chat_state_handle.get_conversation_len().await;
+
+            let trigger = compaction::AutoCompactTriggerInfo {
+                tokens_used: 60_000,
+                context_window: 100_000,
+                percentage: 60,
+                source: "test",
+            };
+            let (mut trace_rx, _guard) = capture_trace_events();
+            let pruned = actor
+                .maybe_pre_prune(&trigger)
+                .await
+                .expect("maybe_pre_prune must not error");
+            assert!(
+                pruned,
+                "pruning the child's own oversized tool result must resolve the pressure"
+            );
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let tool_texts = tool_result_texts(&conversation);
+            assert_eq!(tool_texts.len(), 2);
+            assert_eq!(
+                &tool_texts[0], &parent_tool_text,
+                "the inherited prefix's tool result must be preserved verbatim"
+            );
+            assert_ne!(
+                &tool_texts[1],
+                &big_tool_text(),
+                "the child's oversized tool result must be pruned"
+            );
+            assert!(
+                tool_texts[1].len() <= 20_000,
+                "pruned content must fit the 5K-token budget (20KB)"
+            );
+            let mut raw_events = Vec::new();
+            while let Ok(e) = trace_rx.try_recv() {
+                raw_events.push(e);
+            }
+            let events = diagnostic_events(&raw_events);
+            let pruned_event = events
+                .iter()
+                .find(|(name, _)| name == "auto_compact_pruned")
+                .expect("auto_compact_pruned diagnostics event must fire");
+            assert_eq!(
+                pruned_event.1["pruned_count"], 1,
+                "exactly the child's tool result must be pruned"
+            );
+
+            // Phase 2: `prefix_released` wins over `inherited_prefix_len` —
+            // after release the whole conversation (parent item included) is
+            // prunable again.
+            actor
+                .compaction
+                .prefix_released
+                .store(true, Ordering::Relaxed);
+            actor
+                .chat_state_handle
+                .replace_conversation_for_compaction(vec![
+                    ConversationItem::system("parent system prompt"),
+                    ConversationItem::user("parent u"),
+                    ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                        id: "call-parent".into(),
+                        name: "grep".to_string(),
+                        arguments: "{}".into(),
+                    }]),
+                    ConversationItem::tool_result("call-parent", parent_tool_text.clone()),
+                    ConversationItem::user("child u"),
+                    ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                        id: "call-child".into(),
+                        name: "grep".to_string(),
+                        arguments: "{}".into(),
+                    }]),
+                    ConversationItem::tool_result("call-child", big_tool_text()),
+                ]);
+            let _ = actor.chat_state_handle.get_conversation_len().await;
+            let pruned = actor
+                .maybe_pre_prune(&trigger)
+                .await
+                .expect("maybe_pre_prune must not error");
+            assert!(pruned, "the released prefix must now be prunable");
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let tool_texts = tool_result_texts(&conversation);
+            assert_ne!(
+                &tool_texts[0], &parent_tool_text,
+                "after release the former prefix item must be pruned too"
+            );
+            assert_ne!(
+                &tool_texts[1],
+                &big_tool_text(),
+                "the child's tool result must be pruned too"
             );
         }));
     });

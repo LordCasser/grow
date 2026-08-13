@@ -2106,6 +2106,14 @@ impl SessionActor {
     /// pruning alone brought the estimated total back under the trigger
     /// threshold (the caller then skips `run_compact_inner`).
     ///
+    /// Suppress gate: account-state suppression ([`SUPPRESS_UNTIL_SUCCESS`],
+    /// [`SUPPRESS_AUTH`]) and per-turn suppression ([`SUPPRESS_TURN`]) block
+    /// the ladder — account state is unrelated to model-free pruning, and
+    /// per-turn failures self-heal at the next turn start. [`SUPPRESS_STICKY`]
+    /// (deterministic size failures) is allowed through: pruning is exactly
+    /// the model-free remedy, and a prune whose strict gate passes clears the
+    /// sticky bit (the existing "context-budget change" clear condition).
+    ///
     /// Pruning is an **optimization**, not a correctness requirement: every
     /// failure mode here fails open to the existing summary path and never
     /// touches the suppress state. The skip-summary gate is strict — it uses
@@ -2125,13 +2133,22 @@ impl SessionActor {
         if !self.compaction.pre_prune.get() {
             return Ok(false);
         }
-        if self
+        // Suppress gate: account-state suppression (provider quota / auth) is
+        // unrelated to model-free pruning, and per-turn suppression self-heals
+        // at the next turn start — both keep blocking. STICKY marks
+        // deterministic size failures; pruning is exactly the model-free
+        // remedy for those, so it is allowed through, and a prune whose strict
+        // gate passes clears the sticky bit below (a context-budget change is
+        // the existing STICKY clear condition). Unknown future suppression
+        // classes fail closed.
+        match self
             .compaction
             .auto_compact_suppressed
             .load(std::sync::atomic::Ordering::Relaxed)
-            != SUPPRESS_NONE
         {
-            return Ok(false);
+            SUPPRESS_UNTIL_SUCCESS | SUPPRESS_AUTH | SUPPRESS_TURN => return Ok(false),
+            SUPPRESS_NONE | SUPPRESS_STICKY => {}
+            _ => return Ok(false),
         }
         let context_window = trigger_info.context_window;
         let threshold_percent = self.compaction.threshold_percent.get();
@@ -2147,12 +2164,51 @@ impl SessionActor {
         // `exceeds_threshold`, so `cw * pct / 100` is the matching absolute).
         let target = context_window.saturating_mul(threshold_percent as u64) / 100;
         let conversation = self.chat_state_handle.get_conversation().await;
+        // Fork prefix protection: while the inherited parent transcript is
+        // still pinned (`prefix_released == false`), compaction preserves
+        // `conversation[..inherited_prefix_len]` verbatim
+        // (`preserve_inherited_prefix`), so pre-prune must never touch items
+        // inside that region. Plan over the suffix only, then re-base the
+        // plan's item indexes onto the full conversation before applying.
+        // `target`/`item_budget` keep their full-conversation derivation: the
+        // planner counts tokens over the slice it receives, so its stop
+        // condition compares the slice's own total against that absolute
+        // target — the strict post-prune gate below still re-checks the full
+        // estimate before the summary is skipped, so this can only lean
+        // conservative.
+        let excluded = if self
+            .compaction
+            .prefix_released
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0
+        } else {
+            self.startup_hints.inherited_prefix_len.unwrap_or(0)
+        };
+        // Clamp so an out-of-range hint degrades to an empty slice (and thus
+        // an empty plan → `false`) instead of panicking.
+        let excluded = excluded.min(conversation.len());
+        let slice: &[ConversationItem] = if excluded == 0 {
+            &conversation[..]
+        } else {
+            &conversation[excluded..]
+        };
         let plan = compaction::plan_tool_result_pruning(
-            &conversation,
+            slice,
             &chat_state::actor::state::EstimatedItemTokenCounter,
             item_budget.min(u32::MAX as u64) as u32,
             target.min(u32::MAX as u64) as u32,
         );
+        let plan = compaction::PrunePlan {
+            items: plan
+                .items
+                .into_iter()
+                .map(|item| compaction::PruneItem {
+                    index: item.index + excluded,
+                    ..item
+                })
+                .collect(),
+        };
         if plan.is_empty() {
             return Ok(false);
         }
@@ -2201,6 +2257,14 @@ impl SessionActor {
             source = trigger_info.source,
             "pre-prune resolved auto-compact pressure; skipping summary compaction"
         );
+        // Pruning resolved the pressure without a model call: the effective
+        // context budget changed, which is the existing clear condition for
+        // STICKY suppression (same rule as a successful compaction / rewind /
+        // model switch). Only this success path touches the suppress state;
+        // every gate-failure return above leaves it unchanged.
+        self.compaction
+            .auto_compact_suppressed
+            .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
         ::diagnostics::session_ctx::log_event(::diagnostics::events::AutoCompactPruned {
             tokens_before: report.tokens_before,
             tokens_after,
