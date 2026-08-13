@@ -63,6 +63,29 @@ impl ChatPersistence for ChannelChatPersistence {
             .send(PersistenceMsg::ReplaceChatHistory(items.to_vec()));
     }
 
+    fn replace_history_and_ack(
+        &mut self,
+        items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>> {
+        let (respond_to, receiver) = oneshot::channel();
+        if self
+            .tx
+            .send(PersistenceMsg::ReplaceChatHistoryAndAck {
+                messages: items.to_vec(),
+                respond_to,
+            })
+            .is_err()
+        {
+            let (reply, receiver) = oneshot::channel();
+            let _ = reply.send(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "session persistence actor unavailable",
+            )));
+            return receiver;
+        }
+        receiver
+    }
+
     fn flush(&mut self) {
         let _ = self.tx.send(PersistenceMsg::Flush);
     }
@@ -114,6 +137,47 @@ mod tests {
         persistence.replace_history(&[ConversationItem::system("compacted")]);
         let msg = rx.recv().await.unwrap();
         assert!(matches!(msg, PersistenceMsg::ReplaceChatHistory(_)));
+    }
+
+    #[tokio::test]
+    async fn acknowledged_history_replacement_waits_for_storage_commit() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut persistence = ChannelChatPersistence::new(tx);
+        let item = ConversationItem::system("image-free history");
+        let mut ack = persistence.replace_history_and_ack(std::slice::from_ref(&item));
+        let msg = rx.recv().await.unwrap();
+        let PersistenceMsg::ReplaceChatHistoryAndAck {
+            messages,
+            respond_to,
+        } = msg
+        else {
+            panic!("expected acknowledged history replacement");
+        };
+        assert_eq!(
+            serde_json::to_vec(&messages).unwrap(),
+            serde_json::to_vec(&vec![item]).unwrap()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut ack)
+                .await
+                .is_err(),
+            "recovery must not resume before durable storage acknowledges the rewrite"
+        );
+        respond_to.send(Ok(())).unwrap();
+        ack.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn acknowledged_history_replacement_reports_closed_storage() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let mut persistence = ChannelChatPersistence::new(tx);
+        let error = persistence
+            .replace_history_and_ack(&[ConversationItem::system("history")])
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[tokio::test]

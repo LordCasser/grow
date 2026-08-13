@@ -95,6 +95,11 @@ pub enum PersistenceMsg {
     },
     /// Replace the entire chat history (used for compaction)
     ReplaceChatHistory(Vec<ConversationItem>),
+    /// Durable full-history replacement used by irreversible recovery paths.
+    ReplaceChatHistoryAndAck {
+        messages: Vec<ConversationItem>,
+        respond_to: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    },
     CurrentModel {
         model_id: acp::ModelId,
         /// The active agent definition name (e.g. `"grow-build"`).
@@ -1503,6 +1508,23 @@ impl SessionPersistence {
                     {
                         tracing::warn!(?e, "failed to replace chat history");
                     }
+                }
+                PersistenceMsg::ReplaceChatHistoryAndAck {
+                    messages,
+                    respond_to,
+                } => {
+                    tracing::info!(
+                        num_messages = messages.len(),
+                        "Replacing chat history with durability acknowledgement"
+                    );
+                    let result = self
+                        .storage
+                        .replace_chat_history(&self.info, &messages)
+                        .await;
+                    if let Err(error) = &result {
+                        tracing::warn!(?error, "failed to durably replace chat history");
+                    }
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::CurrentModel {
                     model_id,

@@ -528,6 +528,57 @@ async fn provider_command_times_out() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_helper_future_kills_its_process_group() {
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let child_pid_path = dir.path().join("grandchild.pid");
+    let mut cmd = crate::util::subprocess::shell_c(&format!(
+        "sleep 300 & echo $! > {}; wait",
+        child_pid_path.display()
+    ));
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    tools::util::detach_command(&mut cmd);
+
+    let mut future = Box::pin(run_capped(&mut cmd, std::time::Duration::from_secs(300)));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                result = &mut future => panic!("helper exited before cancellation: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+            if child_pid_path.exists() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("helper must publish its grandchild pid");
+    let child_pid: i32 = std::fs::read_to_string(&child_pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    drop(future);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if nix::sys::signal::kill(nix::unistd::Pid::from_raw(child_pid), None).is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("dropping the helper future must kill its grandchild");
+}
+
 #[tokio::test]
 async fn provider_zero_timeout_clamps_to_one_second() {
     // `timeout_secs = 0` clamps up to the 1s floor, so an instant helper mints

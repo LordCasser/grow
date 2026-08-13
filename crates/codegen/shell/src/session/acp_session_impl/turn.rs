@@ -1943,6 +1943,14 @@ impl SessionActor {
                 );
             }
             self.maybe_inject_mcp_reminder().await;
+            let rewritten_images = self.rewrite_images_for_known_text_model().await?;
+            if rewritten_images.total_images() > 0 {
+                tracing::info!(
+                    converted_images = rewritten_images.converted_images,
+                    dropped_images = rewritten_images.dropped_images,
+                    "degraded canonical image context for known text-only model"
+                );
+            }
             if self.tool_context.task_output_token_budget.is_none()
                 && self.two_pass_active()
                 && !self.compaction.prefire.has_cache()
@@ -1997,6 +2005,21 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
+            let defensive_strip_count = if request.image_count() > 0
+                && self.unsupported_current_model_for_images().await.is_some()
+            {
+                request.strip_images_with_placeholder(
+                    super::sampler_turn::UNSUPPORTED_IMAGE_PLACEHOLDER,
+                )
+            } else {
+                0
+            };
+            if defensive_strip_count > 0 {
+                tracing::info!(
+                    defensive_strip_count,
+                    "defensively removed images appended after canonical text-model recovery"
+                );
+            }
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
@@ -2020,6 +2043,10 @@ impl SessionActor {
                     return Err(error);
                 }
                 Ok(SamplerTurnOutcome::CompactAndResubmit) => {
+                    auth_retry_schedule.reset();
+                    continue;
+                }
+                Ok(SamplerTurnOutcome::ImageInputUnsupportedAndResubmit) => {
                     auth_retry_schedule.reset();
                     continue;
                 }

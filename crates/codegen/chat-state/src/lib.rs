@@ -42,7 +42,9 @@ pub use actor::state::{
     estimate_system_message_tokens, estimate_tool_definition_tokens,
     estimate_tool_definitions_tokens,
 };
-pub use commands::{ModelMetadata, StrictAppendAck, StrictAppendError};
+pub use commands::{
+    ImageRewrite, ImageRewriteReport, ModelMetadata, StrictAppendAck, StrictAppendError,
+};
 pub use compaction_mode::CompactionMode;
 pub use compaction_transcript::CompactionDetail;
 pub use events::ChatStateEvent;

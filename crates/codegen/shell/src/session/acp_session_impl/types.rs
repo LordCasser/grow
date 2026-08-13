@@ -19,6 +19,10 @@ pub(crate) enum SamplerFailureRecovery {
     /// Compaction ran. The turn loop should rebuild the request from
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
+    /// The active runtime explicitly rejected image input. Its negative
+    /// capability and canonical image rewrite were persisted; the turn should
+    /// rebuild the now text-only history.
+    ImageInputUnsupportedAndResubmit,
     /// A BYOK helper or newly available configured key replaced the credential.
     /// `credential` records what the rejected request actually sent so retry
     /// accounting can distinguish a missing header from a rejected key.
@@ -38,6 +42,7 @@ pub(crate) enum SamplerTurnOutcome {
         Box<sampler::InferenceLatencyStats>,
     ),
     CompactAndResubmit,
+    ImageInputUnsupportedAndResubmit,
     RefreshByokAndResubmit {
         credential: sampling_types::SentCredential,
     },

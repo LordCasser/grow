@@ -8,7 +8,10 @@ use sampling_types::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::commands::{ChatStateCommand, RepairHistoryBlocked, StrictAppendAck, StrictAppendError};
+use crate::commands::{
+    ChatStateCommand, ImageRewrite, ImageRewriteReport, RepairHistoryBlocked, StrictAppendAck,
+    StrictAppendError,
+};
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
     TurnCapture,
@@ -207,6 +210,25 @@ impl ChatStateHandle {
             items,
             is_compaction,
         });
+    }
+
+    /// Atomically rewrite all canonical image groups and await the persisted
+    /// actor mutation and its durable history replacement. Returns `None`
+    /// when either actor delivery or persistence fails.
+    pub async fn rewrite_images_and_ack(
+        &self,
+        rewrites: Vec<ImageRewrite>,
+        dropped_placeholder: String,
+    ) -> Option<ImageRewriteReport> {
+        self.query("RewriteImagesAndAck", |reply| {
+            ChatStateCommand::RewriteImagesAndAck {
+                rewrites,
+                dropped_placeholder,
+                reply,
+            }
+        })
+        .await
+        .flatten()
     }
 
     /// Out-of-band history repair (`grow/session/repair`); see

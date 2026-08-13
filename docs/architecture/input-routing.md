@@ -92,4 +92,42 @@ idle admission. If no queued user/manual work claims the slot, an Active Goal
 is woken immediately; Stop Turn Only cannot leave it dormant until the next
 unrelated user message.
 
+Image-input capability recovery is session state, persisted with the existing
+tool resources in `resources_state.json`. The negative cache key is the model
+name, API backend, and endpoint fingerprint; absence means unknown and permits
+an image attempt. A cache entry is written only when an image-bearing request
+receives an API HTTP 400 that explicitly rejects `image_url`, `input_image`, or
+another image content type in favor of text. Decode errors, size/dimension
+limits, content-policy failures, and generic 400s remain terminal errors and do
+not teach model capability.
+
+After an explicit rejection, the shell groups all canonical `User` and
+`ToolResult` images by message. Within one bounded recovery operation, a
+configured auxiliary runtime that is distinct from the rejected runtime gets
+one description request per group, with attachment count and order in its
+prompt. Successful groups become sanitized description blocks. Failed groups,
+or every group when no auxiliary runtime is usable, become explicit removal
+text. Only the auxiliary runtime's own explicit image HTTP 400 enters its
+negative cache; resolution, transport, timeout, and empty-response failures do
+not teach capability.
+
+The chat-state actor compares message position plus image-group fingerprint,
+removes every current image, and persists the entire rewrite atomically before
+acknowledging it. Message order, prompt indices, synthetic metadata, ordinary
+text, and tool call/result pairing remain unchanged. The turn then rebuilds an
+image-free request and resubmits through a dedicated recovery outcome that
+does not consume ordinary retry budget or emit a failed turn. An image-count
+assertion plus request-copy strip is the final loop guard; the canonical actor
+rewrite is the normal path.
+
+Canonical removal is session-wide and is not reversed by switching models.
+User attachment assets and original `read_file` source files remain available,
+so reading them again can create new image messages. If the active runtime is
+already in the negative cache, newly appended images enter the same
+conversion/removal operation before sampling instead of provoking another
+400. Capability remains isolated by model/backend/endpoint, while the history
+rewrite is shared by the session. `ImageDropped` reports whether images were
+all converted, all removed, or mixed. No OCR backend participates in this
+recovery path.
+
 An Active Goal reload keeps its v5 persistent phase/plan/board revisions and settled token counters, clears transient stage leases, reconciles Goal Behavior, and is resumed by the idle hook. An obsolete control/Goal architecture is diagnosed and discarded without migration. A current architecture with an internally inconsistent Goal identity-preserving snapshot is recovered fail-closed as Paused/Planning so it cannot resume autonomously.

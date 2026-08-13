@@ -65,6 +65,11 @@ impl TestHarness {
         Self::with_persistence(items, test_config(), mock, persistence_rx)
     }
 
+    fn with_manual_history_replacement_ack(items: Vec<ConversationItem>) -> Self {
+        let (mock, persistence_rx) = MockChatPersistence::new_with_manual_history_replacement_ack();
+        Self::with_persistence(items, test_config(), mock, persistence_rx)
+    }
+
     fn with_persistence(
         items: Vec<ConversationItem>,
         config: SamplingConfig,
@@ -723,6 +728,142 @@ async fn replace_conversation_persists_and_emits_reset() {
     let records = h.drain_persistence();
     assert_eq!(records.len(), 1);
     assert!(matches!(&records[0], PersistenceRecord::ReplaceHistory(_)));
+}
+
+#[tokio::test]
+async fn atomic_image_rewrite_preserves_message_metadata_and_tool_pairing() {
+    use sampling_types::conversation::{
+        ContentPart, SyntheticReason, UserItem, conversation_image_groups,
+    };
+
+    let user = ConversationItem::User(UserItem {
+        content: vec![
+            ContentPart::Text {
+                text: "inspect these".into(),
+            },
+            ContentPart::Image {
+                url: "data:image/png;base64,user".into(),
+            },
+        ],
+        synthetic_reason: Some(SyntheticReason::Interjection),
+        prompt_index: Some(7),
+        ..Default::default()
+    });
+    let tool_result = ConversationItem::tool_result_with_images(
+        "call_7",
+        "Read image file",
+        vec![
+            ContentPart::Text {
+                text: "keep-me".into(),
+            },
+            ContentPart::Image {
+                url: "data:image/png;base64,tool-a".into(),
+            },
+            ContentPart::Image {
+                url: "data:image/png;base64,tool-b".into(),
+            },
+        ],
+    );
+    let mut h = TestHarness::new();
+    h.handle.begin_turn_capture();
+    h.handle.push_user_message(user);
+    h.handle.push_tool_result(tool_result);
+    let groups = conversation_image_groups(&h.handle.get_conversation().await);
+    let rewrites = groups
+        .iter()
+        .map(|group| crate::ImageRewrite {
+            item_index: group.item_index,
+            fingerprint: group.fingerprint.clone(),
+            expected_image_count: group.image_count(),
+            replacement: (group.item_index == 0).then(|| "converted user image".to_owned()),
+        })
+        .collect();
+
+    let report = h
+        .handle
+        .rewrite_images_and_ack(rewrites, "images permanently removed".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(report.converted_images, 1);
+    assert_eq!(report.dropped_images, 2);
+    assert_eq!(report.unmatched_images, 0);
+
+    let conversation = h.handle.get_conversation().await;
+    let ConversationItem::User(user) = &conversation[0] else {
+        panic!("expected user item");
+    };
+    assert_eq!(user.synthetic_reason, Some(SyntheticReason::Interjection));
+    assert_eq!(user.prompt_index, Some(7));
+    assert!(user.content.iter().any(
+        |part| matches!(part, ContentPart::Text { text } if text.as_ref() == "converted user image")
+    ));
+    assert!(
+        !user
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. }))
+    );
+
+    let ConversationItem::ToolResult(result) = &conversation[1] else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.tool_call_id, "call_7");
+    assert!(result.content.contains("images permanently removed"));
+    assert!(matches!(
+        result.images.as_slice(),
+        [ContentPart::Text { text }] if text.as_ref() == "keep-me"
+    ));
+    let capture = h.handle.take_turn_messages().await.unwrap();
+    assert_eq!(capture.messages.len(), conversation.len());
+    assert!(conversation_image_groups(&capture.messages).is_empty());
+    assert!(
+        h.drain_persistence()
+            .iter()
+            .any(|record| matches!(record, PersistenceRecord::ReplaceHistory(_)))
+    );
+}
+
+#[tokio::test]
+async fn failed_image_rewrite_persistence_leaves_memory_unchanged() {
+    use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
+
+    let user = ConversationItem::User(UserItem {
+        content: vec![ContentPart::Image {
+            url: "data:image/png;base64,original".into(),
+        }],
+        ..Default::default()
+    });
+    let groups = conversation_image_groups(std::slice::from_ref(&user));
+    let rewrite = crate::ImageRewrite {
+        item_index: groups[0].item_index,
+        fingerprint: groups[0].fingerprint.clone(),
+        expected_image_count: groups[0].image_count(),
+        replacement: Some("converted image".to_owned()),
+    };
+    let mut h = TestHarness::with_manual_history_replacement_ack(vec![user.clone()]);
+    let handle = h.handle.clone();
+    let rewrite_future = async move {
+        handle
+            .rewrite_images_and_ack(vec![rewrite], "dropped".to_owned())
+            .await
+    };
+    let reject_persistence = async {
+        let acknowledge = h
+            .persistence_rx
+            .next_history_replacement_ack()
+            .await
+            .expect("history replacement acknowledgement");
+        acknowledge
+            .send(Err(std::io::Error::other("simulated disk failure")))
+            .unwrap();
+    };
+    let (report, ()) = tokio::join!(rewrite_future, reject_persistence);
+    assert!(report.is_none());
+    assert_eq!(
+        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
+        serde_json::to_vec(&vec![user]).unwrap(),
+        "a failed durable replacement must not mutate the live conversation"
+    );
 }
 
 #[tokio::test]

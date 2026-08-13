@@ -1263,6 +1263,9 @@ mod managed_gateway_descriptor_tests {
 #[path = "acp_session_tests/fs_injection_regression_tests.rs"]
 mod fs_injection_regression_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/image_input_recovery_tests.rs"]
+mod image_input_recovery_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/permission_auto_mode_tests.rs"]
 mod permission_auto_mode_tests;
 /// Tests for [`conversation_has_project_instructions`], the idempotence

@@ -541,6 +541,21 @@ impl ToolBridge {
         let _ = self.registry.update_resource(resource).await;
     }
 
+    /// Persist a fresh snapshot of all session resources before returning.
+    pub async fn save_and_flush_persistence(&self) -> std::io::Result<()> {
+        self.registry.save_and_flush_persistence().await.map(|_| ())
+    }
+
+    /// Atomically expose and durably queue a model image-input rejection.
+    pub async fn mark_model_image_input_unsupported_and_flush(
+        &self,
+        key: crate::types::resources::ModelImageInputKey,
+    ) -> std::io::Result<bool> {
+        self.registry
+            .mark_model_image_input_unsupported_and_flush(key)
+            .await
+    }
+
     /// Kill any background task
     pub async fn kill_background_task(
         &self,

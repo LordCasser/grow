@@ -74,6 +74,14 @@ async fn test_agent_from_config(
     use tools::registry::types::SessionContext;
     let builder = crate::tools::bridge::ToolBridge::get_builder();
     let fs: std::sync::Arc<dyn AsyncFileSystem> = std::sync::Arc::new(LocalFs);
+    // Every actor owns an independent persistence path. A shared
+    // `/tmp/tool_state.json` lets parallel tests rename/remove one another's
+    // durable snapshot and turns a real persistence acknowledgement into a
+    // nondeterministic ENOENT.
+    let state_root =
+        std::env::temp_dir().join(format!("grow-test-tool-state-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&state_root).expect("create isolated tool-state test directory");
+    let state_path = state_root.join("tool_state.json");
     let ctx = SessionContext {
         backend,
         fs,
@@ -85,7 +93,7 @@ async fn test_agent_from_config(
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::path::PathBuf::from("/tmp/tool_state.json"),
+        state_path,
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,

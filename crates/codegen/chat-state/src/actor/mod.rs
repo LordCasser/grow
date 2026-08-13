@@ -221,6 +221,14 @@ impl ChatStateActor {
             } => {
                 self.replace_conversation(items, is_compaction);
             }
+            ChatStateCommand::RewriteImagesAndAck {
+                rewrites,
+                dropped_placeholder,
+                reply,
+            } => {
+                let report = self.rewrite_images(rewrites, &dropped_placeholder).await;
+                let _ = reply.send(report);
+            }
             ChatStateCommand::RepairHistory {
                 dry_run,
                 turn_active,

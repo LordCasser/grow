@@ -110,6 +110,7 @@ fn user_request(text: &str) -> ConversationRequest {
                 text: std::sync::Arc::<str>::from(text),
             }],
             synthetic_reason: None,
+            permission_evidence: None,
             ..Default::default()
         })],
         ..Default::default()

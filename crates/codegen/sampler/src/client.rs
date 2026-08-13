@@ -1758,16 +1758,7 @@ impl SamplingClient {
         };
         result
             .map(|(response, _metrics)| response)
-            .map_err(|info| SamplingError::Api {
-                status: info
-                    .status_code
-                    .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
-                    .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
-                message: info.message,
-                model_metadata: info.model_metadata,
-                retry_after_secs: info.retry_after_secs,
-                should_retry: None,
-            })
+            .map_err(|info| crate::events::sampling_error_from_info(&info))
     }
 }
 

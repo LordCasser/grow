@@ -271,6 +271,47 @@ impl From<&SamplingError> for SamplingErrorInfo {
     }
 }
 
+/// Reconstruct the rich error semantics after an L2 stream transform has
+/// crossed the serializable `SamplingErrorInfo` boundary.
+pub(crate) fn sampling_error_from_info(info: &SamplingErrorInfo) -> SamplingError {
+    match info.kind {
+        SamplingErrorKind::IdleTimeout => SamplingError::IdleTimeout {
+            elapsed_secs: info
+                .message
+                .split_whitespace()
+                .find_map(|token| token.strip_suffix('s').and_then(|n| n.parse().ok()))
+                .unwrap_or(0),
+        },
+        SamplingErrorKind::Auth => SamplingError::Auth {
+            message: info.message.clone(),
+            credential: info.credential,
+        },
+        SamplingErrorKind::Serialization => {
+            SamplingError::serialization_from_rendered(&info.message)
+        }
+        SamplingErrorKind::Http => SamplingError::EventStreamError(info.message.clone()),
+        SamplingErrorKind::Api | SamplingErrorKind::RateLimited => SamplingError::Api {
+            status: info
+                .status_code
+                .and_then(|code| reqwest::StatusCode::from_u16(code).ok())
+                .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            message: info.message.clone(),
+            model_metadata: info.model_metadata.clone(),
+            retry_after_secs: info.retry_after_secs,
+            should_retry: Some(info.is_retryable),
+        },
+        SamplingErrorKind::EmptyResponse => info.empty_response_context.clone().map_or_else(
+            || SamplingError::EventStreamError(info.message.clone()),
+            |context| SamplingError::EmptyResponse { context },
+        ),
+        SamplingErrorKind::MaxTokensTruncation => SamplingError::MaxTokensTruncation,
+        SamplingErrorKind::DoomLoopDetected => SamplingError::DoomLoopDetected {
+            triggers: info.doom_loop_triggers.clone().unwrap_or_default(),
+            aborted_at_chunk: info.doom_loop_aborted_at_chunk,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +428,99 @@ mod tests {
         assert_eq!(info.kind, SamplingErrorKind::Api);
         assert_eq!(info.status_code, None);
         assert!(info.is_retryable, "stream errors should be retryable");
+    }
+
+    #[test]
+    fn typed_stream_error_taxonomy_survives_serializable_round_trip() {
+        let cases = [
+            ("invalid_api_key", SamplingErrorKind::Auth, None, false),
+            (
+                "invalid_request_error",
+                SamplingErrorKind::Api,
+                Some(400),
+                false,
+            ),
+            ("billing_error", SamplingErrorKind::Api, Some(402), false),
+            ("not_found_error", SamplingErrorKind::Api, Some(404), false),
+            (
+                "request_too_large",
+                SamplingErrorKind::Api,
+                Some(413),
+                false,
+            ),
+            (
+                "rate_limit_error",
+                SamplingErrorKind::RateLimited,
+                Some(429),
+                true,
+            ),
+            ("server_error", SamplingErrorKind::Api, Some(500), true),
+            ("overloaded_error", SamplingErrorKind::Api, Some(529), true),
+        ];
+
+        for (code, expected_kind, expected_status, expected_retryable) in cases {
+            let wire = format!(
+                r#"{{"error":{{"message":"failure","type":"invalid_request_error","code":"{code}"}}}}"#
+            );
+            let parsed = sampling_types::error::try_parse_stream_error(&wire)
+                .unwrap_or_else(|| panic!("failed to parse {code}"));
+            let first = SamplingErrorInfo::from(&parsed);
+            assert_eq!(first.kind, expected_kind, "wrong kind for {code}");
+            assert_eq!(
+                first.status_code, expected_status,
+                "wrong status for {code}"
+            );
+            assert_eq!(
+                first.is_retryable, expected_retryable,
+                "wrong retryability for {code}"
+            );
+
+            let rebuilt = sampling_error_from_info(&first);
+            let second = SamplingErrorInfo::from(&rebuilt);
+            assert_eq!(second.kind, expected_kind, "round-trip kind for {code}");
+            assert_eq!(
+                second.status_code, expected_status,
+                "round-trip status for {code}"
+            );
+            assert_eq!(
+                second.is_retryable, expected_retryable,
+                "round-trip retryability for {code}"
+            );
+        }
+
+        let numeric_cases = [
+            (402, SamplingErrorKind::Api, Some(402), false),
+            (404, SamplingErrorKind::Api, Some(404), false),
+            (413, SamplingErrorKind::Api, Some(413), false),
+            (429, SamplingErrorKind::RateLimited, Some(429), true),
+            (529, SamplingErrorKind::Api, Some(529), true),
+            // Unknown provider-domain numbers must not override the type.
+            (1210, SamplingErrorKind::Api, Some(400), false),
+        ];
+        for (code, expected_kind, expected_status, expected_retryable) in numeric_cases {
+            let wire = format!(
+                r#"{{"error":{{"message":"failure","type":"invalid_request_error","code":{code}}}}}"#
+            );
+            let parsed = sampling_types::error::try_parse_stream_error(&wire)
+                .unwrap_or_else(|| panic!("failed to parse numeric {code}"));
+            let first = SamplingErrorInfo::from(&parsed);
+            assert_eq!(first.kind, expected_kind, "wrong kind for numeric {code}");
+            assert_eq!(
+                first.status_code, expected_status,
+                "wrong status for numeric {code}"
+            );
+            assert_eq!(
+                first.is_retryable, expected_retryable,
+                "wrong retryability for numeric {code}"
+            );
+
+            let second = SamplingErrorInfo::from(&sampling_error_from_info(&first));
+            assert_eq!(
+                (second.kind, second.status_code, second.is_retryable),
+                (expected_kind, expected_status, expected_retryable),
+                "numeric taxonomy changed after round-trip for {code}"
+            );
+        }
     }
 
     #[test]

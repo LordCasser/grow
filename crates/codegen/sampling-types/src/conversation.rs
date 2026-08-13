@@ -431,6 +431,153 @@ pub enum ContentPart {
     Image { url: Arc<str> },
 }
 
+/// Location and ordered image payloads for one image-bearing conversation item.
+///
+/// Groups deliberately follow message boundaries: a `User` item or a
+/// `ToolResult` is described in one auxiliary-model call so attachment order
+/// remains meaningful. The fingerprint is an ephemeral compare-and-swap guard
+/// used by chat-state; it is not persisted as session data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationImageGroup {
+    pub item_index: usize,
+    pub fingerprint: String,
+    pub image_urls: Vec<Arc<str>>,
+    pub source_text: Arc<str>,
+    pub source: ConversationImageSource,
+}
+
+impl ConversationImageGroup {
+    pub fn image_count(&self) -> usize {
+        self.image_urls.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationImageSource {
+    User,
+    ToolResult,
+}
+
+fn image_group_fingerprint(source: ConversationImageSource, image_urls: &[Arc<str>]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(match source {
+        ConversationImageSource::User => b"user",
+        ConversationImageSource::ToolResult => b"tool_result",
+    });
+    for url in image_urls {
+        hasher.update(&(url.len() as u64).to_le_bytes());
+        hasher.update(url.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Collect one ordered image group per image-bearing user/tool-result item.
+pub fn conversation_image_groups(items: &[ConversationItem]) -> Vec<ConversationImageGroup> {
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(item_index, item)| {
+            let (source, image_urls, source_text) = match item {
+                ConversationItem::User(user) => {
+                    let image_urls = user
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            ContentPart::Image { url } => Some(url.clone()),
+                            ContentPart::Text { .. } => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let source_text = user
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            ContentPart::Text { text } => Some(text.as_ref()),
+                            ContentPart::Image { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (ConversationImageSource::User, image_urls, source_text)
+                }
+                ConversationItem::ToolResult(result) => {
+                    let image_urls = result
+                        .images
+                        .iter()
+                        .filter_map(|part| match part {
+                            ContentPart::Image { url } => Some(url.clone()),
+                            ContentPart::Text { .. } => None,
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        ConversationImageSource::ToolResult,
+                        image_urls,
+                        result.content.as_ref().to_owned(),
+                    )
+                }
+                _ => return None,
+            };
+            if image_urls.is_empty() {
+                return None;
+            }
+            Some(ConversationImageGroup {
+                item_index,
+                fingerprint: image_group_fingerprint(source, &image_urls),
+                image_urls,
+                source_text: Arc::<str>::from(source_text),
+                source,
+            })
+        })
+        .collect()
+}
+
+/// Replace every image in one item with a single model-visible text block.
+/// Returns the number of actual image parts removed.
+///
+/// User metadata and surrounding text remain untouched. Tool-result text parts
+/// stored in `images` are preserved, and the replacement is appended to the
+/// tool result's ordinary text content so all API backends can see it.
+pub fn replace_item_images_with_text(item: &mut ConversationItem, replacement: &str) -> usize {
+    match item {
+        ConversationItem::User(user) => {
+            let mut removed = 0usize;
+            let mut replacement = Some(ContentPart::Text {
+                text: Arc::<str>::from(replacement),
+            });
+            let mut content = Vec::with_capacity(user.content.len());
+            for part in std::mem::take(&mut user.content) {
+                match part {
+                    ContentPart::Image { .. } => {
+                        removed += 1;
+                        if let Some(text) = replacement.take() {
+                            content.push(text);
+                        }
+                    }
+                    other => content.push(other),
+                }
+            }
+            user.content = content;
+            removed
+        }
+        ConversationItem::ToolResult(result) => {
+            let before = result.images.len();
+            result
+                .images
+                .retain(|part| !matches!(part, ContentPart::Image { .. }));
+            let removed = before - result.images.len();
+            if removed > 0 {
+                let separator = if result.content.is_empty() {
+                    ""
+                } else {
+                    "\n\n"
+                };
+                result.content =
+                    Arc::<str>::from(format!("{}{separator}{replacement}", result.content));
+            }
+            removed
+        }
+        _ => 0,
+    }
+}
+
 // ============================================================================
 // Reasoning Content
 // ============================================================================
@@ -585,6 +732,22 @@ pub struct ConversationRequest {
 }
 
 impl ConversationRequest {
+    /// Number of inline images carried by this request.
+    ///
+    /// Counts both user message image parts and images attached directly to
+    /// tool results (for example, `read_file` image/PDF output).
+    pub fn image_count(&self) -> usize {
+        self.image_groups()
+            .iter()
+            .map(ConversationImageGroup::image_count)
+            .sum()
+    }
+
+    /// Return ordered image groups without mutating the request.
+    pub fn image_groups(&self) -> Vec<ConversationImageGroup> {
+        conversation_image_groups(&self.items)
+    }
+
     /// Strip all inline image data from the conversation to reduce payload size.
     ///
     /// Replaces `ContentPart::Image` entries with a text placeholder so the
@@ -592,6 +755,20 @@ impl ConversationRequest {
     /// used as a recovery strategy when the downstream API returns 413
     /// "Request Entity Too Large".
     pub fn strip_images(&mut self) -> usize {
+        self.strip_images_inner("[image removed — conversation too large]", false)
+    }
+
+    /// Strip every inline image using a caller-supplied model-visible reason.
+    ///
+    /// Unlike [`Self::strip_images`], tool results also receive the placeholder
+    /// in their text so a text-only model never mistakes `Read image file` for
+    /// evidence that the pixels were available.
+    pub fn strip_images_with_placeholder(&mut self, placeholder: &str) -> usize {
+        self.strip_images_inner(placeholder, true)
+    }
+
+    fn strip_images_inner(&mut self, placeholder: &str, annotate_tool_results: bool) -> usize {
+        let placeholder = Arc::<str>::from(placeholder);
         let mut stripped = 0usize;
         for item in &mut self.items {
             match item {
@@ -599,7 +776,7 @@ impl ConversationRequest {
                     for part in &mut user.content {
                         if matches!(part, ContentPart::Image { .. }) {
                             *part = ContentPart::Text {
-                                text: Arc::<str>::from("[image removed — conversation too large]"),
+                                text: placeholder.clone(),
                             };
                             stripped += 1;
                         }
@@ -608,8 +785,14 @@ impl ConversationRequest {
                 ConversationItem::ToolResult(t) => {
                     // Drop inline images from tool results (e.g. read_file on
                     // images/PDFs). On 413 retry these are the largest payloads.
-                    stripped += t.images.len();
-                    t.images.clear();
+                    let before = t.images.len();
+                    t.images
+                        .retain(|part| !matches!(part, ContentPart::Image { .. }));
+                    let tool_images = before - t.images.len();
+                    stripped += tool_images;
+                    if annotate_tool_results && tool_images > 0 {
+                        t.content = Arc::<str>::from(format!("{}\n\n{}", t.content, placeholder));
+                    }
                 }
                 _ => {}
             }
@@ -7811,6 +7994,95 @@ mod tests {
 
         let stripped = req.strip_images();
         assert_eq!(stripped, 3);
+    }
+
+    #[test]
+    fn test_image_count_includes_user_and_tool_result_images() {
+        let mut req = ConversationRequest::default();
+        let mut user = ConversationItem::user("first");
+        user.add_image("data:image/png;base64,aaa");
+        req.items.push(user);
+        req.items.push(ConversationItem::tool_result_with_images(
+            "call_1",
+            "Read image file: photo.png",
+            vec![
+                ContentPart::Image {
+                    url: "data:image/png;base64,bbb".into(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,ccc".into(),
+                },
+            ],
+        ));
+
+        assert_eq!(req.image_count(), 3);
+    }
+
+    #[test]
+    fn image_groups_and_replacement_preserve_non_image_tool_parts() {
+        let mut req = ConversationRequest::default();
+        req.items.push(ConversationItem::tool_result_with_images(
+            "call_1",
+            "Read PDF text",
+            vec![
+                ContentPart::Text {
+                    text: "metadata retained".into(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,aaa".into(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,bbb".into(),
+                },
+            ],
+        ));
+
+        let groups = req.image_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].image_count(), 2);
+        assert_eq!(groups[0].source, ConversationImageSource::ToolResult);
+        assert_eq!(req.image_count(), 2);
+
+        let removed = replace_item_images_with_text(&mut req.items[0], "described in order");
+        assert_eq!(removed, 2);
+        assert_eq!(req.image_count(), 0);
+        let ConversationItem::ToolResult(result) = &req.items[0] else {
+            panic!("expected tool result");
+        };
+        assert_eq!(result.tool_call_id, "call_1");
+        assert!(matches!(
+            result.images.as_slice(),
+            [ContentPart::Text { text }] if text.as_ref() == "metadata retained"
+        ));
+        assert_eq!(
+            result.content.as_ref(),
+            "Read PDF text\n\ndescribed in order"
+        );
+    }
+
+    #[test]
+    fn test_strip_images_with_placeholder_annotates_tool_results() {
+        let mut req = ConversationRequest::default();
+        req.items.push(ConversationItem::tool_result_with_images(
+            "call_1",
+            "Read image file: photo.png",
+            vec![ContentPart::Image {
+                url: "data:image/png;base64,aaa".into(),
+            }],
+        ));
+
+        let placeholder = "[image unavailable: current model accepts text only]";
+        assert_eq!(req.strip_images_with_placeholder(placeholder), 1);
+        assert_eq!(req.image_count(), 0);
+        let ConversationItem::ToolResult(result) = &req.items[0] else {
+            panic!("expected tool result");
+        };
+        assert_eq!(result.tool_call_id, "call_1");
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result.content.as_ref(),
+            format!("Read image file: photo.png\n\n{placeholder}")
+        );
     }
 
     // ── Tool result with images tests ──────────────────────────────────────────

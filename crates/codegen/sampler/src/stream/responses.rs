@@ -325,18 +325,14 @@ pub(crate) fn stream_responses_tracked<'a>(
 
                 ResponseStreamEvent::ResponseFailed(failed_event) => {
                     let response = failed_event.response;
-                    let error_message = response
+                    let (error_code, error_message) = response
                         .error
                         .as_ref()
-                        .map(|e| format!("{}: {}", e.code, e.message))
-                        .unwrap_or_else(|| "Response failed with unknown error".to_string());
-                    let err = SamplingError::Api {
-                        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        message: error_message,
-                        model_metadata: None,
-                        retry_after_secs: None,
-                        should_retry: None,
-                    };
+                        .map(|e| (e.code.clone(), e.message.clone()))
+                        .unwrap_or_else(|| {
+                            ("response_failed".to_string(), "unknown error".to_string())
+                        });
+                    let err = SamplingError::from_stream_error(error_code, error_message);
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -346,14 +342,7 @@ pub(crate) fn stream_responses_tracked<'a>(
 
                 ResponseStreamEvent::ResponseError(error_event) => {
                     let code = error_event.code.unwrap_or_else(|| "error".to_string());
-                    let error_message = format!("{}: {}", code, error_event.message);
-                    let err = SamplingError::Api {
-                        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        message: error_message,
-                        model_metadata: None,
-                        retry_after_secs: None,
-                        should_retry: None,
-                    };
+                    let err = SamplingError::from_stream_error(code, error_event.message);
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),

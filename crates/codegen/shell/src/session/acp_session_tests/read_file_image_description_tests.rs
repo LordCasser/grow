@@ -40,15 +40,27 @@ async fn run_image_result(actor: &SessionActor) -> sampling_types::conversation:
     }
 }
 
+async fn mark_current_model_as_text_only(actor: &SessionActor) {
+    let key = actor.current_model_image_input_key().await.unwrap();
+    actor
+        .record_unsupported_model_image_input(key)
+        .await
+        .unwrap();
+}
+
+async fn test_actor() -> SessionActor {
+    let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+    let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn unconfigured_image_description_keeps_main_model_multimodal_path() {
+async fn configured_auxiliary_does_not_preempt_unknown_current_model() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
-                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let actor = test_actor().await;
+            *actor.image_description_model.write() = Some("missing-vision-model".to_owned());
 
             let result = run_image_result(&actor).await;
 
@@ -62,39 +74,43 @@ async fn unconfigured_image_description_keeps_main_model_multimodal_path() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn configured_image_description_never_silently_falls_back_to_main_model() {
+async fn known_text_only_model_degrades_read_file_image_before_sampling() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
-                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            *actor.image_description_model.write() = Some("missing-vision-model".to_owned());
+            let actor = test_actor().await;
+            mark_current_model_as_text_only(&actor).await;
 
-            let result = run_image_result(&actor).await;
-
-            assert!(result.images.is_empty());
-            assert!(
-                result
-                    .content
-                    .contains("Configured image description failed")
+            let raw_result = run_image_result(&actor).await;
+            assert_eq!(
+                raw_result.images.len(),
+                1,
+                "read_file must keep ImageContent"
             );
-            assert!(result.content.contains("could not be resolved"));
+
+            let report = actor.rewrite_images_for_known_text_model().await.unwrap();
+            assert_eq!(report.converted_images, 0);
+            assert_eq!(report.dropped_images, 1);
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
+            );
+            let ConversationItem::ToolResult(result) = conversation.last().unwrap() else {
+                panic!("expected tool result");
+            };
+            assert_eq!(result.tool_call_id, "read-image-1");
+            assert!(result.images.is_empty());
+            assert!(result.content.contains("Images removed"));
         })
         .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn configured_image_description_owns_images_extracted_from_file_content() {
+async fn pdf_extracted_images_stay_one_ordered_group_then_are_permanently_removed() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
-                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            *actor.image_description_model.write() = Some("missing-vision-model".to_owned());
+            let actor = test_actor().await;
             let image = test_image_content();
             let result = ToolRunResult {
                 output: ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
@@ -105,16 +121,22 @@ async fn configured_image_description_owns_images_extracted_from_file_content() 
                     limit: None,
                     raw_output: "PDF text".to_owned(),
                     total_lines: 1,
-                    extracted_images: vec![tools::util::base64_images::ExtractedImage {
-                        data: image.data,
-                        mime_type: image.mime_type,
-                    }],
+                    extracted_images: vec![
+                        tools::util::base64_images::ExtractedImage {
+                            data: image.data.clone(),
+                            mime_type: image.mime_type.clone(),
+                        },
+                        tools::util::base64_images::ExtractedImage {
+                            data: image.data,
+                            mime_type: image.mime_type,
+                        },
+                    ],
                 })),
                 prompt_text: "1→PDF text".to_owned(),
                 effective_tool_name: None,
             };
 
-            actor
+            let deferred = actor
                 .handle_bridge_tool_success(
                     &acp::ToolCallId::new("read-pdf-1"),
                     "read-pdf-1",
@@ -127,18 +149,28 @@ async fn configured_image_description_owns_images_extracted_from_file_content() 
                 )
                 .await
                 .unwrap();
+            assert_eq!(deferred.len(), 1);
+            let groups = sampling_types::conversation::conversation_image_groups(&deferred);
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].image_count(), 2);
+            actor.chat_state_handle.push_user_message(deferred[0].clone());
 
+            mark_current_model_as_text_only(&actor).await;
+            let report = actor.rewrite_images_for_known_text_model().await.unwrap();
+            assert_eq!(report.dropped_images, 2);
             let conversation = actor.chat_state_handle.get_conversation().await;
-            let ConversationItem::ToolResult(result) = conversation.last().unwrap() else {
-                panic!("expected tool result");
-            };
-            assert!(result.images.is_empty());
-            assert!(result.content.contains("1→PDF text"));
-            assert!(
-                result
-                    .content
-                    .contains("Configured image description failed")
-            );
+            assert!(sampling_types::conversation::conversation_image_groups(&conversation).is_empty());
+            assert!(conversation.iter().any(|item| {
+                matches!(item, ConversationItem::ToolResult(result) if result.content.contains("PDF text"))
+            }));
+
+            let mut vision_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            vision_config.model = "vision-model".to_owned();
+            actor.chat_state_handle.update_sampling_config(vision_config);
+            assert!(sampling_types::conversation::conversation_image_groups(
+                &actor.chat_state_handle.get_conversation().await
+            )
+            .is_empty());
         })
         .await;
 }
@@ -148,10 +180,7 @@ async fn live_model_reload_updates_every_next_turn_sampler_knob() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
-                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let actor = test_actor().await;
             let mut sampling = sampler::SamplerConfig::default();
             sampling.base_url = "https://reloaded.example/v2".into();
             sampling.model = "reloaded-model".into();

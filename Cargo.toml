@@ -238,7 +238,7 @@ wait-timeout = "0.2"
 walkdir = "2"
 which = "8"
 wildmatch = "2"
-windows = { version = "0.62", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes"] }
+windows = { version = "0.62", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Diagnostics_ToolHelp"] }
 wiremock = "0.6"
 wl-clipboard-rs = "0.9"
 acp-transport = { path = "crates/codegen/acp-transport" }

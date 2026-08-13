@@ -438,8 +438,27 @@ impl ChatStateActor {
         if is_compaction && let Some(cap) = &mut self.state.turn_capture {
             cap.compaction_occurred = true;
         }
-        let pre_replace_total = self.state.total_tokens;
+        self.install_conversation(items, is_compaction);
+        self.rebase_turn_capture_offset();
+    }
+
+    /// Install and persist a complete conversation without changing turn
+    /// capture offsets. Callers must preserve item count and identity when a
+    /// capture is active; full replacements use [`Self::replace_conversation`]
+    /// so the old turn tail is snapshotted first.
+    fn install_conversation(&mut self, items: Vec<ConversationItem>, is_compaction: bool) {
         self.persistence.replace_history(&items);
+        self.install_persisted_conversation(items, is_compaction);
+    }
+
+    /// Apply a full conversation replacement after its persistence operation
+    /// has already completed successfully.
+    fn install_persisted_conversation(
+        &mut self,
+        items: Vec<ConversationItem>,
+        is_compaction: bool,
+    ) {
+        let pre_replace_total = self.state.total_tokens;
         let base_estimate = super::state::estimate_conversation_tokens(&items);
         let mut estimated_tokens =
             if is_compaction && pre_replace_total > 0 && self.state.estimate_at_last_response > 0 {
@@ -457,13 +476,89 @@ impl ChatStateActor {
         self.state.total_tokens = estimated_tokens;
         self.state.estimate_at_last_response =
             super::state::estimate_conversation_tokens(&self.state.conversation);
-        self.rebase_turn_capture_offset();
         self.send_event(ChatStateEvent::ConversationReset {
             new_len: self.state.conversation.len(),
         });
         self.send_event(ChatStateEvent::TokensUpdated {
             total_tokens: estimated_tokens,
         });
+    }
+
+    /// Rewrite all current image groups against an optimistic snapshot in one
+    /// actor transaction. A mismatched or newly appended group is removed
+    /// rather than retained: once the active runtime is known to reject image
+    /// input, the postcondition is a canonical history with no images.
+    pub(super) async fn rewrite_images(
+        &mut self,
+        rewrites: Vec<crate::commands::ImageRewrite>,
+        dropped_placeholder: &str,
+    ) -> Option<crate::commands::ImageRewriteReport> {
+        use std::collections::BTreeMap;
+
+        use sampling_types::conversation::{
+            conversation_image_groups, replace_item_images_with_text,
+        };
+
+        let mut report = crate::commands::ImageRewriteReport::default();
+        let mut expected = rewrites
+            .into_iter()
+            .map(|rewrite| ((rewrite.item_index, rewrite.fingerprint.clone()), rewrite))
+            .collect::<BTreeMap<_, _>>();
+        let groups = conversation_image_groups(&self.state.conversation);
+        if groups.is_empty() {
+            report.unmatched_images = expected
+                .values()
+                .map(|rewrite| rewrite.expected_image_count)
+                .sum();
+            return Some(report);
+        }
+
+        let mut conversation = self.state.conversation.clone();
+        for group in groups {
+            let key = (group.item_index, group.fingerprint.clone());
+            let rewrite = expected.remove(&key);
+            let replacement = rewrite
+                .as_ref()
+                .and_then(|rewrite| rewrite.replacement.as_deref())
+                .filter(|text| !text.trim().is_empty());
+            let text = replacement.unwrap_or(dropped_placeholder);
+            let removed = replace_item_images_with_text(&mut conversation[group.item_index], text);
+            if replacement.is_some() {
+                report.converted_images += removed;
+            } else {
+                report.dropped_images += removed;
+            }
+            if rewrite.is_none() {
+                report.unmatched_images += removed;
+            }
+        }
+        report.unmatched_images += expected
+            .values()
+            .map(|rewrite| rewrite.expected_image_count)
+            .sum::<usize>();
+        debug_assert_eq!(
+            conversation.len(),
+            self.state.conversation.len(),
+            "image rewrite must preserve conversation item identity"
+        );
+        let persisted = self
+            .persistence
+            .replace_history_and_ack(&conversation)
+            .await;
+        match persisted {
+            Ok(Ok(())) => {
+                self.install_persisted_conversation(conversation, false);
+                Some(report)
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "image history rewrite was not persisted");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("image history rewrite persistence acknowledgement was dropped");
+                None
+            }
+        }
     }
 
     /// Atomically swap the leading `System` message with `prompt` (or insert one

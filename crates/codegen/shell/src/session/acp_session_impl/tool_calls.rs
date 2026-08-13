@@ -2716,47 +2716,6 @@ impl SessionActor {
             });
     }
 
-    async fn describe_read_file_images(
-        &self,
-        configured_model: &str,
-        path: &str,
-        images: Vec<(Vec<u8>, String)>,
-        source_context: String,
-    ) -> Result<String, String> {
-        let mut sampler_config = self
-            .resolve_aux_sampler_config(configured_model)
-            .await
-            .ok_or_else(|| {
-                format!(
-                    "configured image description model `{configured_model}` could not be resolved"
-                )
-            })?;
-        let active_session_config = self.reconstruct_full_config().await;
-        crate::agent::config::stamp_session_local_sampler_fields(
-            &mut sampler_config,
-            &active_session_config,
-            Some(self.max_retries.get()),
-        );
-        let model = sampler_config.model.clone();
-        let client = sampler::SamplingClient::new(sampler_config)
-            .map_err(|e| format!("failed to build image description client: {e}"))?;
-        let conversation = self.chat_state_handle.get_conversation().await;
-        let (outline, current_query) =
-            crate::session::image_describe::build_read_context(&conversation);
-        self.image_describe_cache
-            .get_or_describe(
-                client,
-                &model,
-                &images,
-                outline.as_deref(),
-                &current_query,
-                &source_context,
-                path,
-            )
-            .await
-            .map_err(|e| e.to_string())
-    }
-
     pub(super) async fn handle_bridge_tool_success(
         &self,
         tool_call_id: &acp::ToolCallId,
@@ -2901,89 +2860,16 @@ impl SessionActor {
                     );
                 }
                 InlineAttachVerdict::Attach => {
-                    let configured_model = self.image_description_model.read().clone();
-                    if let Some(configured_model) = configured_model.as_deref() {
-                        use base64::Engine as _;
-                        let described = base64::engine::general_purpose::STANDARD
-                            .decode(&image_content.data)
-                            .map_err(|e| format!("invalid image payload: {e}"))
-                            .map(|bytes| (bytes, image_content.mime_type.clone()));
-                        prompt_text = match described {
-                            Ok(image) => match self
-                                .describe_read_file_images(
-                                    configured_model,
-                                    path,
-                                    vec![image],
-                                    format!("Image file: {path}"),
-                                )
-                                .await
-                            {
-                                Ok(description) => format!(
-                                    "Read image file: {path}\n\n{}",
-                                    crate::session::image_describe::render_image_description_block(
-                                        &description
-                                    )
-                                ),
-                                Err(e) => {
-                                    format!("[Configured image description failed for {path}: {e}]")
-                                }
-                            },
-                            Err(e) => {
-                                format!("[Configured image description failed for {path}: {e}]")
-                            }
-                        };
-                    } else {
-                        let url = format!(
-                            "data:{};base64,{}",
-                            image_content.mime_type, image_content.data
-                        );
-                        inline_images.push(ContentPart::Image {
-                            url: std::sync::Arc::<str>::from(url),
-                        });
-                        prompt_text = format!("Read image file: {path}");
-                    }
+                    let url = format!(
+                        "data:{};base64,{}",
+                        image_content.mime_type, image_content.data
+                    );
+                    inline_images.push(ContentPart::Image {
+                        url: std::sync::Arc::<str>::from(url),
+                    });
+                    prompt_text = format!("Read image file: {path}");
                 }
             }
-        }
-        let configured_model = self.image_description_model.read().clone();
-        if !extracted_images.is_empty()
-            && let Some(configured_model) = configured_model.as_deref()
-        {
-            use base64::Engine as _;
-            let path = tool_parsed_args
-                .get("target_file")
-                .or_else(|| tool_parsed_args.get("path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let images: Result<Vec<_>, _> = extracted_images
-                .iter()
-                .map(|image| {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(&image.data)
-                        .map(|bytes| (bytes, image.mime_type.clone()))
-                })
-                .collect();
-            let description = match images {
-                Ok(images) => self
-                    .describe_read_file_images(
-                        configured_model,
-                        path,
-                        images,
-                        format!("Images extracted from {path}, in attachment order."),
-                    )
-                    .await
-                    .map(|description| {
-                        crate::session::image_describe::render_image_description_block(&description)
-                    })
-                    .unwrap_or_else(|error| {
-                        format!("[Configured image description failed for {path}: {error}]")
-                    }),
-                Err(error) => format!(
-                    "[Configured image description failed for {path}: invalid image payload: {error}]"
-                ),
-            };
-            prompt_text = format!("{prompt_text}\n\n{description}");
-            extracted_images.clear();
         }
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
@@ -3025,11 +2911,15 @@ impl SessionActor {
                 self.send_grow_notification(GrowSessionUpdate::ImageDropped { notes })
                     .await;
             }
-            for norm in norm_result.images {
-                let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
-                let mut image_msg =
-                    ConversationItem::user("[Image extracted from tool result above]");
-                image_msg.add_image(url);
+            let normalized_count = norm_result.images.len();
+            if normalized_count > 0 {
+                let mut image_msg = ConversationItem::user(format!(
+                    "[{normalized_count} images extracted from the tool result above, in attachment order]"
+                ));
+                for norm in norm_result.images {
+                    let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
+                    image_msg.add_image(url);
+                }
                 deferred_followups.push(image_msg);
             }
         }

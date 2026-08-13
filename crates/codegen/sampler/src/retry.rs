@@ -167,12 +167,6 @@ pub fn classify_error(
         return RetryDecision::RetryWithImageStrip;
     }
 
-    // Image processing errors (direct 400 or proxy-wrapped 500): strip
-    // images and retry, same recovery as 413.
-    if err.is_image_processing_error() {
-        return RetryDecision::RetryWithImageStrip;
-    }
-
     // Shared retry vetoes (`SamplingError::is_retry_vetoed`, also used by
     // one-shot callers like /btw):
     // - x-should-retry: false — trust the server, it knows if the error is
@@ -183,7 +177,7 @@ pub fn classify_error(
     // - Context-window / size overflow — deterministic, re-sending the same
     //   (or larger) payload always fails, whatever status the backend used.
     //
-    // Checked AFTER image-strip guards: image stripping changes the
+    // Checked AFTER the payload-size image-strip guard: image stripping changes the
     // request payload, so a server "don't retry" on the original
     // request doesn't apply to the stripped request.
     if err.is_retry_vetoed() {
@@ -553,45 +547,6 @@ mod tests {
     #[test]
     fn classify_payload_too_large_strips_images() {
         let err = api_err(StatusCode::PAYLOAD_TOO_LARGE, "too big");
-        assert!(matches!(
-            classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
-            RetryDecision::RetryWithImageStrip
-        ));
-    }
-
-    #[test]
-    fn classify_image_processing_error_400_strips_images() {
-        let err = api_err(StatusCode::BAD_REQUEST, "Could not process image");
-        assert!(matches!(
-            classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
-            RetryDecision::RetryWithImageStrip
-        ));
-    }
-
-    #[test]
-    fn classify_image_processing_error_500_wrapped_strips_images() {
-        let err = api_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "upstream: 400 Bad Request: Could not process image",
-        );
-        assert!(matches!(
-            classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
-            RetryDecision::RetryWithImageStrip
-        ));
-    }
-
-    #[test]
-    fn classify_image_processing_error_takes_priority_over_5xx_retry() {
-        // A 500 wrapping "Could not process image" is retryable by status
-        // code alone — verify the image-processing guard intercepts first.
-        let err = api_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not process image: bad format",
-        );
-        assert!(
-            err.is_retryable(),
-            "500 is retryable without the image-processing guard"
-        );
         assert!(matches!(
             classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
             RetryDecision::RetryWithImageStrip

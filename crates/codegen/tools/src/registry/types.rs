@@ -986,6 +986,7 @@ impl ToolRegistryBuilder {
         resources.register_state::<crate::reminders::task_completion::ReportedTaskCompletions>();
         resources.register_state::<crate::implementations::grow_build::todo::TodoState>();
         resources.register_state::<crate::types::resources::WebCitationCounter>();
+        resources.register_state::<crate::types::resources::ModelImageInputState>();
         resources
             .register_state::<
                 crate::implementations::cursor_rules_on_read::CursorRulesOnReadTracker,
@@ -1790,13 +1791,67 @@ impl FinalizedToolset {
     /// Unlike `flush_persistence()` (which only flushes previously queued
     /// snapshots), this method captures a **fresh** snapshot of the current
     /// `Resources` and ensures it hits disk before returning.
-    pub async fn save_and_flush_persistence(&self) -> &std::path::Path {
-        {
+    pub async fn save_and_flush_persistence(&self) -> std::io::Result<&std::path::Path> {
+        // Snapshot creation and persistence-command ordering are one critical
+        // section. Every ordinary resource update enqueues while holding this
+        // same lock, so a durable snapshot can neither overtake nor overwrite
+        // a newer in-memory mutation.
+        let acknowledgement = {
             let res = self.resources.lock().await;
-            self.resources_persistence.save(&res);
+            self.resources_persistence
+                .enqueue_save_and_flush(res.serialize())?
+        };
+        crate::persistence::ResourcesPersistence::await_save_and_flush(acknowledgement).await?;
+        Ok(self.resources_persistence.state_path())
+    }
+
+    /// Record a model image-input rejection as one cancellation-safe resource
+    /// transaction. The mutation, snapshot, and persistence enqueue share the
+    /// resource lock, so no caller can observe the key before a durable write
+    /// has been irrevocably queued. The lock remains held through the rare
+    /// fsync acknowledgement: on a pre-publication error we can roll back and
+    /// enqueue a compensating snapshot before any newer resource snapshot can
+    /// copy the rejected key.
+    pub async fn mark_model_image_input_unsupported_and_flush(
+        &self,
+        key: crate::types::resources::ModelImageInputKey,
+    ) -> std::io::Result<bool> {
+        use crate::types::resources::{ModelImageInputState, State};
+
+        let mut resources = self.resources.lock().await;
+        let inserted = resources
+            .get_or_default::<State<ModelImageInputState>>()
+            .mark_unsupported(key.clone());
+        if !inserted {
+            return Ok(false);
         }
-        self.resources_persistence.flush().await;
-        self.resources_persistence.state_path()
+        let acknowledgement = match self
+            .resources_persistence
+            .enqueue_save_and_flush(resources.serialize())
+        {
+            Ok(acknowledgement) => acknowledgement,
+            Err(error) => {
+                resources
+                    .get_or_default::<State<ModelImageInputState>>()
+                    .forget_unsupported(&key);
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            crate::persistence::ResourcesPersistence::await_save_and_flush(acknowledgement).await
+        {
+            if !crate::persistence::ResourcesPersistence::error_was_published(&error) {
+                resources
+                    .get_or_default::<State<ModelImageInputState>>()
+                    .forget_unsupported(&key);
+                let rollback = self
+                    .resources_persistence
+                    .enqueue_save_and_flush(resources.serialize())?;
+                crate::persistence::ResourcesPersistence::await_save_and_flush(rollback).await?;
+            }
+            return Err(error);
+        }
+        Ok(true)
     }
 }
 /// Generate a JSON Schema for type `T`.

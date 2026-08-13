@@ -11,6 +11,29 @@ use tokio::io::AsyncWriteExt;
 
 use crate::types::resources::Resources;
 
+#[derive(Debug)]
+struct PublishedPersistenceError(io::Error);
+
+impl std::fmt::Display for PublishedPersistenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} (state was published; durability is uncertain)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for PublishedPersistenceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+fn published_persistence_error(error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), PublishedPersistenceError(error))
+}
+
 /// Background persistence for `Resources` state/params.
 ///
 /// Same pattern as `ToolStatePersistence` — debounced background writes with
@@ -47,6 +70,17 @@ enum ResourcesPersistenceCommand {
 }
 
 impl ResourcesPersistence {
+    /// Whether a durable write error happened after the target file was
+    /// atomically published. Callers must not roll back matching in-memory
+    /// state in this case: the visible file already contains the new value,
+    /// even though the parent-directory fsync could not prove crash durability.
+    pub fn error_was_published(error: &io::Error) -> bool {
+        error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<PublishedPersistenceError>())
+            .is_some()
+    }
+
     /// Construct a noop persistence handle for tests. No background task.
     pub fn noop() -> Self {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -340,10 +374,19 @@ impl ResourcesPersistence {
     #[cfg(not(windows))]
     async fn publish_durable(path: &Path, tmp_path: &Path) -> io::Result<()> {
         Self::replace_state_path(path, tmp_path).await?;
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "resources state has no parent")
-        })?;
-        tokio::fs::File::open(parent).await?.sync_all().await
+        let parent = path
+            .parent()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "resources state has no parent")
+            })
+            .map_err(published_persistence_error)?;
+        let directory = tokio::fs::File::open(parent)
+            .await
+            .map_err(published_persistence_error)?;
+        directory
+            .sync_all()
+            .await
+            .map_err(published_persistence_error)
     }
 
     #[cfg(windows)]
@@ -403,7 +446,9 @@ mod tests {
     // ResourcesPersistence tests
     // -----------------------------------------------------------------------
 
-    use crate::types::resources::{Resources, State, WebCitationCounter};
+    use crate::types::resources::{
+        ModelImageInputKey, ModelImageInputState, Resources, State, WebCitationCounter,
+    };
 
     #[tokio::test]
     async fn resources_save_and_load_roundtrip() {
@@ -434,6 +479,45 @@ mod tests {
         // Verify WebCitationCounter roundtripped
         let counter = restored.get::<State<WebCitationCounter>>().unwrap();
         assert_eq!(counter.counter, 7);
+    }
+
+    #[tokio::test]
+    async fn model_image_input_state_roundtrips_per_runtime_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("resources_state.json");
+        let persistence = ResourcesPersistence::new(state_path);
+        let rejected = ModelImageInputKey::new("text-model", "messages", "endpoint-a");
+
+        let mut resources = Resources::new();
+        resources.register_state::<ModelImageInputState>();
+        resources
+            .get_or_default::<State<ModelImageInputState>>()
+            .mark_unsupported(rejected.clone());
+        persistence
+            .save_and_flush(resources.serialize())
+            .await
+            .unwrap();
+
+        let mut restored = Resources::new();
+        restored.register_state::<ModelImageInputState>();
+        assert!(persistence.load(&mut restored));
+        let state = restored.get::<State<ModelImageInputState>>().unwrap();
+        assert!(state.is_unsupported(&rejected));
+        assert!(!state.is_unsupported(&ModelImageInputKey::new(
+            "vision-model",
+            "messages",
+            "endpoint-a",
+        )));
+        assert!(!state.is_unsupported(&ModelImageInputKey::new(
+            "text-model",
+            "responses",
+            "endpoint-a",
+        )));
+        assert!(!state.is_unsupported(&ModelImageInputKey::new(
+            "text-model",
+            "messages",
+            "endpoint-b",
+        )));
     }
 
     #[tokio::test]
@@ -623,6 +707,16 @@ mod tests {
         assert_eq!(returned.to_string(), "publish failed");
         assert!(!tmp_path.exists());
         std::fs::write(&tmp_path, "retry").unwrap();
+    }
+
+    #[test]
+    fn published_failure_is_distinguishable_from_pre_publish_failure() {
+        let before = io::Error::other("rename failed");
+        assert!(!ResourcesPersistence::error_was_published(&before));
+
+        let after = published_persistence_error(io::Error::other("directory fsync failed"));
+        assert!(ResourcesPersistence::error_was_published(&after));
+        assert!(after.to_string().contains("state was published"));
     }
 
     #[cfg(windows)]

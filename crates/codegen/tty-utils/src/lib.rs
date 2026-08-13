@@ -298,6 +298,21 @@ pub fn new_process_group(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// Configure a credential-bearing helper so Windows cannot execute user code
+/// before it is enrolled in a kill-on-close Job Object. Unix process-group
+/// enrollment is atomic in the child's `pre_exec` path and needs no suspend.
+pub fn suspend_until_process_group_enrolled(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+        };
+        cmd.creation_flags((CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_SUSPENDED).0);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 /// A Unix process-group id validated as safe to pass to `killpg`.
 ///
 /// `killpg(pgid)` is `kill(-pgid)`, so a degenerate pgid escalates a scoped
@@ -431,6 +446,68 @@ impl ProcessGroup {
             .id()
             .ok_or_else(|| io::Error::other("ProcessGroup::attach: child has already exited"))?;
         self.attach_pid(pid)
+    }
+
+    /// Resume a Windows child that was created by
+    /// [`suspend_until_process_group_enrolled`] after `attach` succeeded.
+    /// On other platforms this is a no-op.
+    pub fn resume_enrolled(&self, child: &tokio::process::Child) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            use std::mem::size_of;
+            use windows::Win32::Foundation::{CloseHandle, HANDLE};
+            use windows::Win32::System::Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                Thread32Next,
+            };
+            use windows::Win32::System::Threading::{
+                OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+            };
+
+            let pid = child
+                .id()
+                .ok_or_else(|| io::Error::other("suspended child exited before resume"))?;
+            let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }
+                .map_err(|error| io::Error::other(format!("thread snapshot: {error}")))?;
+            struct HandleGuard(HANDLE);
+            impl Drop for HandleGuard {
+                fn drop(&mut self) {
+                    let _ = unsafe { CloseHandle(self.0) };
+                }
+            }
+            let _snapshot_guard = HandleGuard(snapshot);
+            let mut entry = THREADENTRY32 {
+                dwSize: size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            unsafe { Thread32First(snapshot, &mut entry) }
+                .map_err(|error| io::Error::other(format!("first thread: {error}")))?;
+            loop {
+                if entry.th32OwnerProcessID == pid {
+                    let thread =
+                        unsafe { OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID) }
+                            .map_err(|error| {
+                                io::Error::other(format!("open child thread: {error}"))
+                            })?;
+                    let _thread_guard = HandleGuard(thread);
+                    if unsafe { ResumeThread(thread) } == u32::MAX {
+                        return Err(io::Error::last_os_error());
+                    }
+                    return Ok(());
+                }
+                if unsafe { Thread32Next(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
+            }
+            return Err(io::Error::other(format!(
+                "no suspended primary thread found for process {pid}"
+            )));
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            Ok(())
+        }
     }
 
     /// Attach a `std::process::Child` (rather than tokio's). The PID is read via

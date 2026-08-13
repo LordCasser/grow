@@ -1,8 +1,5 @@
-//! Auxiliary vision-model support for images returned by `read_file`.
-//!
-//! The auxiliary route is opt-in. When no image-description model is
-//! configured, the session keeps the original multimodal tool-result path and
-//! lets the active model inspect the image directly.
+//! Auxiliary vision-model support for degrading image-bearing conversation
+//! groups after the active model is proven to accept text only.
 use crate::sampling::{Client as OaiCompatClient, ConversationRequest};
 use agent_client_protocol::ImageContent;
 use base64::Engine as _;
@@ -198,17 +195,15 @@ pub fn describe_prompt_fingerprint(
 pub fn content_fingerprint_bytes(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
-fn content_fingerprint_many(images: &[(Vec<u8>, String)]) -> String {
+fn content_fingerprint_urls(image_urls: &[std::sync::Arc<str>]) -> String {
     let mut hasher = blake3::Hasher::new();
-    for (bytes, mime_type) in images {
-        hasher.update(mime_type.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(bytes);
-        hasher.update(b"\0");
+    for url in image_urls {
+        hasher.update(&(url.len() as u64).to_le_bytes());
+        hasher.update(url.as_bytes());
     }
     hasher.finalize().to_hex().to_string()
 }
-/// Session-scoped cache for auxiliary image outputs: keyed by stable path,
+/// Session-scoped cache for auxiliary image outputs: keyed by source/group,
 /// image content, and describe-prompt fingerprint.
 #[derive(Debug, Default)]
 pub struct ImageDescribeCache {
@@ -233,24 +228,48 @@ impl ImageDescribeCache {
         source_context: &str,
         path_key: &str,
     ) -> Result<String, DescribeError> {
-        let content_fp = content_fingerprint_many(images);
-        let prompt_fp = describe_prompt_fingerprint(outline, current_query, source_context);
-        let cache_key = (path_key.to_owned(), content_fp, prompt_fp);
-        if let Some(d) = self.inner.lock().get(&cache_key).cloned() {
-            return Ok(d);
-        }
-        let image_urls: Vec<String> = images
+        let image_urls: Vec<std::sync::Arc<str>> = images
             .iter()
             .map(|(bytes, mime_type)| {
-                format!(
+                std::sync::Arc::<str>::from(format!(
                     "data:{};base64,{}",
                     mime_type,
                     base64::engine::general_purpose::STANDARD.encode(bytes)
-                )
+                ))
             })
             .collect();
+        self.get_or_describe_urls(
+            client,
+            model,
+            &image_urls,
+            outline,
+            current_query,
+            source_context,
+            path_key,
+        )
+        .await
+    }
+
+    /// Describe an already-normalized conversation image group. Successful
+    /// results share the same session cache as file-backed descriptions.
+    pub async fn get_or_describe_urls(
+        &self,
+        client: sampler::SamplingClient,
+        model: &str,
+        image_urls: &[std::sync::Arc<str>],
+        outline: Option<&str>,
+        current_query: &str,
+        source_context: &str,
+        group_key: &str,
+    ) -> Result<String, DescribeError> {
+        let content_fp = content_fingerprint_urls(image_urls);
+        let prompt_fp = describe_prompt_fingerprint(outline, current_query, source_context);
+        let cache_key = (group_key.to_owned(), content_fp, prompt_fp);
+        if let Some(description) = self.inner.lock().get(&cache_key).cloned() {
+            return Ok(description);
+        }
         let prompt_text = build_describe_prompt(outline, current_query, source_context);
-        let description = describe_images(client, model, prompt_text, &image_urls).await?;
+        let description = describe_images(client, model, prompt_text, image_urls).await?;
         self.inner.lock().insert(cache_key, description.clone());
         Ok(description)
     }
@@ -316,29 +335,40 @@ fn mime_to_extension(mime: &str) -> &'static str {
 }
 /// Errors surfaced by the image describe round-trip.
 ///
-/// Variants are kept distinct so the tool-result caller can branch
-/// — e.g. a [`Self::Sampling`] error is a transport problem that may
-/// resolve on retry, while [`Self::EmptyResponse`] indicates the vision
-/// model returned blank text and any retry will likely repeat the same
-/// outcome. The caller owns degradation policy; the configured auxiliary
-/// route surfaces a text failure and never silently falls back to inline image
-/// content or fakes a successful description.
-#[derive(Debug, thiserror::Error)]
+/// Variants are kept distinct so conversation recovery can distinguish an
+/// auxiliary runtime's explicit image rejection from ordinary transport,
+/// timeout, and empty-response failures. The caller owns negative-capability
+/// learning and permanent removal policy.
+#[derive(Debug)]
 pub enum DescribeError {
-    /// The describe sampling call itself failed (transport error, auth
-    /// failure, model not found, etc.). The string is the upstream error
-    /// rendered with `{e}` — opaque to this module but useful for the
-    /// caller's log line and the model-facing degraded message.
-    ///
-    #[error("image describe call failed: {0}")]
-    Sampling(String),
+    /// The describe sampling call itself failed. Structured classification is
+    /// retained so an explicit image HTTP 400 can teach the auxiliary
+    /// runtime's independent negative capability entry.
+    Sampling(sampler::SamplingErrorInfo),
+    /// The entire auxiliary request exceeded its local bound.
+    Timeout(std::time::Duration),
     /// The vision model returned blank text after `trim()`. This is a
     /// soft failure (the call itself succeeded) but the description is
     /// unusable.
     ///
-    #[error("image describe model returned no content")]
     EmptyResponse,
 }
+
+impl std::fmt::Display for DescribeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sampling(info) => write!(f, "image describe call failed: {}", info.message),
+            Self::Timeout(duration) => write!(
+                f,
+                "image describe call timed out after {}s",
+                duration.as_secs()
+            ),
+            Self::EmptyResponse => write!(f, "image describe model returned no content"),
+        }
+    }
+}
+
+impl std::error::Error for DescribeError {}
 /// Call the vision model and return its description text.
 ///
 /// The caller is responsible for prompt assembly and data URLs so this stays
@@ -347,7 +377,7 @@ pub async fn describe_images(
     client: OaiCompatClient,
     model: &str,
     prompt_text: String,
-    image_urls: &[String],
+    image_urls: &[std::sync::Arc<str>],
 ) -> Result<String, DescribeError> {
     let mut user_item = ConversationItem::User(UserItem {
         content: vec![ContentPart::Text {
@@ -358,22 +388,15 @@ pub async fn describe_images(
     });
     if let ConversationItem::User(u) = &mut user_item {
         for url in image_urls {
-            u.content.push(ContentPart::Image {
-                url: std::sync::Arc::<str>::from(url.clone()),
-            });
+            u.content.push(ContentPart::Image { url: url.clone() });
         }
     }
     let request = ConversationRequest::from_items(vec![user_item]).with_model(model);
     const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
     let response = tokio::time::timeout(DESCRIBE_TIMEOUT, client.conversation_collect(request))
         .await
-        .map_err(|_| {
-            DescribeError::Sampling(format!(
-                "image describe call timed out after {}s",
-                DESCRIBE_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| DescribeError::Sampling(format!("{e}")))?;
+        .map_err(|_| DescribeError::Timeout(DESCRIBE_TIMEOUT))?
+        .map_err(|error| DescribeError::Sampling(sampler::SamplingErrorInfo::from(&error)))?;
     let text = response
         .assistant()
         .map(|a| a.content.as_ref().to_owned())

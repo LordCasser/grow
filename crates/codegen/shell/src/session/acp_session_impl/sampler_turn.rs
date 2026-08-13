@@ -2,6 +2,155 @@
 //! facts/gates and retry, sampler config reconstruction, sampling-failure
 //! recovery, and per-response usage recording.
 use super::*;
+
+pub(super) const UNSUPPORTED_IMAGE_PLACEHOLDER: &str = "[Images removed: the active model does not support image input and no usable auxiliary description was available.]";
+const IMAGE_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
+
+/// Match a provider's unconditional model-capability claim without treating
+/// an open-ended format/size qualifier as a permanent text-only capability.
+/// Provider prose such as "does not support images with animated frames" is
+/// about one representation, not image input as a whole.
+fn contains_terminal_capability_claim(message: &str, claim: &str) -> bool {
+    message.match_indices(claim).any(|(start, _)| {
+        let suffix = &message[start + claim.len()..];
+        suffix
+            .chars()
+            .all(|ch| ch.is_whitespace() || ch.is_ascii_punctuation())
+    })
+}
+
+pub(super) fn is_image_input_unsupported(
+    error: &sampler::SamplingErrorInfo,
+    image_count: usize,
+) -> bool {
+    if image_count == 0
+        || !matches!(error.kind, sampler::SamplingErrorKind::Api)
+        || error.status_code != Some(400)
+    {
+        return false;
+    }
+
+    let message = error.message.to_ascii_lowercase();
+    if [
+        "invalid image",
+        "malformed image",
+        "corrupt image",
+        "image too large",
+        "image size",
+        "image dimensions",
+        "unsupported image format",
+        "alpha channel",
+        "transparency",
+        "transparent image",
+        "content policy",
+        "safety policy",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        return false;
+    }
+
+    let names_image_content = [
+        "image_url",
+        "input_image",
+        "image input",
+        "image content",
+        "content type image",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+    let text_only_model = [
+        "this text-only model only supports text input",
+        "this text only model only supports text input",
+        "this model only supports text",
+        "this model supports only text",
+        "this model only accepts text",
+        "this model accepts only text",
+        "model only supports text",
+        "model supports only text",
+        "only text input is supported",
+        "only text inputs are supported",
+        "only text content is supported",
+        "text-only model",
+        "text only model",
+    ]
+    .iter()
+    .any(|claim| contains_terminal_capability_claim(&message, claim));
+    let model_rejects_images = [
+        "model does not support images",
+        "model doesn't support images",
+        "model does not accept images",
+        "input_image is not supported by this model",
+        "image input is unsupported by this model",
+        "image inputs are unsupported by this model",
+        "images are not supported by this model",
+    ]
+    .iter()
+    .any(|claim| contains_terminal_capability_claim(&message, claim));
+    let image_type_rejected_as_text = [
+        "unknown variant",
+        "expected `text`",
+        "expected text",
+        "must be text",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+
+    text_only_model || model_rejects_images || (names_image_content && image_type_rejected_as_text)
+}
+
+fn model_image_input_key(
+    config: &sampling_types::SamplingConfig,
+) -> tools::types::resources::ModelImageInputKey {
+    model_image_input_key_parts(
+        &config.model,
+        &config.api_backend,
+        &config.base_url,
+        &config.query_params,
+    )
+}
+
+fn sampler_model_image_input_key(
+    config: &sampler::SamplerConfig,
+) -> tools::types::resources::ModelImageInputKey {
+    model_image_input_key_parts(
+        &config.model,
+        &config.api_backend,
+        &config.base_url,
+        &config.query_params,
+    )
+}
+
+fn model_image_input_key_parts(
+    model: &str,
+    api_backend: &sampling_types::ApiBackend,
+    base_url: &str,
+    query_params: &indexmap::IndexMap<String, String>,
+) -> tools::types::resources::ModelImageInputKey {
+    use sha2::{Digest, Sha256};
+    let api_backend = match api_backend {
+        sampling_types::ApiBackend::ChatCompletions => "chat_completions",
+        sampling_types::ApiBackend::Responses => "responses",
+        sampling_types::ApiBackend::Messages => "messages",
+    };
+    // The configured query is part of the effective provider route (Azure and
+    // compatible gateways commonly select deployments this way). Sort it so
+    // equivalent maps share one identity; only the digest is persisted, never
+    // query values that may contain credentials.
+    let mut query = query_params.iter().collect::<Vec<_>>();
+    query.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let mut endpoint = Sha256::new();
+    endpoint.update(base_url.as_bytes());
+    for (key, value) in query {
+        endpoint.update([0]);
+        endpoint.update(key.as_bytes());
+        endpoint.update([b'=']);
+        endpoint.update(value.as_bytes());
+    }
+    let endpoint_fingerprint = format!("{:x}", endpoint.finalize());
+    tools::types::resources::ModelImageInputKey::new(model, api_backend, endpoint_fingerprint)
+}
 /// Auth-failure detector for tool errors. Matches strictly on HTTP 401
 /// when the error carries a structured status code, mirroring
 /// `SamplingError::is_auth_error` in sampling-types: 403 is
@@ -27,6 +176,257 @@ pub(super) fn is_auth_tool_error(err: &tool_runtime::ToolError) -> bool {
         || lower.contains("invalid_token")
 }
 impl SessionActor {
+    pub(super) async fn current_model_image_input_key(
+        &self,
+    ) -> Option<tools::types::resources::ModelImageInputKey> {
+        self.chat_state_handle
+            .get_sampling_config()
+            .await
+            .as_ref()
+            .map(model_image_input_key)
+    }
+
+    async fn model_image_input_is_unsupported(
+        &self,
+        key: &tools::types::resources::ModelImageInputKey,
+    ) -> bool {
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let resources = bridge.shared_resources().await;
+        let resources = resources.lock().await;
+        resources
+            .get::<tools::types::resources::State<tools::types::resources::ModelImageInputState>>()
+            .is_some_and(|state| state.is_unsupported(key))
+    }
+
+    pub(super) async fn record_unsupported_model_image_input(
+        &self,
+        key: tools::types::resources::ModelImageInputKey,
+    ) -> std::io::Result<bool> {
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        bridge
+            .mark_model_image_input_unsupported_and_flush(key)
+            .await
+    }
+
+    pub(super) async fn unsupported_current_model_for_images(&self) -> Option<String> {
+        let key = self.current_model_image_input_key().await?;
+        self.model_image_input_is_unsupported(&key)
+            .await
+            .then(|| key.model().to_string())
+    }
+
+    async fn resolve_image_description_route(
+        &self,
+        rejected_key: &tools::types::resources::ModelImageInputKey,
+    ) -> Option<(
+        sampler::SamplingClient,
+        String,
+        tools::types::resources::ModelImageInputKey,
+    )> {
+        let configured_model = self.image_description_model.read().clone()?;
+        let mut sampler_config = match self.resolve_aux_sampler_config(&configured_model).await {
+            Some(config) => config,
+            None => {
+                tracing::warn!(
+                    configured_model,
+                    "configured image description model could not be resolved"
+                );
+                return None;
+            }
+        };
+        let active_session_config = self.reconstruct_full_config().await;
+        crate::agent::config::stamp_session_local_sampler_fields(
+            &mut sampler_config,
+            &active_session_config,
+            Some(self.max_retries.get()),
+        );
+        let auxiliary_key = sampler_model_image_input_key(&sampler_config);
+        if &auxiliary_key == rejected_key {
+            tracing::warn!(
+                model = auxiliary_key.model(),
+                "image description model resolves to the rejected text-only runtime"
+            );
+            return None;
+        }
+        if self.model_image_input_is_unsupported(&auxiliary_key).await {
+            tracing::info!(
+                model = auxiliary_key.model(),
+                "skipping known text-only image description runtime"
+            );
+            return None;
+        }
+        let model = sampler_config.model.clone();
+        let client = match sampler::SamplingClient::new(sampler_config) {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(%error, model, "failed to initialize image description model");
+                return None;
+            }
+        };
+        Some((client, model, auxiliary_key))
+    }
+
+    fn image_recovery_notification(report: chat_state::ImageRewriteReport) -> Option<String> {
+        match (report.converted_images, report.dropped_images) {
+            (0, 0) => None,
+            (converted, 0) => Some(format!(
+                "当前模型不支持图片输入；已使用辅助模型将 {converted} 张图片转换为文字描述并继续。"
+            )),
+            (0, dropped) => Some(format!(
+                "当前模型不支持图片输入；辅助多模态模型不可用，已移除 {dropped} 张图片并继续。"
+            )),
+            (converted, dropped) => Some(format!(
+                "当前模型不支持图片输入；已转换 {converted} 张图片，并移除 {dropped} 张无法转换的图片，随后继续。"
+            )),
+        }
+    }
+
+    /// Permanently degrade all canonical image groups for one text-only model
+    /// runtime, then acknowledge the actor-serialized persistence before the
+    /// caller rebuilds a request.
+    async fn rewrite_conversation_images_for_text_model(
+        &self,
+        rejected_key: &tools::types::resources::ModelImageInputKey,
+    ) -> Option<chat_state::ImageRewriteReport> {
+        use sampling_types::conversation::{ConversationImageSource, conversation_image_groups};
+
+        let conversation = self.chat_state_handle.get_conversation().await;
+        let groups = conversation_image_groups(&conversation);
+        if groups.is_empty() {
+            return Some(chat_state::ImageRewriteReport::default());
+        }
+        let mut rewrites = groups
+            .iter()
+            .map(|group| chat_state::ImageRewrite {
+                item_index: group.item_index,
+                fingerprint: group.fingerprint.clone(),
+                expected_image_count: group.image_count(),
+                replacement: None,
+            })
+            .collect::<Vec<_>>();
+
+        if let Some((client, model, auxiliary_key)) =
+            self.resolve_image_description_route(rejected_key).await
+        {
+            let (outline, current_query) =
+                crate::session::image_describe::build_read_context(&conversation);
+            let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
+            for (group, rewrite) in groups.iter().zip(rewrites.iter_mut()) {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    tracing::warn!(
+                        timeout_secs = IMAGE_RECOVERY_TIMEOUT.as_secs(),
+                        "image context recovery reached its total timeout"
+                    );
+                    break;
+                }
+                let source_kind = match group.source {
+                    ConversationImageSource::User => "User",
+                    ConversationImageSource::ToolResult => "ToolResult",
+                };
+                let source_text = tools::util::truncate::truncate_middle(
+                    group.source_text.as_ref(),
+                    crate::session::image_describe::CURRENT_QUERY_CAP,
+                );
+                let source_context = format!(
+                    "{source_kind} message at conversation position {}; {} image attachment(s), in attachment order. Existing message text:\n{source_text}",
+                    group.item_index,
+                    group.image_count(),
+                );
+                let describe = self.image_describe_cache.get_or_describe_urls(
+                    client.clone(),
+                    &model,
+                    &group.image_urls,
+                    outline.as_deref(),
+                    &current_query,
+                    &source_context,
+                    &group.fingerprint,
+                );
+                match tokio::time::timeout(remaining, describe).await {
+                    Ok(Ok(description)) => {
+                        rewrite.replacement = Some(
+                            crate::session::image_describe::render_image_description_block(
+                                &description,
+                            ),
+                        );
+                    }
+                    Ok(Err(crate::session::image_describe::DescribeError::Sampling(info)))
+                        if is_image_input_unsupported(&info, group.image_count()) =>
+                    {
+                        if let Err(error) = self
+                            .record_unsupported_model_image_input(auxiliary_key.clone())
+                            .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                model,
+                                "failed to persist auxiliary model image-input rejection"
+                            );
+                        }
+                        tracing::warn!(
+                            model,
+                            message = %info.message,
+                            "auxiliary model explicitly rejected image input"
+                        );
+                        break;
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            %error,
+                            model,
+                            item_index = group.item_index,
+                            "auxiliary image description failed; dropping this image group"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            timeout_secs = IMAGE_RECOVERY_TIMEOUT.as_secs(),
+                            "image context recovery reached its total timeout"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        let report = self
+            .chat_state_handle
+            .rewrite_images_and_ack(rewrites, UNSUPPORTED_IMAGE_PLACEHOLDER.to_owned())
+            .await?;
+        if report.unmatched_images > 0 {
+            tracing::warn!(
+                unmatched_images = report.unmatched_images,
+                "image rewrite snapshot changed before atomic commit; unmatched images were removed"
+            );
+        }
+        if let Some(message) = Self::image_recovery_notification(report) {
+            self.send_grow_notification(GrowSessionUpdate::ImageDropped {
+                notes: vec![message],
+            })
+            .await;
+        }
+        Some(report)
+    }
+
+    /// Pre-sampling gate for runtimes already present in the negative cache.
+    /// Unknown runtimes remain optimistic and receive the original images.
+    pub(super) async fn rewrite_images_for_known_text_model(
+        &self,
+    ) -> Result<chat_state::ImageRewriteReport, acp::Error> {
+        let Some(key) = self.current_model_image_input_key().await else {
+            return Ok(chat_state::ImageRewriteReport::default());
+        };
+        if !self.model_image_input_is_unsupported(&key).await {
+            return Ok(chat_state::ImageRewriteReport::default());
+        }
+        self.rewrite_conversation_images_for_text_model(&key)
+            .await
+            .ok_or_else(|| {
+                acp::Error::internal_error()
+                    .data("failed to persist text-only image recovery; sampling was not resumed")
+            })
+    }
+
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
         let mcp_wait_start = std::time::Instant::now();
         match self.mcp_strategy {
@@ -563,7 +963,9 @@ impl SessionActor {
     /// refreshed BYOK credentials. The previous client cache inside
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
-    pub(crate) async fn prepare_sampler_for_turn(&self) {
+    pub(crate) async fn prepare_sampler_for_turn(
+        &self,
+    ) -> tools::types::resources::ModelImageInputKey {
         self.refresh_byok_credential().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
@@ -572,7 +974,9 @@ impl SessionActor {
             sampler_config.doom_loop_recovery = None;
         }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.get().as_secs());
+        let image_input_key = sampler_model_image_input_key(&sampler_config);
         self.sampler_handle.update_config(sampler_config);
+        image_input_key
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
         ::diagnostics::unified_log::warn(
@@ -588,8 +992,38 @@ impl SessionActor {
     pub(crate) async fn handle_sampling_failure(
         self: &Arc<Self>,
         error: sampler::SamplingErrorInfo,
+        request_image_count: usize,
+        request_image_input_key: Option<tools::types::resources::ModelImageInputKey>,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use sampler::SamplingErrorKind;
+        if is_image_input_unsupported(&error, request_image_count)
+            && let Some(key) = request_image_input_key
+        {
+            let model = key.model().to_string();
+            let first_rejection = self
+                .record_unsupported_model_image_input(key.clone())
+                .await
+                .map_err(|persist_error| {
+                    acp::Error::internal_error().data(format!(
+                        "failed to persist text-only model capability: {persist_error}; sampling was not resumed"
+                    ))
+                })?;
+            tracing::warn!(
+                model,
+                request_image_count,
+                first_rejection,
+                "model explicitly rejected image input; rewriting canonical image context"
+            );
+            if self
+                .rewrite_conversation_images_for_text_model(&key)
+                .await
+                .is_none()
+            {
+                return Err(acp::Error::internal_error()
+                    .data("failed to persist text-only image recovery; sampling was not resumed"));
+            }
+            return Ok(SamplerFailureRecovery::ImageInputUnsupportedAndResubmit);
+        }
         if self.tool_context.task_output_token_budget.is_some() {
             self.tool_context.fail_task_output_usage_closed();
             let message = format!(
@@ -834,7 +1268,8 @@ impl SessionActor {
         self: &Arc<Self>,
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
-        self.prepare_sampler_for_turn().await;
+        let request_image_input_key = self.prepare_sampler_for_turn().await;
+        let request_image_count = request.image_count();
         let stream_drained_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.turn_stream_drained.lock() = Some(tx);
@@ -895,9 +1330,19 @@ impl SessionActor {
             Err(rich_err) => {
                 self.turn_stream_drained.lock().take();
                 let info = sampler::SamplingErrorInfo::from(&rich_err);
-                match self.handle_sampling_failure(info).await? {
+                match self
+                    .handle_sampling_failure(
+                        info,
+                        request_image_count,
+                        Some(request_image_input_key),
+                    )
+                    .await?
+                {
                     SamplerFailureRecovery::CompactAndResubmit => {
                         Ok(SamplerTurnOutcome::CompactAndResubmit)
+                    }
+                    SamplerFailureRecovery::ImageInputUnsupportedAndResubmit => {
+                        Ok(SamplerTurnOutcome::ImageInputUnsupportedAndResubmit)
                     }
                     SamplerFailureRecovery::RefreshByokAndResubmit { credential } => {
                         Ok(SamplerTurnOutcome::RefreshByokAndResubmit { credential })
@@ -1029,5 +1474,113 @@ impl SessionActor {
         }
         self.chat_state_handle
             .push_assistant_response(assistant_item);
+    }
+}
+
+#[cfg(test)]
+mod image_input_rejection_tests {
+    use super::*;
+
+    fn api_400(message: &str) -> sampler::SamplingErrorInfo {
+        sampler::SamplingErrorInfo {
+            kind: sampler::SamplingErrorKind::Api,
+            status_code: Some(400),
+            message: message.to_string(),
+            is_retryable: false,
+            retry_after_secs: None,
+            model_metadata: None,
+            empty_response_context: None,
+            doom_loop_triggers: None,
+            doom_loop_aborted_at_chunk: None,
+            credential: sampling_types::SentCredential::Unknown,
+        }
+    }
+
+    #[test]
+    fn recognizes_image_content_type_rejections() {
+        for message in [
+            "Failed to deserialize messages[18]: unknown variant `image_url`, expected `text`",
+            "input_image is not supported by this model",
+            "This text-only model only supports text input",
+            "Only text input is supported",
+            "This model does not support images",
+            "Unsupported image content type; content must be text",
+        ] {
+            assert!(
+                is_image_input_unsupported(&api_400(message), 1),
+                "expected rejection match for {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_false_positives_and_requires_image_api_400() {
+        for message in [
+            "invalid image_url: could not decode image",
+            "input_image is too large",
+            "unsupported image format: image/webp",
+            "data URLs in image_url are not supported; provide an HTTPS URL",
+            "image_url content type image/svg+xml is unsupported",
+            "could not fetch image_url from the provided URL",
+            "image dimensions exceed the provider limit",
+            "model does not support images with alpha channels",
+            "model does not support images with animated frames",
+            "model does not support images in CMYK format",
+            "model does not support images over 20 MB",
+            "model does not accept images encoded as progressive JPEG",
+            "model does not support images: animated GIF frames are rejected",
+            "model does not support images, except static PNG",
+            "invalid image_url.detail: only accepts text values",
+            "this model only supports text and image inputs; audio is unavailable",
+            "model supports only text or image_url content",
+            "this model only accepts text values for image_url.detail",
+            "transparent image input is not supported",
+            "image content rejected by content policy",
+            "invalid_request_error: malformed tool arguments",
+        ] {
+            assert!(
+                !is_image_input_unsupported(&api_400(message), 1),
+                "unexpected rejection match for {message:?}"
+            );
+        }
+        assert!(!is_image_input_unsupported(
+            &api_400("unknown variant `image_url`, expected `text`"),
+            0,
+        ));
+        let mut wrong_status = api_400("unknown variant `image_url`, expected `text`");
+        wrong_status.status_code = Some(413);
+        assert!(!is_image_input_unsupported(&wrong_status, 1));
+        wrong_status.status_code = Some(400);
+        wrong_status.kind = sampler::SamplingErrorKind::Http;
+        assert!(!is_image_input_unsupported(&wrong_status, 1));
+    }
+
+    #[test]
+    fn image_input_identity_includes_canonical_query_route() {
+        let backend = sampling_types::ApiBackend::ChatCompletions;
+        let left = indexmap::indexmap! {
+            "deployment".to_owned() => "vision".to_owned(),
+            "api-version".to_owned() => "2026-01-01".to_owned(),
+        };
+        let reordered = indexmap::indexmap! {
+            "api-version".to_owned() => "2026-01-01".to_owned(),
+            "deployment".to_owned() => "vision".to_owned(),
+        };
+        let text = indexmap::indexmap! {
+            "deployment".to_owned() => "text".to_owned(),
+            "api-version".to_owned() => "2026-01-01".to_owned(),
+        };
+        let left = model_image_input_key_parts("model", &backend, "https://api.test", &left);
+        let reordered =
+            model_image_input_key_parts("model", &backend, "https://api.test", &reordered);
+        let text = model_image_input_key_parts("model", &backend, "https://api.test", &text);
+        assert_eq!(
+            left, reordered,
+            "query insertion order is not route identity"
+        );
+        assert_ne!(
+            left, text,
+            "different routed deployments must not share state"
+        );
     }
 }

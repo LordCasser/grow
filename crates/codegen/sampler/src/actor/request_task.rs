@@ -760,54 +760,7 @@ fn retag(event: SamplingEvent, _request_id: &RequestId) -> SamplingEvent {
 /// `ResponseFailed`, server error event) and there is no captured raw
 /// error in the cell.
 fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
-    match info.kind {
-        SamplingErrorKind::IdleTimeout => SamplingError::IdleTimeout {
-            elapsed_secs: info
-                .message
-                .split_whitespace()
-                .find_map(|tok| tok.strip_suffix('s').and_then(|n| n.parse::<u64>().ok()))
-                .unwrap_or(0),
-        },
-        SamplingErrorKind::Auth => SamplingError::Auth {
-            message: info.message.clone(),
-            credential: info.credential,
-        },
-        // Must stay Serialization: EventStreamError is retryable, and a
-        // response-parse failure is deterministic on retry. `info.message`
-        // is the variant's rendered Display, so rebuild via the constructor
-        // that owns the prefix-stripping.
-        SamplingErrorKind::Serialization => {
-            SamplingError::serialization_from_rendered(&info.message)
-        }
-        SamplingErrorKind::Http => SamplingError::EventStreamError(info.message.clone()),
-        SamplingErrorKind::Api | SamplingErrorKind::RateLimited => {
-            let status = info
-                .status_code
-                .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
-                .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
-            SamplingError::Api {
-                status,
-                message: info.message.clone(),
-                model_metadata: info.model_metadata.clone(),
-                retry_after_secs: info.retry_after_secs,
-                should_retry: None,
-            }
-        }
-        SamplingErrorKind::EmptyResponse => {
-            if let Some(ctx) = &info.empty_response_context {
-                SamplingError::EmptyResponse {
-                    context: ctx.clone(),
-                }
-            } else {
-                SamplingError::EventStreamError(info.message.clone())
-            }
-        }
-        SamplingErrorKind::MaxTokensTruncation => SamplingError::MaxTokensTruncation,
-        SamplingErrorKind::DoomLoopDetected => SamplingError::DoomLoopDetected {
-            triggers: info.doom_loop_triggers.clone().unwrap_or_default(),
-            aborted_at_chunk: info.doom_loop_aborted_at_chunk,
-        },
-    }
+    crate::events::sampling_error_from_info(info)
 }
 
 /// Build an [`EmptyResponseContext`] from a completed-but-empty response.

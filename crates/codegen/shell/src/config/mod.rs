@@ -625,8 +625,8 @@ impl ManagedMcpsConfig {
 pub struct ModelOverrideConfig {
     /// `None` = current model.
     pub session_summary: Option<String>,
-    /// `None` disables auxiliary image description; the active model receives
-    /// image content directly.
+    /// Optional fallback used only after the active runtime is proven to reject
+    /// image input. The active runtime always receives the first image attempt.
     pub image_description: Option<String>,
     /// Next-prompt suggestion model pin. Unlike the other overrides this does
     /// NOT fill a compiled default — see [`PromptSuggestModelPin`].
@@ -681,7 +681,8 @@ fn non_empty_model_override(value: Option<&str>) -> Option<String> {
 }
 impl ModelOverrideConfig {
     /// CLI flag > env var > config.toml > remote settings. An absent auxiliary
-    /// image-description model means images stay on the active model path.
+    /// image-description model means a proven text-only runtime permanently
+    /// removes image groups instead of converting them to descriptions.
     /// `prompt_suggestion` resolves to a [`PromptSuggestModelPin`] instead of
     /// a model string (no CLI flag; the default and the catalog guard live at
     /// the consumer, `handle_suggest_prompt`).

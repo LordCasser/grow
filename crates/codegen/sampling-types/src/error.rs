@@ -195,6 +195,69 @@ pub enum SamplingError {
 }
 
 impl SamplingError {
+    /// Convert a backend's typed in-stream error into the same HTTP/auth
+    /// semantics it would have had if the server returned a non-2xx status.
+    /// This prevents authentication and request-shape failures carried inside
+    /// an HTTP 200 SSE stream from being mislabeled as retryable 500s.
+    pub fn from_stream_error(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+        let error_type = error_type.into();
+        let message = message.into();
+        let normalized: String = error_type
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if normalized.contains("authentication")
+            || normalized.contains("invalid_api_key")
+            || normalized == "unauthorized"
+        {
+            return Self::Auth {
+                message: format!("{error_type}: {message}"),
+                credential: SentCredential::Unknown,
+            };
+        }
+        let status = if normalized.contains("billing")
+            || normalized.contains("payment_required")
+            || normalized.contains("insufficient_quota")
+        {
+            StatusCode::PAYMENT_REQUIRED
+        } else if normalized.contains("permission") || normalized.contains("forbidden") {
+            StatusCode::FORBIDDEN
+        } else if normalized.contains("not_found") {
+            StatusCode::NOT_FOUND
+        } else if normalized.contains("request_too_large")
+            || normalized.contains("payload_too_large")
+        {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else if normalized.contains("rate_limit") || normalized.contains("too_many_requests") {
+            StatusCode::TOO_MANY_REQUESTS
+        } else if normalized.contains("overloaded")
+            || normalized.contains("service_unavailable")
+            || (normalized.contains("service") && normalized.contains("unavailable"))
+        {
+            StatusCode::from_u16(529).expect("529 is a valid status")
+        } else if normalized.contains("invalid")
+            || normalized.contains("unsupported")
+            || normalized.contains("bad_request")
+        {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        Self::Api {
+            status,
+            message: format!("{error_type}: {message}"),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        }
+    }
+
     /// Auth error of unknown wire provenance — for paths that never sent a
     /// request (config validation, cancellation, actor teardown) or that
     /// lost the provenance (legacy round trips).
@@ -292,20 +355,6 @@ impl SamplingError {
                 message,
                 ..
             } if message.contains("encrypted_content")
-        )
-    }
-
-    /// The API rejected the request because an inline image could not be
-    /// processed. Matches both direct 400 and proxy-wrapped 500 responses.
-    /// Exact-case match — consistent with `is_encrypted_content_error`.
-    pub fn is_image_processing_error(&self) -> bool {
-        matches!(
-            self,
-            SamplingError::Api {
-                status,
-                message,
-                ..
-            } if matches!(status.as_u16(), 400 | 500) && message.contains("Could not process image")
         )
     }
 
@@ -423,6 +472,8 @@ struct ErrorBody {
     message: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    #[serde(default)]
+    code: Option<serde_json::Value>,
 }
 
 /// Flat error from the Grow proxy/gateway: `{"code": "...", "error": "..."}`.
@@ -436,8 +487,30 @@ struct FlatErrorResponse {
 /// Extract `(error_type, message)` from either error format.
 fn try_parse_error(data: &str) -> Option<(String, String)> {
     if let Ok(resp) = serde_json::from_str::<ErrorResponse>(data) {
+        let specific_code = resp.error.code.and_then(|code| match code {
+            serde_json::Value::String(value) if !value.trim().is_empty() => Some(value),
+            // Some OpenAI-compatible gateways encode an HTTP status in
+            // `error.code`. Only recognize the closed status taxonomy here;
+            // provider-domain numbers (for example BigModel 12xx codes) must
+            // not hide a more informative `error.type`.
+            serde_json::Value::Number(value) => match value.as_u64() {
+                Some(400) => Some("bad_request".into()),
+                Some(401) => Some("unauthorized".into()),
+                Some(402) => Some("billing_error".into()),
+                Some(403) => Some("forbidden".into()),
+                Some(404) => Some("not_found_error".into()),
+                Some(413) => Some("request_too_large".into()),
+                Some(429) => Some("rate_limit_error".into()),
+                Some(500) => Some("server_error".into()),
+                Some(529) => Some("overloaded_error".into()),
+                _ => None,
+            },
+            _ => None,
+        });
         return Some((
-            resp.error.kind.unwrap_or_else(|| "unknown".to_string()),
+            specific_code
+                .or(resp.error.kind)
+                .unwrap_or_else(|| "unknown".to_string()),
             resp.error
                 .message
                 .unwrap_or_else(|| "unknown error".to_string()),
@@ -522,10 +595,7 @@ pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String
 pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
     let (error_type, message) = try_parse_error(data)?;
     tracing::warn!(error_type, message, "Server-side stream error");
-    Some(SamplingError::StreamError {
-        error_type,
-        message,
-    })
+    Some(SamplingError::from_stream_error(error_type, message))
 }
 
 /// True when an error message indicates a context-window overflow. Backends report
@@ -824,18 +894,45 @@ mod tests {
         let data = r#"{"code":"The service is currently unavailable","error":"Service temporarily unavailable. The model did not respond to this request."}"#;
         let err = try_parse_stream_error(data).expect("should parse flat error");
         match err {
-            SamplingError::StreamError {
-                error_type,
+            SamplingError::Api {
+                status,
                 message,
+                should_retry,
+                ..
             } => {
-                assert_eq!(error_type, "The service is currently unavailable");
+                assert_eq!(status.as_u16(), 529);
                 assert_eq!(
                     message,
-                    "Service temporarily unavailable. The model did not respond to this request."
+                    "The service is currently unavailable: Service temporarily unavailable. The model did not respond to this request."
                 );
+                assert_eq!(should_retry, None);
             }
-            other => panic!("expected StreamError, got {other:?}"),
+            other => panic!("expected typed Api error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn typed_stream_errors_preserve_non_retryable_auth_and_request_semantics() {
+        let auth = SamplingError::from_stream_error("authentication_error", "bad key");
+        assert!(matches!(auth, SamplingError::Auth { .. }));
+        assert!(!auth.is_retryable());
+
+        let invalid = SamplingError::from_stream_error("invalid_request_error", "bad shape");
+        assert!(matches!(
+            invalid,
+            SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            }
+        ));
+        assert!(!invalid.is_retryable());
+    }
+
+    #[test]
+    fn nested_stream_error_prefers_specific_code_over_generic_type() {
+        let data = r#"{"error":{"message":"Incorrect API key","type":"invalid_request_error","code":"invalid_api_key"}}"#;
+        let err = try_parse_stream_error(data).expect("should parse nested error");
+        assert!(matches!(err, SamplingError::Auth { .. }));
     }
 
     #[test]
@@ -1077,85 +1174,6 @@ mod tests {
         assert!(
             !err.is_encrypted_content_error(),
             "unrelated 400 errors must not match"
-        );
-    }
-
-    #[test]
-    fn image_processing_error_direct_400_detected() {
-        let err = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "Could not process image: unsupported format".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(err.is_image_processing_error());
-        assert!(!err.is_encrypted_content_error());
-    }
-
-    #[test]
-    fn image_processing_error_500_wrapped_detected() {
-        let err = SamplingError::Api {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "upstream error: 400 Bad Request: Could not process image".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(err.is_image_processing_error());
-    }
-
-    #[test]
-    fn image_processing_error_unrelated_400_not_detected() {
-        let err = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "Invalid model parameter".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(!err.is_image_processing_error());
-    }
-
-    #[test]
-    fn image_processing_error_unrelated_500_not_detected() {
-        let err = SamplingError::Api {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "internal server error".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(!err.is_image_processing_error());
-    }
-
-    #[test]
-    fn image_processing_error_wrong_status_not_detected() {
-        let err = SamplingError::Api {
-            status: StatusCode::BAD_GATEWAY,
-            message: "Could not process image".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(
-            !err.is_image_processing_error(),
-            "only 400 and 500 should match"
-        );
-    }
-
-    #[test]
-    fn image_processing_error_400_is_not_retryable_standalone() {
-        let err = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "Could not process image".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(
-            !err.is_retryable(),
-            "direct 400 must not be retryable by is_retryable()"
         );
     }
 }

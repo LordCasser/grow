@@ -260,6 +260,38 @@ fn scrub_first_party_credentials(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// Cancellation-safe ownership for an auth helper's process group. Tokio
+/// timeout/select cancellation drops the in-flight future, so teardown cannot
+/// live only in an explicit timeout branch. `ProcessGroup` already has the
+/// required Windows Job Object drop semantics; Unix needs this synchronous
+/// `killpg` on every unfinished exit path.
+struct AuthHelperProcessGuard {
+    group: tools::util::ProcessGroup,
+    armed: bool,
+}
+
+impl AuthHelperProcessGuard {
+    fn new(group: tools::util::ProcessGroup) -> Self {
+        Self { group, armed: true }
+    }
+
+    fn kill(&self) {
+        let _ = self.group.kill();
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AuthHelperProcessGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.kill();
+        }
+    }
+}
+
 /// Spawn `cmd`, capture stdout/stderr with a byte cap (reading both
 /// concurrently so a full pipe on one can't deadlock the other; a runaway helper
 /// is drained to a sink past the cap so it can't wedge the wait), and bound the
@@ -279,13 +311,18 @@ async fn run_capped(
         .spawn()
         .map_err(|e| anyhow::anyhow!("command failed to start: {e}"))?;
     // Enroll the child's process group so the timeout path can tear down the
-    // whole tree. Best-effort: if enrollment fails, `kill_on_drop` still reaps
-    // the direct child.
+    // whole tree. Enrollment is part of spawning a credential-bearing helper,
+    // not advisory: continuing after failure would knowingly leave a process
+    // tree outside the cancellation boundary.
     let mut group = tools::util::ProcessGroup::new()
         .map_err(|e| anyhow::anyhow!("process group setup failed: {e}"))?;
-    if let Err(e) = group.attach(&child) {
-        tracing::debug!(error = %e, "auth provider: could not enroll helper process group");
-    }
+    group
+        .attach(&child)
+        .map_err(|e| anyhow::anyhow!("auth helper process-group enrollment failed: {e}"))?;
+    group
+        .resume_enrolled(&child)
+        .map_err(|e| anyhow::anyhow!("auth helper resume after enrollment failed: {e}"))?;
+    let mut group = AuthHelperProcessGuard::new(group);
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let mut out_buf = Vec::new();
@@ -312,10 +349,11 @@ async fn run_capped(
     let status = match tokio::time::timeout(timeout, capture).await {
         Ok(res) => res?,
         Err(_elapsed) => {
-            let _ = group.kill();
+            group.kill();
             anyhow::bail!("command timed out after {}s", timeout.as_secs());
         }
     };
+    group.disarm();
     if out_buf.len() as u64 > PROVIDER_STDOUT_CAP_BYTES {
         anyhow::bail!("command wrote more than {PROVIDER_STDOUT_CAP_BYTES} bytes to stdout");
     }
@@ -400,6 +438,7 @@ async fn mint_provider_token(
         }
     }
     tools::util::detach_command(&mut cmd);
+    tty_utils::suspend_until_process_group_enrolled(&mut cmd);
     cmd.envs(tools::util::pager_env());
     // Scrub last so nothing above can reintroduce a first-party credential.
     scrub_first_party_credentials(&mut cmd);

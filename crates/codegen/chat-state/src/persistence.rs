@@ -33,6 +33,14 @@ pub trait ChatPersistence: Send + 'static {
     /// Replace the entire chat history (compaction / rewind).
     fn replace_history(&mut self, items: &[ConversationItem]);
 
+    /// Replace the entire chat history and acknowledge the durable commit.
+    /// Recovery paths that permanently discard unsupported content must not
+    /// update in-memory state or resample before this succeeds.
+    fn replace_history_and_ack(
+        &mut self,
+        items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>>;
+
     /// Flush pending writes to disk.
     fn flush(&mut self);
 }
@@ -61,6 +69,7 @@ pub struct MockChatPersistence {
     tx: mpsc::UnboundedSender<PersistenceRecord>,
     persistence_ack_tx:
         Option<mpsc::UnboundedSender<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>>>,
+    history_replacement_ack_tx: Option<mpsc::UnboundedSender<oneshot::Sender<io::Result<()>>>>,
     persisted_working_directory_switches: Vec<ConversationItem>,
 }
 
@@ -70,6 +79,7 @@ pub struct MockPersistenceReceiver {
     persistence_ack_rx: Option<
         mpsc::UnboundedReceiver<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>>,
     >,
+    history_replacement_ack_rx: Option<mpsc::UnboundedReceiver<oneshot::Sender<io::Result<()>>>>,
 }
 
 impl MockChatPersistence {
@@ -81,11 +91,13 @@ impl MockChatPersistence {
             Self {
                 tx,
                 persistence_ack_tx: None,
+                history_replacement_ack_tx: None,
                 persisted_working_directory_switches: Vec::new(),
             },
             MockPersistenceReceiver {
                 rx,
                 persistence_ack_rx: None,
+                history_replacement_ack_rx: None,
             },
         )
     }
@@ -98,11 +110,33 @@ impl MockChatPersistence {
             Self {
                 tx,
                 persistence_ack_tx: Some(persistence_ack_tx),
+                history_replacement_ack_tx: None,
                 persisted_working_directory_switches: Vec::new(),
             },
             MockPersistenceReceiver {
                 rx,
                 persistence_ack_rx: Some(persistence_ack_rx),
+                history_replacement_ack_rx: None,
+            },
+        )
+    }
+
+    /// Create a mock whose full-history replacement acknowledgement is
+    /// test-controlled.
+    pub fn new_with_manual_history_replacement_ack() -> (Self, MockPersistenceReceiver) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (history_replacement_ack_tx, history_replacement_ack_rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                tx,
+                persistence_ack_tx: None,
+                history_replacement_ack_tx: Some(history_replacement_ack_tx),
+                persisted_working_directory_switches: Vec::new(),
+            },
+            MockPersistenceReceiver {
+                rx,
+                persistence_ack_rx: None,
+                history_replacement_ack_rx: Some(history_replacement_ack_rx),
             },
         )
     }
@@ -123,6 +157,16 @@ impl MockPersistenceReceiver {
         &mut self,
     ) -> Option<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>> {
         match &mut self.persistence_ack_rx {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
+    }
+
+    /// Receive the next manual full-history replacement acknowledgement.
+    pub async fn next_history_replacement_ack(
+        &mut self,
+    ) -> Option<oneshot::Sender<io::Result<()>>> {
+        match &mut self.history_replacement_ack_rx {
             Some(rx) => rx.recv().await,
             None => None,
         }
@@ -185,6 +229,25 @@ impl ChatPersistence for MockChatPersistence {
             .send(PersistenceRecord::ReplaceHistory(items.to_vec()));
     }
 
+    fn replace_history_and_ack(
+        &mut self,
+        items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        let result = self
+            .tx
+            .send(PersistenceRecord::ReplaceHistory(items.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mock persistence closed"));
+        if let Err(error) = result {
+            let _ = reply.send(Err(error));
+        } else if let Some(ack_tx) = &self.history_replacement_ack_tx {
+            let _ = ack_tx.send(reply);
+        } else {
+            let _ = reply.send(Ok(()));
+        }
+        receiver
+    }
+
     fn flush(&mut self) {
         let _ = self.tx.send(PersistenceRecord::Flush);
     }
@@ -208,6 +271,14 @@ impl ChatPersistence for NullChatPersistence {
         receiver
     }
     fn replace_history(&mut self, _items: &[ConversationItem]) {}
+    fn replace_history_and_ack(
+        &mut self,
+        _items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        let _ = reply.send(Ok(()));
+        receiver
+    }
     fn flush(&mut self) {}
 }
 

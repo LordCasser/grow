@@ -716,7 +716,7 @@ async fn refusal_after_tool_use_blocks_keeps_tool_calls_stop_reason() {
 }
 
 #[tokio::test]
-async fn server_error_event_yields_failed_500() {
+async fn overloaded_error_event_preserves_retryable_529_status() {
     let err_event = MessageStreamEvent::Error {
         error: StreamError {
             r#type: "overloaded_error".into(),
@@ -729,7 +729,7 @@ async fn server_error_event_yields_failed_500() {
     match evs.last().unwrap() {
         SamplingEvent::Failed { error, .. } => {
             assert_eq!(error.kind, crate::events::SamplingErrorKind::Api);
-            assert_eq!(error.status_code, Some(500));
+            assert_eq!(error.status_code, Some(529));
             assert!(error.message.contains("overloaded_error"));
         }
         other => panic!("expected Failed, got {other:?}"),

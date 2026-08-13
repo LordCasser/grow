@@ -10,7 +10,7 @@ PDFs coexist in `FileContent`: text remains Markdown while
 - Office, OpenDocument, RTF, EPUB, and CSV content is converted to
   GitHub-Flavored Markdown by `anydoc`. PDF text uses the same
   `pdf-inspector` extraction engine that backs anydoc's PDF converter, because
-  the routing layer also needs its per-page OCR decisions.
+  the routing layer also needs its per-page text/raster classification.
 - Content signatures take precedence over the filename; the extension is a
   fallback for formats such as CSV that have no reliable magic bytes.
 - Converted Markdown uses the same line windowing, token limit, cursor rules,
@@ -25,7 +25,7 @@ PDFs do not use page rendering:
 
 1. `pdf-inspector` performs full-page classification and Markdown extraction.
 2. Text remains in `FileContent`.
-3. Pages reported as needing OCR are passed to `pdf-rs`; raster image XObjects
+3. Pages without a usable text layer are passed to `pdf-rs`; raster image XObjects
    are extracted from page resources and nested Form XObjects.
 4. Extracted images are normalized by the existing conversation image path and
    stored in `FileContent.extracted_images` in page/resource order.
@@ -41,18 +41,28 @@ non-PDF inputs. No `text` or `markdown` format aliases exist.
 
 ## Image-model ownership
 
-- With no `models.image_description`, direct image files and PDF-extracted
-  images remain multimodal content for the active model.
-- With `models.image_description = Some(model)`, that configured model owns
-  interpretation of both `ImageContent` and `FileContent.extracted_images`.
-  Its textual description is appended to the tool result; raw images are not
-  also sent to the active model.
-- An explicitly configured auxiliary model is never silently replaced by the
-  active model. Resolution, transport, or empty-response failures become a
-  visible textual failure.
-- Image-description requests inherit the configured model's sampling
-  parameters. User message attachments remain independent of this setting.
+- `read_file` always returns its existing typed projection: direct image files
+  become base64 `ImageContent`, while PDF text and ordered
+  `FileContent.extracted_images` coexist. It does not expose arbitrary binary
+  files as base64.
+- An active runtime whose image capability is unknown receives the original
+  image first. Configuring `models.image_description` does not preempt this
+  first multimodal attempt.
+- After an explicit image-type HTTP 400 proves the active runtime accepts text
+  only, chat-state groups every `User`/`ToolResult` message's attachments in
+  order. A distinct configured auxiliary runtime gets one description request
+  per group. Successful groups are permanently replaced by sanitized text;
+  unavailable, empty, timed-out, or failed groups are permanently replaced by
+  an explicit removal marker.
+- A known text-only runtime applies the same conversion/removal gate to later
+  `read_file` results before sampling, without manufacturing another 400.
+  Auxiliary runtimes have their own capability identity and may not resolve to
+  the already rejected active runtime.
+- There is no OCR service fallback in this pipeline. PDF raster extraction is
+  not OCR, and an auxiliary-model failure removes the image from conversation
+  history. The source file and user attachment stored under session assets are
+  not deleted, so a later `read_file` can create a new image-bearing message.
 
 `image_describe` owns prompt construction, bounded context, auxiliary sampling,
-output sanitization, and its session-local cache. Typed tool-result routing
-remains in `handle_bridge_tool_success`.
+structured error retention, output sanitization, and its session-local cache.
+Canonical replacement and persistence remain owned by the chat-state actor.

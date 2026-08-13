@@ -8012,6 +8012,7 @@ version = "1.1.7"
 dependencies = [
  "assert_matches",
  "async-openai",
+ "blake3",
  "compaction",
  "indexmap",
  "reqwest 0.13.4",

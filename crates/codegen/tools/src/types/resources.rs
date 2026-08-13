@@ -18,7 +18,7 @@ use crate::computer::types::{AsyncFileSystem, TerminalBackend};
 use crate::notification::types::ToolNotificationHandle;
 use serde::Serialize;
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -791,6 +791,60 @@ impl WebCitationCounter {
     }
 }
 register_resource!("grow_build", "WebCitation", WebCitationCounter);
+
+/// Stable identity for the image-input capability of one configured model
+/// runtime. The endpoint is represented by a fingerprint so session state does
+/// not persist credentials or other sensitive URL components.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct ModelImageInputKey {
+    model: String,
+    api_backend: String,
+    endpoint_fingerprint: String,
+}
+impl ModelImageInputKey {
+    pub fn new(
+        model: impl Into<String>,
+        api_backend: impl Into<String>,
+        endpoint_fingerprint: impl Into<String>,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            api_backend: api_backend.into(),
+            endpoint_fingerprint: endpoint_fingerprint.into(),
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+/// Session-local negative capability cache for model image input.
+///
+/// Missing entries remain optimistic: Grow tries image input until an API 400
+/// explicitly proves that this exact model/backend/endpoint only accepts text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelImageInputState {
+    #[serde(default)]
+    unsupported: BTreeSet<ModelImageInputKey>,
+}
+impl ModelImageInputState {
+    pub fn is_unsupported(&self, key: &ModelImageInputKey) -> bool {
+        self.unsupported.contains(key)
+    }
+
+    /// Returns `true` only when this is the first rejection recorded for `key`.
+    pub fn mark_unsupported(&mut self, key: ModelImageInputKey) -> bool {
+        self.unsupported.insert(key)
+    }
+
+    /// Roll back a negative-capability observation that could not be made
+    /// durable. Absence means unknown, never proven support.
+    pub fn forget_unsupported(&mut self, key: &ModelImageInputKey) -> bool {
+        self.unsupported.remove(key)
+    }
+}
+register_resource!("session", "ModelImageInput", ModelImageInputState);
 impl std::fmt::Debug for Terminal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Terminal").finish()

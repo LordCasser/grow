@@ -19,6 +19,31 @@ pub struct ModelMetadata {
     pub model_fingerprint: Option<String>,
 }
 
+/// Compare-and-swap input for one canonical conversation image group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRewrite {
+    pub item_index: usize,
+    pub fingerprint: String,
+    pub expected_image_count: usize,
+    /// Sanitized auxiliary description. `None` means the group must be
+    /// permanently removed because no usable description was produced.
+    pub replacement: Option<String>,
+}
+
+/// Counts from an actor-serialized canonical image rewrite.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImageRewriteReport {
+    pub converted_images: usize,
+    pub dropped_images: usize,
+    pub unmatched_images: usize,
+}
+
+impl ImageRewriteReport {
+    pub fn total_images(self) -> usize {
+        self.converted_images + self.dropped_images
+    }
+}
+
 /// Refusal reply for [`ChatStateCommand::RepairHistory`]: a turn was in
 /// flight, and in-flight tool calls must not be treated as dangling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +159,15 @@ pub enum ChatStateCommand {
     ReplaceConversation {
         items: Vec<ConversationItem>,
         is_compaction: bool,
+    },
+
+    /// Atomically replace every canonical user/tool-result image with either
+    /// an auxiliary description or an explicit removal marker. Matching and
+    /// mutation happen inside the actor so concurrent appends cannot be lost.
+    RewriteImagesAndAck {
+        rewrites: Vec<ImageRewrite>,
+        dropped_placeholder: String,
+        reply: oneshot::Sender<Option<ImageRewriteReport>>,
     },
 
     /// Out-of-band history repair (`grow/session/repair`): run
