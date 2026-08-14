@@ -16,7 +16,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-TAG="${ACT_RELEASE_TAG:-v1.1.8}"
+TAG="${ACT_RELEASE_TAG:-v1.1.9}"
 EVENT="${ROOT}/.github/act/workflow_dispatch.json"
 WF="${ROOT}/.github/workflows/release.yml"
 JOB="${1:-validate}"
