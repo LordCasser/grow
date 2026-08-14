@@ -2419,6 +2419,11 @@ pub(super) fn dispatch_dashboard_permission_followup(
 /// `None` + non-empty `freeform` submits the "Other" free-text answer.
 /// Delegates to [`AgentView::dashboard_answer_question`], which sends the
 /// ext-response; the peek closes once an answer is actually submitted.
+///
+/// Question answering is single-entry per session: this dispatch is only
+/// valid for `TopLevel` rows (the root session's own questions).
+/// `Subagent` rows refuse outright without consuming the child's parked
+/// response — enter the child fullscreen view to answer.
 pub(super) fn dispatch_dashboard_question_answer(
     app: &mut AppView,
     row: crate::views::dashboard::DashboardRowId,
@@ -2426,6 +2431,18 @@ pub(super) fn dispatch_dashboard_question_answer(
     option_idx: Option<usize>,
     freeform: String,
 ) -> Vec<Effect> {
+    if matches!(
+        row,
+        crate::views::dashboard::DashboardRowId::Subagent { .. }
+    ) {
+        // Defensive: the peek never surfaces child questions, so an answer
+        // dispatch for a subagent row must not consume the child's parked
+        // response (single answering entry = child fullscreen view).
+        if let Some(d) = app.dashboard.as_mut() {
+            d.set_error_toast("Open the subagent to answer");
+        }
+        return vec![];
+    }
     let Some(agent) = dashboard_row_view_mut(&mut app.agents, &row) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);

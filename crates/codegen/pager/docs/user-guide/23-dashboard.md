@@ -271,12 +271,19 @@ peek's reply **talks to the selected agent**:
   (type to add feedback)") and the ask-tool **"Other"** row ("Other
   (type your own answer)"). Type on it and `Enter` sends the rejection +
   message / the free-text answer.
-- This also covers the agent's **Ask tool** (`AskUserQuestion`): its
-  options + the "Other" row show in the peek, answered the same way.
-  **Multi-question** forms are walked one question at a time — a `(i/N)`
-  marker shows progress and each answer advances to the next, submitting
-  on the last. (Forms with a **multi-select** question are left to the
-  agent's own view — open the agent to answer those.)
+- This also covers the **top-level session's own** Ask tool
+  (`AskUserQuestion`): its options + the "Other" row show in the peek,
+  answered the same way. **Multi-question** forms are walked one question
+  at a time — a `(i/N)` marker shows progress and each answer advances to
+  the next, submitting on the last. (Forms with a **multi-select**
+  question are left to the agent's own view — open the agent to answer
+  those.)
+- A **subagent's** ask-tool question does not appear in the peek: the
+  panel keeps the plain `❯ reply` box. Press **`Enter`** on the subagent
+  row to open its full-screen view and answer the question there.
+  Subagent **permission** requests surface in the parent agent's
+  permission overlay, not in the dashboard peek — peek permission
+  answering covers only top-level sessions' own requests.
 
 The panel only renders when the terminal is tall enough; on very short
 terminals the dispatch box shows even with a row selected.

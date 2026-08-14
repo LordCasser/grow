@@ -4752,6 +4752,85 @@ fn dashboard_question_answer_walks_multiple_questions() {
     assert!(app.agents[&AgentId(0)].question_view.is_none());
     assert!(app.dashboard.as_ref().unwrap().peek.is_none());
 }
+/// Single-entry question answering: `dispatch_dashboard_question_answer`
+/// refuses subagent rows — no effects, no response consumption — because
+/// the child's question answers only inside its fullscreen view.
+#[serial_test::serial(GROW_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_question_answer_refuses_subagent_rows() {
+    use crate::views::prompt_widget::StashedPrompt;
+    use crate::views::question_view::QuestionViewState;
+    use tools::implementations::grow_build::ask_user_question::{
+        AskUserQuestionMode, Question, QuestionOption,
+    };
+    let mut app = test_app_with_agent();
+    let parent = AgentId(0);
+    let child_sid = "child-1";
+    let question = Question {
+        question: "Which DB?".to_string(),
+        options: vec![QuestionOption {
+            label: "Redis".to_string(),
+            description: String::new(),
+            preview: None,
+            id: None,
+        }],
+        multi_select: Some(false),
+        id: None,
+    };
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let mut child = AgentView::new(
+        make_test_agent_session(&app, AgentId(1), child_sid),
+        ScrollbackState::new(),
+    );
+    child.question_view = Some(QuestionViewState::with_response_tx(
+        Some(child_sid.to_string()),
+        "tc-child".to_string(),
+        vec![question],
+        StashedPrompt::default(),
+        Some(tx),
+        AskUserQuestionMode::Default,
+    ));
+    app.agents
+        .get_mut(&parent)
+        .unwrap()
+        .insert_subagent_view(child_sid.to_string(), Box::new(child));
+    app.agents
+        .get_mut(&parent)
+        .unwrap()
+        .subagent_sessions
+        .insert(child_sid.to_string(), make_test_subagent(child_sid, "sa-1"));
+    open_dashboard(&mut app);
+
+    let effects = dispatch_dashboard_question_answer(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::Subagent {
+            parent,
+            child_session_id: child_sid.to_string(),
+        },
+        "tc-child".to_string(),
+        Some(0),
+        String::new(),
+    );
+    assert!(effects.is_empty(), "refused dispatch must emit no effects");
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "the child's parked response must NOT be consumed by the refused dispatch"
+    );
+    let child_view = app.agents[&parent].subagent_views.get(child_sid).unwrap();
+    assert!(
+        child_view.question_view.is_some(),
+        "the child question must stay parked for the fullscreen answering entry"
+    );
+    let toast = app
+        .dashboard
+        .as_ref()
+        .and_then(|d| d.error_toast.clone())
+        .expect("the refusal should surface an error toast");
+    assert!(toast.contains("Open the subagent"), "got: {toast}");
+}
 /// The peek panel auto-opens when a row is selected (replacing the
 /// new-session input) and closes when the selection clears (e.g. the
 /// `[+ New Agent]` button is focused).

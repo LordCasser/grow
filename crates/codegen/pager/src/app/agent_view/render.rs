@@ -2036,8 +2036,25 @@ impl AgentView {
                         .tracker
                         .running_execute_tool_call_id()
                         .is_some();
-                let is_pending_user_input =
-                    !self.permission_queue.is_empty() || self.question_view.is_some();
+                // Child pending questions light the parent turn-status ◆ only
+                // for a NON-FINISHED subagent whose own ACP question is parked
+                // on its child view. This must stay in sync with
+                // `activity::AgentActivityProjection::from_agent`'s
+                // `child_question_pending` (same source-session match +
+                // non-finished guards): a finished child's residual question
+                // view (InteractionResolved lost in a reconnect race) or a
+                // child-local question (source_session_id == None, e.g. a
+                // /fork modal) must NOT light the diamond.
+                let is_pending_user_input = !self.permission_queue.is_empty()
+                    || self.question_view.is_some()
+                    || self.subagent_views.iter().any(|(child_sid, child)| {
+                        child.question_view.as_ref().is_some_and(|question| {
+                            question.source_session_id.as_deref() == Some(child_sid.as_str())
+                        }) && self
+                            .subagent_sessions
+                            .get(child_sid)
+                            .is_some_and(|info| !info.finished)
+                    });
                 let held_queue = self.held_queue_count();
                 let held_queue_top_sendable = self.held_queue_top_sendable();
                 let turn_output = turn_status::render_turn_status(
@@ -4373,6 +4390,76 @@ mod behavior_status_tests {
         assert!(
             text.contains("plan · executing"),
             "rendered prompt status: {text}"
+        );
+    }
+
+    #[test]
+    fn parent_turn_status_diamond_follows_child_pending_question() {
+        // The parent's turn-status ◆ lights only for a NON-FINISHED child's
+        // ACP question parked on its own view (the fix that made background
+        // subagent questions visible). A finished child's residual question
+        // view (InteractionResolved lost in a reconnect race) and a
+        // child-local question (source_session_id == None, e.g. a /fork
+        // modal) must NOT light the diamond — mirroring the activity
+        // projection's `child_question_pending` guards.
+        use crate::views::question_view::QuestionViewState;
+        use tools::implementations::grow_build::ask_user_question::AskUserQuestionMode;
+
+        // `child_question_source`: None = no question parked at all;
+        // Some(None) = local question (no source session);
+        // Some(Some(sid)) = ACP question owned by `sid`.
+        let render = |child_question_source: Option<Option<&str>>, finished: bool| {
+            let mut parent = make_agent();
+            parent.session.state = crate::app::agent::AgentState::TurnRunning;
+            if let Some(source) = child_question_source {
+                let mut child = make_agent();
+                child.question_view = Some(QuestionViewState::with_response_tx(
+                    source.map(str::to_string),
+                    "call-q".into(),
+                    vec![],
+                    child.prompt.stash(),
+                    None,
+                    AskUserQuestionMode::Default,
+                ));
+                parent
+                    .subagent_views
+                    .insert("child-1".into(), Box::new(child));
+                let mut info = super::super::test_fixtures::running_subagent_info("child-1");
+                info.finished = finished;
+                parent.subagent_sessions.insert("child-1".into(), info);
+            }
+            draw_text(&mut parent)
+        };
+
+        let diamond = crate::glyphs::diamond_filled().to_string();
+
+        // Positive: non-finished child with its own ACP question → ◆.
+        let positive = render(Some(Some("child-1")), false);
+        assert!(
+            positive.contains(&diamond),
+            "a non-finished child's parked ACP question must light the \
+             diamond; rendered:\n{positive}"
+        );
+        // Guard: finished child with a residual question view → no ◆.
+        let finished = render(Some(Some("child-1")), true);
+        assert!(
+            !finished.contains(&diamond),
+            "a finished child's residual question must not light the \
+             diamond; rendered:\n{finished}"
+        );
+        // Guard: child-local question (no source session) → no ◆.
+        let local = render(Some(None), false);
+        assert!(
+            !local.contains(&diamond),
+            "a child-local question (e.g. /fork) must not light the parent \
+             diamond; rendered:\n{local}"
+        );
+        // Control: no question at all → braille spinner, no ◆.
+        let none = render(None, false);
+        assert!(
+            !none.contains(&diamond),
+            "no diamond without any parked question (braille spinner \
+             instead); rendered:\n{none}"
         );
     }
 }

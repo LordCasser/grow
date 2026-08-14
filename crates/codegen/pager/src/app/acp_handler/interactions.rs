@@ -36,13 +36,13 @@ pub(crate) fn handle_ask_user_question(
     // user hasn't entered the session yet.
     let session_id = acp::SessionId::new(ext_req.session_id.clone());
     let Some(matched) = find_session_match(app, &session_id) else {
-        // No local view for this session. Do NOT send an error — that would FAIL
-        // the tool (rendered red). Leave the reverse-request unanswered: the
-        // agent keeps awaiting and the leader replays it when a client attaches
-        // via `session/load`.
+        // No local view for this session. Dropping `response_tx` makes the
+        // pager-side transport layer write back an error response for the
+        // unanswered reverse-request, so the tool FAILS FAST instead of the
+        // agent hanging until the 30-minute tool timeout.
         tracing::info!(
             session_id = %ext_req.session_id,
-            "ask_user_question for a session with no local view; parked for leader replay-on-attach"
+            "ask_user_question for a session with no local view; dropping response (tool will fail fast)"
         );
         drop(ext.response_tx);
         return false;
@@ -127,10 +127,11 @@ pub(crate) fn handle_ask_user_question(
         "Opened question view from ext_method"
     );
 
-    // Only the currently-displayed view needs an immediate redraw; a question
-    // parked on a background agent surfaces via the roster `NeedsInput` delta
-    // and renders when the user switches to that session.
-    is_active
+    // Every successfully-opened (or replaced) question returns true: even when
+    // the parked view is off-screen, the dashboard `NeedsInput` rows and the
+    // parent's turn-status ◆ indicator both derive from the parked state and
+    // must repaint immediately.
+    true
 }
 
 /// Handle a `grow/plan_approval` reverse request.
@@ -174,12 +175,13 @@ pub(super) fn handle_plan_approval(
     // when the user isn't currently focused on it — rather than failing.
     let session_id = acp::SessionId::new(params.session_id.clone());
     let Some(matched) = find_session_match(app, &session_id) else {
-        // No local view for this session. Do NOT error (that fails the tool):
-        // leave the reverse-request unanswered and rely on the leader's
-        // replay-on-attach.
+        // No local view for this session. Dropping `response_tx` makes the
+        // pager-side transport layer write back an error response for the
+        // unanswered reverse-request, so the tool FAILS FAST instead of the
+        // agent hanging until the 30-minute tool timeout.
         tracing::info!(
             session_id = %params.session_id,
-            "plan approval for a session with no local view; parked for leader replay-on-attach"
+            "plan approval for a session with no local view; dropping response (tool will fail fast)"
         );
         drop(ext.response_tx);
         return false;

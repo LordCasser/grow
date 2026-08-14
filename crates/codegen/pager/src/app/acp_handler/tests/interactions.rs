@@ -178,8 +178,9 @@
         let affected = handle(msg, &mut app);
 
         assert!(
-            !affected,
-            "a background-session question must not redraw the active view"
+            affected,
+            "a background-session question must still trigger a redraw so the \
+             dashboard NeedsInput row reflects it immediately"
         );
         assert!(
             app.agents.get(&AgentId(1)).unwrap().question_view.is_some(),
@@ -234,8 +235,9 @@
             "fullscreen child A must redraw for its own question"
         );
         assert!(
-            !handle(ask_b, &mut app),
-            "background sibling B does not redraw child A"
+            handle(ask_b, &mut app),
+            "background sibling B must still trigger a redraw so the dashboard \
+             and parent turn-status reflect B's parked question"
         );
 
         let parent = &app.agents[&AgentId(0)];
@@ -255,6 +257,62 @@
         );
         assert!(rx_a.try_recv().is_err(), "sibling B must not cancel A");
         assert!(rx_b.try_recv().is_err(), "both questions remain pending");
+    }
+
+    #[test]
+    fn background_child_question_flags_parent_needs_input() {
+        // A child that is NOT fullscreen (no active_subagent) asks a question:
+        // the question must stay parked on the child's own view while the
+        // parent's activity projection reports needs_input so the dashboard
+        // top-level row, the subagent row, and the parent turn-status ◆ all
+        // light up immediately.
+        let mut app = make_app_with_agent("sess-parent");
+        {
+            let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+            parent
+                .subagent_views
+                .insert("child-1".into(), Box::new(make_agent(Some("child-1"))));
+            parent
+                .subagent_sessions
+                .insert("child-1".into(), make_subagent_info("child-1"));
+        }
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "child-1",
+            "toolCallId": "tc-child-1",
+            "questions": [],
+            "mode": "default",
+        }))
+        .unwrap();
+        let msg = AcpClientMessage::ExtMethod(acp_transport::AcpArgs {
+            request: acp::ExtRequest::new("grow/ask_user_question", raw.into()),
+            response_tx: tx,
+        });
+
+        let affected = handle(msg, &mut app);
+
+        assert!(
+            affected,
+            "a background child question must trigger a redraw so the \
+             dashboard/turn-status chrome reflects it"
+        );
+        let parent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            crate::app::activity::AgentActivityProjection::from_agent(parent).needs_input,
+            "a non-finished child with a pending question must set needs_input"
+        );
+        assert!(
+            parent.question_view.is_none(),
+            "the question must stay on the child view, not hoist to the parent"
+        );
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "response must still be parked on the child view, waiting for the user"
+        );
     }
 
     #[test]

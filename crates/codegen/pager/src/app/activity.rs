@@ -35,11 +35,23 @@ impl AgentActivityProjection {
             question.source_session_id.is_none()
                 || question.source_session_id.as_deref() == root_session_id
         });
+        // A question parked on a non-finished child view (its own
+        // `question_view`, not hoisted onto the parent) still demands user
+        // input, so the dashboard NeedsInput rows light up while the child
+        // waits in the background.
+        let child_question_pending = agent.subagent_views.iter().any(|(child_sid, child)| {
+            child.question_view.as_ref().is_some_and(|question| {
+                question.source_session_id.as_deref() == Some(child_sid.as_str())
+            }) && agent
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|info| !info.finished)
+        });
         Self {
             foreground_busy: !agent.session.state.is_idle()
                 || agent.session.turn_activity().is_some(),
             queued_prompts: !agent.session.pending_prompts.is_empty(),
-            needs_input: root_permission_pending || root_question_pending,
+            needs_input: root_permission_pending || root_question_pending || child_question_pending,
             replaying: agent.session.loading_replay,
             background_tasks: agent
                 .session
@@ -104,5 +116,107 @@ mod tests {
         assert!(projection.queued_prompts);
         assert!(projection.working());
         assert!(!projection.animates());
+    }
+    fn make_subagent_info(finished: bool) -> crate::app::subagent::SubagentInfo {
+        crate::app::subagent::SubagentInfo {
+            subagent_id: std::sync::Arc::from("sa-child-1"),
+            child_session_id: std::sync::Arc::from("child-1"),
+            description: std::sync::Arc::from("test child"),
+            subagent_type: std::sync::Arc::from("general-purpose"),
+            persona: None,
+            role: None,
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            started_at: std::time::Instant::now(),
+            last_progress_at: std::time::Instant::now(),
+            finished,
+            status: None,
+            error: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: None,
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            prompt: None,
+            child_cwd: None,
+            worktree_path: None,
+            child_updates_replayed: false,
+        }
+    }
+
+    /// Parent with one child view keyed `child-1`; optionally parks an
+    /// ACP-style question on the child's own `question_view`.
+    fn parent_with_child_question(finished: bool, park_question: bool) -> AgentView {
+        let mut parent = test_agent_view(Some("parent-sess"), "/tmp".into());
+        let mut child = test_agent_view(Some("child-1"), "/tmp".into());
+        if park_question {
+            let stashed = child.prompt.stash();
+            child.question_view = Some(crate::views::question_view::QuestionViewState::with_response_tx(
+                Some("child-1".into()),
+                "call-q".into(),
+                vec![],
+                stashed,
+                None,
+                tools::implementations::grow_build::ask_user_question::AskUserQuestionMode::Default,
+            ));
+        }
+        parent
+            .subagent_views
+            .insert("child-1".into(), Box::new(child));
+        parent
+            .subagent_sessions
+            .insert("child-1".into(), make_subagent_info(finished));
+        parent
+    }
+
+    #[test]
+    fn child_pending_question_projects_needs_input() {
+        let parent = parent_with_child_question(false, true);
+        let projection = AgentActivityProjection::from_agent(&parent);
+        assert!(
+            projection.needs_input,
+            "a non-finished child with a parked question must set needs_input"
+        );
+        assert!(
+            parent.question_view.is_none(),
+            "the child question must not hoist onto the parent view"
+        );
+    }
+
+    #[test]
+    fn finished_child_question_does_not_project_needs_input() {
+        let parent = parent_with_child_question(true, true);
+        let projection = AgentActivityProjection::from_agent(&parent);
+        assert!(
+            !projection.needs_input,
+            "a finished child must not contribute needs_input"
+        );
+    }
+
+    #[test]
+    fn child_without_question_does_not_project_needs_input() {
+        let parent = parent_with_child_question(false, false);
+        let projection = AgentActivityProjection::from_agent(&parent);
+        assert!(
+            !projection.needs_input,
+            "a non-finished child with no question must not set needs_input"
+        );
     }
 }

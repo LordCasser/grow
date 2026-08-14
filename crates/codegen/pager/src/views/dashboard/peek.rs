@@ -240,16 +240,21 @@ impl PeekPanelState {
     }
 }
 
-/// Compute the live display fields for a dashboard row.
+/// Compute the pending-interaction display fields for one session view.
 ///
-/// Returns `None` when the row's owning agent (or subagent) no longer
-/// exists, signalling the caller to close the peek. Extracted from the
-/// dashboard dispatcher so both the initial open and the per-frame
-/// refresh share one source of truth.
+/// Permission requests surface for every session (matched by
+/// `session_id`) — peek answering of permissions is unchanged for both
+/// top-level and subagent rows. Ask-user-question fields surface only
+/// when `questions_enabled`: question answering is single-entry per
+/// session, the root session answers in the peek (`TopLevel` rows) and a
+/// subagent answers only inside its child fullscreen view (`Subagent`
+/// rows pass `questions_enabled = false` so the peek degrades to the
+/// plain reply box).
 fn pending_interaction_peek(
     agent: &AgentView,
     session_id: &str,
     include_local_question: bool,
+    questions_enabled: bool,
 ) -> (
     Option<String>,
     Vec<(String, String)>,
@@ -302,6 +307,13 @@ fn pending_interaction_peek(
         return (Some(q), options, Some(p.id), None, reject);
     }
 
+    if !questions_enabled {
+        // Subagent rows: the peek never surfaces child questions. The
+        // single answering entry is the child fullscreen view, so the
+        // panel falls through to the plain reply box.
+        return (None, Vec::new(), None, None, None);
+    }
+
     let Some((qv, question)) = agent.question_view.as_ref().and_then(|qv| {
         let belongs_to_session = qv.source_session_id.as_deref() == Some(session_id)
             || (include_local_question && qv.source_session_id.is_none());
@@ -351,6 +363,18 @@ fn pending_interaction_peek(
     )
 }
 
+/// Compute the live display fields for a dashboard row.
+///
+/// Returns `None` when the row's owning agent (or subagent) no longer
+/// exists, signalling the caller to close the peek. Extracted from the
+/// dashboard dispatcher so both the initial open and the per-frame
+/// refresh share one source of truth.
+///
+/// Single-entry question answering: `TopLevel` rows surface the root
+/// session's own `AskUserQuestion` in the peek; `Subagent` rows never
+/// surface child questions (the peek degrades to the plain reply box) —
+/// enter the child fullscreen view to answer. Permission requests keep
+/// surfacing on both row kinds.
 pub fn compute_peek_fields(
     row: &DashboardRowId,
     agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
@@ -369,7 +393,7 @@ pub fn compute_peek_fields(
                 .unwrap_or_default();
             let root_session_id = agent.session.session_id.as_ref()?.0.as_ref();
             let (question, options, request_id, question_id, reject_option) =
-                pending_interaction_peek(agent, root_session_id, true);
+                pending_interaction_peek(agent, root_session_id, true, true);
             Some(PeekFields {
                 label,
                 time_ago,
@@ -402,7 +426,7 @@ pub fn compute_peek_fields(
             let time_ago =
                 crate::util::format_time_ago(now.saturating_duration_since(info.last_progress_at));
             let (question, options, request_id, question_id, reject_option) = child
-                .map(|child| pending_interaction_peek(child, child_session_id, false))
+                .map(|child| pending_interaction_peek(child, child_session_id, false, false))
                 .unwrap_or_else(|| (None, Vec::new(), None, None, None));
             Some(PeekFields {
                 label,
@@ -1553,6 +1577,93 @@ mod tests {
         );
         assert_eq!(state.question_id.as_deref(), Some("ask-2"));
         assert_eq!(state.selected_option, None);
+    }
+
+    /// Single-entry question answering: a child question parked on the
+    /// subagent's own view must NOT surface in the subagent peek (the
+    /// answering entry is the child fullscreen view), while the same
+    /// agent's root question still surfaces on the `TopLevel` peek.
+    #[test]
+    fn subagent_peek_suppresses_questions_but_root_peek_keeps_them() {
+        use crate::views::question_view::QuestionViewState;
+        use tools::implementations::grow_build::ask_user_question::{
+            AskUserQuestionMode, Question, QuestionOption,
+        };
+
+        let single_question = |text: &str| Question {
+            question: text.to_string(),
+            options: vec![QuestionOption {
+                label: "Yes".to_string(),
+                description: String::new(),
+                preview: None,
+                id: None,
+            }],
+            multi_select: Some(false),
+            id: None,
+        };
+
+        let mut parent = crate::app::agent_view::test_agent_view(Some("root-sess"), "/tmp".into());
+        let mut child = crate::app::agent_view::test_agent_view(Some("child-sess"), "/tmp".into());
+        child.question_view = Some(QuestionViewState::with_response_tx(
+            Some("child-sess".into()),
+            "tc-child".into(),
+            vec![single_question("Child choice?")],
+            child.prompt.stash(),
+            None,
+            AskUserQuestionMode::Default,
+        ));
+        parent
+            .subagent_views
+            .insert("child-sess".into(), Box::new(child));
+        parent.subagent_sessions.insert(
+            "child-sess".into(),
+            crate::app::agent_view::test_fixtures::running_subagent_info("child-sess"),
+        );
+
+        let mut agents = indexmap::IndexMap::new();
+        agents.insert(AgentId(0), parent);
+        let now = std::time::Instant::now();
+
+        let sub_fields = compute_peek_fields(
+            &DashboardRowId::Subagent {
+                parent: AgentId(0),
+                child_session_id: "child-sess".into(),
+            },
+            &agents,
+            now,
+        )
+        .expect("subagent row must be peekable");
+        assert_eq!(
+            sub_fields.question_id, None,
+            "child questions must not surface in the subagent peek"
+        );
+        assert!(
+            sub_fields.options.is_empty(),
+            "subagent peek must degrade to the plain reply box, got: {:?}",
+            sub_fields.options
+        );
+        assert!(sub_fields.question.is_none());
+        assert!(sub_fields.request_id.is_none());
+
+        // Regression guard: the root's own question (local, no source
+        // session) still surfaces on the TopLevel peek for the SAME agent.
+        agents.get_mut(&AgentId(0)).unwrap().question_view =
+            Some(QuestionViewState::with_response_tx(
+                None,
+                "tc-root".into(),
+                vec![single_question("Root choice?")],
+                agents.get_mut(&AgentId(0)).unwrap().prompt.stash(),
+                None,
+                AskUserQuestionMode::Default,
+            ));
+        let top_fields = compute_peek_fields(&DashboardRowId::TopLevel(AgentId(0)), &agents, now)
+            .expect("root row must be peekable");
+        assert_eq!(top_fields.question_id.as_deref(), Some("tc-root"));
+        assert!(
+            !top_fields.options.is_empty(),
+            "root questions must keep surfacing in the top-level peek"
+        );
+        assert!(top_fields.question.is_some());
     }
 
     /// `render_peek_panel` paints a single rounded box
