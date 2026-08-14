@@ -261,12 +261,10 @@ pub struct EnsureLatestOutcome {
 /// hourly re-download while a busy leader keeps deferring its relaunch.
 ///
 /// When the disk version is unknowable ([`disk_version_for_installer`]:
-/// On installations without a readable managed symlink (for example dev builds), this
-/// degrades to the pre-fix behavior — download when the *running* process is
-/// stale, relaunch only after a download this pass actually installed
-/// something. Note the Windows consequence: the hourly busy-leader
-/// re-download is NOT fixed there; only the symlink layout can prove the
-/// disk is current without exec'ing the binary.
+/// the install target cannot be resolved or `--version` cannot be parsed),
+/// this degrades to the pre-fix behavior — download when the *running*
+/// process is stale, relaunch only after a download this pass actually
+/// installed something.
 pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<EnsureLatestOutcome> {
     let mut outcome = EnsureLatestOutcome {
         installed: None,
@@ -285,7 +283,9 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
     };
 
     let effective_current =
-        disk_version_for_installer(installer).unwrap_or_else(get_installed_version);
+        disk_version_for_installer(installer)
+            .await
+            .unwrap_or_else(get_installed_version);
     if needs_update(
         &effective_current,
         &target,
@@ -302,8 +302,9 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
     // channel's update direction — covers binaries installed by other
     // processes, not just the install above.
     let running = get_installed_version();
-    if let Some(disk_now) =
-        disk_version_for_installer(installer).or_else(|| outcome.installed.clone())
+    if let Some(disk_now) = disk_version_for_installer(installer)
+        .await
+        .or_else(|| outcome.installed.clone())
     {
         outcome.relaunch_needed =
             needs_update(&running, &disk_now, &update_config.channel, allow_downgrade)
@@ -312,16 +313,301 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
     Ok(outcome)
 }
 
-/// Disk-version probe gated on the installer actually maintaining the
-/// managed `~/.grow/bin/grow` symlink.
+/// Disk-version probe for the update-staleness decision.
 ///
-/// Only the GitHub Release installer writes that symlink. GitHub Release manages its own
-/// global install, so its disk version cannot be inferred from this layout.
-fn disk_version_for_installer(installer: &str) -> Option<String> {
+/// Probes the binary the user actually runs ([`resolve_install_target`]) —
+/// the same target an install would replace — so a binary another process
+/// already landed (TUI background download, leader hourly checker, explicit
+/// `grow update`) is never downloaded a second time. `None` when the target
+/// cannot be resolved or its version cannot be established (unknown, never
+/// "up to date").
+async fn disk_version_for_installer(installer: &str) -> Option<String> {
     match installer {
-        "gh-release" => crate::version::installed_on_disk_version(),
+        "gh-release" => {
+            let target = resolve_install_target(None).ok()?;
+            probe_target_version(&target.path).await
+        }
         _ => None,
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Install-target resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Where `grow update` will land the next binary: the `grow` the user
+/// actually runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallTarget {
+    /// Path of the target, guaranteed to exist at resolve time.
+    pub path: std::path::PathBuf,
+    /// How that path is installed on disk — decides the landing strategy.
+    pub kind: TargetKind,
+}
+
+/// How the update target is installed on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKind {
+    /// The managed `~/.grow/bin/grow` layout the updater maintains
+    /// (`grow` + `agent` links swapped in lockstep).
+    Managed,
+    /// A symlink (Unix) pointing at the real binary; the link itself is
+    /// swapped and the old target file is left untouched.
+    Symlink,
+    /// A plain executable file. On Windows this also covers symlinks and
+    /// junctions, which are written through (the link is preserved).
+    RegularFile,
+}
+
+/// Split a PATHEXT string into its suffix entries, dropping empty parts.
+///
+/// PATHEXT is `;`-separated on Windows (independent of locale) and the
+/// cmd.exe default is `;.COM;.EXE;.BAT;.CMD`. Parsed in a platform-free way
+/// so the Windows candidate order is unit-testable anywhere.
+fn parse_pathext(raw: Option<&str>) -> Vec<String> {
+    let raw = raw.unwrap_or(";.COM;.EXE;.BAT;.CMD");
+    raw.split(';')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Candidate file names for the grow binary in PATH lookup order.
+///
+/// Always the bare name first. On Windows each PATHEXT suffix is appended in
+/// order (`grow`, `grow.COM`, `grow.EXE`, ...), the same order cmd.exe
+/// resolves a bare command — minus the cwd and App Paths registry lookups
+/// that `where` performs (deliberate omissions, see `resolve_install_target`).
+/// On Unix the list is exactly the bare name.
+fn path_lookup_candidates(with_pathext: bool, pathext: Option<&str>) -> Vec<String> {
+    let mut names = vec!["grow".to_string()];
+    if with_pathext {
+        names.extend(
+            parse_pathext(pathext)
+                .into_iter()
+                .map(|ext| format!("grow{ext}")),
+        );
+    }
+    names
+}
+
+/// First `entry.join(candidate)` that exists and is usable as an executable,
+/// in entry-major then candidate-major order; `None` when nothing matches.
+///
+/// Pure — PATH/PATHEXT are read by the caller — so the candidate order, the
+/// Unix X_OK rule, directory skipping and relative-entry resolution are
+/// unit-testable on any platform. Relative entries (including empty ones)
+/// resolve against the current directory, matching `execvp(3)`.
+fn first_existing_in_path(
+    entries: &[std::path::PathBuf],
+    candidates: &[String],
+) -> Option<std::path::PathBuf> {
+    for entry in entries {
+        for name in candidates {
+            let candidate = entry.join(name);
+            let Ok(meta) = std::fs::metadata(&candidate) else {
+                continue;
+            };
+            if meta.is_dir() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+            }
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Locate the `grow` the user's shell would run: a PATH lookup equivalent
+/// to `which grow`.
+///
+/// PATH and PATHEXT are read **at call time** — never cached — so tests can
+/// inject the environment per call.
+fn find_grow_on_path() -> Option<std::path::PathBuf> {
+    let entries: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    let pathext = std::env::var_os("PATHEXT").and_then(|v| v.into_string().ok());
+    let candidates = path_lookup_candidates(cfg!(windows), pathext.as_deref());
+    first_existing_in_path(&entries, &candidates)
+}
+
+/// Classify how `path` is installed on disk, given the managed application
+/// path. Canonical comparisons are `dunce`-normalized; on Windows the
+/// managed check is case-insensitive and every symlink/junction resolves to
+/// its final file (written through, link preserved).
+fn classify_target(path: &std::path::Path, managed: &std::path::Path) -> TargetKind {
+    let is_managed = match (dunce::canonicalize(path), dunce::canonicalize(managed)) {
+        (Ok(p), Ok(m)) => {
+            if cfg!(windows) {
+                p.as_os_str().eq_ignore_ascii_case(m.as_os_str())
+            } else {
+                p == m
+            }
+        }
+        _ => false,
+    };
+    if is_managed {
+        return TargetKind::Managed;
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(meta) = std::fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return TargetKind::Symlink;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: symlinks and junctions are written through — replacing
+        // the file they point at, never the link itself.
+        let _ = path;
+    }
+    TargetKind::RegularFile
+}
+
+/// Resolve the binary `grow update` replaces: the `grow` on PATH if any
+/// (equivalent to `which grow`), else `exe_override` when given, else this
+/// process's own executable.
+///
+/// PATH/PATHEXT are read at call time (never cached) so callers and tests
+/// can control the lookup via the environment.
+pub fn resolve_install_target(exe_override: Option<std::path::PathBuf>) -> Result<InstallTarget> {
+    let path = match find_grow_on_path() {
+        Some(path) => path,
+        None => match exe_override {
+            Some(path) => path,
+            None => std::env::current_exe()
+                .map_err(|e| anyhow::anyhow!("cannot resolve the running grow binary: {e}"))?,
+        },
+    };
+    let kind = classify_target(&path, &grow_application());
+    Ok(InstallTarget { path, kind })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Target version probe (validation + disk staleness)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Process-wide memo of [`probe_target_version`] results keyed by the probe
+/// path and its canonical form, so concurrent updaters in one process don't
+/// re-exec the target repeatedly. Invalidated by
+/// [`land_binary_on_target`] after a swap so the post-install probe sees the
+/// new version (download-dedup closure).
+static PROBE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Option<String>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn probe_cache_key(path: &std::path::Path) -> std::path::PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Drop cached probe results for `path` (literal and canonical keys) after a
+/// swap, so the next probe reflects the new binary.
+fn invalidate_probe_cache(path: &std::path::Path) {
+    let mut cache = PROBE_CACHE.lock().unwrap();
+    cache.remove(path);
+    if let Ok(canonical) = dunce::canonicalize(path) {
+        cache.remove(&canonical);
+    }
+}
+
+/// Parse `grow --version` stdout: strip the `grow ` prefix, take the first
+/// whitespace-delimited token, require valid semver.
+///
+/// Handles `grow 0.1.181\n`, the commit-suffixed build
+/// (`grow 0.1.181 (bde00506) [stable]\n`) and channel suffixes; garbage
+/// input yields `None`.
+fn parse_version_output(stdout: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    let token = text.strip_prefix("grow ")?.split_whitespace().next()?;
+    semver::Version::parse(token).ok()?;
+    Some(token.to_string())
+}
+
+/// Probe a binary's version by exec'ing `path --version` (detached, silent,
+/// [`SMOKE_TEST_TIMEOUT`]-bounded). Any failure — spawn error, timeout,
+/// non-zero exit, unparseable output — yields `None`.
+async fn probe_version_by_exec(path: &std::path::Path) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(path);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
+        // Piped, not null: the version is read back from stdout. The
+        // process is detached and stderr is null, so the probe stays silent.
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    tools::util::detach_command(&mut cmd);
+    let output = tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_version_output(&output.stdout)
+}
+
+async fn probe_target_version_uncached(path: &std::path::Path) -> Option<String> {
+    // File-name parsing first: the canonical path's file name recognizes the
+    // managed layout (`grow-0.1.181-macos-aarch64`) without running anything.
+    if let Ok(canonical) = dunce::canonicalize(path)
+        && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
+        && let Some(version) = crate::version::version_from_versioned_binary_name(name, "grow")
+    {
+        return Some(version);
+    }
+    probe_version_by_exec(path).await
+}
+
+/// Best-effort version probe of `path`, used both as the target-validation
+/// gate and as the disk-staleness source.
+///
+/// File-name parsing first (no exec), then `path --version`. Any failure
+/// yields `None` — **`None` means "unknown", never "already up to date"** —
+/// so callers keep falling back to the running version. Results are
+/// memoized per path (concurrent-updater dedup) and invalidated by
+/// [`land_binary_on_target`].
+pub async fn probe_target_version(path: &std::path::Path) -> Option<String> {
+    let key = probe_cache_key(path);
+    if let Some(hit) = PROBE_CACHE.lock().unwrap().get(&key).cloned() {
+        return hit;
+    }
+    let result = probe_target_version_uncached(path).await;
+    PROBE_CACHE.lock().unwrap().insert(key, result.clone());
+    result
+}
+
+/// Gate before replacing `target`: never overwrite a binary that isn't a
+/// parseable grow.
+///
+/// When the target is this process's own executable it is trusted (we are
+/// grow). Otherwise the target must probe a grow version, or the update is
+/// refused outright with the target left byte-for-byte untouched.
+async fn verify_target_replaceable(target: &InstallTarget) -> Result<()> {
+    let is_self = match std::env::current_exe() {
+        Ok(cur) => match (dunce::canonicalize(&cur), dunce::canonicalize(&target.path)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        },
+        Err(_) => false,
+    };
+    if is_self {
+        return Ok(());
+    }
+    if probe_target_version(&target.path).await.is_none() {
+        anyhow::bail!(
+            "refusing to replace {}: it is not a grow binary (--version check failed)",
+            target.path.display()
+        );
+    }
+    Ok(())
 }
 
 pub async fn get_installer() -> Option<&'static str> {
@@ -454,10 +740,10 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
     // Only download when the on-disk install is behind the pointer; the
     // running process being stale (checked above) just means "show the
     // restart hint". The quit-for-update path's `grow update` child resolves
-    // to "Already up to date" against the same disk state. Gated on the
-    // installer maintaining the managed symlink — for GitHub Release a leftover symlink
-    // would wrongly suppress the download (see `disk_version_for_installer`).
-    let disk_needs_download = match disk_version_for_installer(installer) {
+    // to "Already up to date" against the same disk state. The probe covers
+    // the binary the user actually runs, so a concurrent updater's landed
+    // install suppresses the download (see `disk_version_for_installer`).
+    let disk_needs_download = match disk_version_for_installer(installer).await {
         Some(disk) => needs_update(
             &disk,
             &target_version,
@@ -613,15 +899,44 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
 
 /// Resolve the grow binary path for re-execution after an update.
 ///
-/// `current_exe()` resolves symlinks via `/proc/self/exe` (see proc(5)),
-/// so it returns the old versioned target after a symlink swap.
-/// Prefer `~/.grow/bin/grow` which always points to the latest version.
+/// 1. The install target ([`resolve_install_target`]): the `grow` the user
+///    actually runs — PATH lookup first, then the current executable.
+/// 2. Only when PATH missed (step 1 came from the current_exe fallback)
+///    **and** the current executable (canonicalized) lives under grow_home
+///    **and** the managed `~/.grow/bin/grow` link exists: the managed link.
+///    `current_exe()` resolves symlinks via `/proc/self/exe` (see proc(5)),
+///    so after a symlink swap it still names the *old* versioned target;
+///    the managed link always points at the latest version.
+/// 3. Otherwise the current executable.
 fn resolve_restart_exe() -> Result<std::path::PathBuf> {
-    let canonical = grow_application();
-    if canonical.exists() {
-        return Ok(canonical);
+    resolve_restart_exe_impl(find_grow_on_path(), std::env::current_exe().ok(), &grow_home())
+}
+
+/// Pure core of [`resolve_restart_exe`] with the environment-dependent
+/// inputs injected, for testability.
+fn resolve_restart_exe_impl(
+    on_path: Option<std::path::PathBuf>,
+    current_exe: Option<std::path::PathBuf>,
+    grow_home: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    if let Some(path) = on_path {
+        return Ok(path);
     }
-    Ok(std::env::current_exe()?)
+    let Some(current) = current_exe else {
+        anyhow::bail!("cannot resolve the current executable");
+    };
+    let canonical_current = dunce::canonicalize(&current).unwrap_or_else(|_| current.clone());
+    let canonical_home = dunce::canonicalize(grow_home).unwrap_or_else(|_| grow_home.to_path_buf());
+    if canonical_current.starts_with(&canonical_home) {
+        // `config::grow_application_in(grow_home)` shape, built locally so
+        // the injected home is honored (no global GROW_HOME OnceLock).
+        let managed_name = if cfg!(windows) { "grow.exe" } else { "grow" };
+        let managed = grow_home.join("bin").join(managed_name);
+        if managed.exists() {
+            return Ok(managed);
+        }
+    }
+    Ok(current)
 }
 
 /// Restart grow with the original command-line arguments to pick up the update.
@@ -665,7 +980,7 @@ pub async fn run_install_script(
     installer: &str,
     target: Option<&str>,
     _update_config: &UpdateConfig,
-) -> Result<()> {
+) -> Result<std::path::PathBuf> {
     let result = match installer {
         "gh-release" => install_gh_release(target).await,
         other => anyhow::bail!("unsupported Grow installer: {other}"),
@@ -1174,6 +1489,109 @@ fn relative_symlink_target(target: &std::path::Path, link: &std::path::Path) -> 
         return std::path::Path::new("..").join(dir_name).join(file_name);
     }
     target.to_path_buf()
+}
+
+/// Remove `<file>.*.tmp` siblings left by a regular-file install that
+/// crashed between copy and rename (see [`land_binary_on_target`]). Only
+/// those older than `max_age` are removed, so a concurrent racer's
+/// in-flight temp copy is never deleted out from under it.
+///
+/// Mirrors [`sweep_stale_tmp_links`] (the symlink-swap sibling).
+#[cfg(unix)]
+async fn sweep_stale_tmp_copies(file_path: &std::path::Path, max_age: Duration) {
+    let (Some(dir), Some(name)) = (
+        file_path.parent(),
+        file_path.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return;
+    };
+    let prefix = format!("{name}.");
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else {
+            continue;
+        };
+        if !fname.starts_with(&prefix) || !fname.ends_with(".tmp") {
+            continue;
+        }
+        let stale = tokio::fs::symlink_metadata(entry.path())
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+            .is_some_and(|age| age > max_age);
+        if stale {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
+/// Place the freshly-downloaded `binary` at `target`, per its kind.
+///
+/// Returns the path the binary now lives at: the managed `grow` link for
+/// [`TargetKind::Managed`], the link path for [`TargetKind::Symlink`]
+/// (Unix), and `target` itself for [`TargetKind::RegularFile`]. Callers use
+/// it for completions and the success message.
+///
+/// - Managed: the existing `~/.grow/bin/{grow,agent}` lockstep swap
+///   ([`swap_managed_bin_links`]) — byte-for-byte the pre-existing behavior.
+/// - Unix symlink: atomic swap of the link itself (relative target); the
+///   old target file is never touched, and a dangling link (its target was
+///   deleted) is swapped too.
+/// - Unix regular file: copy to a unique temp sibling, set `0755`, then
+///   `rename` over the target — atomic, so concurrent same-version updaters
+///   converge on the same final file. Stale temp leftovers are swept
+///   best-effort with the standard age gate.
+/// - Windows regular file: [`windows_replace_exe`] — copy first, rename
+///   aside + retry when the running image is locked, rollback on failure.
+pub async fn land_binary_on_target(
+    binary: &std::path::Path,
+    target: &InstallTarget,
+) -> Result<std::path::PathBuf> {
+    let landed = match target.kind {
+        TargetKind::Managed => {
+            let bin_dir = grow_home().join("bin");
+            swap_managed_bin_links(binary, &bin_dir).await?
+        }
+        TargetKind::Symlink => {
+            #[cfg(unix)]
+            {
+                let rel_target = relative_symlink_target(binary, &target.path);
+                atomic_symlink_swap(&rel_target, &target.path).await?;
+                target.path.clone()
+            }
+            #[cfg(not(unix))]
+            {
+                // `classify_target` never produces Symlink on Windows —
+                // symlinks/junctions resolve to RegularFile (write-through).
+                unreachable!("Windows resolves symlink targets to RegularFile")
+            }
+        }
+        TargetKind::RegularFile => {
+            #[cfg(unix)]
+            {
+                sweep_stale_tmp_copies(&target.path, STALE_TMP_AGE).await;
+                let tmp = unique_temp_sibling(&target.path, "tmp");
+                tokio::fs::copy(binary, &tmp).await?;
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).await?;
+                tokio::fs::rename(&tmp, &target.path).await?;
+                target.path.clone()
+            }
+            #[cfg(windows)]
+            {
+                windows_replace_exe(binary, &target.path).await?;
+                target.path.clone()
+            }
+        }
+    };
+    // The probe memo must reflect the new binary, or a second pass would
+    // decide the disk is still stale and re-download.
+    invalidate_probe_cache(&target.path);
+    Ok(landed)
 }
 
 /// Swap `~/.grow/bin/{grow,agent}` to point at `binary_path`. Returns the
@@ -1899,7 +2317,28 @@ async fn extract_release_archive(
 ///
 /// Uses the public release asset URL directly; no GitHub CLI or account is
 /// required for a public release.
-async fn install_gh_release(target: Option<&str>) -> Result<()> {
+async fn install_gh_release(target: Option<&str>) -> Result<std::path::PathBuf> {
+    let base_url = format!("https://github.com/{}", crate::version::GH_RELEASE_REPO);
+    install_gh_release_from(&base_url, target).await
+}
+
+/// Download and install Grow from a GitHub-Releases-shaped base URL.
+///
+/// `base_url` is the repository URL (e.g. `https://github.com/LordCasser/grow`);
+/// assets are fetched from `{base_url}/releases/download/{tag}/{asset}`.
+/// Returns the path the binary was landed at (for completions and the
+/// success message).
+///
+/// `#[doc(hidden)]` test seam mirroring
+/// [`crate::version::fetch_gh_release_version_from_url`]: the release
+/// pipeline itself is unchanged, only the landing target is resolved from
+/// what the user actually runs (`resolve_install_target`) and guarded by the
+/// grow-version validation gate.
+#[doc(hidden)]
+pub async fn install_gh_release_from(
+    base_url: &str,
+    target: Option<&str>,
+) -> Result<std::path::PathBuf> {
     let platform = detect_platform()?;
 
     let version = match target {
@@ -1932,12 +2371,7 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         version, platform
     );
 
-    let asset_url = format!(
-        "https://github.com/{}/releases/download/{}/{}",
-        crate::version::GH_RELEASE_REPO,
-        tag,
-        asset_name
-    );
+    let asset_url = format!("{base_url}/releases/download/{tag}/{asset_name}");
     download_with_progress(&asset_url, &archive_path).await?;
     let extraction = extract_release_archive(&archive_path, &binary_path).await;
     let _ = tokio::fs::remove_file(&archive_path).await;
@@ -1948,37 +2382,52 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         anyhow::bail!("downloaded GitHub release binary failed to run");
     }
 
-    // Atomic swap of ~/.grow/bin/{grow,agent} -> downloaded binary.
-    let link_path = swap_managed_bin_links(&binary_path, &bin_dir).await?;
+    // Land where the user actually runs grow — never blindly into the
+    // managed layout. A target that isn't a parseable grow is refused
+    // outright (file untouched).
+    let install_target = resolve_install_target(None)?;
+    verify_target_replaceable(&install_target).await?;
 
-    // Update grow-latest -> versioned binary so any existing symlinks that route
-    // through it (e.g. /usr/local/bin/grow -> ~/.grow/downloads/grow-latest)
-    // resolve to the newly installed version.
-    #[cfg(unix)]
-    {
-        let latest_path = download_dir.join("grow-latest");
-        let rel_target = relative_symlink_target(&binary_path, &latest_path);
-        if let Err(e) = atomic_symlink_swap(&rel_target, &latest_path).await {
-            tracing::warn!("Failed to update grow-latest symlink: {e}");
-        }
-    }
+    let landed = land_binary_on_target(&binary_path, &install_target).await?;
 
-    // Also update /usr/local/bin/{grow,agent} if either points directly into
-    // ~/.grow/downloads/ (legacy layout — skips the grow-latest indirection).
-    // Permission errors ignored.
-    #[cfg(unix)]
-    for name in ["grow", "agent"] {
-        let system_link = std::path::PathBuf::from(format!("/usr/local/bin/{name}"));
-        if let Ok(existing_target) = tokio::fs::read_link(&system_link).await {
-            let target_str = existing_target.to_string_lossy();
-            if target_str.contains(".grow/downloads/") && !target_str.ends_with("grow-latest") {
-                // Try to update; ignore permission errors
-                let _ = atomic_symlink_swap(&binary_path, &system_link).await;
+    match install_target.kind {
+        TargetKind::Managed => {
+            // Update grow-latest -> versioned binary so any existing symlinks
+            // that route through it (e.g. /usr/local/bin/grow ->
+            // ~/.grow/downloads/grow-latest) resolve to the newly installed
+            // version.
+            #[cfg(unix)]
+            {
+                let latest_path = download_dir.join("grow-latest");
+                let rel_target = relative_symlink_target(&binary_path, &latest_path);
+                if let Err(e) = atomic_symlink_swap(&rel_target, &latest_path).await {
+                    tracing::warn!("Failed to update grow-latest symlink: {e}");
+                }
             }
-        }
-    }
 
-    remove_stale_pager(&bin_dir).await;
+            // Also update /usr/local/bin/{grow,agent} if either points
+            // directly into ~/.grow/downloads/ (legacy layout — skips the
+            // grow-latest indirection). Permission errors ignored.
+            #[cfg(unix)]
+            for name in ["grow", "agent"] {
+                let system_link = std::path::PathBuf::from(format!("/usr/local/bin/{name}"));
+                if let Ok(existing_target) = tokio::fs::read_link(&system_link).await {
+                    let target_str = existing_target.to_string_lossy();
+                    if target_str.contains(".grow/downloads/") && !target_str.ends_with("grow-latest")
+                    {
+                        // Try to update; ignore permission errors
+                        let _ = atomic_symlink_swap(&binary_path, &system_link).await;
+                    }
+                }
+            }
+
+            remove_stale_pager(&bin_dir).await;
+        }
+        // External targets: no managed links, no `~/.grow/bin/agent`
+        // maintenance, no legacy /usr/local/bin loop — those belong to the
+        // managed layout only.
+        TargetKind::Symlink | TargetKind::RegularFile => {}
+    }
 
     eprintln!();
 
@@ -1986,9 +2435,9 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
     cleanup_old_downloads(&download_dir, "grow", &version).await;
     cleanup_old_downloads(&download_dir, "grow-pager", &version).await;
 
-    regenerate_completions(&link_path, &grow_home).await;
+    regenerate_completions(&landed, &grow_home).await;
 
-    Ok(())
+    Ok(landed)
 }
 
 pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &mut UpdateConfig) {
@@ -2042,7 +2491,7 @@ pub async fn run_update(
             version, current_version
         );
         eprintln!();
-        run_install_script(installer, Some(version), update_config).await?;
+        let landed = run_install_script(installer, Some(version), update_config).await?;
         refresh_deployment_config().await;
         if let Err(e) = config::update_config(|st| {
             st.cli.auto_update = Some(false);
@@ -2051,7 +2500,11 @@ pub async fn run_update(
         {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
-        eprintln!("  ✓ grow v{} installed successfully!", version);
+        eprintln!(
+            "  ✓ grow v{} installed successfully! → {}",
+            version,
+            landed.display()
+        );
         eprintln!("  Please restart Grow.");
         return Ok(Some(version.to_string()));
     }
@@ -2096,11 +2549,12 @@ pub async fn run_update(
     // What's on disk wins over this process's compiled-in version: a
     // concurrent or earlier updater (TUI background download, leader hourly
     // checker) may already have installed the target, in which case there is
-    // nothing to download. Gated on the installer maintaining the managed
-    // symlink — for GitHub Release a leftover symlink would lie (see
+    // nothing to download. The probe covers the binary the user actually
+    // runs, so a binary another process landed suppresses the download (see
     // `disk_version_for_installer`).
-    let effective_current =
-        disk_version_for_installer(installer).unwrap_or_else(|| current_version.clone());
+    let effective_current = disk_version_for_installer(installer)
+        .await
+        .unwrap_or_else(|| current_version.clone());
 
     if !force {
         match needs_update(
@@ -2174,14 +2628,18 @@ pub async fn run_update(
     };
 
     eprintln!();
-    run_install_script(installer, Some(target_version), update_config).await?;
+    let landed = run_install_script(installer, Some(target_version), update_config).await?;
     // Fetch the stable pointer now so the new binary has it immediately
     // for channel_label() display, rather than waiting for the next
     // TTL-gated update check (~30 min).
     let stable_ptr = try_fetch_stable_pointer().await;
     write_version_cache(target_version, stable_ptr.as_deref()).await;
     refresh_deployment_config().await;
-    eprintln!("  ✓ grow v{} installed successfully!", target_version);
+    eprintln!(
+        "  ✓ grow v{} installed successfully! → {}",
+        target_version,
+        landed.display()
+    );
 
     if !force && std::env::var_os("GROW_AUTO_UPDATE").is_none() {
         eprintln!("  Please restart Grow.");
@@ -2221,6 +2679,395 @@ async fn refresh_deployment_config() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ──────────────────────────────────────────────────────────────────────
+    // install-target resolution: PATH/PATHEXT candidate order (pure)
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_path_lookup_candidates_bare_name_then_pathext_order() {
+        // Windows with default PATHEXT: bare name first, then suffix order.
+        assert_eq!(
+            path_lookup_candidates(true, None),
+            vec!["grow", "grow.COM", "grow.EXE", "grow.BAT", "grow.CMD"],
+            "default PATHEXT order must be cmd.exe's, bare name first"
+        );
+        // Custom PATHEXT: order preserved, empty entries dropped.
+        assert_eq!(
+            path_lookup_candidates(true, Some(";.EXE;.BAT;")),
+            vec!["grow", "grow.EXE", "grow.BAT"]
+        );
+        // Unix: bare name only.
+        assert_eq!(path_lookup_candidates(false, None), vec!["grow"]);
+    }
+
+    #[test]
+    fn test_parse_pathext_drops_empty_and_defaults() {
+        assert_eq!(parse_pathext(None), vec![".COM", ".EXE", ".BAT", ".CMD"]);
+        assert_eq!(parse_pathext(Some(";;.EXE;;")), vec![".EXE"]);
+        assert_eq!(parse_pathext(Some("")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_first_existing_in_path_entry_major_candidate_minor() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let a = d.join("a");
+        let b = d.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mk = |path: &std::path::Path| {
+            std::fs::write(path, "x").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        };
+        mk(&a.join("grow"));
+        mk(&b.join("grow"));
+
+        // Entry-major: the first PATH entry wins.
+        let found = first_existing_in_path(&[a.clone(), b.clone()], &["grow".to_string()]);
+        assert_eq!(found, Some(a.join("grow")));
+
+        // Candidate-minor: within an entry, the bare name beats a PATHEXT
+        // suffix even when both exist.
+        mk(&a.join("grow.EXE"));
+        let found = first_existing_in_path(
+            std::slice::from_ref(&a),
+            &["grow".to_string(), "grow.EXE".to_string()],
+        );
+        assert_eq!(found, Some(a.join("grow")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_first_existing_in_path_skips_non_executable_and_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let a = d.join("a");
+        let b = d.join("b");
+        let c = d.join("c");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(a.join("grow"), "no x bit").unwrap();
+        std::fs::create_dir(b.join("grow")).unwrap();
+        std::fs::write(c.join("grow"), "#!/bin/sh\necho ok").unwrap();
+        std::fs::set_permissions(c.join("grow"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let found = first_existing_in_path(&[a, b, c.clone()], &["grow".to_string()]);
+        assert_eq!(found, Some(c.join("grow")));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_first_existing_in_path_resolves_relative_entries_against_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        std::fs::write(dir.path().join("grow"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.path().join("grow"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let found = first_existing_in_path(&[std::path::PathBuf::from(".")], &["grow".to_string()]);
+        std::env::set_current_dir(&prev).unwrap();
+        assert_eq!(found, Some(std::path::PathBuf::from("./grow")));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // kind classification
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_classify_target_managed_symlink_regular() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let managed = d.join("managed").join("grow");
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        std::fs::write(&managed, "managed").unwrap();
+
+        let regular = d.join("plain");
+        std::fs::write(&regular, "plain").unwrap();
+        assert_eq!(classify_target(&regular, &managed), TargetKind::RegularFile);
+
+        #[cfg(unix)]
+        {
+            let real = d.join("real");
+            std::fs::write(&real, "real").unwrap();
+            let link = d.join("grow-link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert_eq!(classify_target(&link, &managed), TargetKind::Symlink);
+
+            // A symlink resolving to the managed file is Managed (canonical
+            // equality), not Symlink.
+            let alias = d.join("alias");
+            std::os::unix::fs::symlink(&managed, &alias).unwrap();
+            assert_eq!(classify_target(&alias, &managed), TargetKind::Managed);
+        }
+
+        assert_eq!(classify_target(&managed, &managed), TargetKind::Managed);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // --version output parsing
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_version_output() {
+        // Plain.
+        assert_eq!(parse_version_output(b"grow 0.1.181\n"), Some("0.1.181".into()));
+        // Commit-suffixed build: `VERSION_WITH_COMMIT` is "{ver} ({commit})".
+        assert_eq!(
+            parse_version_output(b"grow 0.1.181 (bde00506) [stable]\n"),
+            Some("0.1.181".into())
+        );
+        // Channel suffix only.
+        assert_eq!(parse_version_output(b"grow 0.1.181 [alpha]\n"), Some("0.1.181".into()));
+        // CRLF tolerant.
+        assert_eq!(parse_version_output(b"grow 0.1.181\r\n"), Some("0.1.181".into()));
+        // Extra trailing junk after the token is fine.
+        assert_eq!(parse_version_output(b"grow 0.1.181\njunk"), Some("0.1.181".into()));
+
+        // Pre-release versions are valid semver and must round-trip.
+        assert_eq!(parse_version_output(b"grow 0.1.181-alpha.4\n"), Some("0.1.181-alpha.4".into()));
+
+        // Garbage → None.
+        assert_eq!(parse_version_output(b""), None);
+        assert_eq!(parse_version_output(b"hello\n"), None);
+        assert_eq!(parse_version_output(b"grow\n"), None);
+        assert_eq!(parse_version_output(b"grow not-a-version\n"), None);
+        assert_eq!(parse_version_output(b"GROW 0.1.181\n"), None); // case-sensitive prefix
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // probe_target_version: filename-first, exec fallback, dedup memo
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_probe_target_version_prefers_filename_without_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        // Versioned file name — resolved without exec'ing (content is
+        // arbitrary, not even executable).
+        let versioned = dir.path().join("grow-0.1.181-linux-x86_64");
+        std::fs::write(&versioned, "not an executable").unwrap();
+        assert_eq!(
+            probe_target_version(&versioned).await.as_deref(),
+            Some("0.1.181")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_probe_target_version_exec_falls_back_to_version_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("grow");
+        std::fs::write(&script, "#!/bin/sh\necho \"grow 0.1.181\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            probe_target_version(&script).await.as_deref(),
+            Some("0.1.181")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_probe_target_version_none_for_unparseable_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("grow");
+        std::fs::write(&script, "#!/bin/sh\necho hello\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(probe_target_version(&script).await, None);
+    }
+
+    #[tokio::test]
+    async fn test_probe_target_version_none_for_nonexistent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(probe_target_version(&dir.path().join("nope")).await, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_probe_target_version_memoized_until_invalidated() {
+        // The probe memo must dedup execs (concurrent-updater dedup) and be
+        // invalidated by a landing so the post-install probe sees the new
+        // version — otherwise a second pass would re-download.
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("count");
+        let script = dir.path().join("grow");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"grow 0.1.181\"\necho \"grow 0.1.181\" >> \"{}\"\n",
+                counter.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        assert_eq!(
+            probe_target_version(&script).await.as_deref(),
+            Some("0.1.181")
+        );
+        assert_eq!(
+            probe_target_version(&script).await.as_deref(),
+            Some("0.1.181")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            1,
+            "memoized probe must not re-exec"
+        );
+
+        invalidate_probe_cache(&script);
+        assert_eq!(
+            probe_target_version(&script).await.as_deref(),
+            Some("0.1.181")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            2,
+            "invalidation must clear the memo so the new version is seen"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // validation gate
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_verify_target_replaceable_accepts_grow_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("grow");
+        std::fs::write(&script, "#!/bin/sh\necho \"grow 0.1.181\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let target = InstallTarget {
+            path: script,
+            kind: TargetKind::RegularFile,
+        };
+        verify_target_replaceable(&target).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_verify_target_replaceable_refuses_non_grow() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("grow");
+        std::fs::write(&script, "#!/bin/sh\necho hello\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let target = InstallTarget {
+            path: script,
+            kind: TargetKind::RegularFile,
+        };
+        let err = verify_target_replaceable(&target).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("refusing to replace"), "msg: {msg}");
+        assert!(msg.contains("--version check failed"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_verify_target_replaceable_skips_self() {
+        // The running test binary is "this process's grow" — trusted
+        // without probing.
+        let target = InstallTarget {
+            path: std::env::current_exe().unwrap(),
+            kind: TargetKind::RegularFile,
+        };
+        verify_target_replaceable(&target).await.unwrap();
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // resolve_restart_exe ordering
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_restart_exe_prefers_path_hit() {
+        let home = tempfile::tempdir().unwrap();
+        let on_path = home.path().join("bin").join("grow");
+        std::fs::create_dir_all(on_path.parent().unwrap()).unwrap();
+        std::fs::write(&on_path, "x").unwrap();
+        let resolved = resolve_restart_exe_impl(
+            Some(on_path.clone()),
+            Some(home.path().join("elsewhere")),
+            home.path(),
+        )
+        .unwrap();
+        assert_eq!(resolved, on_path);
+    }
+
+    #[test]
+    fn test_resolve_restart_exe_managed_link_when_current_under_home() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let managed = bin.join("grow");
+        std::fs::write(&managed, "managed").unwrap();
+        // current_exe lives under grow_home (e.g. the versioned downloads
+        // file) and PATH missed → the managed link wins.
+        let current = home.path().join("downloads").join("grow-0.1.181-macos-aarch64");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, "old").unwrap();
+        let resolved =
+            resolve_restart_exe_impl(None, Some(current.clone()), home.path()).unwrap();
+        assert_eq!(resolved, managed);
+    }
+
+    #[test]
+    fn test_resolve_restart_exe_current_when_outside_home() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let current = outside.path().join("grow");
+        std::fs::write(&current, "dev binary").unwrap();
+        let resolved = resolve_restart_exe_impl(None, Some(current.clone()), home.path()).unwrap();
+        assert_eq!(resolved, current);
+    }
+
+    #[test]
+    fn test_resolve_restart_exe_current_when_managed_missing() {
+        let home = tempfile::tempdir().unwrap();
+        // current under home but no managed link → current_exe.
+        let current = home.path().join("downloads").join("grow-0.1.181");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, "old").unwrap();
+        let resolved = resolve_restart_exe_impl(None, Some(current.clone()), home.path()).unwrap();
+        assert_eq!(resolved, current);
+    }
+
+    #[test]
+    fn test_resolve_restart_exe_errors_without_current_exe() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(resolve_restart_exe_impl(None, None, home.path()).is_err());
+    }
 
     fn write_release_archive(path: &std::path::Path, entry_name: &str, body: &[u8]) {
         let file = std::fs::File::create(path).unwrap();

@@ -93,6 +93,9 @@ Move-Item -Force grow.exe "$HOME\bin\grow.exe"
 Grow 当前不发布 npm、Homebrew 或其他包管理器版本。若所选安装目录不在 `PATH` 中，需要先按
 当前 shell 的方式加入。
 
+`grow update` 会更新 `PATH` 中（或当前进程的）grow 二进制本身，而不是固定的受管目录；若
+该位置存在同名但非 grow 的程序，更新会中止且不替换它。
+
 ### 从源码安装
 
 源码构建方式见本文后面的[编译与构建](#编译与构建)。

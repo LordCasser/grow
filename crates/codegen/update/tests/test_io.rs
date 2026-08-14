@@ -9,6 +9,16 @@
 //! The patterns here mirror the GROW_HOME isolation used in other
 //! integration tests.
 
+/// reqwest is built with `rustls-no-provider` (see the vendoring notes on the
+/// workspace's rustls setup): production installs the ring provider at CLI
+/// startup, but test binaries bypass startup, so install it once here. The
+/// install-path integration tests exercise the full
+/// `install_gh_release_from` pipeline, which downloads via reqwest.
+#[ctor::ctor]
+fn install_rustls_provider() {
+    diagnostics::tls::install_ring_provider_once();
+}
+
 mod common;
 
 use std::path::PathBuf;
@@ -374,5 +384,453 @@ async fn get_installed_version_does_not_validate_env_var_format() {
     assert_eq!(v, "not-a-version");
     unsafe {
         std::env::remove_var("GROW_TEST_VERSION");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Install-target landing — full pipeline via `install_gh_release_from`
+// (wiremock + tar/flate2 fixture). The fixture is an executable script
+// `#!/bin/sh\necho "grow <version>"`, which the smoke test and the version
+// probe exec. Unix-only: Windows cannot exec shebang scripts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+mod install_pipeline {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use update::auto_update::{
+        InstallTarget, TargetKind, install_gh_release_from, land_binary_on_target,
+        probe_target_version, resolve_install_target,
+    };
+
+    /// Release asset platform for this test binary (mirror of the Unix
+    /// branches of `detect_platform`).
+    fn test_platform() -> &'static str {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "macos-aarch64"
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            "macos-x86_64"
+        } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            "linux-aarch64"
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            "linux-x86_64"
+        } else {
+            panic!("unsupported test platform");
+        }
+    }
+
+    /// A one-file release archive whose `grow` entry echoes `grow <version>`.
+    fn release_fixture(version: &str) -> Vec<u8> {
+        let body = format!("#!/bin/sh\necho \"grow {version}\"\n");
+        let file = std::io::Cursor::new(Vec::new());
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append_data(&mut header, "grow", body.as_bytes()).unwrap();
+        let encoder = archive.into_inner().unwrap();
+        encoder.finish().unwrap().into_inner()
+    }
+
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn assert_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o111,
+            0,
+            "{} must be executable",
+            path.display()
+        );
+    }
+
+    /// Snapshot of PATH/HOME restored on drop, so a panicking install test
+    /// can't leak env changes into later serial tests.
+    struct EnvGuard {
+        path: Option<std::ffi::OsString>,
+        home: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                path: std::env::var_os("PATH"),
+                home: std::env::var_os("HOME"),
+            }
+        }
+        fn set_path(&self, value: &Path) {
+            unsafe { std::env::set_var("PATH", value) };
+        }
+        fn set_home(&self, value: &Path) {
+            unsafe { std::env::set_var("HOME", value) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.path {
+                    Some(p) => std::env::set_var("PATH", p),
+                    None => std::env::remove_var("PATH"),
+                }
+                match &self.home {
+                    Some(h) => std::env::set_var("HOME", h),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    /// Mount a mock serving the `version` release asset, expecting exactly
+    /// `expect` GETs (any extra request trips verification on drop).
+    async fn mount_release(server: &MockServer, version: &str, expect: u64) {
+        let asset = format!(
+            "/releases/download/v{version}/grow-{version}-{}.tar.gz",
+            test_platform()
+        );
+        Mock::given(method("GET"))
+            .and(path(asset))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(release_fixture(version)))
+            .expect(expect)
+            .mount(server)
+            .await;
+    }
+
+    /// Script for a pre-existing (old) target that echoes a grow version.
+    fn old_grow_script(version: &str) -> String {
+        format!("#!/bin/sh\necho \"grow {version}\"\n")
+    }
+
+    // 2a: a plain file on PATH is replaced in place, executable, probed at
+    // the new version; the returned landing path is the resolved target
+    // (the success message is formatted from exactly that value).
+    #[tokio::test]
+    #[serial]
+    async fn install_replaces_plain_file_on_path() {
+        let _ = test_home();
+        reset();
+
+        let bin = tempfile::tempdir().unwrap();
+        let target = bin.path().join("grow");
+        std::fs::write(&target, old_grow_script("0.1.180")).unwrap();
+        make_executable(&target);
+
+        let env = EnvGuard::capture();
+        let fake_home = tempfile::tempdir().unwrap();
+        env.set_path(bin.path());
+        env.set_home(fake_home.path());
+
+        let server = MockServer::start().await;
+        mount_release(&server, "0.1.181", 1).await;
+
+        let landed = install_gh_release_from(&server.uri(), Some("0.1.181"))
+            .await
+            .unwrap();
+        assert_eq!(landed, target, "landing path is the PATH-resolved target");
+        assert_executable(&target);
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            content.contains("0.1.181"),
+            "target must be replaced with the new binary: {content}"
+        );
+        assert!(
+            !content.contains("0.1.180"),
+            "old target bytes must be gone"
+        );
+        // The post-install probe sees the new version — the dedup closure
+        // that makes a second pass skip the download.
+        assert_eq!(
+            probe_target_version(&target).await.as_deref(),
+            Some("0.1.181")
+        );
+    }
+
+    // 2b: the managed layout keeps working — both entrypoints swapped,
+    // grow-latest updated, disk-version probe reads the new version.
+    #[tokio::test]
+    #[serial]
+    async fn install_replaces_managed_symlink_layout() {
+        let _ = test_home();
+        reset();
+
+        let home = test_home().clone();
+        let bin_dir = home.join("bin");
+        let downloads = home.join("downloads");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&downloads).unwrap();
+
+        let old_name = format!("grow-0.1.180-{}", test_platform());
+        let old = downloads.join(&old_name);
+        std::fs::write(&old, old_grow_script("0.1.180")).unwrap();
+        make_executable(&old);
+        let rel_old = format!("../downloads/{old_name}");
+        std::os::unix::fs::symlink(&rel_old, bin_dir.join("grow")).unwrap();
+        std::os::unix::fs::symlink(&rel_old, bin_dir.join("agent")).unwrap();
+
+        let env = EnvGuard::capture();
+        let fake_home = tempfile::tempdir().unwrap();
+        env.set_path(&bin_dir);
+        env.set_home(fake_home.path());
+
+        let server = MockServer::start().await;
+        mount_release(&server, "0.1.181", 1).await;
+
+        let landed = install_gh_release_from(&server.uri(), Some("0.1.181"))
+            .await
+            .unwrap();
+        assert_eq!(landed, bin_dir.join("grow"));
+
+        // Both entrypoints swapped to the new versioned binary (agent
+        // reconciled in lockstep).
+        let new_target = format!("../downloads/grow-0.1.181-{}", test_platform());
+        assert_eq!(
+            std::fs::read_link(bin_dir.join("grow")).unwrap(),
+            PathBuf::from(&new_target)
+        );
+        assert_eq!(
+            std::fs::read_link(bin_dir.join("agent")).unwrap(),
+            PathBuf::from(&new_target)
+        );
+        // grow-latest follows.
+        assert_eq!(
+            std::fs::read_link(downloads.join("grow-latest")).unwrap(),
+            PathBuf::from(format!("grow-0.1.181-{}", test_platform()))
+        );
+        // The disk-version probe reads the new version without exec.
+        assert_eq!(
+            update::version::installed_on_disk_version().as_deref(),
+            Some("0.1.181")
+        );
+        // The versioned binary landed in downloads.
+        assert!(downloads.join(format!("grow-0.1.181-{}", test_platform())).exists());
+    }
+
+    // 2c: an external symlink (outside grow_home) is swapped to the new
+    // versioned binary; the old target file is untouched.
+    #[tokio::test]
+    #[serial]
+    async fn install_swaps_external_symlink_target() {
+        let _ = test_home();
+        reset();
+
+        let bin = tempfile::tempdir().unwrap();
+        let real_dir = tempfile::tempdir().unwrap();
+        let real = real_dir.path().join("grow-old");
+        std::fs::write(&real, old_grow_script("0.1.180")).unwrap();
+        make_executable(&real);
+        let link = bin.path().join("grow");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let env = EnvGuard::capture();
+        let fake_home = tempfile::tempdir().unwrap();
+        env.set_path(bin.path());
+        env.set_home(fake_home.path());
+
+        let server = MockServer::start().await;
+        mount_release(&server, "0.1.181", 1).await;
+
+        let landed = install_gh_release_from(&server.uri(), Some("0.1.181"))
+            .await
+            .unwrap();
+        assert_eq!(landed, link);
+        // The link now points at the new versioned binary (absolute target:
+        // the link lives outside grow_home, so no relative short form).
+        let expected = test_home()
+            .join("downloads")
+            .join(format!("grow-0.1.181-{}", test_platform()));
+        assert_eq!(std::fs::read_link(&link).unwrap(), expected);
+        // The old target file is left untouched.
+        assert!(real.exists());
+        // Probe of the link resolves the new version by file name.
+        assert_eq!(
+            probe_target_version(&link).await.as_deref(),
+            Some("0.1.181")
+        );
+    }
+
+    // 2c (dangling): `land_binary_on_target` swaps a dangling link too.
+    // (The full pipeline would resolve PATH past a dangling link — metadata
+    // follows it and fails, so the lookup skips it and falls back to
+    // current_exe — hence the land-layer contract is tested directly.)
+    #[tokio::test]
+    #[serial]
+    async fn land_swaps_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("grow");
+        let dangling = dir.path().join("gone");
+        std::os::unix::fs::symlink(&dangling, &link).unwrap();
+
+        let new_binary = dir.path().join("grow-0.1.181-linux-x86_64");
+        std::fs::write(&new_binary, old_grow_script("0.1.181")).unwrap();
+        make_executable(&new_binary);
+
+        let landed = land_binary_on_target(
+            &new_binary,
+            &InstallTarget {
+                path: link.clone(),
+                kind: TargetKind::Symlink,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(landed, link);
+        assert!(link.exists(), "link now resolves");
+        // Same-directory swap: the relative symlink target is the bare
+        // file name.
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            PathBuf::from("grow-0.1.181-linux-x86_64")
+        );
+    }
+
+    // 2d: a non-grow target (its --version output doesn't parse) aborts the
+    // install with the target byte-for-byte untouched.
+    #[tokio::test]
+    #[serial]
+    async fn install_refuses_non_grow_target_and_leaves_bytes() {
+        let _ = test_home();
+        reset();
+
+        let bin = tempfile::tempdir().unwrap();
+        let target = bin.path().join("grow");
+        let original = "#!/bin/sh\necho hello\n";
+        std::fs::write(&target, original).unwrap();
+        make_executable(&target);
+
+        let env = EnvGuard::capture();
+        let fake_home = tempfile::tempdir().unwrap();
+        env.set_path(bin.path());
+        env.set_home(fake_home.path());
+
+        let server = MockServer::start().await;
+        mount_release(&server, "0.1.181", 1).await;
+
+        let err = install_gh_release_from(&server.uri(), Some("0.1.181"))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("refusing to replace"), "msg: {msg}");
+        assert!(msg.contains("--version check failed"), "msg: {msg}");
+        // Byte-for-byte untouched.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+    }
+
+    // 2e: after a landing, the disk probe reports the new version — the
+    // second-pass download decision (probe + needs_update) finds the disk
+    // current and skips the download. The wiremock `expect(1)` makes any
+    // actual re-download fail verification. The probe memo was invalidated
+    // by the landing; without that, the pre-install probe result would be
+    // served and the disk would look stale forever (re-download loop).
+    #[tokio::test]
+    #[serial]
+    async fn second_pass_skips_download_when_disk_current() {
+        let _ = test_home();
+        reset();
+
+        let bin = tempfile::tempdir().unwrap();
+        let target = bin.path().join("grow");
+        std::fs::write(&target, old_grow_script("0.1.180")).unwrap();
+        make_executable(&target);
+
+        let env = EnvGuard::capture();
+        let fake_home = tempfile::tempdir().unwrap();
+        env.set_path(bin.path());
+        env.set_home(fake_home.path());
+
+        let server = MockServer::start().await;
+        mount_release(&server, "0.1.181", 1).await;
+
+        let landed = install_gh_release_from(&server.uri(), Some("0.1.181"))
+            .await
+            .unwrap();
+        assert_eq!(landed, target);
+
+        assert_eq!(
+            probe_target_version(&target).await.as_deref(),
+            Some("0.1.181"),
+            "post-landing probe must see the new version so a second pass \
+             skips the download"
+        );
+    }
+
+    // 2f: PATH miss falls back to the current executable (or the injected
+    // override), classified as a plain file when outside grow_home.
+    #[tokio::test]
+    #[serial]
+    async fn resolve_falls_back_to_current_exe_when_not_on_path() {
+        let _ = test_home();
+        reset();
+
+        let empty = tempfile::tempdir().unwrap();
+        let env = EnvGuard::capture();
+        env.set_path(empty.path());
+
+        let resolved = resolve_install_target(None).unwrap();
+        assert_eq!(resolved.path, std::env::current_exe().unwrap());
+        assert_eq!(resolved.kind, TargetKind::RegularFile);
+
+        // exe_override wins over current_exe when PATH misses.
+        let override_path = empty.path().join("grow");
+        std::fs::write(&override_path, "x").unwrap();
+        make_executable(&override_path);
+        let resolved = resolve_install_target(Some(override_path.clone())).unwrap();
+        assert_eq!(resolved.path, override_path);
+        assert_eq!(resolved.kind, TargetKind::RegularFile);
+    }
+
+    // 2f: Unix rename-over-running — replacing a file a process is
+    // currently executing succeeds and doesn't kill the running process
+    // (the old inode stays alive; only the directory entry is re-pointed).
+    // This is what makes replacing `current_exe()` itself legal.
+    #[tokio::test]
+    #[serial]
+    async fn land_replaces_running_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("grow");
+        std::fs::write(&target, "#!/bin/sh\nsleep 30\n").unwrap();
+        make_executable(&target);
+
+        // The child is our own fixture process, killed and waited on
+        // explicitly below — no session enrollment needed.
+        #[allow(clippy::disallowed_methods)]
+        let mut child = tokio::process::Command::new(&target).spawn().unwrap();
+        // Give the child a moment to exec the script.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(child.try_wait().unwrap().is_none(), "child must be running");
+
+        let new_binary = dir.path().join("grow-new");
+        std::fs::write(&new_binary, old_grow_script("0.1.181")).unwrap();
+        make_executable(&new_binary);
+
+        let landed = land_binary_on_target(
+            &new_binary,
+            &InstallTarget {
+                path: target.clone(),
+                kind: TargetKind::RegularFile,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(landed, target);
+        assert!(
+            std::fs::read_to_string(&target).unwrap().contains("0.1.181"),
+            "target must be replaced"
+        );
+        // The still-running process survived the rename-over.
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "running process must survive the rename-over"
+        );
+        child.kill().await.unwrap();
+        let _ = child.wait().await;
     }
 }

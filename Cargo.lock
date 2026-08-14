@@ -10230,6 +10230,7 @@ dependencies = [
  "anyhow",
  "ctor",
  "diagnostics",
+ "dunce",
  "flate2",
  "futures",
  "indicatif",

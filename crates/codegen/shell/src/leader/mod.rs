@@ -1426,8 +1426,14 @@ pub async fn connect_or_spawn(
 /// auto-update or `grow update` atomically swaps that symlink, `current_exe()`
 /// still resolves (via `/proc/self/exe` on Linux) to the *old* versioned target,
 /// so spawning it would relaunch the stale binary. The symlink always points to
-/// the freshly-installed version. This mirrors
-/// `update::auto_update::resolve_restart_exe`.
+/// the freshly-installed version.
+///
+/// This mirrors `update::auto_update::resolve_restart_exe` in that shared
+/// "managed installs relaunch on the managed link, not the stale
+/// current_exe" core, with one difference: the updater's resolver first
+/// prefers the `grow` found on `PATH` (the binary the user actually runs),
+/// while the leader must stay on the binary that spawned it, so this
+/// resolver never consults PATH.
 ///
 /// For a **dev / out-of-tree binary** (`cargo run`, integration tests, installs
 /// not under `grow_home`), keep `current_exe()` so the spawned leader matches the
