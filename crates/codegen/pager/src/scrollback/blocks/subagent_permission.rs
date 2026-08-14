@@ -207,45 +207,57 @@ impl SubagentPermissionBlock {
         self.members.is_empty()
     }
 
+    /// Aggregated summary line for multi-member blocks, using the same
+    /// verb-first syntax as tool verb-group headers ("Read 3 files"): each
+    /// outcome renders as `{verb} {count} {noun}`, buckets appear in member
+    /// first-appearance order, and a distinct-subagent suffix closes the line.
     fn header_line(&self, theme: &Theme) -> BlockLine {
-        let mut approved = 0usize;
-        let mut denied = 0usize;
-        let mut timed_out = 0usize;
-        let mut unavailable = 0usize;
-        let mut cancelled = 0usize;
+        let mut buckets: Vec<(SubagentPermissionOutcome, usize)> = Vec::new();
         let mut children = HashSet::new();
         for event in &self.members {
             children.insert(event.child_session_id.as_str());
-            match event.outcome {
-                SubagentPermissionOutcome::Approved => approved += 1,
-                SubagentPermissionOutcome::Denied => denied += 1,
-                SubagentPermissionOutcome::TimedOut => timed_out += 1,
-                SubagentPermissionOutcome::Unavailable => unavailable += 1,
-                SubagentPermissionOutcome::Cancelled => cancelled += 1,
+            match buckets
+                .iter_mut()
+                .find(|(outcome, _)| *outcome == event.outcome)
+            {
+                Some((_, count)) => *count += 1,
+                None => buckets.push((event.outcome, 1)),
             }
         }
 
-        let title_style = theme.fg(theme.gray_bright).add_modifier(Modifier::BOLD);
-        let mut spans = vec![Span::styled("◇ Subagent permissions", title_style)];
-        let mut push_count = |count: usize, label: &str, style| {
-            if count > 0 {
-                spans.push(Span::styled(format!(" · {count} {label}"), style));
-            }
-        };
-        push_count(approved, "approved", theme.fg(theme.accent_success));
-        push_count(denied, "denied", theme.fg(theme.accent_error));
-        push_count(timed_out, "timed out", theme.fg(theme.accent_error));
-        push_count(unavailable, "unavailable", theme.fg(theme.accent_error));
-        push_count(cancelled, "cancelled", theme.fg(theme.accent_error));
-        push_count(
-            children.len(),
-            if children.len() == 1 {
-                "subagent"
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (i, (outcome, count)) in buckets.iter().enumerate() {
+            let verb = match outcome {
+                SubagentPermissionOutcome::Approved => "Approved",
+                SubagentPermissionOutcome::Denied => "Denied",
+                SubagentPermissionOutcome::TimedOut => "Timed out",
+                SubagentPermissionOutcome::Unavailable => "Unavailable",
+                SubagentPermissionOutcome::Cancelled => "Cancelled",
+            };
+            let outcome_style = if *outcome == SubagentPermissionOutcome::Approved {
+                theme.fg(theme.accent_success)
             } else {
-                "subagents"
-            },
+                theme.fg(theme.accent_error)
+            };
+            if i > 0 {
+                spans.push(Span::styled(", ", theme.muted()));
+            }
+            spans.push(Span::styled(verb, outcome_style));
+            let noun = if *count == 1 { "request" } else { "requests" };
+            spans.push(Span::styled(
+                format!(" {count} {noun}"),
+                theme.fg(theme.gray_bright).add_modifier(Modifier::BOLD),
+            ));
+        }
+        let subagent_noun = if children.len() == 1 {
+            "subagent"
+        } else {
+            "subagents"
+        };
+        spans.push(Span::styled(
+            format!(" · {} {subagent_noun}", children.len()),
             theme.muted(),
-        );
+        ));
         BlockLine::styled(Line::from(spans)).with_selection_range(Some(0))
     }
 
@@ -305,8 +317,15 @@ mod tests {
     use super::*;
 
     fn event(outcome: SubagentPermissionOutcome) -> SubagentPermissionEvent {
+        event_with_child(outcome, "019ff931-child")
+    }
+
+    fn event_with_child(
+        outcome: SubagentPermissionOutcome,
+        child_session_id: &str,
+    ) -> SubagentPermissionEvent {
         SubagentPermissionEvent {
-            child_session_id: "019ff931-child".into(),
+            child_session_id: child_session_id.into(),
             subagent_title: Some("Software-engineering/coder W4-C: Approval 加固".into()),
             subagent_type: Some("software-engineering/coder".into()),
             description: Some("edit docs".into()),
@@ -415,5 +434,88 @@ mod tests {
         multi.push(event(SubagentPermissionOutcome::Denied));
         assert_eq!(multi.is_empty(), multi.len().eq(&0));
         assert!(!multi.is_empty());
+    }
+
+    /// Plain text of the collapsed header row (multi-member blocks only).
+    fn header_text(block: &SubagentPermissionBlock) -> String {
+        block.output(&ctx(DisplayMode::Collapsed)).lines[0]
+            .content
+            .to_string()
+    }
+
+    #[test]
+    fn header_aggregates_outcomes_in_first_appearance_order() {
+        use SubagentPermissionOutcome::{Approved, Denied};
+        let mut block = SubagentPermissionBlock::new(event_with_child(Denied, "child-a"));
+        block.push(event_with_child(Approved, "child-b"));
+        block.push(event_with_child(Denied, "child-a"));
+        block.push(event_with_child(Denied, "child-b"));
+        assert_eq!(
+            header_text(&block),
+            "Denied 3 requests, Approved 1 request · 2 subagents"
+        );
+
+        // Reverse member order reverses the buckets: order is member
+        // first-appearance, not outcome kind.
+        let mut block = SubagentPermissionBlock::new(event_with_child(Approved, "child-a"));
+        block.push(event_with_child(Denied, "child-b"));
+        block.push(event_with_child(Denied, "child-a"));
+        assert_eq!(
+            header_text(&block),
+            "Approved 1 request, Denied 2 requests · 2 subagents"
+        );
+    }
+
+    #[test]
+    fn header_colors_verbs_by_outcome_and_counts_bold_gray() {
+        use SubagentPermissionOutcome::{Approved, Denied};
+        let theme = Theme::current();
+        let mut block = SubagentPermissionBlock::new(event_with_child(Denied, "child-a"));
+        block.push(event_with_child(Approved, "child-a"));
+        let line = &block.output(&ctx(DisplayMode::Collapsed)).lines[0].content;
+        // Spans: [Denied, " 1 request", ", ", Approved, " 1 request", " · 1 subagent"].
+        assert_eq!(line.spans[0].content, "Denied");
+        assert_eq!(line.spans[0].style.fg, Some(theme.accent_error));
+        assert_eq!(line.spans[1].content, " 1 request");
+        assert_eq!(line.spans[1].style.fg, Some(theme.gray_bright));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[2].content, ", ");
+        assert_eq!(line.spans[2].style, theme.muted());
+        assert_eq!(line.spans[3].content, "Approved");
+        assert_eq!(line.spans[3].style.fg, Some(theme.accent_success));
+        assert_eq!(line.spans[4].content, " 1 request");
+        assert_eq!(line.spans[4].style.fg, Some(theme.gray_bright));
+        assert!(line.spans[4].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[5].content, " · 1 subagent");
+        assert_eq!(line.spans[5].style, theme.muted());
+    }
+
+    #[test]
+    fn header_uses_singular_nouns_for_single_counts() {
+        use SubagentPermissionOutcome::{Approved, Denied};
+        let mut block = SubagentPermissionBlock::new(event_with_child(Denied, "child-a"));
+        block.push(event_with_child(Approved, "child-a"));
+        assert_eq!(
+            header_text(&block),
+            "Denied 1 request, Approved 1 request · 1 subagent"
+        );
+    }
+
+    #[test]
+    fn header_all_denied_has_no_stray_comma_or_title() {
+        use SubagentPermissionOutcome::Denied;
+        let mut block = SubagentPermissionBlock::new(event_with_child(Denied, "child-a"));
+        block.push(event_with_child(Denied, "child-a"));
+        block.push(event_with_child(Denied, "child-b"));
+        let text = header_text(&block);
+        assert_eq!(text, "Denied 3 requests · 2 subagents");
+        assert!(
+            !text.contains(','),
+            "single bucket must not emit separators: {text}"
+        );
+        assert!(
+            !text.contains("◇"),
+            "the old title must not be rendered: {text}"
+        );
     }
 }
