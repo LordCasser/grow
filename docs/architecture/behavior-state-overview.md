@@ -44,7 +44,7 @@ flowchart LR
 | Clarify | 对抗性问答，逼近目标与决策 | 不额外限制；副作用仍走普通权限 | 无 runtime，可立即切换 |
 | Plan | Drafting/Awaiting/Amending 只规划；Executing 执行批准计划 | 非 Executing 拒绝 workspace mutation；Executing 恢复普通权限 | 离开未结束 Plan 需同目标二次确认并取消 Plan-owned foreground |
 | Workflow | 主 Agent正常对话与整合 | 普通权限与 Workflow tool | Behavior 是公共 Definition/Run 管理的唯一入口，但不拥有已启动 Run 的生命周期 |
-| Deep Research | 首条 query 启动私有研究；后续 foreground 正常回答 | foreground 与 worker 都只读 | 普通消息不重启；离开 active run需确认并生成取消报告 |
+| Deep Research | 首条 query 启动私有研究；后续 foreground 正常回答 | foreground 只读；workflow subagents（planner/researcher/verifier/synthesizer）以 `capability_mode: "all"` 运行，统一 PermissionManager 安全底线照常生效 | 普通消息不重启；离开 active run需确认并生成取消报告 |
 | Goal | 所有阶段可正常对话 | 主 Agent 获得 Goal scoped tools | 未 complete/clear 前独占 Behavior；planner/verifier 不占 foreground |
 
 Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Workflow Workspace 持久化 session 草稿与 Definition 焦点，Run 则属于独立公共 runtime。Deep Research 只拥有 control snapshot 中明确记录的私有 run id。
@@ -73,7 +73,7 @@ Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档�
 
 工具 taxonomy 必须明确；所有子 Agent（包括 `All` delegated grant）对 `kind: None` fail closed，`All` 只代表所有已分类 capability。permission mode 只决定一个已允许副作用是否需要批准，不能授予 capability。Behavior policy按 admission 捕获的 Behavior过滤工具，因此运行中的 Normal turn不会因 picker 切到 Goal突然获得 Goal工具，Plan turn也不会中途失去 edit gate。
 
-Deep Research foreground 只保留明确 `ToolScope::Read` 的工具；未分类工具同样被拒绝。Goal role/object权限见 [goal-continuation.md](./goal-continuation.md)。
+Deep Research foreground 只保留明确 `ToolScope::Read` 的工具；未分类工具同样被拒绝。其 workflow subagents 以 `capability_mode: "all"` 起跑（围栏语义预授权全部 bound MCP server 与 general-purpose authored native 能力），但 managed deny/ask、protected edit 与 Bash request floor 等统一 PermissionManager 底线不受 capability_mode 影响，照常生效。Goal role/object权限见 [goal-continuation.md](./goal-continuation.md)。
 
 `SubagentCapabilityState` 是子 Agent 运行时授权的唯一能力围栏。Agent 定义和 delegated mode 初始化当前 session 的 native capability 与 MCP eligibility；围栏内的普通 Read/Grep/Bash/Edit/MCP 调用不进入 Auto classifier，也不产生权限审批审计。managed deny/ask、protected edit、交互工具和 Bash request floor 仍在统一 PermissionManager 中生效。只有 `request_tool_access` 可以申请扩大围栏，而且不能突破 authored hard ceiling；MCP 按 server 授权，一次 grant 覆盖该 child session 中这个 server 的所有 eligible tools，并绑定继承的 transport incarnation。每个 child handle 另外持有不可变 `DelegableCapabilityCeiling`：nested child 的初始 mode 必须是 immediate security parent 初始 mode 的偏序子集，且只能继承 ceiling 中同一 transport ID 的 MCP binding。运行时 fresh grant 只属于当前 child，永远不扩大其后代 ceiling。
 
@@ -101,6 +101,8 @@ Shell 在 `AvailableCommandsUpdate.meta["grow/behaviorAvailability"]` 发布由 
 Pager 同样只消费 Shell 发布的 foreground identity、Goal task projection和 `AgentActivityProjection`，不重复推断 owner。
 
 optimistic user bubble 与 ACP echo只按 `messageId` 对账；不用 trim 文本、skip boolean或 adoption stash。Goal Planning/Verifying、Deep Research、公共 Workflow、watcher和 subagent wait都进入统一 activity projection。
+
+私有 workflow run（Deep Research）的运行状态有独立的显示通道：transcript 进度块（复用 WorkflowBlock）、tasks pane 状态行（标签 Deep Research）与 activity projection 都消费 shell 的 `WorkflowUpdated`，但 pager 把它存放在独立的 `private_workflow_runs` 集合，永不进入 `workflow_runs`——因此 `/workflows`、`/workflow-run`、overlay 与所有管理面信号都不可能被私有 run 驱动；terminal/cleared 后私有条目与块收敛并从集合移除。
 
 child 会话的 `ask_user_question` 提问所有权留在 child 视图（兄弟 child 提问互相独立，不 hoist 到父视图），主界面通过父视图 turn-status ◆ 等待指示与 dashboard `NeedsInput`（顶层行与子代理行）立即呈现，回答走 child 全屏（subagent 提问不在 dashboard peek 提供作答；root 自己的提问仍可在顶层行 peek 中作答）。
 

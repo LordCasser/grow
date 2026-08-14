@@ -532,6 +532,7 @@ pub(crate) struct SessionReload {
     todo: TodoPane,
     workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
     workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
+    private_workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
     workflow_run_revisions: std::collections::HashMap<String, u64>,
     cleared_workflow_runs: std::collections::HashSet<String>,
     /// Reconnect cursor as of window open, restored with the stash so a
@@ -808,6 +809,11 @@ pub struct AgentView {
     pub(crate) goal_board_renderer: crate::views::goal_detail::GoalBoardRenderer,
     pub workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
     pub workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
+    /// Active private workflow runs (deep research). These are deliberately
+    /// kept out of [`Self::workflow_runs`]: they must render running status
+    /// (transcript block, tasks pane, activity projection) but never appear
+    /// in any public Workflow management surface.
+    pub private_workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
     pub workflow_run_revisions: std::collections::HashMap<String, u64>,
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,

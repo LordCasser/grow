@@ -1670,3 +1670,4 @@ mod background_tasks;
 mod models;
 mod mcp;
 mod git_head;
+mod workflows;

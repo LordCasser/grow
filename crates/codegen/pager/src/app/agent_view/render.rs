@@ -1082,6 +1082,7 @@ impl AgentView {
             self.cron_task_id.as_deref(),
             &queued_cron_ids,
             &self.workflow_runs,
+            &self.private_workflow_runs,
             frame_stamp,
         );
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {

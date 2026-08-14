@@ -63,7 +63,14 @@ impl AgentActivityProjection {
                 .subagent_sessions
                 .values()
                 .any(|info| !info.finished && info.workflow_run_id.is_none()),
-            workflows: agent.workflow_runs.iter().any(|run| run.is_active()),
+            // Active private runs (deep research) share the `workflows` flag:
+            // this projection only drives motion/working chrome, never any
+            // management surface (those iterate `workflow_runs` directly).
+            workflows: agent.workflow_runs.iter().any(|run| run.is_active())
+                || agent
+                    .private_workflow_runs
+                    .iter()
+                    .any(|run| run.is_active()),
             goal_active: agent
                 .goal_state
                 .as_ref()
@@ -117,6 +124,92 @@ mod tests {
         assert!(projection.working());
         assert!(!projection.animates());
     }
+
+    #[test]
+    fn active_private_workflow_projects_work_and_motion() {
+        let mut agent = test_agent_view(Some("private-wf-session"), "/tmp".into());
+        agent
+            .private_workflow_runs
+            .push(crate::views::workflows::WorkflowRunSnapshot {
+                run_id: "wf_private".into(),
+                definition_id: None,
+                definition_scope: None,
+                definition_hash: None,
+                name: "deep-research".into(),
+                objective: "investigate".into(),
+                status: "active".into(),
+                management_available: false,
+                builtin: false,
+                phases: vec![("Research".into(), "active".into())],
+                current_phase: Some("Research".into()),
+                agents: vec![crate::views::workflows::WorkflowAgentRowView {
+                    agent_id: "a1".into(),
+                    label: "researcher-0".into(),
+                    phase: Some("Research".into()),
+                    model: None,
+                    state: "running".into(),
+                    tokens_used: 0,
+                    duration_ms: 0,
+                }],
+                agent_budget: None,
+                agents_used: 0,
+                agents_reserved: 0,
+                agents_remaining: None,
+                agent_usage_incomplete: false,
+                active_agents: 1,
+                elapsed_ms: 1_000,
+                received_at: std::time::Instant::now(),
+                pause_message: None,
+                result_summary: None,
+            });
+        let projection = AgentActivityProjection::from_agent(&agent);
+        assert!(
+            projection.workflows,
+            "an active private run must set the workflows projection flag"
+        );
+        assert!(projection.working());
+        assert!(projection.animates());
+        assert!(
+            agent.workflow_runs.is_empty(),
+            "the private run must stay out of the public workflow_runs list"
+        );
+    }
+
+    #[test]
+    fn settled_private_workflow_does_not_project_work() {
+        let mut agent = test_agent_view(Some("settled-wf-session"), "/tmp".into());
+        agent
+            .private_workflow_runs
+            .push(crate::views::workflows::WorkflowRunSnapshot {
+                run_id: "wf_private".into(),
+                definition_id: None,
+                definition_scope: None,
+                definition_hash: None,
+                name: "deep-research".into(),
+                objective: "investigate".into(),
+                status: "complete".into(),
+                management_available: false,
+                builtin: false,
+                phases: Vec::new(),
+                current_phase: None,
+                agents: Vec::new(),
+                agent_budget: None,
+                agents_used: 0,
+                agents_reserved: 0,
+                agents_remaining: None,
+                agent_usage_incomplete: false,
+                active_agents: 0,
+                elapsed_ms: 1_000,
+                received_at: std::time::Instant::now(),
+                pause_message: None,
+                result_summary: None,
+            });
+        let projection = AgentActivityProjection::from_agent(&agent);
+        assert!(!projection.workflows);
+        assert!(!projection.working());
+        assert!(!projection.animates());
+    }
+
     fn make_subagent_info(finished: bool) -> crate::app::subagent::SubagentInfo {
         crate::app::subagent::SubagentInfo {
             subagent_id: std::sync::Arc::from("sa-child-1"),

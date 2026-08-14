@@ -58,12 +58,14 @@ const DEFAULT_SYNTHESIS: &str = "<core-conclusions>\n- First retained conclusion
 fn run_scenario(
     case: VerificationCase,
     synthesis_output: &'static str,
-) -> (serde_json::Value, String) {
+) -> (serde_json::Value, String, Vec<(String, Option<String>)>) {
     let resolved = super::registry::resolve_deep_research()
         .expect("private deep-research definition must validate");
     let (host_tx, mut host_rx) = tokio::sync::mpsc::unbounded_channel();
     let artifact = Arc::new(Mutex::new(String::new()));
     let captured = artifact.clone();
+    let spawn_modes = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+    let captured_modes = spawn_modes.clone();
     let host = std::thread::spawn(move || {
         while let Some(request) = host_rx.blocking_recv() {
             match request {
@@ -73,6 +75,10 @@ fn run_scenario(
                 }
                 Request::SpawnAgent { opts, reply } => {
                     let label = opts.label.unwrap_or_default();
+                    captured_modes
+                        .lock()
+                        .unwrap()
+                        .push((label.clone(), opts.capability_mode.clone()));
                     let output = match label.as_str() {
                         "research-planner" => serde_json::json!({
                             "axes": [
@@ -185,12 +191,13 @@ fn run_scenario(
         panic!("unexpected workflow outcome: {outcome:?}");
     };
     let full_report = artifact.lock().unwrap().clone();
-    (result, full_report)
+    let spawn_modes = spawn_modes.lock().unwrap().clone();
+    (result, full_report, spawn_modes)
 }
 
 #[test]
 fn evidence_levels_are_preserved_without_false_partial_status() {
-    let (result, full_report) = run_scenario(VerificationCase::Normal, DEFAULT_SYNTHESIS);
+    let (result, full_report, _) = run_scenario(VerificationCase::Normal, DEFAULT_SYNTHESIS);
     assert_eq!(result["status"], "verified");
     assert_eq!(result["verified_claim_ids"].as_array().unwrap().len(), 3);
     let chat = result["report"].as_str().unwrap();
@@ -206,7 +213,7 @@ fn evidence_levels_are_preserved_without_false_partial_status() {
 #[test]
 fn malformed_verdict_ids_remain_local_to_the_affected_finding() {
     for case in [VerificationCase::Duplicate, VerificationCase::Missing] {
-        let (result, full_report) = run_scenario(case, DEFAULT_SYNTHESIS);
+        let (result, full_report, _) = run_scenario(case, DEFAULT_SYNTHESIS);
         assert_eq!(result["status"], "verified");
         let retained = result["verified_claim_ids"].as_array().unwrap();
         assert_eq!(retained.len(), 3);
@@ -217,7 +224,7 @@ fn malformed_verdict_ids_remain_local_to_the_affected_finding() {
         assert!(full_report.contains("Finding finding-0 was excluded"));
     }
 
-    let (result, full_report) = run_scenario(VerificationCase::Foreign, DEFAULT_SYNTHESIS);
+    let (result, full_report, _) = run_scenario(VerificationCase::Foreign, DEFAULT_SYNTHESIS);
     assert_eq!(result["status"], "verified");
     assert_eq!(result["verified_claim_ids"].as_array().unwrap().len(), 4);
     let chat = result["report"].as_str().unwrap();
@@ -228,7 +235,7 @@ fn malformed_verdict_ids_remain_local_to_the_affected_finding() {
 #[test]
 fn adaptive_report_may_change_structure_and_omit_unused_sources() {
     let synthesis = "<core-conclusions>\n核心判断只需要第一项证据 [S1]\n</core-conclusions>\n<report-body>\n# 领域自适应标题\n\n这里采用适合问题的叙事结构，而不是固定综述模板 [S1]。\n</report-body>";
-    let (result, full_report) = run_scenario(VerificationCase::Normal, synthesis);
+    let (result, full_report, _) = run_scenario(VerificationCase::Normal, synthesis);
     assert_eq!(result["status"], "verified");
     assert!(full_report.contains("# 领域自适应标题"));
     assert!(full_report.contains("https://original.example/0"));
@@ -247,10 +254,50 @@ fn invalid_citations_or_unverified_media_use_detailed_fallback() {
         "report without the required synthesis blocks",
     ];
     for synthesis in invalid_outputs {
-        let (result, full_report) = run_scenario(VerificationCase::Normal, synthesis);
+        let (result, full_report, _) = run_scenario(VerificationCase::Normal, synthesis);
         assert_eq!(result["status"], "partial");
         assert!(full_report.contains("## Research axis 1"));
         assert!(full_report.contains("detailed evidence fallback is shown instead"));
         assert!(!full_report.contains("unverified.example"));
     }
+}
+
+#[test]
+fn all_deep_research_subagent_spawn_sites_request_full_capability_mode() {
+    let (_, _, spawn_modes) = run_scenario(VerificationCase::Normal, DEFAULT_SYNTHESIS);
+
+    // Every workflow subagent spawn must ask for the full capability fence.
+    // The unified PermissionManager safety floor (managed deny/ask, protected
+    // edits, Bash request floor) still applies on top of `all`.
+    for (label, mode) in &spawn_modes {
+        assert_eq!(
+            mode.as_deref(),
+            Some("all"),
+            "spawn {label} must request capability_mode \"all\", got {mode:?}"
+        );
+    }
+
+    // Cover all four spawn sites: planner, researcher(s), verifier(s),
+    // synthesizer — not just "some spawn happened".
+    let has_spawn = |prefix: &str| {
+        spawn_modes
+            .iter()
+            .any(|(label, _)| label.starts_with(prefix))
+    };
+    assert!(
+        has_spawn("research-planner"),
+        "planner spawn missing: {spawn_modes:?}"
+    );
+    assert!(
+        has_spawn("researcher-"),
+        "researcher spawn missing: {spawn_modes:?}"
+    );
+    assert!(
+        has_spawn("evidence-verifier-"),
+        "verifier spawn missing: {spawn_modes:?}"
+    );
+    assert!(
+        has_spawn("report-synthesizer"),
+        "synthesizer spawn missing: {spawn_modes:?}"
+    );
 }

@@ -47,4 +47,6 @@ Definitions 与 Runs：前者显示焦点、scope、临时/已保存、dirty、v
 
 有 Active 公共 Run 时离开 Workflow 需要重复确认，Run 继续后台执行；重新进入 Workflow
 后才能管理。暂停、预算受限和未保存草稿不会阻止切换。Deep Research 不出现在公共列表、
-动态命令或管理入口中。
+动态命令或管理入口中；其运行状态仍通过独立的 Pager 显示通道可见（transcript 进度块、
+tasks pane 的 Deep Research 状态行与 activity projection），这些显示面只消费 shell 发布的
+`WorkflowUpdated`，管理面数据（`workflow_runs`）不受私有 run 影响。

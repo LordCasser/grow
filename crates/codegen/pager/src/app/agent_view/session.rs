@@ -118,6 +118,7 @@ impl AgentView {
             goal_board_renderer: crate::views::goal_detail::GoalBoardRenderer::default(),
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
+            private_workflow_runs: Vec::new(),
             workflow_run_revisions: std::collections::HashMap::new(),
             cleared_workflow_runs: std::collections::HashSet::new(),
             show_workflows: false,
@@ -405,6 +406,7 @@ impl AgentView {
         self.workflow_run_revisions.clear();
         self.cleared_workflow_runs.clear();
         self.workflow_runs.clear();
+        self.private_workflow_runs.clear();
     }
     /// Open a reconnect reload window: stash the current transcript/tracker
     /// and point the live fields at fresh state for the incoming
@@ -450,6 +452,7 @@ impl AgentView {
             todo: std::mem::take(&mut self.todo),
             workflow_blocks: std::mem::take(&mut self.workflow_blocks),
             workflow_runs: std::mem::take(&mut self.workflow_runs),
+            private_workflow_runs: std::mem::take(&mut self.private_workflow_runs),
             workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
             cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
             last_seen_event_id: self.last_seen_event_id.clone(),
@@ -618,6 +621,27 @@ impl AgentView {
                 merged.retain(|run| !self.cleared_workflow_runs.contains(&run.run_id));
                 self.workflow_runs = merged;
             }
+            {
+                let mut live_by_id: HashMap<String, _> =
+                    std::mem::take(&mut self.private_workflow_runs)
+                        .into_iter()
+                        .map(|run| (run.run_id.clone(), run))
+                        .collect();
+                let mut merged =
+                    Vec::with_capacity(reload.private_workflow_runs.len() + live_by_id.len());
+                for run in reload.private_workflow_runs {
+                    if let Some(live) = live_by_id.remove(&run.run_id) {
+                        merged.push(live);
+                    } else {
+                        merged.push(run);
+                    }
+                }
+                let mut live_only: Vec<_> = live_by_id.into_values().collect();
+                live_only.sort_by_key(|run| run.received_at);
+                merged.extend(live_only);
+                merged.retain(|run| !self.cleared_workflow_runs.contains(&run.run_id));
+                self.private_workflow_runs = merged;
+            }
             for (run_id, rev) in reload.workflow_run_revisions {
                 self.workflow_run_revisions
                     .entry(run_id)
@@ -639,6 +663,7 @@ impl AgentView {
             self.todo = reload.todo;
             self.workflow_blocks = reload.workflow_blocks;
             self.workflow_runs = reload.workflow_runs;
+            self.private_workflow_runs = reload.private_workflow_runs;
             self.workflow_run_revisions = reload.workflow_run_revisions;
             self.cleared_workflow_runs = reload.cleared_workflow_runs;
             self.last_seen_event_id = reload.last_seen_event_id;

@@ -48,14 +48,19 @@ pub(crate) fn queue_block_text(agent: &AgentView) -> String {
 pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     let mut rows: Vec<String> = Vec::new();
 
-    let mut workflows: Vec<_> = agent.workflow_runs.iter().collect();
-    workflows.sort_by(|a, b| {
+    let mut workflows: Vec<_> = agent
+        .workflow_runs
+        .iter()
+        .map(|run| (run, false))
+        .chain(agent.private_workflow_runs.iter().map(|run| (run, true)))
+        .collect();
+    workflows.sort_by(|(a, _), (b, _)| {
         b.is_active()
             .cmp(&a.is_active())
             .then(b.received_at.cmp(&a.received_at))
             .then(a.run_id.cmp(&b.run_id))
     });
-    for run in workflows {
+    for (run, private) in workflows {
         let active = run.active_agent_count();
         let agents = match active {
             0 => String::new(),
@@ -69,8 +74,9 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             .filter(|phase| !phase.is_empty())
             .map(|phase| format!(" · {phase}"))
             .unwrap_or_default();
+        let kind = if private { "Deep Research" } else { "Workflow" };
         rows.push(format!(
-            "  {:<9}Workflow · {}{phase}{agents}  ({})",
+            "  {:<9}{kind} · {}{phase}{agents}  ({})",
             if run.is_active() {
                 "running".to_string()
             } else {
@@ -406,6 +412,64 @@ mod tests {
         assert_eq!(
             format_queue_row(3, "first\nsecond\nthird"),
             "  #3  first  (+2 more lines)"
+        );
+    }
+
+    #[test]
+    fn tasks_block_text_labels_private_runs_as_deep_research() {
+        use crate::app::agent_view::test_agent_view;
+        let mut agent = test_agent_view(Some("tasks-sess"), "/tmp".into());
+        agent
+            .private_workflow_runs
+            .push(crate::views::workflows::WorkflowRunSnapshot {
+                run_id: "wf_private".into(),
+                definition_id: None,
+                definition_scope: None,
+                definition_hash: None,
+                name: "deep-research".into(),
+                objective: "investigate".into(),
+                status: "active".into(),
+                management_available: false,
+                builtin: false,
+                phases: Vec::new(),
+                current_phase: Some("Research".into()),
+                agents: vec![crate::views::workflows::WorkflowAgentRowView {
+                    agent_id: "a1".into(),
+                    label: "researcher-0".into(),
+                    phase: None,
+                    model: None,
+                    state: "running".into(),
+                    tokens_used: 0,
+                    duration_ms: 0,
+                }],
+                agent_budget: None,
+                agents_used: 0,
+                agents_reserved: 0,
+                agents_remaining: None,
+                agent_usage_incomplete: false,
+                active_agents: 1,
+                elapsed_ms: 1_000,
+                received_at: std::time::Instant::now(),
+                pause_message: None,
+                result_summary: None,
+            });
+
+        let text = tasks_block_text(&agent);
+        assert!(
+            text.contains("Deep Research · deep-research"),
+            "private run must render under the Deep Research label: {text}"
+        );
+        assert!(
+            text.contains("· Research"),
+            "live phase must appear on the private row: {text}"
+        );
+        assert!(
+            text.contains("· 1 agent"),
+            "running agent count must appear on the private row: {text}"
+        );
+        assert!(
+            !text.contains("Workflow · deep-research"),
+            "private run must not reuse the public Workflow label: {text}"
         );
     }
 }
