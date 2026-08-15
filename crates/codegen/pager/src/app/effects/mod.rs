@@ -2692,7 +2692,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ShowSessionInfo { agent_id, session_id, show_resolved_model } => {
+        Effect::ShowSessionInfo { agent_id, session_id, show_resolved_model, nonce } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2708,12 +2708,16 @@ pub(crate) fn execute(
                                 agent_id,
                                 info: Box::new(info),
                                 text,
+                                title,
+                                show_resolved_model,
+                                nonce,
                             }
                         }
                         Err(error) => {
                             TaskResult::SessionInfoFailed {
                                 agent_id,
                                 error,
+                                nonce,
                             }
                         }
                     }
@@ -2833,7 +2837,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ShowContextInfo { agent_id, session_id } => {
+        Effect::ShowContextInfo { agent_id, session_id, nonce } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2842,18 +2846,20 @@ pub(crate) fn execute(
                             TaskResult::ContextInfoComplete {
                                 agent_id,
                                 info: Box::new(info),
+                                nonce,
                             }
                         }
                         Err(error) => {
                             TaskResult::ContextInfoFailed {
                                 agent_id,
                                 error,
+                                nonce,
                             }
                         }
                     }
                 });
         }
-        Effect::FetchSessionUsage { agent_id, session_id } => {
+        Effect::FetchSessionUsage { agent_id, session_id, nonce } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2863,6 +2869,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 session_id,
                                 usage: Box::new(usage),
+                                nonce,
                             }
                         }
                         Err(error) => {
@@ -2870,6 +2877,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 session_id,
                                 error,
+                                nonce,
                             }
                         }
                     }

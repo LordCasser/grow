@@ -20,6 +20,7 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "please also add tests".to_string(),
                 attachments: vec![],
+                auto_promoted: None,
             });
 
             assert!(
@@ -87,14 +88,17 @@ async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "first steer".to_string(),
                 attachments: vec![],
+                auto_promoted: None,
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "second steer".to_string(),
                 attachments: vec![],
+                auto_promoted: None,
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "third steer".to_string(),
                 attachments: vec![],
+                auto_promoted: None,
             });
 
             assert!(actor.drain_pending_interjections().await);
@@ -174,14 +178,226 @@ async fn terminal_boundary_discards_residual_same_turn_interjections() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "too late for this turn".to_string(),
                 attachments: vec![],
+                auto_promoted: None,
             });
 
-            actor.discard_residual_interjections_at_turn_end();
+            actor
+                .discard_residual_interjections_at_turn_end()
+                .await;
 
             assert!(actor.pending_interjections.is_empty());
             assert!(
                 actor.chat_state_handle.get_conversation().await.is_empty(),
                 "a terminal fence discards; it must not synthesize input for the next turn"
+            );
+        })
+        .await;
+}
+
+/// An auto-promoted follow-up (`follow_up_behavior = "steer"`) that missed
+/// the turn's final safe-point drain is NOT discarded at the terminal fence:
+/// it turns back into the user FIFO front as a fresh turn, preserving its
+/// original prompt id / origin / turn kind. Explicit-steer residuals in the
+/// same buffer are still discarded.
+#[tokio::test]
+async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explicit() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+
+            let requeue = |prompt_id: &str| super::AutoPromotedRequeue {
+                prompt_id: prompt_id.to_string(),
+                origin: crate::session::PromptOrigin::User,
+                turn_kind: crate::session::TurnKind::User,
+                client_identifier: Some("pager".to_string()),
+                screen_mode: None,
+                verbatim: false,
+                json_schema: None,
+            };
+            actor.pending_interjections.push(PendingInterjection {
+                text: "first follow-up".to_string(),
+                attachments: vec![],
+                auto_promoted: Some(requeue("follow-up-1")),
+            });
+            actor.pending_interjections.push(PendingInterjection {
+                text: "explicit steer".to_string(),
+                attachments: vec![],
+                auto_promoted: None,
+            });
+            actor.pending_interjections.push(PendingInterjection {
+                text: "second follow-up".to_string(),
+                attachments: vec![],
+                auto_promoted: Some(requeue("follow-up-2")),
+            });
+
+            actor
+                .discard_residual_interjections_at_turn_end()
+                .await;
+
+            assert!(
+                actor.pending_interjections.is_empty(),
+                "terminal fence must drain the whole buffer"
+            );
+
+            let state = actor.state.lock().await;
+            assert_eq!(state.pending_inputs.len(), 2, "only auto entries re-queue");
+            let front = state
+                .pending_inputs
+                .front()
+                .expect("first requeued entry at the FIFO front");
+            assert_eq!(front.prompt_id, "follow-up-1", "FIFO order preserved");
+            assert_eq!(front.origin, crate::session::PromptOrigin::User);
+            assert_eq!(front.turn_kind, crate::session::TurnKind::User);
+            let meta = front.queue_meta.as_ref().expect("user-visible queue row");
+            assert_eq!(meta.id, "follow-up-1");
+            assert_eq!(meta.owner.as_deref(), Some("pager"));
+            assert_eq!(meta.kind, "prompt");
+            assert_eq!(meta.text, "first follow-up");
+            let back = state
+                .pending_inputs
+                .back()
+                .expect("second requeued entry");
+            assert_eq!(back.prompt_id, "follow-up-2");
+            assert!(
+                state.pending_inputs.iter().all(|item| {
+                    item.prompt_blocks
+                        .iter()
+                        .all(|b| matches!(b, acp::ContentBlock::Text(_) | acp::ContentBlock::Image(_)))
+                }),
+                "rebuilt blocks are plain text/image prompts"
+            );
+            drop(state);
+
+            assert!(
+                actor.chat_state_handle.get_conversation().await.is_empty(),
+                "the terminal fence must not synthesize user messages"
+            );
+        })
+        .await;
+}
+
+/// An auto-promoted entry that IS drained at a safe point is consumed as
+/// mid-turn steering — its requeue payload is stale and must not resurrect a
+/// FIFO turn.
+#[tokio::test]
+async fn auto_promoted_entry_drained_at_safe_point_is_consumed_not_requeued() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            actor.pending_interjections.push(PendingInterjection {
+                text: "steer me".to_string(),
+                attachments: vec![],
+                auto_promoted: Some(super::AutoPromotedRequeue {
+                    prompt_id: "follow-up-1".to_string(),
+                    origin: crate::session::PromptOrigin::User,
+                    turn_kind: crate::session::TurnKind::User,
+                    client_identifier: None,
+                    screen_mode: None,
+                    verbatim: false,
+                    json_schema: None,
+                }),
+            });
+
+            assert!(actor.drain_pending_interjections().await);
+
+            let state = actor.state.lock().await;
+            assert!(
+                state.pending_inputs.is_empty(),
+                "a drained auto entry is consumed mid-turn; no FIFO turn-back"
+            );
+            drop(state);
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert_eq!(conversation.len(), 1);
+        })
+        .await;
+}
+
+/// The `queue_input` promotion path steers exactly one interjection into the
+/// shared buffer, resolves the submitting client with `RemovedFromQueue`
+/// (the same completion a queue-steer emits), broadcasts the interjection
+/// with the prompt id, and never touches the FIFO or foreground.
+#[tokio::test]
+async fn auto_promote_follow_up_uses_the_interjection_path_once() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.foreground = ForegroundState::RegularTurn(running_task_stub("turn-1"));
+            }
+
+            let (respond_to, rx) = tokio::sync::oneshot::channel();
+            let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "please pivot".to_string(),
+            ))];
+            actor.auto_promote_follow_up(
+                blocks,
+                "follow-up-1",
+                crate::session::PromptOrigin::User,
+                crate::session::TurnKind::User,
+                Some("pager".to_string()),
+                None,
+                false,
+                None,
+                respond_to,
+            );
+
+            // The submitting client's QueuePrompt RPC resolves as removed —
+            // never as a failed turn.
+            let result = rx.await.expect("client RPC must resolve");
+            assert!(
+                matches!(
+                    result,
+                    Ok(crate::session::commands::PromptTurnOk {
+                        completion_kind: crate::session::commands::PromptCompletionKind::RemovedFromQueue,
+                        ..
+                    })
+                ),
+                "auto-promotion resolves the client with RemovedFromQueue, got {result:?}"
+            );
+
+            // Exactly one entry, carrying the requeue payload.
+            let entries = actor.pending_interjections.snapshot();
+            assert_eq!(entries.len(), 1, "exactly one interjection");
+            assert_eq!(entries[0].text, "please pivot");
+            let auto = entries[0]
+                .auto_promoted
+                .as_ref()
+                .expect("auto-promoted entry carries its requeue payload");
+            assert_eq!(auto.prompt_id, "follow-up-1");
+            assert_eq!(auto.origin, crate::session::PromptOrigin::User);
+            assert_eq!(auto.turn_kind, crate::session::TurnKind::User);
+            assert_eq!(auto.client_identifier.as_deref(), Some("pager"));
+
+            // FIFO and foreground untouched.
+            let state = actor.state.lock().await;
+            assert!(state.pending_inputs.is_empty());
+            assert!(state.foreground.regular().is_some());
+            drop(state);
+
+            // One interjection broadcast carrying the prompt id for pager
+            // dedup/adoption.
+            let mut broadcasts = Vec::new();
+            while let Ok(msg) = gateway_rx.try_recv() {
+                if let acp_transport::AcpClientMessage::ExtNotification(args) = msg
+                    && args.request.method.as_ref() == "grow/session/interjection"
+                {
+                    broadcasts.push(
+                        serde_json::from_str::<serde_json::Value>(args.request.params.get())
+                            .ok(),
+                    );
+                }
+            }
+            assert_eq!(broadcasts.len(), 1, "exactly one interjection broadcast");
+            assert_eq!(
+                broadcasts[0]
+                    .as_ref()
+                    .and_then(|v| v.get("interjectionId"))
+                    .and_then(|v| v.as_str()),
+                Some("follow-up-1")
             );
         })
         .await;

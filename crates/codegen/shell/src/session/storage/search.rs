@@ -16,10 +16,12 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use config_types::{BoolFlag, ConfigSource, Resolved, SessionSearchConfig};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
@@ -42,6 +44,146 @@ const BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const BOOTSTRAP_MAX_CONCURRENT: usize = 4;
 const BOOTSTRAP_PER_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const BOOTSTRAP_MAX_FILE_SIZE: u64 = 30 * 1024 * 1024;
+
+// Bootstrap lease coordination timing. The lease must outlive several
+// refreshes, and a waiter must poll at least once within its wait window.
+const BOOTSTRAP_LEASE_DURATION: Duration = Duration::from_secs(30);
+const BOOTSTRAP_LEASE_REFRESH: Duration = Duration::from_secs(10);
+const BOOTSTRAP_LEASE_PEER_WAIT: Duration = Duration::from_secs(30);
+const BOOTSTRAP_LEASE_POLL: Duration = Duration::from_secs(1);
+const _: () = assert!(BOOTSTRAP_LEASE_REFRESH.as_millis() < BOOTSTRAP_LEASE_DURATION.as_millis());
+const _: () = assert!(BOOTSTRAP_LEASE_POLL.as_millis() < BOOTSTRAP_LEASE_PEER_WAIT.as_millis());
+
+// ---------------------------------------------------------------------------
+// Process-level gate: whether this process may keep a session-search index.
+//
+// Mirrors the upstream `search_gate`: an `AtomicU8` latch with three states.
+// `UNAPPLIED` means "no one resolved the setting yet" — the first reader
+// resolves the disk/env tiers once and applies the result. Once `CLOSED`,
+// the gate can never reopen in this process: the completed-bootstrap marker
+// outlives the time spent off, so re-opening mid-process would serve a
+// half-index that misses everything written while search was off.
+// ---------------------------------------------------------------------------
+
+const SEARCH_GATE_UNAPPLIED: u8 = 0;
+const SEARCH_GATE_OPEN: u8 = 1;
+const SEARCH_GATE_CLOSED: u8 = 2;
+
+/// One latch for the process, so the first workspace to turn search off
+/// turns it off for every workspace hosted beside it.
+static SEARCH_GATE: AtomicU8 = AtomicU8::new(SEARCH_GATE_UNAPPLIED);
+
+/// The config tier that turned search off; set exactly once, before the
+/// latch flips to `CLOSED`, so the off state stays diagnosable even when a
+/// later lower-tier resolve disagrees.
+static SEARCH_CLOSED_BY: OnceLock<ConfigSource> = OnceLock::new();
+
+/// Apply a resolved setting to the latch. `false` closes the gate for the
+/// process (recording the source); `true` only opens an unapplied gate.
+fn apply_search_gate(setting: &Resolved<bool>) {
+    if !setting.value {
+        let _ = SEARCH_CLOSED_BY.set(setting.source);
+        if SEARCH_GATE.swap(SEARCH_GATE_CLOSED, Ordering::AcqRel) != SEARCH_GATE_CLOSED {
+            tracing::info!(
+                source = %setting.source,
+                "session search index turned off for this process"
+            );
+        }
+        return;
+    }
+    let opened = SEARCH_GATE.compare_exchange(
+        SEARCH_GATE_UNAPPLIED,
+        SEARCH_GATE_OPEN,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+    if opened == Err(SEARCH_GATE_CLOSED) {
+        tracing::info!(
+            source = %setting.source,
+            "session search stays off until the next launch"
+        );
+    }
+}
+
+/// Names the setting that turned search off, for a message like
+/// `off (a requirements.toml pin)`.
+fn session_search_off_reason(source: ConfigSource) -> &'static str {
+    match source {
+        ConfigSource::Requirement => "a requirements.toml pin or an MDM policy",
+        ConfigSource::Env => "the GROW_SESSION_SEARCH environment variable",
+        ConfigSource::Config
+        | ConfigSource::UserConfig
+        | ConfigSource::ManagedConfig
+        | ConfigSource::SystemManagedConfig => "the session_search key in a Grow config file",
+        // Neither can resolve to off: the default is on and no CLI flag
+        // sets this key.
+        ConfigSource::Cli | ConfigSource::Remote | ConfigSource::Default => "a local setting",
+    }
+}
+
+/// Which tier closed the gate, if any.
+fn search_closed_by() -> Option<ConfigSource> {
+    SEARCH_CLOSED_BY.get().copied()
+}
+
+/// Resolve the session search setting: requirements pin > `GROW_SESSION_SEARCH`
+/// env var > `[session_search]` config file > default (`true`).
+fn resolve_session_search_setting(
+    requirement: Option<bool>,
+    config: Option<SessionSearchConfig>,
+) -> Resolved<bool> {
+    BoolFlag::env("GROW_SESSION_SEARCH")
+        .requirement(requirement)
+        .config(config.and_then(|c| c.enabled))
+        .default(true)
+        .resolve()
+}
+
+/// Read the disk tiers that stand on their own: the requirements pin and
+/// the `[session_search]` config table. A corrupt user config must not
+/// disarm a pin, so each tier is read independently.
+fn load_session_search_disk_tiers() -> (Option<bool>, Option<SessionSearchConfig>) {
+    let pin = crate::config::load_merged_requirements().and_then(|req| {
+        req.get("features")
+            .and_then(|features| features.get("session_search"))
+            .and_then(|value| value.as_bool())
+    });
+    let config = match crate::config::load_from_disk() {
+        Ok(toml) => toml
+            .get("session_search")
+            .and_then(|table| table.clone().try_into::<SessionSearchConfig>().ok()),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the config for session search");
+            None
+        }
+    };
+    (pin, config)
+}
+
+/// Cheap after the setting is resolved. The first call in a process that
+/// never applied the gate reads the config files from disk and latches the
+/// result, so the read happens at most once per process.
+fn is_index_enabled() -> bool {
+    match SEARCH_GATE.load(Ordering::Acquire) {
+        SEARCH_GATE_CLOSED => false,
+        SEARCH_GATE_OPEN => true,
+        // Nothing has resolved the setting yet: resolve the disk/env tiers
+        // here rather than assume on — a pin still outranks the environment.
+        _ => {
+            let (pin, config) = load_session_search_disk_tiers();
+            let setting = resolve_session_search_setting(pin, config);
+            tracing::debug!(
+                enabled = setting.value,
+                "session search resolved from disk before anything applied the setting"
+            );
+            // Latch it, so this work happens once, and report the latch
+            // rather than the value: another thread may have closed the
+            // gate while the config was loading.
+            apply_search_gate(&setting);
+            SEARCH_GATE.load(Ordering::Acquire) != SEARCH_GATE_CLOSED
+        }
+    }
+}
 
 /// Pre-check: skip sessions with excessively large updates files.
 ///
@@ -73,7 +215,9 @@ pub struct SessionSearchResponse {
     pub total_estimate: Option<usize>,
     /// True when the FTS5 index is still being bootstrapped. Callers
     /// should re-query after a delay to get results from newly indexed
-    /// sessions.
+    /// sessions. Also true when another process holds the bootstrap lease
+    /// without a completion marker (peer mid-rebuild or a dead claimant
+    /// within its lease).
     pub bootstrapping: bool,
 }
 
@@ -107,13 +251,12 @@ struct SearchManagerState {
 ///
 /// Requires an active tokio runtime on first access (spawns tasks).
 ///
-/// TODO: When multiple grow processes run concurrently, they each have
-/// their own `SearchIndexManager` writing to the same SQLite database.
-/// WAL mode reduces corruption risk and [`search_fts`] self-heals an
-/// unusable file, but redundant work is still done. Consider adding
-/// reindex claim coordination (like the memory system's
-/// `try_claim_reindex()` / `release_claim()` pattern) if this becomes
-/// a problem.
+/// When multiple grow processes run concurrently, they each have their own
+/// `SearchIndexManager` writing to the same SQLite database. WAL mode
+/// reduces corruption risk, [`search_fts`] self-heals an unusable file, and
+/// the bootstrap lease (a claim row in the index's own `meta` table, see
+/// [`bootstrap_with_lease`]) keeps the full reindex single-flight across
+/// processes.
 pub struct SearchIndexManager {
     tx: mpsc::UnboundedSender<SearchManagerCmd>,
     progress: Arc<BootstrapProgress>,
@@ -190,7 +333,13 @@ impl SearchIndexManager {
     ///
     /// Sets `bootstrapping` eagerly so callers polling the flag see `true`
     /// before the background task even starts processing.
+    ///
+    /// Does nothing while the index is switched off — no bootstrap job is
+    /// dispatched and no eager flag is set.
     pub fn bootstrap_once(&self, root: PathBuf) {
+        if !is_index_enabled() {
+            return;
+        }
         self.progress.bootstrapping.store(true, Ordering::Release);
         let _ = self.tx.send(SearchManagerCmd::BootstrapOnce { root });
     }
@@ -242,14 +391,27 @@ pub fn notify_session_updated(session_id: &str, cwd: &str) {
     SEARCH_INDEX_MANAGER.enqueue(root, session_id.to_string(), cwd.to_string());
 }
 
+/// The file the index would open, without creating anything. The
+/// journal-mode classifier inspects the parent directory, so a caller that
+/// means to write must go through [`search_db_path`] first.
+fn search_db_path_in(root_dir: &Path) -> PathBuf {
+    let path = root_dir.join("sessions").join("session_search.sqlite");
+    // Pre-resolve the per-host sibling used on network mounts. Resolution is
+    // idempotent, so the index opening the same path again is a no-op.
+    sqlite_journal::JournalMode::for_db_path(&path).effective_db_path(&path)
+}
+
 fn search_db_path(root_dir: &Path) -> PathBuf {
     let sessions = root_dir.join("sessions");
     // Best-effort: the journal-mode classifier statfs's the parent dir.
     let _ = std::fs::create_dir_all(&sessions);
-    let path = sessions.join("session_search.sqlite");
-    // Pre-resolve the per-host sibling used on network mounts. Resolution is
-    // idempotent, so the index opening the same path again is a no-op.
-    sqlite_journal::JournalMode::for_db_path(&path).effective_db_path(&path)
+    search_db_path_in(root_dir)
+}
+
+/// Whether an index was built earlier. Creates nothing, so a switched-off
+/// process can ask without leaving a fresh empty index behind.
+fn search_index_exists(root_dir: &Path) -> bool {
+    search_db_path_in(root_dir).exists()
 }
 
 const META_KEY_LAST_BOOTSTRAP: &str = "last_bootstrap_at";
@@ -265,6 +427,9 @@ fn try_read_last_bootstrap_at(db_path: &Path) -> Result<Option<i64>, String> {
     Ok(value.and_then(|value| value.parse::<i64>().ok()))
 }
 
+/// Test helper: stamp the completed-bootstrap marker directly. Production
+/// writes go through [`write_last_bootstrap_at_if_claim_owner`].
+#[cfg(test)]
 fn write_last_bootstrap_at(db_path: &Path) -> io::Result<()> {
     let index = SessionSearchIndex::open_or_create(db_path).map_err(sqlite_to_io_error)?;
     index
@@ -356,10 +521,21 @@ fn with_search_index<R>(
 /// existing sessions. Waits up to [`BOOTSTRAP_WAIT_TIMEOUT`] for the
 /// bootstrap to complete so the query runs against a populated index.
 /// Subsequent calls skip the wait (bootstrap is already done).
+///
+/// When the process gate is off this returns a diagnostic error instead of
+/// serving an empty result set as if the index simply had no matches.
 pub async fn execute_search(
     root_dir: &Path,
     req: &SessionSearchRequest,
 ) -> io::Result<SessionSearchResponse> {
+    if !is_index_enabled() {
+        let source = search_closed_by().unwrap_or(ConfigSource::Default);
+        return Err(io::Error::other(format!(
+            "session search is off ({})",
+            session_search_off_reason(source)
+        )));
+    }
+
     let query = req.query.trim();
     if query.is_empty() {
         return Ok(SessionSearchResponse {
@@ -391,9 +567,18 @@ pub async fn execute_search(
     let include_content = req.include_content;
     let query_owned = query.to_string();
 
-    let qr = tokio::task::spawn_blocking(move || {
+    let (qr, claim_in_flight) = tokio::task::spawn_blocking(move || {
         with_search_index(&db_path, |index| {
-            index.query(&query_owned, cwd.as_deref(), limit, offset, include_content)
+            let result =
+                index.query(&query_owned, cwd.as_deref(), limit, offset, include_content)?;
+            // A peer mid-rebuild (or a dead claimant within its lease)
+            // reads as "bootstrapping" even when this process's flag is
+            // clear, so callers re-query once the rebuild lands.
+            let claim_in_flight = index
+                .get_meta(search_fts::META_KEY_BOOTSTRAP_CLAIM)?
+                .is_some()
+                && index.get_meta(META_KEY_LAST_BOOTSTRAP)?.is_none();
+            Ok((result, claim_in_flight))
         })
     })
     .await
@@ -412,7 +597,8 @@ pub async fn execute_search(
             || SEARCH_INDEX_MANAGER
                 .progress
                 .bootstrapping
-                .load(Ordering::Relaxed),
+                .load(Ordering::Relaxed)
+            || claim_in_flight,
     })
 }
 
@@ -468,9 +654,18 @@ async fn handle_job(
             pending.insert(key, Instant::now() + debounce);
         }
         SearchIndexJob::BootstrapAll => {
-            if let Err(e) = reindex_all(root_dir, storage).await {
-                tracing::warn!(error = %e, "session search bootstrap failed");
-                clear_bootstrapping_flag();
+            // The lease gate clears the eager `bootstrapping` flag on every
+            // path that declines a reindex (adopt/give-up); `reindex_all`
+            // clears it when a reindex actually runs.
+            match bootstrap_with_lease(root_dir, storage, BootstrapRole::Launch).await {
+                Ok(BootstrapOutcome::Done) => {}
+                Ok(BootstrapOutcome::RunAgain) => {
+                    SEARCH_INDEX_MANAGER.bootstrap_once(root_dir.to_path_buf());
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "session search bootstrap failed");
+                    clear_bootstrapping_flag();
+                }
             }
         }
         SearchIndexJob::RecheckBootstrap => match has_completed_bootstrap_marker(root_dir).await {
@@ -483,9 +678,15 @@ async fn handle_job(
                 tracing::info!(
                     "session search index missing completed-bootstrap marker; re-running bootstrap"
                 );
-                if let Err(e) = reindex_all(root_dir, storage).await {
-                    tracing::warn!(error = %e, "session search re-bootstrap failed");
-                    clear_bootstrapping_flag();
+                match try_bootstrap_with_lease(root_dir, storage).await {
+                    Ok(BootstrapOutcome::Done) => {}
+                    Ok(BootstrapOutcome::RunAgain) => {
+                        SEARCH_INDEX_MANAGER.bootstrap_once(root_dir.to_path_buf());
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session search re-bootstrap failed");
+                        clear_bootstrapping_flag();
+                    }
                 }
             }
             None => {
@@ -499,6 +700,250 @@ async fn handle_job(
             }
         },
     }
+}
+
+/// What the caller owes after the bootstrap gate returns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BootstrapOutcome {
+    /// Completed, adopted, or gave up: the caller owes nothing more.
+    Done,
+    /// The cache healed mid-run, so the index must be bootstrapped again.
+    RunAgain,
+}
+
+/// How the caller entered the bootstrap gate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BootstrapRole {
+    Launch,
+    Recheck,
+}
+
+/// Run [`reindex_all`] at most once at a time across concurrent grow
+/// processes: a claim in the index's own `meta` table lets one process run
+/// the full bootstrap while waiters adopt its completed-bootstrap marker.
+/// A launch's first claim always reindexes, even when a completed marker
+/// exists (the launch owes pruning and skipped-retry work); waiters give up
+/// after [`BOOTSTRAP_LEASE_PEER_WAIT`].
+async fn bootstrap_with_lease(
+    root_dir: &Path,
+    storage: &dyn StorageAdapter,
+    role: BootstrapRole,
+) -> io::Result<BootstrapOutcome> {
+    bootstrap_with_lease_inner(root_dir, storage, role).await
+}
+
+/// Single claim attempt: rebuilds when the lease is free and no completed
+/// marker exists, adopts the marker otherwise, and returns at once when a
+/// peer holds the lease. Rechecks use this so a rebuild that outlives the
+/// peer wait cannot re-block the worker on every later search.
+async fn try_bootstrap_with_lease(
+    root_dir: &Path,
+    storage: &dyn StorageAdapter,
+) -> io::Result<BootstrapOutcome> {
+    bootstrap_with_lease_inner(root_dir, storage, BootstrapRole::Recheck).await
+}
+
+async fn bootstrap_with_lease_inner(
+    root_dir: &Path,
+    storage: &dyn StorageAdapter,
+    role: BootstrapRole,
+) -> io::Result<BootstrapOutcome> {
+    let db_path = search_db_path(root_dir);
+    let token = ClaimToken::new();
+    let started = Instant::now();
+    let peer_wait = match role {
+        BootstrapRole::Launch => BOOTSTRAP_LEASE_PEER_WAIT,
+        BootstrapRole::Recheck => Duration::ZERO,
+    };
+    let deadline = started + peer_wait;
+    let mut peer_seen = false;
+    loop {
+        // Skipped on the first iteration so a launch always reindexes.
+        if peer_seen && has_completed_bootstrap_marker(root_dir).await == Some(true) {
+            tracing::info!(
+                waited_ms = started.elapsed().as_millis() as u64,
+                "adopted a peer's completed session search bootstrap"
+            );
+            clear_bootstrapping_flag();
+            return Ok(BootstrapOutcome::Done);
+        }
+
+        if claim_bootstrap_lease(&db_path, &token, BOOTSTRAP_LEASE_DURATION).await? {
+            // Only a launch's first claim ignores an existing marker (the
+            // launch owes pruning and skipped retries); everyone else
+            // adopts any completed marker.
+            let first_launch_claim = role == BootstrapRole::Launch && !peer_seen;
+            if !first_launch_claim && has_completed_bootstrap_marker(root_dir).await == Some(true) {
+                release_bootstrap_claim(&db_path, &token).await;
+                tracing::info!(
+                    waited_ms = started.elapsed().as_millis() as u64,
+                    "adopted a peer's completed session search bootstrap"
+                );
+                clear_bootstrapping_flag();
+                return Ok(BootstrapOutcome::Done);
+            }
+            tracing::info!(
+                token = %token,
+                contended = peer_seen,
+                waited_ms = started.elapsed().as_millis() as u64,
+                "claimed session search bootstrap lease"
+            );
+            let refresher =
+                spawn_claim_refresher(db_path.clone(), token.clone(), BOOTSTRAP_LEASE_REFRESH);
+            let result = reindex_all(root_dir, storage, &token, refresher.claim_lost()).await;
+            drop(refresher);
+            release_bootstrap_claim(&db_path, &token).await;
+            return result;
+        }
+        peer_seen = true;
+
+        if Instant::now() >= deadline {
+            // A live peer is rebuilding the shared index. Skip this pass;
+            // the next search re-probes the marker and re-bootstraps if
+            // the rebuild did not complete.
+            tracing::info!(
+                "peer process is bootstrapping the shared session search index; not waiting"
+            );
+            clear_bootstrapping_flag();
+            return Ok(BootstrapOutcome::Done);
+        }
+        tokio::time::sleep(BOOTSTRAP_LEASE_POLL).await;
+    }
+}
+
+/// Owner token that fences every claim-scoped write to the shared index.
+#[derive(Clone)]
+struct ClaimToken(String);
+
+impl ClaimToken {
+    fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ClaimToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Returns `true` when this process claimed the bootstrap lease.
+async fn claim_bootstrap_lease(
+    db_path: &Path,
+    token: &ClaimToken,
+    lease: Duration,
+) -> io::Result<bool> {
+    let db_path = db_path.to_path_buf();
+    let token = token.as_str().to_string();
+    tokio::task::spawn_blocking(move || {
+        with_search_index(&db_path, |index| {
+            index.try_claim_bootstrap(chrono::Utc::now().timestamp(), lease, &token)
+        })
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Aborts the refresher on drop so no detached task outlives the gate.
+struct RefresherGuard {
+    handle: tokio::task::JoinHandle<()>,
+    claim_lost: Arc<AtomicBool>,
+}
+
+impl RefresherGuard {
+    /// Latched when the refresher sees the claim held by someone else.
+    fn claim_lost(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.claim_lost)
+    }
+}
+
+impl Drop for RefresherGuard {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+fn spawn_claim_refresher(db_path: PathBuf, token: ClaimToken, every: Duration) -> RefresherGuard {
+    let claim_lost = Arc::new(AtomicBool::new(false));
+    let lost = Arc::clone(&claim_lost);
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(every);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick fires immediately; the claim was stamped just now.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let refreshed = tokio::task::spawn_blocking({
+                let db_path = db_path.clone();
+                let token = token.as_str().to_string();
+                move || {
+                    with_search_index(&db_path, |index| {
+                        index.refresh_bootstrap_claim(chrono::Utc::now().timestamp(), &token)
+                    })
+                }
+            })
+            .await
+            .map_err(io::Error::other)
+            .and_then(|r| r);
+            match refreshed {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Claim expired and was taken over, or already released:
+                    // fence all remaining claim-scoped writes.
+                    lost.store(true, Ordering::Release);
+                    tracing::warn!("bootstrap claim lost mid-reindex; a peer took over");
+                    return;
+                }
+                Err(e) => {
+                    // Transient (busy/locked DB): the lease expiry is the
+                    // fallback if refreshes keep failing.
+                    tracing::debug!(error = %e, "failed to refresh bootstrap claim lease");
+                }
+            }
+        }
+    });
+    RefresherGuard { handle, claim_lost }
+}
+
+/// Best-effort; on any failure the lease expiry is the fallback.
+async fn release_bootstrap_claim(db_path: &Path, token: &ClaimToken) {
+    let db_path = db_path.to_path_buf();
+    let token = token.as_str().to_string();
+    let released = tokio::task::spawn_blocking(move || {
+        with_search_index(&db_path, |index| index.release_bootstrap_claim(&token))
+    })
+    .await
+    .map_err(io::Error::other)
+    .and_then(|r| r);
+    match released {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!("bootstrap claim was already released or taken over"),
+        Err(e) => {
+            tracing::debug!(error = %e, "failed to release bootstrap claim; lease will expire");
+        }
+    }
+}
+
+/// Fenced marker write: returns `false` (no write) when the claim under
+/// `token` was lost, so a stale claimant never asserts completion.
+fn write_last_bootstrap_at_if_claim_owner(db_path: &Path, token: &str) -> io::Result<bool> {
+    let now = chrono::Utc::now().timestamp();
+    with_search_index(db_path, |index| {
+        index.set_meta_if_claim_owner(META_KEY_LAST_BOOTSTRAP, &now.to_string(), token)
+    })
+}
+
+/// Whether any process currently holds the bootstrap claim.
+fn has_bootstrap_claim(db_path: &Path) -> io::Result<bool> {
+    with_search_index(db_path, |index| {
+        index
+            .get_meta(search_fts::META_KEY_BOOTSTRAP_CLAIM)
+            .map(|claim| claim.is_some())
+    })
 }
 
 /// Tri-state probe for the completed-bootstrap marker (`last_bootstrap_at`
@@ -569,9 +1014,20 @@ async fn upsert_by_key(
     };
 
     match storage.load_summary(&info).await {
-        Ok(summary) => upsert_session(root_dir, &summary, storage, &info)
-            .await
-            .map(|_| ()),
+        Ok(summary) => {
+            // The latch cannot reopen in this process, so a write declined
+            // here is dropped, not held until search comes back on.
+            if !is_index_enabled() {
+                return Ok(());
+            }
+            upsert_session(root_dir, &summary, storage, &info)
+                .await
+                .map(|_| ())
+        }
+        // A missing session is a delete, not a failure. Deletes must land
+        // whether or not this process still indexes (a session deleted while
+        // search is off must not leave a stale row behind), so this branch
+        // bypasses the gate — `delete_session` never creates the index.
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             delete_session(root_dir, &key.session_id).await
         }
@@ -618,6 +1074,13 @@ async fn upsert_session(
 }
 
 async fn delete_session(root_dir: &Path, session_id: &str) -> io::Result<()> {
+    // A delete must land whether or not this process still indexes, but it
+    // must never create an index while search is off. Skip when nothing was
+    // built; the row waits for the next bootstrap, which only runs if
+    // search is on again.
+    if !search_index_exists(root_dir) {
+        return Ok(());
+    }
     let db_path = search_db_path(root_dir);
     let session_id = session_id.to_string();
     tokio::task::spawn_blocking(move || {
@@ -627,7 +1090,12 @@ async fn delete_session(root_dir: &Path, session_id: &str) -> io::Result<()> {
     .map_err(io::Error::other)?
 }
 
-async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Result<()> {
+async fn reindex_all(
+    root_dir: &Path,
+    storage: &dyn StorageAdapter,
+    claim_token: &ClaimToken,
+    claim_lost: Arc<AtomicBool>,
+) -> io::Result<BootstrapOutcome> {
     let epoch = search_recovery::CacheEpoch::now();
     let progress = &SEARCH_INDEX_MANAGER.progress;
 
@@ -685,6 +1153,7 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
         let sem = semaphore.clone();
         let progress = progress_arc.clone();
         let root = root_owned.clone();
+        let claim_lost = Arc::clone(&claim_lost);
         let timeout_dur = BOOTSTRAP_PER_SESSION_TIMEOUT;
         let max_file_size = BOOTSTRAP_MAX_FILE_SIZE;
 
@@ -695,6 +1164,13 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
             // shared only by tasks spawned in this loop, all of which
             // complete before the Arc is dropped.
             let _permit = sem.acquire().await.expect("semaphore is never closed");
+
+            // A successor owns the index once the claim is lost. These
+            // upserts are idempotent, not fenced; stopping just avoids
+            // contending with it.
+            if claim_lost.load(Ordering::Acquire) {
+                return;
+            }
 
             let session_id = summary.info.id.to_string();
 
@@ -810,15 +1286,32 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
         }
     }
 
-    // Prune orphaned entries
+    if claim_lost.load(Ordering::Acquire) {
+        tracing::warn!("bootstrap claim lost; abandoning reindex without a completion marker");
+        // A local heal quarantines the claim row with the file, which the
+        // fenced refresh cannot tell from a takeover; only the takeover has
+        // a successor that finishes the job.
+        return Ok(if epoch.changed() {
+            BootstrapOutcome::RunAgain
+        } else {
+            BootstrapOutcome::Done
+        });
+    }
+
+    // Prune sessions deleted on disk. Fenced: `expected_ids` is a startup
+    // snapshot, so a claimant that lost its lease must not delete rows a
+    // successor indexed since; the refresh doubles as the ownership check.
     let db_path = search_db_path(root_dir);
+    let prune_token = claim_token.as_str().to_string();
+    let prune_expected = expected_ids.clone();
     tokio::task::spawn_blocking(move || -> io::Result<()> {
         with_search_index(&db_path, |index| {
-            let indexed_ids = index.all_indexed_session_ids()?;
-            for id in indexed_ids {
-                if !expected_ids.contains(&id) {
-                    let _ = index.delete_doc(&id);
-                }
+            if !index.prune_missing_if_claim_owner(
+                chrono::Utc::now().timestamp(),
+                &prune_token,
+                &prune_expected,
+            )? {
+                tracing::warn!("bootstrap claim lost; skipping stale orphan prune");
             }
             Ok(())
         })
@@ -842,21 +1335,39 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
     let mut needs_rebootstrap = epoch.changed();
     if needs_rebootstrap {
         tracing::warn!("session search cache healed during bootstrap; completion marker withheld");
-    } else if let Err(e) = write_last_bootstrap_at(&db_path_meta) {
-        tracing::warn!(error = %e, "failed to write last_bootstrap_at metadata");
-    } else if epoch.changed() {
-        tracing::warn!("session search cache healed while writing completion marker; clearing it");
-        if let Err(e) = clear_last_bootstrap_at(&db_path_meta) {
-            tracing::warn!(error = %e, "failed to clear stale completion marker after heal");
+    } else {
+        match write_last_bootstrap_at_if_claim_owner(&db_path_meta, claim_token.as_str()) {
+            Ok(true) if epoch.changed() => {
+                tracing::warn!(
+                    "session search cache healed while writing completion marker; clearing it"
+                );
+                if let Err(e) = clear_last_bootstrap_at(&db_path_meta) {
+                    tracing::warn!(error = %e, "failed to clear stale completion marker after heal");
+                }
+                needs_rebootstrap = true;
+            }
+            Ok(true) => {}
+            // No claim at all means the file was replaced under us (a heal
+            // here or in a peer), not taken over; the fresh index is empty
+            // and needs a rebuild.
+            Ok(false) => match has_bootstrap_claim(&db_path_meta) {
+                Ok(false) => {
+                    tracing::warn!(
+                        "session search index was replaced during bootstrap; rebuilding"
+                    );
+                    needs_rebootstrap = true;
+                }
+                _ => tracing::warn!("bootstrap claim lost; completion marker withheld"),
+            },
+            Err(e) => tracing::warn!(error = %e, "failed to write last_bootstrap_at metadata"),
         }
-        needs_rebootstrap = true;
     }
 
     if needs_rebootstrap {
-        SEARCH_INDEX_MANAGER.bootstrap_once(root_dir.to_path_buf());
+        return Ok(BootstrapOutcome::RunAgain);
     }
 
-    Ok(())
+    Ok(BootstrapOutcome::Done)
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,6 +1711,69 @@ fn build_session_doc(summary: &Summary, content: String) -> SessionDoc {
 mod tests {
     use super::*;
 
+    // ── process-gate test scaffolding ──────────────────────────────────────
+    //
+    // `SEARCH_GATE` is process-global, so any test that mutates it must be
+    // `#[serial_test::serial]`, and every other test that observes it
+    // (`execute_search`, `bootstrap_once`) is serial too so a temporary
+    // CLOSED state can never leak into an unrelated test.
+
+    /// Restores `SEARCH_GATE` but not `SEARCH_CLOSED_BY`, which is set once
+    /// per process. Callers must be `#[serial]` so no other test observes
+    /// the temporary state.
+    #[must_use]
+    struct IndexGateGuard {
+        prior: u8,
+    }
+
+    impl IndexGateGuard {
+        fn snapshot() -> Self {
+            Self {
+                prior: SEARCH_GATE.load(Ordering::Acquire),
+            }
+        }
+
+        /// Force the unapplied state so a test can exercise the first-open
+        /// transition. Only serialized gate tests may do this: the first
+        /// non-serial reader that races it would resolve and latch the gate
+        /// from the dev machine's disk tiers.
+        fn unapplied() -> Self {
+            let guard = Self::snapshot();
+            SEARCH_GATE.store(SEARCH_GATE_UNAPPLIED, Ordering::Release);
+            guard
+        }
+    }
+
+    impl Drop for IndexGateGuard {
+        fn drop(&mut self) {
+            SEARCH_GATE.store(self.prior, Ordering::Release);
+        }
+    }
+
+    /// Mutex serializing tests that touch the `GROW_SESSION_SEARCH` env var
+    /// (env vars are process-global, so parallel tests race on them).
+    static SESSION_SEARCH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with `GROW_SESSION_SEARCH` set to `value` (Some) or removed
+    /// (None), restoring the previous value even on panic.
+    fn with_session_search_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = SESSION_SEARCH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("GROW_SESSION_SEARCH").ok();
+        match value {
+            Some(v) => unsafe { std::env::set_var("GROW_SESSION_SEARCH", v) },
+            None => unsafe { std::env::remove_var("GROW_SESSION_SEARCH") },
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match previous {
+            Some(prev) => unsafe { std::env::set_var("GROW_SESSION_SEARCH", prev) },
+            None => unsafe { std::env::remove_var("GROW_SESSION_SEARCH") },
+        }
+        result.unwrap_or_else(|p| std::panic::resume_unwind(p))
+    }
+
+    #[serial_test::serial]
     #[tokio::test]
     async fn test_execute_search_empty_query() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1705,6 +2279,7 @@ mod tests {
     // can re-set the flag). Only the eager-set test is reliable because
     // the store is synchronous before the channel send.
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn test_bootstrap_once_sets_flag_eagerly() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1718,6 +2293,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn test_execute_search_completes_on_fresh_db() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1776,6 +2352,7 @@ mod tests {
 
     /// End-to-end recheck healing: `RecheckBootstrap` on a marker-less index
     /// re-runs the full bootstrap, which rewrites the marker on completion.
+    #[serial_test::serial]
     #[tokio::test]
     async fn test_recheck_bootstrap_reruns_reindex_when_marker_missing() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1833,6 +2410,351 @@ mod tests {
             index.get_content_hash("stub").unwrap(),
             None,
             "the upgrade drop must clear stub rows so their stale hashes cannot block re-indexing"
+        );
+    }
+
+    // ── gate tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_session_search_off_reason_mapping() {
+        assert_eq!(
+            session_search_off_reason(ConfigSource::Requirement),
+            "a requirements.toml pin or an MDM policy"
+        );
+        assert_eq!(
+            session_search_off_reason(ConfigSource::Env),
+            "the GROW_SESSION_SEARCH environment variable"
+        );
+        for source in [
+            ConfigSource::Config,
+            ConfigSource::UserConfig,
+            ConfigSource::ManagedConfig,
+            ConfigSource::SystemManagedConfig,
+        ] {
+            assert_eq!(
+                session_search_off_reason(source),
+                "the session_search key in a Grow config file"
+            );
+        }
+        for source in [
+            ConfigSource::Cli,
+            ConfigSource::Remote,
+            ConfigSource::Default,
+        ] {
+            assert_eq!(session_search_off_reason(source), "a local setting");
+        }
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_resolve_session_search_precedence() {
+        with_session_search_env(None, || {
+            // Unset everywhere → on by default.
+            let r = resolve_session_search_setting(None, None);
+            assert!(r.value);
+            assert_eq!(r.source, ConfigSource::Default);
+
+            // A requirements pin wins everything, including a config that
+            // says on.
+            let r = resolve_session_search_setting(
+                Some(false),
+                Some(SessionSearchConfig {
+                    enabled: Some(true),
+                }),
+            );
+            assert!(!r.value);
+            assert_eq!(r.source, ConfigSource::Requirement);
+
+            // The config file tier beats the default.
+            let r = resolve_session_search_setting(
+                None,
+                Some(SessionSearchConfig {
+                    enabled: Some(false),
+                }),
+            );
+            assert!(!r.value);
+            assert_eq!(r.source, ConfigSource::Config);
+
+            // An unset config field falls through to the default.
+            let r = resolve_session_search_setting(None, Some(SessionSearchConfig::default()));
+            assert!(r.value);
+            assert_eq!(r.source, ConfigSource::Default);
+        });
+        with_session_search_env(Some("0"), || {
+            // Env off beats a config that says on.
+            let r = resolve_session_search_setting(
+                None,
+                Some(SessionSearchConfig {
+                    enabled: Some(true),
+                }),
+            );
+            assert!(!r.value);
+            assert_eq!(r.source, ConfigSource::Env);
+
+            // A pin still outranks the environment.
+            let r = resolve_session_search_setting(Some(true), None);
+            assert!(r.value);
+            assert_eq!(r.source, ConfigSource::Requirement);
+        });
+    }
+
+    /// The off state must be diagnosable (an error naming the closing tier,
+    /// never an empty result set) and must not create an index. The latch
+    /// cannot reopen in this process once closed.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn test_search_gate_off_blocks_search_and_never_reopens() {
+        let _gate = IndexGateGuard::unapplied();
+        apply_search_gate(&Resolved::new(false, ConfigSource::Env));
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let req = SessionSearchRequest {
+            query: "hello".to_string(),
+            cwd: None,
+            limit: 10,
+            offset: 0,
+            include_content: false,
+        };
+
+        let source = search_closed_by().expect("the closing source must be recorded");
+        let expected = format!(
+            "session search is off ({})",
+            session_search_off_reason(source)
+        );
+
+        let err = execute_search(tmp.path(), &req).await.unwrap_err();
+        assert_eq!(err.to_string(), expected);
+        assert!(
+            !search_index_exists(tmp.path()),
+            "off must not create an index"
+        );
+
+        // bootstrap_once must not arm anything while off.
+        SEARCH_INDEX_MANAGER.bootstrap_once(tmp.path().to_path_buf());
+        assert!(!search_index_exists(tmp.path()));
+
+        // Even when a setting now says on, the gate stays closed for the
+        // process: the completed-bootstrap marker outlives the time spent
+        // off, so reopening mid-process would serve a half-index.
+        apply_search_gate(&Resolved::new(true, ConfigSource::Default));
+        assert!(
+            !is_index_enabled(),
+            "a closed gate must never reopen in-process"
+        );
+
+        let err2 = execute_search(tmp.path(), &req).await.unwrap_err();
+        assert_eq!(
+            err2.to_string(),
+            expected,
+            "the original closing source stays recorded"
+        );
+        assert!(!search_index_exists(tmp.path()));
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_search_gate_unapplied_opens() {
+        let _gate = IndexGateGuard::unapplied();
+        apply_search_gate(&Resolved::new(true, ConfigSource::Default));
+        assert!(is_index_enabled());
+    }
+
+    /// A session save queued while the gate is off must be dropped, not
+    /// written to (or creating) the index.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn test_off_state_drops_queued_writes() {
+        let _gate = IndexGateGuard::snapshot();
+        apply_search_gate(&Resolved::new(false, ConfigSource::Env));
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let storage: Box<dyn StorageAdapter> = Box::new(
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.to_path_buf()),
+        );
+        let info = Info {
+            id: acp::SessionId::new("s1"),
+            cwd: "/ws".to_string(),
+        };
+        storage
+            .init_session(&info, acp::ModelId::new("test"))
+            .await
+            .unwrap();
+
+        let key = SessionSearchKey {
+            session_id: "s1".to_string(),
+            cwd: "/ws".to_string(),
+        };
+        upsert_by_key(root, storage.as_ref(), &key).await.unwrap();
+        assert!(
+            !search_index_exists(root),
+            "a write declined while off must not create the index"
+        );
+    }
+
+    // ── delete-evict contract ──────────────────────────────────────────────
+
+    /// A session delete must remove its index row even when no index was
+    /// ever built, and must never create an index as a side effect.
+    #[tokio::test]
+    async fn test_evict_removes_row_and_never_creates_index() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // No index exists: the evict path must not create one.
+        delete_session(root, "s1").await.unwrap();
+        assert!(!search_index_exists(root), "no index may be created");
+
+        // Build a row, then evict through the real call point
+        // (load_summary → NotFound → delete_doc): the row must be gone.
+        let doc = build_session_doc(
+            &test_summary("s1", "/ws", "a memorable title"),
+            "indexed body text".to_string(),
+        );
+        with_search_index(&search_db_path(root), |index| index.upsert_doc(&doc)).unwrap();
+        let hits = |query: &str| {
+            with_search_index(&search_db_path(root), |index| {
+                index.query(query, None, 10, 0, false)
+            })
+            .unwrap()
+            .results
+            .len()
+        };
+        assert_eq!(hits("memorable"), 1);
+
+        let storage: Box<dyn StorageAdapter> = Box::new(
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.to_path_buf()),
+        );
+        upsert_by_key(
+            root,
+            storage.as_ref(),
+            &SessionSearchKey {
+                session_id: "s1".to_string(),
+                cwd: "/ws".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hits("memorable"), 0, "a delete must land");
+    }
+
+    // ── bootstrap lease gate tests ─────────────────────────────────────────
+
+    /// The gate itself: a launch's first claim reindexes even when a
+    /// completed marker exists (the launch owes pruning and skipped
+    /// retries), rewrites the marker, and releases the claim.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn test_launch_claimant_reindexes_even_when_marker_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let db_path = search_db_path(root);
+        with_search_index(&db_path, |index| {
+            index.set_meta(META_KEY_LAST_BOOTSTRAP, "123")
+        })
+        .unwrap();
+
+        let storage: Box<dyn StorageAdapter> = Box::new(
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.to_path_buf()),
+        );
+        let outcome = bootstrap_with_lease(root, storage.as_ref(), BootstrapRole::Launch)
+            .await
+            .unwrap();
+        assert_eq!(outcome, BootstrapOutcome::Done);
+
+        assert_ne!(
+            with_search_index(&db_path, |index| index.get_meta(META_KEY_LAST_BOOTSTRAP)).unwrap(),
+            Some("123".to_string()),
+            "the reindex must rewrite the marker"
+        );
+        assert_eq!(
+            with_search_index(&db_path, |index| {
+                index.get_meta(search_fts::META_KEY_BOOTSTRAP_CLAIM)
+            })
+            .unwrap(),
+            None,
+            "the claim must be released"
+        );
+    }
+
+    /// A waiter adopts a peer's completed marker without reindexing, leaving
+    /// the peer's claim row alone.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn test_launch_waiter_adopts_peer_marker_without_reindexing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let db_path = search_db_path(root);
+
+        let now = chrono::Utc::now().timestamp();
+        with_search_index(&db_path, |index| {
+            index.try_claim_bootstrap(now, BOOTSTRAP_LEASE_DURATION, "peer")
+        })
+        .unwrap();
+        with_search_index(&db_path, |index| {
+            index.set_meta(META_KEY_LAST_BOOTSTRAP, "123")
+        })
+        .unwrap();
+
+        let storage: Box<dyn StorageAdapter> = Box::new(
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.to_path_buf()),
+        );
+        let outcome = bootstrap_with_lease(root, storage.as_ref(), BootstrapRole::Launch)
+            .await
+            .unwrap();
+        assert_eq!(outcome, BootstrapOutcome::Done);
+
+        assert_eq!(
+            with_search_index(&db_path, |index| index.get_meta(META_KEY_LAST_BOOTSTRAP)).unwrap(),
+            Some("123".to_string()),
+            "the waiter adopts the marker instead of reindexing"
+        );
+        assert_eq!(
+            with_search_index(&db_path, |index| {
+                index.get_meta(search_fts::META_KEY_BOOTSTRAP_CLAIM)
+            })
+            .unwrap(),
+            Some(format!("{now}:peer")),
+            "the waiter must not touch the peer's claim"
+        );
+    }
+
+    /// A recheck (post-first search) gives up at once when a peer holds the
+    /// claim, without reindexing; the next search re-probes the marker.
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn test_recheck_gives_up_when_peer_holds_claim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let db_path = search_db_path(root);
+
+        let now = chrono::Utc::now().timestamp();
+        with_search_index(&db_path, |index| {
+            index.try_claim_bootstrap(now, BOOTSTRAP_LEASE_DURATION, "peer")
+        })
+        .unwrap();
+
+        let storage: Box<dyn StorageAdapter> = Box::new(
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.to_path_buf()),
+        );
+        let outcome = try_bootstrap_with_lease(root, storage.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(outcome, BootstrapOutcome::Done);
+
+        assert_eq!(
+            with_search_index(&db_path, |index| index.get_meta(META_KEY_LAST_BOOTSTRAP)).unwrap(),
+            None,
+            "no reindex ran, so no marker appears"
+        );
+        assert_eq!(
+            with_search_index(&db_path, |index| {
+                index.get_meta(search_fts::META_KEY_BOOTSTRAP_CLAIM)
+            })
+            .unwrap(),
+            Some(format!("{now}:peer")),
+            "the peer's live claim is left alone"
         );
     }
 }

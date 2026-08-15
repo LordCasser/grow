@@ -17,6 +17,8 @@ pub enum Command {
     },
     /// Check terminal, clipboard, color, and input support without starting Grow
     Doctor(crate::doctor_cmd::DoctorArgs),
+    /// Show disk usage of the Grow home directory (~/.grow)
+    Du(crate::du_cmd::DuArgs),
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Manage MCP server configurations
@@ -909,6 +911,19 @@ mod tests {
                 .expect_err("unsupported doctor form must fail");
             assert_eq!(error.exit_code(), 2);
         }
+    }
+    #[test]
+    fn du_accepts_plain_and_json_forms() {
+        let bare = PagerArgs::try_parse_from(["grow", "du"]).expect("bare du parses");
+        assert!(matches!(
+            bare.command,
+            Some(Command::Du(crate::du_cmd::DuArgs { json: false }))
+        ));
+        let json = PagerArgs::try_parse_from(["grow", "du", "--json"]).expect("du --json parses");
+        assert!(matches!(
+            json.command,
+            Some(Command::Du(crate::du_cmd::DuArgs { json: true }))
+        ));
     }
     #[test]
     fn resume_target_classifies_flags() {

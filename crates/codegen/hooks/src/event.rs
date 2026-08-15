@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Maximum serialized size for `toolInput` or `toolResult` in bytes (128 KB).
 pub const MAX_PAYLOAD_SIZE: usize = 128 * 1024;
@@ -145,6 +145,13 @@ hook_events! {
         aliases: ["StopFailure", "stop_failure", "stopFailure"],
         traits: (Observe, Tested),
     },
+    /// Fires when a turn is cancelled (user abort, permission/hook gate). Observe-only:
+    /// output and exit code are ignored, and a hook can never delay the cancel itself.
+    StopCancelled {
+        display: "stop_cancelled",
+        aliases: ["StopCancelled", "stop_cancelled", "stopCancelled"],
+        traits: (Observe, Ignored),
+    },
     Notification {
         display: "notification",
         aliases: ["Notification", "notification"],
@@ -241,6 +248,13 @@ pub fn clip_stop_entry_text(text: &str) -> String {
     clip_text(text, MAX_STOP_ENTRY_TEXT_CHARS)
 }
 
+/// Max characters for the free-text cancel trigger in a `StopCancelled` payload.
+pub const MAX_CANCEL_TRIGGER_CHARS: usize = 64;
+
+pub fn clip_cancel_trigger(text: &str) -> String {
+    clip_text(text, MAX_CANCEL_TRIGGER_CHARS)
+}
+
 /// `SubagentStop` fire phase: always `Gate` today, `Observe` reserved and not emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -307,6 +321,21 @@ impl StopFailureKind {
             Self::Unknown => "unknown",
         }
     }
+}
+
+/// Why a turn was cancelled. Single source of truth shared by the session
+/// event log (`TurnEnded.cancellation_category`) and the `StopCancelled` hook
+/// payload's `reason`. `Deserialize`/`PartialEq`/`Eq`/`Hash` let the workspace
+/// decode `cancellation_category` strings back into this enum, and `snake_case`
+/// keeps the wire form identical to serialization.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationCategory {
+    HookDenied,
+    PermissionRejected,
+    PermissionCancelled,
+    PermissionTimedOut,
+    MidTurnAbort,
 }
 
 /// The normalized event envelope sent to hook commands on stdin as JSON:
@@ -380,6 +409,15 @@ pub enum HookPayload {
             skip_serializing_if = "Option::is_none"
         )]
         last_assistant_message: Option<String>,
+    },
+    StopCancelled {
+        /// Why the turn was cancelled, directly serialized as the shared
+        /// [`CancellationCategory`] (bare snake_case on the wire).
+        reason: CancellationCategory,
+        /// Free-text cancel trigger (e.g. `ctrl_c`, `esc`), clipped to
+        /// [`MAX_CANCEL_TRIGGER_CHARS`]; omitted when the cancel path carries none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
     },
 
     PreToolUse {
@@ -517,7 +555,9 @@ impl HookPayload {
             // Always a non-empty name, unlike the free-text arms above.
             Self::StopFailure { error, .. } => return Some(error.as_str()),
             // Ignored events listed explicitly so a new Tested event can't silently return None.
-            Self::Stop { .. } | Self::UserPromptSubmit { .. } => return None,
+            Self::Stop { .. } | Self::UserPromptSubmit { .. } | Self::StopCancelled { .. } => {
+                return None;
+            }
         };
         Some(value.as_str()).filter(|v| !v.is_empty())
     }
@@ -561,6 +601,7 @@ mod tests {
             ("SessionEnd", "session_end", HookEventName::SessionEnd),
             ("Stop", "stop", HookEventName::Stop),
             ("StopFailure", "stop_failure", HookEventName::StopFailure),
+            ("StopCancelled", "stop_cancelled", HookEventName::StopCancelled),
             ("Notification", "notification", HookEventName::Notification),
             (
                 "UserPromptSubmit",
@@ -606,6 +647,7 @@ mod tests {
             (HookEventName::SessionEnd, "session_end"),
             (HookEventName::Stop, "stop"),
             (HookEventName::StopFailure, "stop_failure"),
+            (HookEventName::StopCancelled, "stop_cancelled"),
             (HookEventName::Notification, "notification"),
             (HookEventName::UserPromptSubmit, "user_prompt_submit"),
             (HookEventName::PermissionDenied, "permission_denied"),
@@ -639,6 +681,7 @@ mod tests {
             ("subagentEnd", HookEventName::SubagentEnd),
             ("preCompact", HookEventName::PreCompact),
             ("stopFailure", HookEventName::StopFailure),
+            ("stopCancelled", HookEventName::StopCancelled),
         ];
         for (spelling, expected) in cases {
             let parsed: HookEventName = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
@@ -665,8 +708,17 @@ mod tests {
             "alias resolves through canonical()"
         );
         assert_eq!(HookEventName::PostToolUse.traits().gate, GateKind::Observe);
+        assert_eq!(
+            HookEventName::StopCancelled.traits().gate,
+            GateKind::Observe,
+            "StopCancelled is observe-only: it never participates in a decision gate"
+        );
 
         assert_eq!(HookEventName::Stop.traits().matcher, MatcherPolicy::Ignored);
+        assert_eq!(
+            HookEventName::StopCancelled.traits().matcher,
+            MatcherPolicy::Ignored
+        );
         assert_eq!(
             HookEventName::UserPromptSubmit.traits().matcher,
             MatcherPolicy::Ignored
@@ -780,6 +832,120 @@ mod tests {
                 "{kind:?} serialization drifted from as_str"
             );
         }
+    }
+
+    /// Every variant must survive a `to_value` -> `from_value` round-trip.
+    #[test]
+    fn cancellation_category_round_trips_every_variant() {
+        for variant in [
+            CancellationCategory::HookDenied,
+            CancellationCategory::PermissionRejected,
+            CancellationCategory::PermissionCancelled,
+            CancellationCategory::PermissionTimedOut,
+            CancellationCategory::MidTurnAbort,
+        ] {
+            let value = serde_json::to_value(variant).unwrap();
+            let decoded: CancellationCategory = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded, variant, "{variant:?} must round-trip");
+        }
+    }
+
+    /// Serialization is bare snake_case strings (identical to the session event
+    /// log's `cancellation_category` wire form).
+    #[test]
+    fn cancellation_category_serializes_snake_case() {
+        for (variant, expected) in [
+            (CancellationCategory::HookDenied, "\"hook_denied\""),
+            (
+                CancellationCategory::PermissionRejected,
+                "\"permission_rejected\"",
+            ),
+            (
+                CancellationCategory::PermissionCancelled,
+                "\"permission_cancelled\"",
+            ),
+            (
+                CancellationCategory::PermissionTimedOut,
+                "\"permission_timed_out\"",
+            ),
+            (CancellationCategory::MidTurnAbort, "\"mid_turn_abort\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected, "{variant:?} must serialize to {expected}");
+        }
+    }
+
+    /// The `StopCancelled` payload serializes the shared `CancellationCategory`
+    /// directly as `reason` (single source of truth — no string mapping layer),
+    /// carries the cancel trigger, and omits an absent trigger.
+    #[test]
+    fn stop_cancelled_payload_serializes_reason_and_trigger() {
+        let payload = HookPayload::StopCancelled {
+            reason: CancellationCategory::MidTurnAbort,
+            trigger: Some("esc".into()),
+        };
+        let value = serde_json::to_value(&payload).unwrap();
+        assert_eq!(value["reason"], "mid_turn_abort");
+        assert_eq!(value["trigger"], "esc");
+
+        let no_trigger = HookPayload::StopCancelled {
+            reason: CancellationCategory::PermissionRejected,
+            trigger: None,
+        };
+        let value = serde_json::to_value(&no_trigger).unwrap();
+        assert_eq!(value["reason"], "permission_rejected");
+        assert!(
+            value.get("trigger").is_none(),
+            "absent trigger must be omitted, got {value}"
+        );
+    }
+
+    /// The envelope stays far below `MAX_PAYLOAD_SIZE`: the reason is a fixed
+    /// enum and the trigger is clipped to 64 chars.
+    #[test]
+    fn stop_cancelled_envelope_respects_payload_cap() {
+        let long_trigger = "x".repeat(10_000);
+        let envelope = HookEventEnvelope {
+            hook_event_name: HookEventName::StopCancelled,
+            session_id: "s".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "t".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: Some("p-1".into()),
+            permission_mode: None,
+            payload: HookPayload::StopCancelled {
+                reason: CancellationCategory::MidTurnAbort,
+                trigger: Some(clip_cancel_trigger(&long_trigger)),
+            },
+        };
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(value["hookEventName"], "stop_cancelled");
+        assert!(value.get("trigger").is_some(), "trigger must be present");
+        assert!(value.get("reason").is_some(), "reason must be present");
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(
+            serialized.len() <= MAX_PAYLOAD_SIZE,
+            "envelope must stay within MAX_PAYLOAD_SIZE"
+        );
+    }
+
+    /// The cancel trigger clips at 64 chars on a char boundary (same marker
+    /// convention as `clip_stop_entry_text`).
+    #[test]
+    fn clip_cancel_trigger_clips_on_char_boundary() {
+        assert_eq!(clip_cancel_trigger("esc"), "esc");
+        let exact = "x".repeat(MAX_CANCEL_TRIGGER_CHARS);
+        assert_eq!(clip_cancel_trigger(&exact), exact);
+
+        let long = "x".repeat(MAX_CANCEL_TRIGGER_CHARS + 5);
+        let clipped = clip_cancel_trigger(&long);
+        assert!(clipped.ends_with("… [+5 chars]"));
+
+        let unicode = "€".repeat(MAX_CANCEL_TRIGGER_CHARS + 2);
+        let clipped = clip_cancel_trigger(&unicode);
+        assert!(clipped.ends_with("… [+2 chars]"));
     }
 
     #[test]

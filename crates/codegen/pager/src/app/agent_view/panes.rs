@@ -531,6 +531,15 @@ impl AgentView {
                     crate::views::modal::apply_doc_scroll_delta(scroll, lines);
                     return;
                 }
+                ActiveModal::Usage { state, .. } => {
+                    let delta = lines.unsigned_abs() as u16;
+                    state.scroll = if lines > 0 {
+                        state.scroll.saturating_add(delta)
+                    } else {
+                        state.scroll.saturating_sub(delta)
+                    };
+                    return;
+                }
                 _ => {}
             }
         }

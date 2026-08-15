@@ -1306,7 +1306,9 @@ pub(super) async fn run_session(
                         // Cancellation terminates the exact turn named when a
                         // steer was admitted. Never leak residual steering to
                         // the next user turn or Goal continuation.
-                        session.discard_residual_interjections_at_turn_end();
+                        session
+                            .discard_residual_interjections_at_turn_end()
+                            .await;
                         let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
                         session
                             .cancel_running_task(

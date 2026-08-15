@@ -186,6 +186,8 @@ This shows:
 - API backend and sandbox profile (when set)
 - Context window usage (used and total tokens, with the percentage used)
 
+In fullscreen and inline modes `/session-info` opens the tabbed usage modal (`Esc` closes it; content never enters the transcript). Click a row — Session ID, working directory, model — to copy it. Minimal mode keeps the inline scrollback output.
+
 ---
 
 ## Headless Session Management

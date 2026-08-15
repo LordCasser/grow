@@ -9,11 +9,14 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
+use crate::views::modal::ActiveModal;
+use crate::views::usage_modal::{UsageModalState, UsageModalTab, UsageTabData};
 
-/// Show session info: fetch via x.ai/session/info and display in scrollback.
+/// Show session info: fetch via x.ai/session/info.
 ///
-/// Produces Effect::ShowSessionInfo which spawns an async ACP ext request.
-/// On completion, TaskResult::SessionInfoComplete shows the formatted info.
+/// Fullscreen/inline opens the tabbed usage modal (Session Info tab) and fills
+/// it when `TaskResult::SessionInfoComplete` arrives; minimal mode keeps the
+/// legacy scrollback block (fetch nonce `0` = scrollback intent).
 pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -27,11 +30,16 @@ pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
 
-    vec![Effect::ShowSessionInfo {
-        agent_id: id,
-        session_id,
-        show_resolved_model: app.show_resolved_model,
-    }]
+    if app.screen_mode.is_minimal() {
+        vec![Effect::ShowSessionInfo {
+            agent_id: id,
+            session_id,
+            show_resolved_model: app.show_resolved_model,
+            nonce: 0,
+        }]
+    } else {
+        open_usage_modal(app, id, UsageModalTab::SessionInfo, &session_id)
+    }
 }
 
 pub(super) fn scrub_error_for_toast(error: &str) -> String {
@@ -49,8 +57,10 @@ pub(super) fn scrub_error_for_toast(error: &str) -> String {
 
 /// Show context info: fetch via grow/session/info and display rich breakdown.
 ///
-/// Produces Effect::ShowContextInfo which spawns an async ACP ext request.
-/// On completion, TaskResult::ContextInfoComplete shows the formatted info.
+/// Fullscreen/inline opens the tabbed usage modal (Context tab) and fills it
+/// when `TaskResult::ContextInfoComplete` arrives; minimal mode keeps the
+/// legacy scrollback block (fetch nonce `0` = scrollback intent). Also the
+/// entry point for a context-bar click.
 pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -62,13 +72,21 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
 
-    vec![Effect::ShowContextInfo {
-        agent_id: id,
-        session_id,
-    }]
+    if app.screen_mode.is_minimal() {
+        vec![Effect::ShowContextInfo {
+            agent_id: id,
+            session_id,
+            nonce: 0,
+        }]
+    } else {
+        open_usage_modal(app, id, UsageModalTab::Context, &session_id)
+    }
 }
 
 /// `/usage` — local session token and context usage.
+///
+/// Fullscreen/inline opens the tabbed usage modal (Usage tab); minimal mode
+/// keeps the legacy scrollback block.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -80,10 +98,17 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         agent.session.session_id.clone()
     };
     match session_id {
-        Some(session_id) => vec![Effect::FetchSessionUsage {
-            agent_id: id,
-            session_id,
-        }],
+        Some(session_id) => {
+            if app.screen_mode.is_minimal() {
+                vec![Effect::FetchSessionUsage {
+                    agent_id: id,
+                    session_id,
+                    nonce: 0,
+                }]
+            } else {
+                open_usage_modal(app, id, UsageModalTab::Usage, &session_id)
+            }
+        }
         None => {
             if let Some(agent) = app.agents.get_mut(&id) {
                 agent.scrollback.push_block(RenderBlock::system(
@@ -95,12 +120,57 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     }
 }
 
-/// Commit a session-usage block if still on `session_id`.
-pub(super) fn commit_session_usage_block(
+/// Open the tabbed usage modal on `tab` and fire all three tab fetches with a
+/// fresh epoch. The modal state keeps the epoch; TaskResults carry it back and
+/// are applied only while the same modal open is still present — a result from
+/// before a close/reopen can never overwrite the newer request.
+fn open_usage_modal(
+    app: &mut AppView,
+    agent_id: AgentId,
+    tab: UsageModalTab,
+    session_id: &acp::SessionId,
+) -> Vec<Effect> {
+    let nonce = crate::views::usage_modal::next_fetch_nonce();
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.active_modal = Some(ActiveModal::Usage {
+            state: UsageModalState::open(tab, nonce),
+        });
+    }
+    vec![
+        Effect::FetchSessionUsage {
+            agent_id,
+            session_id: session_id.clone(),
+            nonce,
+        },
+        Effect::ShowContextInfo {
+            agent_id,
+            session_id: session_id.clone(),
+            nonce,
+        },
+        Effect::ShowSessionInfo {
+            agent_id,
+            session_id: session_id.clone(),
+            show_resolved_model: app.show_resolved_model,
+            nonce,
+        },
+    ]
+}
+
+/// True when the agent's open usage modal carries the given fetch epoch.
+fn usage_modal_matches(agent: &AgentView, nonce: u64) -> bool {
+    nonce > 0
+        && matches!(&agent.active_modal, Some(ActiveModal::Usage { state }) if state.fetch_nonce == nonce)
+}
+
+/// Commit a session-usage result either into the open usage modal (epoch
+/// match) or, for scrollback-intent fetches (`nonce == 0`, minimal mode), as a
+/// system block — still only if `session_id` matches. Stale epochs are dropped.
+pub(super) fn apply_session_usage_result(
     app: &mut AppView,
     agent_id: AgentId,
     session_id: &acp::SessionId,
-    text: String,
+    result: Result<Box<shell::extensions::notification::PromptUsage>, String>,
+    nonce: u64,
 ) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
@@ -108,7 +178,23 @@ pub(super) fn commit_session_usage_block(
     if agent.session.session_id.as_ref() != Some(session_id) {
         return vec![];
     }
-    agent.scrollback.push_block(RenderBlock::system(text));
+    if nonce == 0 {
+        let text = match &result {
+            Ok(usage) => crate::app::status_blocks::session_usage_block_text(usage),
+            Err(error) => format!("Couldn't load session usage: {error}"),
+        };
+        agent.scrollback.push_block(RenderBlock::system(text));
+        return vec![];
+    }
+    if usage_modal_matches(agent, nonce) {
+        let data = match result {
+            Ok(usage) => UsageTabData::Loaded(usage),
+            Err(error) => UsageTabData::Failed(error),
+        };
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.usage = data;
+        }
+    }
     vec![]
 }
 
@@ -204,31 +290,137 @@ pub(super) fn notify_session_ready(
 
 // TaskResult handlers.
 
+/// `SessionInfoComplete` — refresh the agent's live context/agent-name state,
+/// then route the payload: scrollback block for scrollback-intent fetches
+/// (`nonce == 0`, minimal), usage-modal rows for a matching open modal epoch,
+/// or drop when the modal was closed/reopened since the request.
+pub(super) fn handle_session_info_complete(
+    app: &mut AppView,
+    agent_id: AgentId,
+    info: Box<shell::session::SessionInfoResponse>,
+    text: String,
+    title: Option<String>,
+    show_resolved_model: bool,
+    nonce: u64,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    agent.session_agent_name = info.data.agent_name.clone();
+    if let Some(modal) = agent.agents_modal.as_mut() {
+        modal.active_agent = info.data.agent_name.clone();
+    }
+    agent.apply_full_context_info(info.data.context.clone());
+    if nonce == 0 {
+        agent.scrollback.push_block(RenderBlock::system(text));
+    } else if usage_modal_matches(agent, nonce) {
+        let rows = crate::views::usage_modal::session_info_rows(
+            &info,
+            title.as_deref(),
+            show_resolved_model,
+        );
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.session_info = UsageTabData::Loaded(rows);
+        }
+    }
+    vec![]
+}
+
+/// `SessionInfoFailed` — same routing as [`handle_session_info_complete`].
+pub(super) fn handle_session_info_failed(
+    app: &mut AppView,
+    agent_id: AgentId,
+    error: String,
+    nonce: u64,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if nonce == 0 {
+        agent.scrollback.push_block(RenderBlock::system(format!(
+            "Couldn't load session info: {error}"
+        )));
+    } else if usage_modal_matches(agent, nonce) {
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.session_info = UsageTabData::Failed(error);
+        }
+    }
+    vec![]
+}
+
+/// `ContextInfoComplete` — refresh the agent's live context state, then route
+/// the payload: scrollback block (`nonce == 0`) or usage-modal Context tab.
 pub(super) fn handle_context_info_complete(
     app: &mut AppView,
     agent_id: AgentId,
     info: Box<shell::session::SessionInfoResponse>,
+    nonce: u64,
 ) -> Vec<Effect> {
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
-        let model = info.data.model.as_deref().unwrap_or("unknown").to_string();
-        // Take ownership of the snapshot once, hand a clone to the
-        // agent's running counters, then move the original into the
-        // scrollback block (which keeps it for theme-reactive
-        // re-rendering). This still costs one clone but reads as
-        // "the agent needs a copy" rather than "the block needs a
-        // copy", which matches the lifetime story.
-        let snapshot = info.data.context;
-        agent.apply_full_context_info(snapshot.clone());
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    let model = info.data.model.as_deref().unwrap_or("unknown").to_string();
+    // Take ownership of the snapshot once, hand a clone to the agent's
+    // running counters, then move the original into the display payload
+    // (scrollback block or modal tab).
+    let snapshot = info.data.context;
+    agent.apply_full_context_info(snapshot.clone());
+    if nonce == 0 {
         agent
             .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::context_info(
-                snapshot, model,
-            ));
+            .push_block(RenderBlock::context_info(snapshot, model));
+    } else if usage_modal_matches(agent, nonce) {
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.context = UsageTabData::Loaded(crate::views::usage_modal::ContextSnapshot {
+                snapshot,
+                model,
+            });
+        }
+    }
+    vec![]
+}
+
+/// `ContextInfoFailed` — same routing as [`handle_context_info_complete`].
+pub(super) fn handle_context_info_failed(
+    app: &mut AppView,
+    agent_id: AgentId,
+    error: String,
+    nonce: u64,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if nonce == 0 {
+        agent.scrollback.push_block(RenderBlock::system(format!(
+            "Couldn't load context info: {error}"
+        )));
+    } else if usage_modal_matches(agent, nonce) {
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.context = UsageTabData::Failed(error);
+        }
     }
     vec![]
 }
 
 // Action handlers.
+
+/// Copy a Session Info row value from the usage modal (mouse click / Enter).
+/// Reuses the shared clipboard channel; the index addresses the rows rendered
+/// for the open modal's Session Info tab.
+pub(super) fn dispatch_copy_usage_modal_value(app: &mut AppView, index: usize) -> Vec<Effect> {
+    let value = app
+        .agents
+        .values()
+        .find_map(|agent| match &agent.active_modal {
+            Some(ActiveModal::Usage { state }) => state.copy_value(index),
+            _ => None,
+        });
+    if let Some(value) = value {
+        let delivery = crate::clipboard::copy_text_or_file(&value);
+        app.show_toast(delivery.toast_message().as_ref());
+    }
+    vec![]
+}
 
 pub(super) fn dispatch_copy_session_id(app: &mut AppView, index: usize) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;

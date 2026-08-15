@@ -3844,7 +3844,7 @@ mod wait_interrupt_tests {
     #[tokio::test(start_paused = true)]
     async fn pending_interjection_aborts_in_flight_wait() {
         use super::InterjectionBuffer;
-        use tools::interjection::PendingInterjection;
+        use super::PendingInterjection;
         let buf: InterjectionBuffer<agent_client_protocol::ImageContent> =
             InterjectionBuffer::default();
         let out = tokio::select! {
@@ -3856,6 +3856,7 @@ mod wait_interrupt_tests {
         buf.push(PendingInterjection {
             text: "user message".into(),
             attachments: Vec::new(),
+            auto_promoted: None,
         });
         let out = tokio::select! {
             biased;

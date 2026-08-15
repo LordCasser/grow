@@ -204,7 +204,7 @@ impl SessionActor {
         // Terminal fence for exact-turn steering. The sampler drains at its
         // safe points; anything left here arrived too late to belong to the
         // completed turn and must never be consumed by its successor.
-        self.discard_residual_interjections_at_turn_end();
+        self.discard_residual_interjections_at_turn_end().await;
 
         if let Some(input) = settled_input {
             let _ = input.respond_to.send(result.clone());

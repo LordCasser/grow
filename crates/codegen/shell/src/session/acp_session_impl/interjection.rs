@@ -10,11 +10,40 @@ use super::*;
 //
 // Re-exported for `acp_session.rs` which does `pub(crate) use interjection::*;`
 // so retained code and co-located tests keep resolving by `acp_session::` path.
-#[allow(unused_imports)]
-pub(crate) use tools::interjection::{InterjectionBuffer, drain_formatted, format_interjection};
+pub(crate) use tools::interjection::format_interjection;
 
-/// Shell instantiation of the shared entry type: images are ACP content.
-pub(crate) type PendingInterjection = tools::interjection::PendingInterjection<acp::ImageContent>;
+/// Requeue payload for an auto-promoted follow-up: the exact fields needed to
+/// rebuild a fresh [`InputItem`] when the turn terminal turns a residual
+/// auto-promoted entry back into the user FIFO (as a brand-new turn — the
+/// original prompt id, origin, and turn kind are preserved). Explicit steers
+/// carry `None`; their residuals are discarded at the same fence (turn
+/// identity: an explicit steer belongs to the exact turn it named).
+#[derive(Debug, Clone)]
+pub(crate) struct AutoPromotedRequeue {
+    pub prompt_id: String,
+    pub origin: crate::session::PromptOrigin,
+    pub turn_kind: crate::session::TurnKind,
+    pub client_identifier: Option<String>,
+    pub screen_mode: Option<String>,
+    pub verbatim: bool,
+    pub json_schema: Option<serde_json::Value>,
+}
+
+/// Shell instantiation of the shared pending-interjection entry. `auto_promoted`
+/// is `Some` only for plain-Enter QueuePrompts admitted under
+/// `follow_up_behavior = "steer"`; explicit steers (Ctrl+Enter / queue
+/// "Send now") carry `None`.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingInterjection<Attachment> {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    pub auto_promoted: Option<AutoPromotedRequeue>,
+}
+
+/// Same-turn steering buffer: one buffer, one safe-point drain, one terminal
+/// fence for both explicit steers and auto-promoted follow-ups.
+pub(crate) type InterjectionBuffer<Attachment> =
+    tools::interjection::EventQueue<PendingInterjection<Attachment>>;
 
 impl SessionActor {
     /// Common same-turn steering buffer shared by direct and queued input.
@@ -25,23 +54,112 @@ impl SessionActor {
         text: String,
         attachments: Vec<acp::ImageContent>,
     ) {
-        self.pending_interjections
-            .push(PendingInterjection { text, attachments });
+        self.pending_interjections.push(PendingInterjection {
+            text,
+            attachments,
+            auto_promoted: None,
+        });
+    }
+
+    /// Enqueue a plain-Enter follow-up that [`SessionActor::queue_input`]
+    /// auto-promoted into the running regular turn (`follow_up_behavior =
+    /// "steer"`). Same buffer, drain, and terminal fence as explicit steers;
+    /// the requeue payload lets the turn-end fence turn a residual entry back
+    /// into the user FIFO as a fresh turn instead of discarding it.
+    pub(super) fn queue_auto_promoted_follow_up(
+        &self,
+        text: String,
+        attachments: Vec<acp::ImageContent>,
+        requeue: AutoPromotedRequeue,
+    ) {
+        self.pending_interjections.push(PendingInterjection {
+            text,
+            attachments,
+            auto_promoted: Some(requeue),
+        });
     }
 
     /// Close the current turn's steering scope.
     ///
     /// The buffer is deliberately not a cross-turn queue: every entry was
-    /// admitted against an exact running turn id. A residual entry can only
-    /// be a steer that missed the sampler's final drain point, so carrying it
-    /// into the next foreground owner would violate turn identity.
-    pub(super) fn discard_residual_interjections_at_turn_end(&self) {
-        let discarded = self.pending_interjections.drain_all().len();
+    /// admitted against an exact running turn id. Explicit-steer residuals
+    /// (Ctrl+Enter / "Send now") are discarded — carrying them into the next
+    /// foreground owner would violate turn identity. Auto-promoted follow-ups
+    /// (`follow_up_behavior = "steer"`) are different: they were admitted as
+    /// queue prompts, so a residual is turned back into the user FIFO front as
+    /// a fresh turn (original prompt id / origin / turn kind preserved) before
+    /// the next promotion — no user input is silently swallowed.
+    pub(super) async fn discard_residual_interjections_at_turn_end(&self) {
+        let drained = self.pending_interjections.drain_all();
+        if drained.is_empty() {
+            return;
+        }
+        let mut discarded = 0usize;
+        let mut to_requeue: Vec<PendingInterjection<acp::ImageContent>> = Vec::new();
+        for entry in drained {
+            if entry.auto_promoted.is_some() {
+                to_requeue.push(entry);
+            } else {
+                discarded += 1;
+            }
+        }
         if discarded > 0 {
             tracing::debug!(
                 discarded,
                 "discarded residual same-turn steering at terminal boundary"
             );
+        }
+        if !to_requeue.is_empty() {
+            let requeued = to_requeue.len();
+            let mut state = self.state.lock().await;
+            // Reverse so the oldest drained entry lands at the FIFO front.
+            for entry in to_requeue.into_iter().rev() {
+                state
+                    .pending_inputs
+                    .push_front(Self::requeue_auto_promoted(entry));
+            }
+            tracing::info!(
+                requeued,
+                "re-queued auto-promoted follow-ups as fresh turns at the terminal boundary"
+            );
+            self.broadcast_queue_changed(&state);
+        }
+    }
+
+    /// Rebuild a fresh FIFO [`InputItem`] from a residual auto-promoted entry.
+    /// Runs under the state lock at the terminal fence, before any promotion,
+    /// so the FIFO head is settled before clients can observe a new owner.
+    fn requeue_auto_promoted(entry: PendingInterjection<acp::ImageContent>) -> InputItem {
+        let auto = entry
+            .auto_promoted
+            .expect("only auto-promoted entries reach the requeue path");
+        let mut prompt_blocks =
+            vec![acp::ContentBlock::Text(acp::TextContent::new(entry.text.clone()))];
+        prompt_blocks.extend(entry.attachments.into_iter().map(acp::ContentBlock::Image));
+        let owner = auto.client_identifier.clone();
+        let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
+        InputItem {
+            prompt_id: auto.prompt_id.clone(),
+            turn_kind: auto.turn_kind,
+            prompt_blocks,
+            client_identifier: auto.client_identifier,
+            screen_mode: auto.screen_mode,
+            verbatim: auto.verbatim,
+            json_schema: auto.json_schema,
+            origin: auto.origin,
+            task_wake_fallback: None,
+            respond_to,
+            persist_ack: None,
+            parsed_prompt_tx: None,
+            queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
+                id: auto.prompt_id,
+                version: 0,
+                owner,
+                last_editor: None,
+                kind: "prompt".to_string(),
+                text: entry.text,
+                combined_texts: None,
+            }),
         }
     }
 
@@ -209,7 +327,10 @@ impl SessionActor {
             return false;
         }
 
-        for PendingInterjection { text, attachments } in entries {
+        for PendingInterjection {
+            text, attachments, ..
+        } in entries
+        {
             // Sanitizer drops `[Image #N: <path>]` → `[Image #N]` before the
             // text reaches the model, covering legacy-client raw text AND the
             // queue-interject harvest. Wrapping and truncation stay in the

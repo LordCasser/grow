@@ -30,6 +30,7 @@ pub fn hook_spec_to_info(spec: &::hooks::config::HookSpec) -> HookInfo {
         HookEventName::SessionEnd => HookEvent::SessionEnd,
         HookEventName::Stop => HookEvent::Stop,
         HookEventName::StopFailure => HookEvent::StopFailure,
+        HookEventName::StopCancelled => HookEvent::StopCancelled,
         // Tool events
         HookEventName::PreToolUse => HookEvent::PreToolUse,
         HookEventName::PostToolUse => HookEvent::PostToolUse,
@@ -335,6 +336,17 @@ mod tests {
             Some("https://h/c")
         );
         assert!(url(None, None).is_none());
+    }
+
+    /// A `StopCancelled` spec maps to the `HookEvent::StopCancelled` DTO variant
+    /// (pager modal lists it under its own label, never as `StopFailure` or `Stop`).
+    #[test]
+    fn hook_spec_to_info_maps_stop_cancelled() {
+        let mut spec = make_spec(None, Some("/bin/true"), None, None);
+        spec.event = HookEventName::StopCancelled;
+        let info = hook_spec_to_info(&spec);
+        assert_eq!(info.event, extension_types::HookEvent::StopCancelled);
+        assert_eq!(info.event.to_string(), "Stop Cancelled");
     }
 
     #[test]

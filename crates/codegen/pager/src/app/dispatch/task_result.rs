@@ -29,7 +29,8 @@ use super::session::load::{
 use super::session::modal::remove_agent_and_cleanup;
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
-    commit_session_usage_block, handle_context_info_complete, scrub_error_for_toast,
+    apply_session_usage_result, handle_context_info_complete, handle_context_info_failed,
+    handle_session_info_complete, handle_session_info_failed, scrub_error_for_toast,
 };
 use super::transcript::{
     handle_hooks_list_loaded, handle_marketplace_list_loaded, handle_marketplace_updates_available,
@@ -950,29 +951,23 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             info,
             text,
-        } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.session_agent_name = info.data.agent_name.clone();
-                if let Some(modal) = agent.agents_modal.as_mut() {
-                    modal.active_agent = info.data.agent_name.clone();
-                }
-                agent.apply_full_context_info(info.data.context);
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(text));
-            }
-            vec![]
-        }
-        TaskResult::SessionInfoFailed { agent_id, error } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't load session info: {error}"
-                    )));
-            }
-            vec![]
-        }
+            title,
+            show_resolved_model,
+            nonce,
+        } => handle_session_info_complete(
+            app,
+            agent_id,
+            info,
+            text,
+            title,
+            show_resolved_model,
+            nonce,
+        ),
+        TaskResult::SessionInfoFailed {
+            agent_id,
+            error,
+            nonce,
+        } => handle_session_info_failed(app, agent_id, error, nonce),
         TaskResult::RenameSessionComplete { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 let safe = crate::views::session_title::sanitize_display_text(&title);
@@ -1067,39 +1062,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("Couldn't delete session: {error}"));
             vec![]
         }
-        TaskResult::ContextInfoComplete { agent_id, info } => {
-            handle_context_info_complete(app, agent_id, info)
-        }
-        TaskResult::ContextInfoFailed { agent_id, error } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't load context info: {error}"
-                    )));
-            }
-            vec![]
-        }
+        TaskResult::ContextInfoComplete {
+            agent_id,
+            info,
+            nonce,
+        } => handle_context_info_complete(app, agent_id, info, nonce),
+        TaskResult::ContextInfoFailed {
+            agent_id,
+            error,
+            nonce,
+        } => handle_context_info_failed(app, agent_id, error, nonce),
         TaskResult::SessionUsageComplete {
             agent_id,
             session_id,
             usage,
-        } => commit_session_usage_block(
-            app,
-            agent_id,
-            &session_id,
-            crate::app::status_blocks::session_usage_block_text(&usage),
-        ),
+            nonce,
+        } => apply_session_usage_result(app, agent_id, &session_id, Ok(usage), nonce),
         TaskResult::SessionUsageFailed {
             agent_id,
             session_id,
             error,
-        } => commit_session_usage_block(
-            app,
-            agent_id,
-            &session_id,
-            format!("Couldn't load session usage: {error}"),
-        ),
+            nonce,
+        } => apply_session_usage_result(app, agent_id, &session_id, Err(error), nonce),
         TaskResult::MemoryNoteSaved { agent_id, result } => {
             handle_memory_note_saved(app, agent_id, result)
         }

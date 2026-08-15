@@ -64,6 +64,9 @@ pub enum Action {
     PickSessionInWorktree(usize),
     /// Copy the selected session's ID to the clipboard.
     CopySessionId(usize),
+    /// Copy a value row from the usage modal's Session Info tab
+    /// (mouse click / Enter). `usize` indexes the rendered rows.
+    CopyUsageModalValue(usize),
     /// Toggle expanded card view for a session in the picker.
     ExpandSessionCard {
         session_id: String,
@@ -1713,15 +1716,19 @@ pub enum Effect {
     },
     /// Fetch and display session info via grow/session/info.
     /// Auth lines are derived in the effect from SessionFlags + env (not Effect fields).
+    /// `nonce` carries the usage-modal fetch epoch; `0` = scrollback intent.
     ShowSessionInfo {
         agent_id: AgentId,
         session_id: acp::SessionId,
         show_resolved_model: bool,
+        nonce: u64,
     },
     /// Fetch and display detailed context usage via grow/session/info.
+    /// `nonce` carries the usage-modal fetch epoch; `0` = scrollback intent.
     ShowContextInfo {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        nonce: u64,
     },
     /// Fetch current bundle cache status via `grow/bundle/status`.
     FetchBundleStatus,
@@ -1860,9 +1867,13 @@ pub enum Effect {
         mode: crate::views::rewind::RewindMode,
     },
     /// Fetch per-session token/cost via `grow/session/usage` (auth-agnostic).
+    /// `nonce` is the usage-modal fetch epoch (see
+    /// [`crate::views::usage_modal::next_fetch_nonce`]); `0` marks a
+    /// scrollback-intent fetch (minimal mode).
     FetchSessionUsage {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        nonce: u64,
     },
     /// Spawn a debounce sleep task for shell suggestions. `agent_id` rides
     /// to the expiry so the fetch is built from the arming agent, not
@@ -2303,11 +2314,18 @@ pub enum TaskResult {
         agent_id: AgentId,
         info: Box<shell::session::SessionInfoResponse>,
         text: String,
+        /// Session title from local persistence, if any (for the modal's rows).
+        title: Option<String>,
+        show_resolved_model: bool,
+        /// Usage-modal fetch epoch; `0` = scrollback intent.
+        nonce: u64,
     },
     /// Session info fetch failed.
     SessionInfoFailed {
         agent_id: AgentId,
         error: String,
+        /// Usage-modal fetch epoch; `0` = scrollback intent.
+        nonce: u64,
     },
     /// Session rename completed successfully.
     RenameSessionComplete {
@@ -2333,23 +2351,31 @@ pub enum TaskResult {
     ContextInfoComplete {
         agent_id: AgentId,
         info: Box<shell::session::SessionInfoResponse>,
+        /// Usage-modal fetch epoch; `0` = scrollback intent.
+        nonce: u64,
     },
     /// Context info fetch failed.
     ContextInfoFailed {
         agent_id: AgentId,
         error: String,
+        /// Usage-modal fetch epoch; `0` = scrollback intent.
+        nonce: u64,
     },
     /// `/usage` session ledger fetched. Drop if `session_id` no longer matches.
     SessionUsageComplete {
         agent_id: AgentId,
         session_id: acp::SessionId,
         usage: Box<shell::extensions::notification::PromptUsage>,
+        /// Usage-modal fetch epoch; `0` = scrollback intent.
+        nonce: u64,
     },
     /// `/usage` session ledger fetch failed. Drop if `session_id` no longer matches.
     SessionUsageFailed {
         agent_id: AgentId,
         session_id: acp::SessionId,
         error: String,
+        /// Usage-modal fetch epoch; `0` = scrollback intent.
+        nonce: u64,
     },
     /// Memory note saved to global MEMORY.md.
     MemoryNoteSaved {

@@ -29,6 +29,19 @@ use super::search_recovery;
 /// (v3 → v4: messages with JSON escapes were silently dropped at indexing).
 const SCHEMA_VERSION: &str = "4";
 
+/// Lease stamp for the in-flight bootstrap claim, stored in the `meta` table
+/// as `"{unix_secs}:{owner_token}"`. `CAST` reads the numeric prefix for
+/// expiry checks; the token suffix fences refresh/release to the owner.
+pub(crate) const META_KEY_BOOTSTRAP_CLAIM: &str = "bootstrap_claimed_at";
+
+/// SQL that extracts the owner token from a claim stamp; the single source
+/// for every fenced statement, paired with [`claim_stamp`].
+const CLAIM_TOKEN_SQL: &str = "substr(value, instr(value, ':') + 1)";
+
+fn claim_stamp(now_unix: i64, token: &str) -> String {
+    format!("{now_unix}:{token}")
+}
+
 /// A document to be indexed for session search.
 #[derive(Debug, Clone)]
 pub struct SessionDoc {
@@ -177,8 +190,9 @@ impl SessionSearchIndex {
             // permanently empty (the query path itself performs this drop).
             // Deleting the marker makes the wipe observable: the search
             // manager re-runs a full bootstrap and remote sync correctly
-            // treats the local index as stale. All other `meta` keys are
-            // preserved.
+            // treats the local index as stale. A surviving bootstrap claim
+            // would block that rebuild until the lease expires, so it dies
+            // with the marker. All other `meta` keys are preserved.
             db.execute_batch(
                 "
                 BEGIN;
@@ -187,7 +201,7 @@ impl SessionSearchIndex {
                 DROP TRIGGER IF EXISTS session_docs_au;
                 DROP TABLE IF EXISTS session_docs_fts;
                 DROP TABLE IF EXISTS session_docs;
-                DELETE FROM meta WHERE key = 'last_bootstrap_at';
+                DELETE FROM meta WHERE key IN ('last_bootstrap_at', 'bootstrap_claimed_at');
                 COMMIT;
                 ",
             )?;
@@ -353,6 +367,108 @@ impl SessionSearchIndex {
         self.db
             .execute("DELETE FROM meta WHERE key = ?1", params![key])?;
         Ok(())
+    }
+
+    /// Returns `true` when this process claimed the bootstrap under `token`.
+    /// An expired (older than `lease`), future-dated (clock rollback), or
+    /// unparsable claim is taken over; a live peer claim is not.
+    pub(crate) fn try_claim_bootstrap(
+        &self,
+        now_unix: i64,
+        lease: std::time::Duration,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let lease_secs = lease.as_secs() as i64;
+        // One upsert keeps the check-and-claim atomic across processes.
+        let changed = self.db.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value
+             WHERE CAST(meta.value AS INTEGER) <= ?3
+                OR CAST(meta.value AS INTEGER) > ?4",
+            params![
+                META_KEY_BOOTSTRAP_CLAIM,
+                claim_stamp(now_unix, token),
+                now_unix.saturating_sub(lease_secs),
+                now_unix.saturating_add(lease_secs),
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Re-stamp the lease. Fenced on `token`: returns `false` without
+    /// writing when the claim is no longer ours (expired and taken over, or
+    /// already released), so a stale claimant can never clobber a successor.
+    pub(crate) fn refresh_bootstrap_claim(
+        &self,
+        now_unix: i64,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!("UPDATE meta SET value = ?2 WHERE key = ?1 AND {CLAIM_TOKEN_SQL} = ?3"),
+            params![
+                META_KEY_BOOTSTRAP_CLAIM,
+                claim_stamp(now_unix, token),
+                token
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Write `key = value` only while the bootstrap claim is still held
+    /// under `token`; returns `false` (no write) otherwise.
+    pub(crate) fn set_meta_if_claim_owner(
+        &self,
+        key: &str,
+        value: &str,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!(
+                "INSERT INTO meta(key, value)
+                 SELECT ?1, ?2
+                 WHERE EXISTS (
+                     SELECT 1 FROM meta WHERE key = ?3 AND {CLAIM_TOKEN_SQL} = ?4
+                 )
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            ),
+            params![key, value, META_KEY_BOOTSTRAP_CLAIM, token],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Delete the claim, fenced on `token` so only the current owner frees
+    /// it. Returns `false` when the claim was already released or taken over.
+    pub(crate) fn release_bootstrap_claim(&self, token: &str) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!("DELETE FROM meta WHERE key = ?1 AND {CLAIM_TOKEN_SQL} = ?2"),
+            params![META_KEY_BOOTSTRAP_CLAIM, token],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Refresh the claim under `token` and delete indexed session ids not in
+    /// `keep`, in one Immediate transaction. Returns `false` without deleting
+    /// when this process is not the claim owner.
+    pub(crate) fn prune_missing_if_claim_owner(
+        &self,
+        now_unix: i64,
+        token: &str,
+        keep: &std::collections::HashSet<String>,
+    ) -> Result<bool, rusqlite::Error> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if !self.refresh_bootstrap_claim(now_unix, token)? {
+            return Ok(false);
+        }
+        for id in self.all_indexed_session_ids()? {
+            if !keep.contains(&id) {
+                self.delete_doc(&id)?;
+            }
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Return all session IDs currently in the index.
@@ -954,6 +1070,105 @@ mod tests {
             Some(doc.content_hash.as_str())
         );
         assert_eq!(index.get_content_hash("nonexistent").unwrap(), None);
+    }
+
+    // ── bootstrap lease claim tests ────────────────────────────────────────
+
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(300);
+
+    #[test]
+    fn test_bootstrap_claim_is_single_flight_until_lease_expires() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        let peer = open(&tmp);
+        let claim = |idx: &SessionSearchIndex, now: i64, token: &str| {
+            idx.try_claim_bootstrap(now, LEASE, token).unwrap()
+        };
+
+        assert!(claim(&index, 1_000, "a"));
+        assert!(!claim(&index, 1_010, "a"), "live claim is not re-claimable");
+        assert!(
+            !claim(&peer, 1_299, "b"),
+            "live claim is not claimable by a peer"
+        );
+        assert!(claim(&peer, 1_301, "b"), "expired lease is claimable");
+    }
+
+    #[test]
+    fn test_bootstrap_claim_release_and_refresh_are_owner_fenced() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        let claim = |now: i64, token: &str| index.try_claim_bootstrap(now, LEASE, token).unwrap();
+
+        assert!(claim(1_000, "a"));
+        assert!(index.refresh_bootstrap_claim(1_200, "a").unwrap());
+        assert!(!claim(1_400, "b"), "refresh extends the lease");
+
+        // A stale claimant (expired, taken over) can neither refresh nor
+        // release the successor's claim.
+        assert!(claim(1_501, "b"), "lease from 1_200 expires at 1_500");
+        assert!(!index.refresh_bootstrap_claim(1_502, "a").unwrap());
+        assert!(!index.release_bootstrap_claim("a").unwrap());
+        assert!(!claim(1_503, "c"), "b's claim survives a's stale release");
+
+        assert!(index.release_bootstrap_claim("b").unwrap());
+        assert!(claim(1_504, "c"), "owner release frees the claim");
+    }
+
+    #[test]
+    fn test_upgrade_drop_clears_bootstrap_claim() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        assert!(index.try_claim_bootstrap(1_000, LEASE, "a").unwrap());
+        index
+            .set_meta("session_search_schema_version", "3")
+            .unwrap();
+        drop(index);
+
+        let reopened = open(&tmp);
+        assert!(
+            reopened.try_claim_bootstrap(1_001, LEASE, "b").unwrap(),
+            "the upgrade wipe must clear the claim so the rebuild is not blocked"
+        );
+    }
+
+    #[test]
+    fn test_set_meta_if_claim_owner_is_fenced() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+
+        assert!(!index.set_meta_if_claim_owner("k", "v", "a").unwrap());
+        assert_eq!(index.get_meta("k").unwrap(), None, "no claim: no write");
+
+        assert!(index.try_claim_bootstrap(1_000, LEASE, "a").unwrap());
+        assert!(!index.set_meta_if_claim_owner("k", "v", "b").unwrap());
+        assert_eq!(index.get_meta("k").unwrap(), None, "non-owner: no write");
+
+        assert!(index.set_meta_if_claim_owner("k", "v1", "a").unwrap());
+        assert_eq!(index.get_meta("k").unwrap().as_deref(), Some("v1"));
+        assert!(index.set_meta_if_claim_owner("k", "v2", "a").unwrap());
+        assert_eq!(
+            index.get_meta("k").unwrap().as_deref(),
+            Some("v2"),
+            "owner writes take the update arm on conflict"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_claim_takes_over_garbage_and_future_stamps() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+
+        index
+            .set_meta(META_KEY_BOOTSTRAP_CLAIM, "not-a-number")
+            .unwrap();
+        assert!(index.try_claim_bootstrap(1_000, LEASE, "a").unwrap());
+
+        // A future-dated stamp (clock rollback) must not hold forever.
+        index
+            .set_meta(META_KEY_BOOTSTRAP_CLAIM, &claim_stamp(9_999_999, "x"))
+            .unwrap();
+        assert!(index.try_claim_bootstrap(1_000, LEASE, "a").unwrap());
     }
 
     #[test]

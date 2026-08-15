@@ -536,6 +536,10 @@ impl SessionActor {
             .as_ref()
             .map(|t| t.prompt_id.clone())
             .or(pinned_prompt_id);
+        // `cancelled_prompt_id` is moved by `emit_turn_completed` below; keep a
+        // copy for the observe-only `StopCancelled` hook dispatched at the end
+        // of the cancel (after every client-facing resolution).
+        let stop_cancelled_prompt_id = cancelled_prompt_id.clone();
         let cancelled_identity = running_task
             .as_ref()
             .map(|task| (task.origin.clone(), task.turn_kind))
@@ -744,6 +748,29 @@ impl SessionActor {
                     },
                 }))
                 .ok();
+        }
+
+        // Observe-only `StopCancelled` hook: fired after the turn task is
+        // aborted and every client-facing `Cancelled` response is sent, so a
+        // hook can never delay or alter the cancel itself (its output is
+        // ignored and a failing observer is only logged). Skipped when no turn
+        // was actually cancelled (an idle cancel has no prompt id) and on the
+        // rewind path, which returns above. The category is `MidTurnAbort` —
+        // the same single classification every explicit cancel stamps on
+        // `turn_ended`; the trigger (esc / ctrl_c / …) rides alongside it.
+        if let Some(prompt_id) = stop_cancelled_prompt_id.as_deref() {
+            self.dispatch_hook(
+                ::hooks::event::HookEventName::StopCancelled,
+                ::hooks::event::HookPayload::StopCancelled {
+                    reason: crate::session::events::CancellationCategory::MidTurnAbort,
+                    trigger: trigger
+                        .as_deref()
+                        .map(::hooks::event::clip_cancel_trigger),
+                },
+                Some(prompt_id),
+                None,
+            )
+            .await;
         }
     }
 }

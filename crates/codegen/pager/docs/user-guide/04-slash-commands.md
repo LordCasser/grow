@@ -39,9 +39,13 @@ Grow also auto-compacts once the context window hits 85% (tune it with `[session
 
 Show how the context window is being used: a category breakdown (system prompt, messages, reasoning and overhead, free space) plus informational rows for tool definitions, the skills listing, and MCP server announcements with their estimated token cost.
 
+In fullscreen and inline modes this opens the tabbed usage modal (Usage · Context · Session Info); `Esc` closes it and nothing is written into the transcript. Minimal mode keeps the inline scrollback output.
+
 ### `/session-info`
 
 Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`.
+
+In fullscreen and inline modes this opens the tabbed usage modal on the Session Info tab, where each row (Session ID, working directory, model, …) can be clicked to copy. Minimal mode keeps the inline scrollback output.
 
 ### `/fork`
 
@@ -392,6 +396,8 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 ### `/usage`
 
 View local token and context usage for the current session. Alias: `/cost`.
+
+In fullscreen and inline modes this opens the tabbed usage modal on the Usage tab; `Esc` closes it and nothing is written into the transcript. Minimal mode keeps the inline scrollback output.
 
 ```
 /usage

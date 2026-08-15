@@ -71,6 +71,66 @@ fn doctor_json_bypasses_unrelated_startup_state() {
 
 #[test]
 #[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn du_json_bypasses_unrelated_startup_state() {
+    let binary = pager_binary().expect("real pager binary is required when this test is selected");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let grow_home = temp.path().join("grow-home");
+    std::fs::create_dir_all(&home).expect("create HOME");
+    std::fs::create_dir_all(&grow_home).expect("create GROW_HOME");
+
+    // A SQLite-shaped database that a metadata-only scan must not open:
+    // no -wal/-shm sidecars may appear.
+    let db_path = grow_home.join("chat.db");
+    let mut db = vec![0u8; 4096];
+    db[..16].copy_from_slice(b"SQLite format 3\0");
+    db[16..18].copy_from_slice(&4096u16.to_be_bytes());
+    db[18] = 1; // legacy file format
+    db[19] = 1; // read version
+    std::fs::write(&db_path, &db).expect("write db");
+
+    let before = directory_entries(&grow_home);
+    let output = run_pager(
+        &binary,
+        &home,
+        &grow_home,
+        "/bin/sh",
+        &["du", "--json"],
+        &[],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "stderr must be clean: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_eq!(json["schemaVersion"], "1");
+    assert_eq!(json["root"], grow_home.display().to_string());
+    assert_eq!(json["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(json["entries"][0]["name"], "chat.db");
+
+    let after = directory_entries(&grow_home);
+    assert_eq!(
+        after, before,
+        "du must not create startup artifacts or SQLite sidecars"
+    );
+    for absent in ["docs", "crash", "memtrace", "active_sessions.json"] {
+        assert!(
+            !grow_home.join(absent).exists(),
+            "unexpected startup artifact: {absent}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
 fn doctor_fix_without_id_lists_tmux_fixes_from_current_probe_evidence() {
     let binary = pager_binary().expect("real pager binary is required when selected");
     let temp = tempfile::tempdir().unwrap();

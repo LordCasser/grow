@@ -247,6 +247,36 @@ mod tests {
     }
 
     #[test]
+    fn all_mode_keeps_every_builtin_tool_kind_from_the_live_registry() {
+        // Invariant: no fix may change the main agent's (All mode) toolset.
+        // The All-mode fence must keep every built-in tool the binary's own
+        // registry knows, regardless of kind — including fail-closed kinds
+        // such as `Other`. The registry's tool set itself is pinned by the
+        // contract test in `tools::registry::tool_kind_contract`.
+        let registry = tools::registry::types::ToolRegistryBuilder::new();
+        let kinds = registry.known_tool_kinds();
+        assert!(
+            !kinds.is_empty(),
+            "the built-in registry is empty; contract test cannot pin a fence"
+        );
+        let tools: Vec<ToolConfig> = kinds
+            .into_iter()
+            .map(|(id, kind)| test_support::tc(&id, Some(kind)))
+            .collect();
+        let cfg = make_cfg(tools);
+        let out = CapabilityMode::All.filter(&cfg);
+        let kept_ids: Vec<&str> = out.tools.iter().map(|t| t.id.as_str()).collect();
+        for tool in &cfg.tools {
+            assert!(
+                kept_ids.contains(&tool.id.as_str()),
+                "All mode dropped built-in tool {} (kind {:?})",
+                tool.id,
+                tool.kind
+            );
+        }
+    }
+
+    #[test]
     fn capability_mode_kind_none_fails_closed_outside_all() {
         let cfg = make_cfg(vec![
             test_support::tc("baseline.opaque", None),

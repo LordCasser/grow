@@ -398,6 +398,37 @@ impl AgentView {
             }
         }
 
+        // Usage modal: ModalWindow chrome (Esc, tab clicks) first, then the
+        // read-only tab content (Tab/BackTab switch, scroll/select, copy).
+        if let ActiveModal::Usage { state } = modal {
+            use crate::views::usage_modal::{self, UsageModalTab};
+            let labels: Vec<&str> = UsageModalTab::ALL.iter().map(|t| t.label()).collect();
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: Some(&labels),
+                shortcuts: &[],
+                sizing: mw::ModalSizing::default(),
+                fold_info: None,
+            };
+            match mw::handle_modal_key(&mut state.window, key, &chrome_cfg) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Handled => return InputOutcome::Changed,
+                ModalWindowOutcome::Unhandled => {
+                    return match usage_modal::handle_key(state, key) {
+                        usage_modal::UsageModalOutcome::CopyRow(index) => {
+                            InputOutcome::Action(Action::CopyUsageModalValue(index))
+                        }
+                        usage_modal::UsageModalOutcome::Changed => InputOutcome::Changed,
+                        usage_modal::UsageModalOutcome::Unchanged => InputOutcome::Unchanged,
+                    };
+                }
+                _ => return InputOutcome::Changed,
+            }
+        }
+
         // DocViewer: route through ModalWindow chrome, then handle scroll.
         if let ActiveModal::DocViewer {
             window,
@@ -624,6 +655,7 @@ impl AgentView {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
+            | ActiveModal::Usage { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. } => unreachable!(),
         }
@@ -1673,6 +1705,37 @@ impl AgentView {
             };
         }
 
+        // Usage modal: chrome (close button, tab clicks, click-outside) first,
+        // then row hover/click-to-copy and wheel scrolling on the content.
+        if let Some(ActiveModal::Usage { state }) = &mut self.active_modal {
+            use crate::views::usage_modal::{self, UsageModalTab};
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            return match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::TabChanged(idx) => {
+                    if let Some(&tab) = UsageModalTab::ALL.get(idx) {
+                        state.switch_tab(tab);
+                    }
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Handled => InputOutcome::Changed,
+                ModalWindowOutcome::Unhandled => {
+                    match usage_modal::handle_mouse(state, mouse.kind, mouse.column, mouse.row) {
+                        usage_modal::UsageModalOutcome::CopyRow(index) => {
+                            InputOutcome::Action(Action::CopyUsageModalValue(index))
+                        }
+                        usage_modal::UsageModalOutcome::Changed => InputOutcome::Changed,
+                        usage_modal::UsageModalOutcome::Unchanged => InputOutcome::Changed,
+                    }
+                }
+                _ => InputOutcome::Changed,
+            };
+        }
+
         // Standard modal mouse handling (EditConfirm).
         match mouse.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -2411,6 +2474,8 @@ impl AgentView {
                         Some(&overlay),
                     );
                 }
+            } else if let modal::ActiveModal::Usage { state } = active_modal {
+                crate::views::usage_modal::render_usage_modal(buf, area, state, compact);
             }
         }
     }
@@ -3113,5 +3178,169 @@ mod settings_memory_paste_routing_tests {
         };
         assert_eq!(state.query(), "a中b");
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod usage_modal_input_tests {
+    use crate::app::actions::Action;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::modal::ActiveModal;
+    use crate::views::usage_modal::{SessionInfoRow, UsageModalState, UsageModalTab, UsageTabData};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+
+    fn open_modal(tab: UsageModalTab) -> crate::app::agent_view::AgentView {
+        let mut agent = make_agent();
+        agent.active_modal = Some(ActiveModal::Usage {
+            state: UsageModalState::open(tab, 7),
+        });
+        agent
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn state_of(agent: &crate::app::agent_view::AgentView) -> &UsageModalState {
+        match agent.active_modal.as_ref() {
+            Some(ActiveModal::Usage { state }) => state,
+            _ => panic!("usage modal expected"),
+        }
+    }
+
+    #[test]
+    fn esc_closes_the_modal() {
+        let mut agent = open_modal(UsageModalTab::Usage);
+        let outcome = agent.handle_modal_key(&key(KeyCode::Esc));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            agent.active_modal.is_none(),
+            "Esc must close the usage modal"
+        );
+    }
+
+    #[test]
+    fn tab_and_backtab_switch_tabs() {
+        let mut agent = open_modal(UsageModalTab::Usage);
+        let _ = agent.handle_modal_key(&key(KeyCode::Tab));
+        assert_eq!(state_of(&agent).active_tab, UsageModalTab::Context);
+        assert_eq!(state_of(&agent).window.active_tab, 1);
+        let _ = agent.handle_modal_key(&key(KeyCode::BackTab));
+        assert_eq!(state_of(&agent).active_tab, UsageModalTab::Usage);
+    }
+
+    #[test]
+    fn enter_copies_selected_session_info_row() {
+        let mut agent = open_modal(UsageModalTab::SessionInfo);
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.session_info = UsageTabData::Loaded(vec![SessionInfoRow {
+                label: "Session ID".into(),
+                value: "sess-9".into(),
+            }]);
+        }
+        let outcome = agent.handle_modal_key(&key(KeyCode::Enter));
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::CopyUsageModalValue(0))
+            ),
+            "got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn mouse_click_on_row_copies_after_render_records_hits() {
+        let mut agent = open_modal(UsageModalTab::SessionInfo);
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.session_info = UsageTabData::Loaded(vec![SessionInfoRow {
+                label: "Session ID".into(),
+                value: "sess-9".into(),
+            }]);
+            // Simulate what a render pass records: one hit rect per row.
+            state.row_hits.push(crate::views::usage_modal::RowHit {
+                index: 0,
+                rect: ratatui::layout::Rect {
+                    x: 10,
+                    y: 8,
+                    width: 40,
+                    height: 1,
+                },
+            });
+        }
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_modal_mouse(&click);
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::CopyUsageModalValue(0))
+            ),
+            "got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn click_outside_popup_closes_the_modal() {
+        let mut agent = open_modal(UsageModalTab::Usage);
+        // Give the chrome a popup area so click-outside detection works.
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.window.popup_area = Some(ratatui::layout::Rect {
+                x: 20,
+                y: 5,
+                width: 60,
+                height: 20,
+            });
+        }
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_modal_mouse(&click);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            agent.active_modal.is_none(),
+            "click outside the popup must close the modal"
+        );
+    }
+
+    #[test]
+    fn mouse_click_on_tab_switches_tab() {
+        let mut agent = open_modal(UsageModalTab::Usage);
+        // The chrome records tab rects during render; seed one for tab 1.
+        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+            state.window.tab_rects = vec![
+                Some(ratatui::layout::Rect {
+                    x: 25,
+                    y: 6,
+                    width: 10,
+                    height: 1,
+                }),
+                Some(ratatui::layout::Rect {
+                    x: 36,
+                    y: 6,
+                    width: 10,
+                    height: 1,
+                }),
+                None,
+            ];
+        }
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 39,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_modal_mouse(&click);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(state_of(&agent).active_tab, UsageModalTab::Context);
     }
 }

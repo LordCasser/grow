@@ -79,7 +79,45 @@ impl SessionActor {
             self.mark_completions_reported(&[subagent_id]).await;
         }
 
+        // Follow-up admission policy, resolved outside the state lock (same
+        // pattern as `maybe_start_running_task`'s combine_queued_prompts
+        // read). Synthetic auto-wake prompts are never user follow-ups, so
+        // they skip the disk read entirely.
+        let follow_up_behavior = if origin.is_synthetic() {
+            crate::agent::config::FollowUpBehavior::Queue
+        } else {
+            crate::util::config::load_config().await.ui.follow_up_behavior
+        };
+
         let mut state = self.state.lock().await;
+
+        // `follow_up_behavior = "steer"`: a plain-Enter follow-up while a
+        // regular turn owns foreground is auto-promoted into that turn through
+        // the same interjection entry point as Ctrl+Enter / "Send now".
+        // Idle and Compaction foreground are never steerable, so the prompt
+        // falls through to the FIFO below. The decision is made under the same
+        // lock as the FIFO append — foreground is the authority.
+        if Self::follow_up_promotion_eligible(
+            follow_up_behavior,
+            state.foreground.regular().is_some(),
+            origin.is_synthetic(),
+            task_wake_fallback.is_some(),
+            &prompt_blocks,
+        ) {
+            self.auto_promote_follow_up(
+                prompt_blocks,
+                &prompt_id,
+                origin,
+                turn_kind,
+                client_identifier,
+                screen_mode,
+                verbatim,
+                json_schema,
+                respond_to,
+            );
+            self.broadcast_queue_changed(&state);
+            return;
+        }
 
         // User prompts have priority over queued synthetic auto-wake prompts;
         // the guarded sweep exempts the running turn's own slot (see
@@ -176,6 +214,87 @@ impl SessionActor {
         // Broadcast the new authoritative queue to all subscribers
         // (fire-and-forget, never persisted).
         self.broadcast_queue_changed(&state);
+    }
+
+    /// Admission gate for `follow_up_behavior = "steer"` at [`queue_input`]
+    /// time: only a plain user prompt while a regular turn owns foreground
+    /// may be auto-promoted. Idle and Compaction foreground are never
+    /// steerable, explicit chords (Ctrl+Enter / double-Enter / "Send now")
+    /// arrive on other commands, synthetic auto-wake prompts always stay on
+    /// the FIFO, and bash/structured prompts never hijack the turn.
+    fn follow_up_promotion_eligible(
+        behavior: crate::agent::config::FollowUpBehavior,
+        foreground_is_regular: bool,
+        origin_is_synthetic: bool,
+        has_task_wake_fallback: bool,
+        prompt_blocks: &[acp::ContentBlock],
+    ) -> bool {
+        behavior == crate::agent::config::FollowUpBehavior::Steer
+            && foreground_is_regular
+            && !origin_is_synthetic
+            && !has_task_wake_fallback
+            && Self::extract_bash_command(prompt_blocks).is_none()
+            && prompt_blocks.iter().all(|block| {
+                matches!(
+                    block,
+                    acp::ContentBlock::Text(_) | acp::ContentBlock::Image(_)
+                )
+            })
+    }
+
+    /// Promote one plain-Enter follow-up into the running regular turn.
+    /// Mirrors [`SessionActor::handle_steer_queued_prompt`]'s queue-steer
+    /// exactly: same interjection buffer, same `RemovedFromQueue` resolution
+    /// for the submitting client, same interjection broadcast + queue
+    /// rebroadcast. The requeue payload rides the entry so a terminal fence
+    /// can turn a residual back into the user FIFO as a fresh turn. Runs
+    /// under the caller's state lock (foreground was just verified).
+    pub(super) fn auto_promote_follow_up(
+        &self,
+        prompt_blocks: Vec<acp::ContentBlock>,
+        prompt_id: &str,
+        origin: crate::session::PromptOrigin,
+        turn_kind: crate::session::TurnKind,
+        client_identifier: Option<String>,
+        screen_mode: Option<String>,
+        verbatim: bool,
+        json_schema: Option<serde_json::Value>,
+        respond_to: oneshot::Sender<PromptTurnResult>,
+    ) {
+        let text = Self::queue_text_from_blocks(&prompt_blocks);
+        let attachments = prompt_blocks
+            .into_iter()
+            .filter_map(|block| match block {
+                acp::ContentBlock::Image(image) => Some(image),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let image_count = attachments.len() as u32;
+        Self::respond_removed_prompt(respond_to);
+        self.queue_auto_promoted_follow_up(
+            text.clone(),
+            attachments,
+            AutoPromotedRequeue {
+                prompt_id: prompt_id.to_string(),
+                origin,
+                turn_kind,
+                client_identifier,
+                screen_mode,
+                verbatim,
+                json_schema,
+            },
+        );
+        self.broadcast_interjection(&text, Some(prompt_id));
+        self.events
+            .emit(crate::session::events::Event::Interjected {
+                source: crate::session::events::InterjectionSource::Queue,
+                image_count,
+                redirect_kind: crate::session::events::RedirectKind::Interjection,
+            });
+        tracing::info!(
+            prompt_id,
+            "follow_up_behavior=steer: auto-promoted plain Enter into the running turn"
+        );
     }
 
     /// Extract a plain-text summary of a prompt's content blocks for the
@@ -835,5 +954,98 @@ impl SessionActor {
             meta.version = meta.version.saturating_add(1);
             meta.last_editor = editor.map(str::to_string);
         }
+    }
+}
+
+#[cfg(test)]
+mod follow_up_admission_tests {
+    use super::*;
+    use crate::agent::config::FollowUpBehavior;
+
+    fn text_blocks(text: &str) -> Vec<acp::ContentBlock> {
+        vec![acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        ))]
+    }
+
+    fn bash_blocks() -> Vec<acp::ContentBlock> {
+        let value = serde_json::to_value(crate::extensions::prompt_meta::PromptBlockMeta::bash(
+            "ls",
+        ))
+        .expect("PromptBlockMeta serializes");
+        let meta = value.as_object().cloned();
+        vec![acp::ContentBlock::Text(
+            acp::TextContent::new("ls".to_string()).meta(meta),
+        )]
+    }
+
+    #[test]
+    fn steer_promotes_plain_enter_only_during_regular_turn() {
+        assert!(SessionActor::follow_up_promotion_eligible(
+            FollowUpBehavior::Steer,
+            true,
+            false,
+            false,
+            &text_blocks("hi")
+        ));
+        // Idle foreground is not steerable.
+        assert!(!SessionActor::follow_up_promotion_eligible(
+            FollowUpBehavior::Steer,
+            false,
+            false,
+            false,
+            &text_blocks("hi")
+        ));
+        // Default behavior never promotes.
+        assert!(!SessionActor::follow_up_promotion_eligible(
+            FollowUpBehavior::Queue,
+            true,
+            false,
+            false,
+            &text_blocks("hi")
+        ));
+    }
+
+    #[test]
+    fn synthetic_bash_and_wake_fallback_never_promote() {
+        assert!(!SessionActor::follow_up_promotion_eligible(
+            FollowUpBehavior::Steer,
+            true,
+            true,
+            false,
+            &text_blocks("auto-wake")
+        ));
+        assert!(!SessionActor::follow_up_promotion_eligible(
+            FollowUpBehavior::Steer,
+            true,
+            false,
+            false,
+            &bash_blocks()
+        ));
+        assert!(!SessionActor::follow_up_promotion_eligible(
+            FollowUpBehavior::Steer,
+            true,
+            false,
+            true,
+            &text_blocks("hi")
+        ));
+    }
+
+    #[test]
+    fn image_carrying_plain_prompt_is_promotable() {
+        let blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("look".to_string())),
+            acp::ContentBlock::Image(acp::ImageContent::new(
+                String::new(),
+                "image/png".to_string(),
+            )),
+        ];
+        assert!(SessionActor::follow_up_promotion_eligible(
+            FollowUpBehavior::Steer,
+            true,
+            false,
+            false,
+            &blocks
+        ));
     }
 }

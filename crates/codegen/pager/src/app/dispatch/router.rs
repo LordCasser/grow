@@ -86,9 +86,10 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_open_gboom, dispatch_open_tutorial,
-    dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
-    dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage,
+    dispatch_copy_session_id, dispatch_copy_usage_modal_value, dispatch_open_gboom,
+    dispatch_open_tutorial, dispatch_show_context_info, dispatch_show_queue,
+    dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
+    dispatch_show_usage,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -176,6 +177,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PickSession(index) => dispatch_pick_session(app, index),
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),
         Action::CopySessionId(index) => dispatch_copy_session_id(app, index),
+        Action::CopyUsageModalValue(index) => dispatch_copy_usage_modal_value(app, index),
         Action::ExpandSessionCard { session_id } => {
             use crate::views::modal::ActiveModal;
             let detail_generation = app.session_picker_detail_generation;

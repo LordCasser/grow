@@ -1382,12 +1382,25 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+fn dispatch_du_if_requested(args: &PagerArgs) -> bool {
+    let Some(Command::Du(du_args)) = &args.command else {
+        return false;
+    };
+    if let Err(error) = pager::du_cmd::run(du_args.clone()) {
+        eprintln!("Error: {error:#}");
+        std::process::exit(1);
+    }
+    true
+}
 fn main() {
     if let Some(code) = pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
     }
     let args = PagerArgs::parse_cli();
-    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+    if dispatch_version_if_requested(&args)
+        || dispatch_doctor_if_requested(&args)
+        || dispatch_du_if_requested(&args)
+    {
         return;
     }
     pager_minimal::install();
@@ -1555,6 +1568,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Doctor(_) => {
                 unreachable!("doctor was consumed before runtime startup")
+            }
+            Command::Du(_) => {
+                unreachable!("du was consumed before runtime startup")
             }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();

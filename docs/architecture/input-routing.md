@@ -16,7 +16,7 @@ The pager mirrors shell state. It does not infer ownership from Goal status, pro
 
 ## Input classes
 
-1. Plain Enter sends `QueuePrompt`. While idle the common gate may start it; while running it remains in the user FIFO.
+1. Plain Enter sends `QueuePrompt`. While idle the common gate may start it; while running it remains in the user FIFO. Under the non-default `follow_up_behavior = "steer"`, a plain-Enter follow-up that arrives while a regular turn is running is auto-promoted into that turn through the same mid-turn interjection entry point as Ctrl+Enter; only a regular foreground turn is promotable — idle or compaction states, synthetic prompts, and bash or structured prompts are not promoted and stay on the FIFO.
 2. Ctrl+Enter sends a steer request for the current regular turn.
 3. Double Enter atomically converts the just-queued first row to steer.
 4. Queue-row “Send now” invokes the same steer request.
@@ -26,7 +26,7 @@ A successful Goal control that invalidates the running context (set/edit/enter/p
 
 Steering includes `expected_turn_id`. The shell accepts it only if the identified regular turn is still foreground, then moves the queued payload into that same turn's input buffer. It never creates a replacement turn or another terminal. Compaction and idle state are not steerable.
 
-The turn terminal is also a steering-scope fence. A residual steer that missed the sampler's final safe-point drain is discarded on completion or cancellation; it can never leak into a later user turn or Goal continuation merely because Goal remains active.
+The turn terminal is also a steering-scope fence. A residual steer that missed the sampler's final safe-point drain is discarded on completion or cancellation; it can never leak into a later user turn or Goal continuation merely because Goal remains active. The fence is decided by turn identity: an explicit steer's residual is still discarded, because an explicit steer belongs to the exact turn it named; an auto-promoted follow-up's residual returns to the front of the user FIFO at the terminal boundary as a brand-new turn (keeping its original prompt identity) instead of silently dropping user input. Neither kind ever leaks into a successor turn's steering buffer.
 
 ## Idle admission
 

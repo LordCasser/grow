@@ -1,6 +1,63 @@
 use config_types::DisplayRefreshSettings;
 use serde::{Deserialize, Serialize};
 
+/// How a plain-Enter follow-up typed while a regular turn is running is
+/// admitted by the shell (`queue_input`). `queue` appends to the explicit
+/// user FIFO (the pre-existing behavior); `steer` auto-promotes it into the
+/// running regular turn through the same mid-turn interjection path as
+/// Ctrl+Enter / queue "Send now".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpBehavior {
+    /// Append to the user FIFO (default; pre-existing behavior).
+    #[default]
+    Queue,
+    /// Auto-promote into the running regular turn (shell-side admission).
+    Steer,
+}
+
+impl FollowUpBehavior {
+    /// Canonical persisted string (matches the serde wire shape).
+    pub fn as_canonical(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Steer => "steer",
+        }
+    }
+
+    /// Parse a canonical string. Unknown or blank values return `None` so
+    /// callers fall back to the default (trim-tolerant, mirroring the
+    /// appearance catalogs like `ScrollMode::from_canonical`).
+    pub fn from_canonical(value: &str) -> Option<Self> {
+        match value.trim() {
+            "queue" => Some(Self::Queue),
+            "steer" => Some(Self::Steer),
+            _ => None,
+        }
+    }
+
+    /// Whether this is the default value — keeps `[ui]` clean on settings
+    /// writes (mirrors `ContextualHints::is_default`). `&self` so serde's
+    /// `skip_serializing_if` can call it.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Lenient field deserializer: any unknown canonical string folds to the
+/// default (`queue`) instead of failing the whole `[ui]` section. A
+/// non-string value still fails the section (consistent with the other
+/// typed `[ui]` fields, which fall back to `UiConfig::default()`).
+fn deserialize_follow_up_behavior<'de, D>(
+    deserializer: D,
+) -> Result<FollowUpBehavior, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(FollowUpBehavior::from_canonical(&raw).unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -151,6 +208,17 @@ pub struct UiConfig {
     /// Combine consecutive queued follow-ups into one turn. `None` = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combine_queued_prompts: Option<bool>,
+    /// How a plain-Enter follow-up typed mid-turn is admitted: `queue`
+    /// (append to the FIFO; default) or `steer` (auto-promote into the
+    /// running regular turn). Read by the shell session admission
+    /// (`queue_input`); no pager settings row yet (deferred — see the
+    /// TodoGate precedent in `pager/src/settings/defs.rs`).
+    #[serde(
+        default,
+        skip_serializing_if = "FollowUpBehavior::is_default",
+        deserialize_with = "deserialize_follow_up_behavior"
+    )]
+    pub follow_up_behavior: FollowUpBehavior,
     /// Display-refresh probe + auto-cadence (`[ui.display_refresh]`). Per-field
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
@@ -263,6 +331,7 @@ impl Default for UiConfig {
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
+            follow_up_behavior: FollowUpBehavior::default(),
             display_refresh: DisplayRefreshSettings::default(),
         }
     }
@@ -383,5 +452,57 @@ mod tests {
         assert!(DisplayRefreshSettings::default().is_default());
         let ui = UiConfig::default();
         assert!(ui.display_refresh.is_default());
+    }
+
+    #[test]
+    fn follow_up_behavior_canonicals_round_trip() {
+        assert_eq!(FollowUpBehavior::Queue.as_canonical(), "queue");
+        assert_eq!(FollowUpBehavior::Steer.as_canonical(), "steer");
+        assert_eq!(
+            FollowUpBehavior::from_canonical("queue"),
+            Some(FollowUpBehavior::Queue)
+        );
+        assert_eq!(
+            FollowUpBehavior::from_canonical(" steer "),
+            Some(FollowUpBehavior::Steer)
+        );
+        assert_eq!(FollowUpBehavior::from_canonical("banana"), None);
+        assert_eq!(FollowUpBehavior::from_canonical(""), None);
+        assert!(FollowUpBehavior::Queue.is_default());
+        assert!(!FollowUpBehavior::Steer.is_default());
+        assert_eq!(FollowUpBehavior::default(), FollowUpBehavior::Queue);
+    }
+
+    #[test]
+    fn follow_up_behavior_deserializes_unknown_string_to_default() {
+        // Missing field → default queue.
+        let ui: UiConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(ui.follow_up_behavior, FollowUpBehavior::Queue);
+        // Explicit steer → Steer.
+        let ui: UiConfig =
+            serde_json::from_str(r#"{"follow_up_behavior": "steer"}"#).unwrap();
+        assert_eq!(ui.follow_up_behavior, FollowUpBehavior::Steer);
+        // Unknown canonical folds to the default instead of failing `[ui]`.
+        let ui: UiConfig =
+            serde_json::from_str(r#"{"follow_up_behavior": "banana"}"#).unwrap();
+        assert_eq!(ui.follow_up_behavior, FollowUpBehavior::Queue);
+    }
+
+    #[test]
+    fn follow_up_behavior_default_is_skipped_shape() {
+        let serialized = serde_json::to_value(UiConfig::default()).unwrap();
+        assert!(
+            serialized.get("follow_up_behavior").is_none(),
+            "default follow_up_behavior must not appear in serialized output"
+        );
+        let steer = UiConfig {
+            follow_up_behavior: FollowUpBehavior::Steer,
+            ..UiConfig::default()
+        };
+        let serialized = serde_json::to_value(&steer).unwrap();
+        assert_eq!(
+            serialized.get("follow_up_behavior").and_then(|v| v.as_str()),
+            Some("steer")
+        );
     }
 }

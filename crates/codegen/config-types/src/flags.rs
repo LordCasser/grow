@@ -127,6 +127,43 @@ fn resolve_bool_flag(
     }
     Resolved::new(default, ConfigSource::Default)
 }
+/// Session search index gate (`[session_search]` table in `config.toml`).
+///
+/// The session search index is ON by default. `enabled = false` turns the
+/// index off for the current process; the gate resolves
+/// `GROW_SESSION_SEARCH` (env) and a `requirements.toml` `[features]
+/// session_search` pin above this table, mirroring [`BoolFlag`] precedence.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct SessionSearchConfig {
+    /// Master switch. `None` (unset) defers to env / requirements / default
+    /// (`true`). `Some(false)` turns the index off for the process.
+    pub enabled: Option<bool>,
+}
+
+#[cfg(test)]
+mod session_search_config_tests {
+    use super::*;
+
+    #[test]
+    fn session_search_config_defaults_to_unset() {
+        let c = SessionSearchConfig::default();
+        assert_eq!(c.enabled, None);
+    }
+
+    #[test]
+    fn session_search_config_deserializes_enabled() {
+        let off: SessionSearchConfig = serde_json::from_str(r#"{"enabled": false}"#).unwrap();
+        assert_eq!(off.enabled, Some(false));
+
+        let on: SessionSearchConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert_eq!(on.enabled, Some(true));
+
+        let absent: SessionSearchConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.enabled, None);
+    }
+}
+
 /// Per-model configuration for the Layer-3 LazinessDetector.
 ///
 /// All fields default to the disabled state. Activation is a deliberate

@@ -70,6 +70,7 @@ prompt_suggestions = true
 cursor_blink = true                 # 删除本行则继承终端光标样式
 screen_mode = "fullscreen"          # fullscreen | minimal
 combine_queued_prompts = false
+follow_up_behavior = "queue"         # queue | steer：steer 时运行中的 turn 收到 plain Enter 直接并入该 turn
 
 # 主题名取决于已安装主题；不确定时保持未配置。
 # theme = "dark"
@@ -327,6 +328,16 @@ mcp_recursive_config_watch = true    # 名称保留；实际控制 cwd 配置监
 
 # compaction_tool_choice 的值取决于当前 backend；不确定时保持未配置。
 # compaction_tool_choice = "auto"
+
+# -----------------------------------------------------------------------------
+# 会话搜索索引开关（默认开启）。关闭后本进程不再读写搜索索引，且本进程内不可
+# 重新打开（避免用关闭期间缺失写入的半索引服务搜索）。诊断信息会说明关闭来源。
+# 优先级：requirements.toml 的 [features] session_search > GROW_SESSION_SEARCH
+# 环境变量 > 本表 > 默认开启。
+# -----------------------------------------------------------------------------
+
+# [session_search]
+# enabled = false
 
 [session]
 auto_compact_threshold_percent = 85

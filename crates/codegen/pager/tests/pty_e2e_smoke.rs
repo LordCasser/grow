@@ -33,6 +33,8 @@ mod requirements_version_failure_exits_2_with_guidance;
 mod small_screen_tip_survives_slow_turn;
 #[path = "pty_e2e/tab_focuses_scrollback_in_vim_and_default_modes.rs"]
 mod tab_focuses_scrollback_in_vim_and_default_modes;
+#[path = "pty_e2e/usage_modal_pty.rs"]
+mod usage_modal_pty;
 #[path = "pty_e2e/waiting_for_model_label.rs"]
 mod waiting_for_model_label;
 #[path = "pty_e2e/welcome_screen.rs"]

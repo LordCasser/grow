@@ -364,6 +364,12 @@ pub enum ActiveModal {
         /// different note's review modal.
         rewrite_nonce: u64,
     },
+    /// Usage / context / session-info tabs (`/usage`, `/context`,
+    /// `/session-info`). Read-only; Esc closes and nothing is written into the
+    /// transcript. See [`crate::views::usage_modal::UsageModalState`].
+    Usage {
+        state: crate::views::usage_modal::UsageModalState,
+    },
 }
 /// Snapshot of the command palette state, saved when opening an arg picker
 /// and restored on Esc.
@@ -670,6 +676,7 @@ impl ActiveModal {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
+            | ActiveModal::Usage { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
@@ -704,6 +711,7 @@ impl ActiveModal {
             ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
             ActiveModal::MemoryBrowser { .. } => "Memory",
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
+            ActiveModal::Usage { state } => state.active_tab.label(),
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
         }

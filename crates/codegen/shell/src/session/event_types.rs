@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Schema version for the event log format. Bumped on breaking changes.
 pub const EVENT_SCHEMA_VERSION: &str = "1.0";
@@ -383,18 +383,12 @@ pub enum PermissionDecision {
     Followup,
 }
 
-// `Deserialize`/`PartialEq`/`Eq`/`Hash` let the workspace decode
-// `cancellation_category` strings back into this enum. `snake_case` keeps the
-// wire form identical, so adding `Deserialize` doesn't change serialization.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum CancellationCategory {
-    HookDenied,
-    PermissionRejected,
-    PermissionCancelled,
-    PermissionTimedOut,
-    MidTurnAbort,
-}
+// `CancellationCategory` is the `StopCancelled` hook payload's `reason` type
+// and lives in `hooks::event` (single source of truth) alongside the other
+// hook wire types. Re-exported here so the session event layer and every
+// existing call site (`crate::session::events::CancellationCategory`) keep
+// their path. Wire form is unchanged: bare snake_case strings.
+pub use ::hooks::event::CancellationCategory;
 
 // Note: `From<&permission::Decision> for PermissionDecision` crosses the
 // crate boundary (orphan rule) and lives in
@@ -403,46 +397,6 @@ pub enum CancellationCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every variant must survive a `to_value` -> `from_value` round-trip.
-    #[test]
-    fn cancellation_category_round_trips_every_variant() {
-        for variant in [
-            CancellationCategory::HookDenied,
-            CancellationCategory::PermissionRejected,
-            CancellationCategory::PermissionCancelled,
-            CancellationCategory::PermissionTimedOut,
-            CancellationCategory::MidTurnAbort,
-        ] {
-            let value = serde_json::to_value(variant).unwrap();
-            let decoded: CancellationCategory = serde_json::from_value(value).unwrap();
-            assert_eq!(decoded, variant, "{variant:?} must round-trip");
-        }
-    }
-
-    /// Serialization is unchanged by the added derives (bare snake_case strings).
-    #[test]
-    fn cancellation_category_serializes_snake_case() {
-        for (variant, expected) in [
-            (CancellationCategory::HookDenied, "\"hook_denied\""),
-            (
-                CancellationCategory::PermissionRejected,
-                "\"permission_rejected\"",
-            ),
-            (
-                CancellationCategory::PermissionCancelled,
-                "\"permission_cancelled\"",
-            ),
-            (
-                CancellationCategory::PermissionTimedOut,
-                "\"permission_timed_out\"",
-            ),
-            (CancellationCategory::MidTurnAbort, "\"mid_turn_abort\""),
-        ] {
-            let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, expected, "{variant:?} must serialize to {expected}");
-        }
-    }
 
     #[test]
     fn tool_completed_source_omits_shell_writes_workspace() {

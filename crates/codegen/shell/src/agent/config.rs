@@ -1182,7 +1182,7 @@ fn resolve_subagent_permission_mode(
 pub use agent::config::AgentDefinition;
 pub use agent::config::Effort;
 pub use agent::config::PermissionMode;
-pub use client_support::ui_config::{ContextualHints, UiConfig};
+pub use client_support::ui_config::{ContextualHints, FollowUpBehavior, UiConfig};
 /// Configuration for selecting the agent definition.
 ///
 /// Set in `config.toml` under `[agent]`:

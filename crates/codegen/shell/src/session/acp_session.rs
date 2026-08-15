@@ -1578,6 +1578,9 @@ mod reminder_policy_tests;
 #[path = "acp_session_tests/truncation_recovery_tests.rs"]
 mod truncation_recovery_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/stop_cancelled_tests.rs"]
+mod stop_cancelled_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/compaction_pre_prune_tests.rs"]
 mod compaction_pre_prune_tests;
 #[cfg(test)]
