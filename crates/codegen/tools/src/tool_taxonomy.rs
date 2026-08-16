@@ -66,6 +66,7 @@ impl ToolKind {
             ToolKind::GoalProgressUpdate => "Update Goal Progress",
             ToolKind::GoalReplanRequest => "Request Goal Replan",
             ToolKind::GoalLifecycleUpdate => "Update Goal Lifecycle",
+            ToolKind::GoalPlanSubmit => "Submit Goal Plan",
             ToolKind::Workflow => "Workflow",
             ToolKind::CapabilityRequest => "Request Tool Access",
             ToolKind::Other => "Tool",
@@ -86,6 +87,7 @@ impl ToolKind {
             | ToolKind::MemoryGet
             | ToolKind::GoalRead
             | ToolKind::WebFetch
+            | ToolKind::GoalPlanSubmit
             | ToolKind::PlanControl
             | ToolKind::CapabilityRequest
             | ToolKind::AskUser => ToolScope::Read,

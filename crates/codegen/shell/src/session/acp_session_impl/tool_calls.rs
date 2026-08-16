@@ -2566,6 +2566,18 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            ToolInput::SubmitGoalPlanSection(_) => (
+                "Goal: submit plan section".to_string(),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::FinalizeGoalPlan(_) => (
+                "Goal: finalize plan".to_string(),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             ToolInput::Monitor(ref m) => (
                 format!("Start monitor: {}", m.description),
                 acp::ToolKind::Other,

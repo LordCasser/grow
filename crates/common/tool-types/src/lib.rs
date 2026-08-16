@@ -11,7 +11,10 @@ pub use behavior::{
     BehaviorAvailability, BehaviorAvailabilityDisposition, BehaviorAvailabilityEntry, BehaviorId,
 };
 pub use ext::Extensions;
-pub use goal::{GoalProgressUpdate, GoalTaskProjection, GoalTaskStatus};
+pub use goal::{
+    GoalPlanAssemblyError, GoalPlanAssemblyIssue, GoalPlanSectionPayload, GoalPlanSpec,
+    GoalPlanTaskSpec, GoalProgressUpdate, GoalTaskProjection, GoalTaskStatus,
+};
 pub use schema_utils::parse_arguments_from_schema_lossy;
 pub use serde_lenient::{
     deserialize_lenient_bool, deserialize_lenient_option_bool, lenient_bool_from_json,

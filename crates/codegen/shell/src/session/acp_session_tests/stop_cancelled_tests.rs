@@ -34,7 +34,10 @@ fn text_block(text: &str) -> serde_json::Value {
 
 /// Assemble a Messages-API SSE turn with one text block and an `end_turn`
 /// terminal stop_reason (same wire shape as `truncation_recovery_tests.rs`).
-fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> test_support::ScriptedResponse {
+fn messages_turn(
+    blocks: &[serde_json::Value],
+    stop_reason: &str,
+) -> test_support::ScriptedResponse {
     let mut events: Vec<String> = vec![
         json!({
             "type": "message_start",
@@ -63,10 +66,7 @@ fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> test_suppor
             })
             .to_string(),
         );
-        events.push(
-            json!({ "type": "content_block_stop", "index": i })
-                .to_string(),
-        );
+        events.push(json!({ "type": "content_block_stop", "index": i }).to_string());
     }
     events.push(
         json!({
@@ -77,7 +77,12 @@ fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> test_suppor
         .to_string(),
     );
     events.push(json!({ "type": "message_stop" }).to_string());
-    test_support::ScriptedResponse::sse(events.into_iter().map(test_support::SseEvent::data).collect())
+    test_support::ScriptedResponse::sse(
+        events
+            .into_iter()
+            .map(test_support::SseEvent::data)
+            .collect(),
+    )
 }
 
 /// Build a `SessionActor` whose sampler is a real `SamplerActor` pointed at

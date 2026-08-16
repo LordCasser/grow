@@ -24,7 +24,7 @@ struct StageLease {
 }
 ```
 
-`GoalOrchestration` 与 Behavior 一起存入原子 `session-control.json`。stage lease、取消句柄、当前子 Agent、实时 token、activity projection 和动画状态不持久化。
+`GoalOrchestration` 与 Behavior 一起存入原子 `session-control.json`。stage lease、取消句柄、当前子 Agent、实时 token、activity projection、动画状态以及 planner 分段 staging（已接受段、上一任 planner subagent id、失败原因）不持久化。
 
 - 旧 session-control architecture 不迁移，诊断后清除并恢复 Normal。
 - 旧 Goal architecture 不迁移。
@@ -67,7 +67,7 @@ Markdown 是唯一持久任务真相；结构化 task tree 只是严格解析得
 
 字段写权限：
 
-- Planner 独占 task id、层次、摘要、Scope 与 Acceptance，提交完整候选 Markdown；host 校验 lease 和语法后才替换。
+- Planner 独占 task id、层次、摘要、Scope 与 Acceptance，但只提交结构化分段（`plan_tasks`、`goal_acceptance`、可选 `open_gaps`）：经 stage-bound 提交通道逐项校验并累积 staging，同 kind 段再提交即替换；`finalize_goal_plan` 由 host 拼装全部已接受段并回读校验后才替换黑板。task id、缩进、章节与 Markdown 全部由 host 派生，planner 不产 Markdown。
 - 主 Agent 只能用 typed patch 按 task id 更新 status、Progress、Evidence、Gap。
 - Goal runtime 只能更新 Verification evidence 与 Open gaps。
 - Verifier 与普通 Goal worker 无黑板写权；其输出只是交给 SessionActor 的数据。
@@ -79,7 +79,7 @@ Planner/Verifier 的调度指令、工具约束和 lifecycle policy 只在私有
 ```mermaid
 stateDiagram-v2
     [*] --> Planning: create / edit / request replan
-    Planning --> Executing: valid planner board
+    Planning --> Executing: finalize_goal_plan commits the host-assembled board
     Executing --> Verifying: candidate_complete
     Verifying --> Planning: request replan / cancel verifier
     Verifying --> Executing: progress patch / NotAchieved
@@ -104,7 +104,7 @@ Planning/Verifying claim 一个 transient lease 后在后台运行，不拥有 f
 - 普通消息、steer 和主 turn cancel 不取消 planner/verifier。
 - edit、replan、pause、clear 或合法 revision 失效只取消匹配 lease。
 - stage 迟到结果必须通过完整 lease 比对；不得拿走新 stage 的取消句柄。
-- planner 基础设施失败释放 lease，Active/Planning 由 idle hook 重拉；第三次失败 Paused。显式 pause/clear 后不重拉。
+- planner 基础设施失败释放 lease；planner 结束但未 finalize 时同样计入 respawn。host 在 transient staging 里保留已接受段、上一任 planner subagent id 与失败原因，Active/Planning 由 idle hook 重拉并 `resume_from` 上一任 planner 子会话（携带失败原因与已接受段清单），不再从零盲试；spawn 前 staging 与当前 goal id/plan revision 失配（edit/replan/clear 推进）则丢弃并全新 spawn。逐项校验失败不计 planner_failures；第三次 respawn 失败 Paused。显式 pause/clear 后不重拉。
 - 普通用户 turn 的 provider/tool 错误不能暂停 Goal；只有结构化 `GoalContinuation`/`GoalFinalization` origin 的错误进入 Goal foreground 降级。
 
 ## Agent 能力
@@ -114,7 +114,7 @@ Planning/Verifying claim 一个 transient lease 后在后台运行，不拥有 f
 `registered tools ∩ Agent definition ∩ Behavior policy ∩ delegated grant ∩ user permission`
 
 - 主 Agent：`get_goal`、`update_goal_progress`、`request_goal_replan`、revisioned `update_goal`；不能全文替换任务结构。
-- Planner：ReadOnly、禁止嵌套子 Agent和 workspace 写入，只返回候选 Markdown。
+- Planner：ReadOnly、禁止嵌套子 Agent和 workspace 写入，只通过 `submit_goal_plan_section`/`finalize_goal_plan` 提交结构化分段，不输出 Markdown；提交句柄只注入 planner stage 子会话。
 - Verifier：Execute、禁止 Goal mutation，在一次性 worktree 验证；文件修改随 worktree 丢弃。
 - 普通 Goal worker：创建时得到 immutable `GoalContextSnapshot`，可读固定 revision，无 Goal mutation；若它被允许继续委派，后代继承同一 Goal revisions/角色所有权，不能退化为普通 Task 来逃逸对象权限。
 - `always-approve` 只免除本来允许的副作用审批，不能越过 capability/Behavior/object gate。

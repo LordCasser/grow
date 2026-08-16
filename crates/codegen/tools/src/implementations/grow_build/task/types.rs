@@ -144,7 +144,24 @@ pub struct SubagentRequest {
     /// Immutable blackboard snapshot available to a Goal-owned child through
     /// `get_goal`. It is captured at spawn and never follows later revisions.
     pub goal_context: Option<crate::implementations::grow_build::update_goal::GoalContextSnapshot>,
+    /// Planner-stage-only submit channel into the host staging state machine.
+    /// The host injects it only into Goal planner children; the tool layer
+    /// additionally gates submission on a Planner context snapshot.
+    pub goal_stage_submit:
+        Option<crate::implementations::grow_build::update_goal::GoalStageSubmitHandle>,
+    /// Host record of the prior planner subagent this stage resumes. The
+    /// shell's Goal admission validator requires it to agree with
+    /// `resume_from` for Planner stages and rejects it for every other role.
+    pub goal_stage_resume: Option<GoalStageResume>,
     pub cancel_token: CancellationToken,
+}
+
+/// Host-side record of the previous planner subagent that ended without
+/// finalizing its plan. Carried on the resuming planner request next to
+/// `SubagentRequest::resume_from`; the two fields must name the same id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalStageResume {
+    pub prior_subagent_id: String,
 }
 
 /// Spawn command envelope owned by the coordinator mailbox.

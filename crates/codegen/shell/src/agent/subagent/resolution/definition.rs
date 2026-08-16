@@ -223,8 +223,11 @@ pub fn apply_child_tool_policy(definition: &mut AgentDefinition, allow_nested_su
 
 /// Restrict Goal-owned children to the immutable blackboard view. Even an
 /// initial `All` grant cannot restore an object mutation the delegated Goal
-/// role does not own.
-pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition) {
+/// role does not own. The one narrow exception is the Planner role: it keeps
+/// the structured plan submission tools (`GoalPlanSubmit`), which the tool
+/// layer additionally gates on a planner-only stage handle. Verifier and
+/// Worker roles never see them.
+pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition, planner_stage: bool) {
     definition.tool_config.tools.retain(|tool| {
         tool.kind.is_some_and(|kind| {
             !matches!(
@@ -232,7 +235,7 @@ pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition) {
                 ToolKind::GoalProgressUpdate
                     | ToolKind::GoalReplanRequest
                     | ToolKind::GoalLifecycleUpdate
-            )
+            ) && !(matches!(kind, ToolKind::GoalPlanSubmit) && !planner_stage)
         })
     });
 }
@@ -315,7 +318,7 @@ mod tests {
         let toggles = HashMap::new();
         let mut definition =
             resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
-        apply_goal_object_tool_policy(&mut definition);
+        apply_goal_object_tool_policy(&mut definition, false);
         let kinds: Vec<Option<ToolKind>> = definition
             .tool_config
             .tools
@@ -331,7 +334,7 @@ mod tests {
             .tool_config
             .tools
             .push(ToolConfig::from_id("custom:opaque"));
-        apply_goal_object_tool_policy(&mut definition);
+        apply_goal_object_tool_policy(&mut definition, false);
         assert!(
             definition
                 .tool_config
@@ -339,6 +342,50 @@ mod tests {
                 .iter()
                 .all(|tool| tool.kind.is_some())
         );
+    }
+
+    #[test]
+    fn goal_object_policy_keeps_plan_submit_only_for_the_planner_role() {
+        use tools::implementations::grow_build::task::types::GoalSubagentRole;
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        for (role, planner_stage) in [
+            (GoalSubagentRole::Planner, true),
+            (GoalSubagentRole::Verifier, false),
+            (GoalSubagentRole::Worker, false),
+        ] {
+            let mut definition =
+                resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles))
+                    .unwrap();
+            for tool in [
+                ToolConfig::for_tool::<tools::implementations::grow_build::SubmitGoalPlanSectionTool>(
+                ),
+                ToolConfig::for_tool::<tools::implementations::grow_build::FinalizeGoalPlanTool>(),
+                ToolConfig::for_tool::<tools::implementations::grow_build::GetGoalTool>(),
+            ] {
+                definition.tool_config.tools.push(tool);
+            }
+            apply_goal_object_tool_policy(&mut definition, planner_stage);
+            let submit_kept = definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::GoalPlanSubmit));
+            assert_eq!(
+                submit_kept,
+                planner_stage,
+                "{role:?} must {} the structured plan submission tools",
+                if planner_stage { "keep" } else { "lose" }
+            );
+            assert!(
+                definition
+                    .tool_config
+                    .tools
+                    .iter()
+                    .any(|tool| tool.kind == Some(ToolKind::GoalRead)),
+                "{role:?} keeps the read-only snapshot view"
+            );
+        }
     }
 
     #[test]

@@ -86,7 +86,10 @@ impl SessionActor {
         let follow_up_behavior = if origin.is_synthetic() {
             crate::agent::config::FollowUpBehavior::Queue
         } else {
-            crate::util::config::load_config().await.ui.follow_up_behavior
+            crate::util::config::load_config()
+                .await
+                .ui
+                .follow_up_behavior
         };
 
         let mut state = self.state.lock().await;
@@ -969,10 +972,9 @@ mod follow_up_admission_tests {
     }
 
     fn bash_blocks() -> Vec<acp::ContentBlock> {
-        let value = serde_json::to_value(crate::extensions::prompt_meta::PromptBlockMeta::bash(
-            "ls",
-        ))
-        .expect("PromptBlockMeta serializes");
+        let value =
+            serde_json::to_value(crate::extensions::prompt_meta::PromptBlockMeta::bash("ls"))
+                .expect("PromptBlockMeta serializes");
         let meta = value.as_object().cloned();
         vec![acp::ContentBlock::Text(
             acp::TextContent::new("ls".to_string()).meta(meta),

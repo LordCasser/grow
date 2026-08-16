@@ -389,6 +389,8 @@ impl tool_runtime::Tool for TaskTool {
             fork_context: false,
             owner,
             goal_context,
+            goal_stage_submit: None,
+            goal_stage_resume: None,
             cancel_token: child_cancellation,
         };
 

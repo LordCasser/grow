@@ -643,6 +643,8 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::UpdateGoalProgressTool>();
         b.register::<grow_build::RequestGoalReplanTool>();
         b.register::<grow_build::UpdateGoalTool>();
+        b.register::<grow_build::SubmitGoalPlanSectionTool>();
+        b.register::<grow_build::FinalizeGoalPlanTool>();
         b.register::<grow_build::WorkflowTool>();
         b.register::<grow_build::TaskOutputTool>();
         b.register::<grow_build::GetTerminalCommandOutputTool>();

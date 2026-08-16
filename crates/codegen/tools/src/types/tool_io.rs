@@ -19,9 +19,6 @@ use crate::implementations::grow_build::read_file::ReadFileInput;
 use crate::implementations::grow_build::request_tool_access::RequestToolAccessInput;
 use crate::implementations::grow_build::search_replace::SearchReplaceInput;
 use crate::implementations::grow_build::todo::TodoWriteInput;
-use crate::implementations::grow_build::update_goal::{
-    GetGoalInput, RequestGoalReplanInput, UpdateGoalInput, UpdateGoalProgressInput,
-};
 use crate::implementations::grow_build::web_fetch::WebFetchInput;
 use crate::implementations::grow_build::write::WriteInput;
 use crate::implementations::lsp::LspToolInput;
@@ -78,10 +75,14 @@ pub enum ToolInput {
     SchedulerCreate(crate::implementations::grow_build::scheduler::create::SchedulerCreateInput),
     SchedulerDelete(crate::implementations::grow_build::scheduler::delete::SchedulerDeleteInput),
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListInput),
-    GetGoal(GetGoalInput),
-    UpdateGoal(UpdateGoalInput),
-    UpdateGoalProgress(UpdateGoalProgressInput),
-    RequestGoalReplan(RequestGoalReplanInput),
+    GetGoal(crate::implementations::grow_build::update_goal::GetGoalInput),
+    UpdateGoal(crate::implementations::grow_build::update_goal::UpdateGoalInput),
+    UpdateGoalProgress(crate::implementations::grow_build::update_goal::UpdateGoalProgressInput),
+    RequestGoalReplan(crate::implementations::grow_build::update_goal::RequestGoalReplanInput),
+    SubmitGoalPlanSection(
+        crate::implementations::grow_build::update_goal::SubmitGoalPlanSectionInput,
+    ),
+    FinalizeGoalPlan(crate::implementations::grow_build::update_goal::FinalizeGoalPlanInput),
     Workflow(crate::implementations::grow_build::workflow::WorkflowToolInput),
     RequestToolAccess(RequestToolAccessInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)

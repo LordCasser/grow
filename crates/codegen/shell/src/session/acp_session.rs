@@ -583,6 +583,13 @@ pub(crate) struct SessionActor {
             tokio_util::sync::CancellationToken,
         )>,
     >,
+    /// Transient planner staging accumulator for the current planning
+    /// epoch. Sections accepted through the planner's submit channel are
+    /// kept here until `finalize_goal_plan` commits the assembled board
+    /// (which clears it) or the planning epoch is invalidated by
+    /// edit/replan/clear/pause (which drops it). Never persisted: the
+    /// durable truth remains the canonical Markdown blackboard.
+    pub(crate) goal_plan_staging: std::sync::Mutex<Option<goal::GoalPlanStaging>>,
     /// `task_id`s of background tasks (and monitors) that originated during
     /// the goal turn — either spawned by the goal model itself or reparented
     /// from a harness verifier/planner subagent on its exit. Their late
@@ -1353,6 +1360,9 @@ mod build_tool_parse_error_message_tests;
 #[path = "acp_session_tests/turn/chat_history_integrity_tests.rs"]
 mod chat_history_integrity_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/goal/goal_plan_staging_tests.rs"]
+mod goal_plan_staging_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/laziness/laziness_debug_tests.rs"]
 mod laziness_debug_tests;
 #[cfg(test)]
@@ -1566,6 +1576,9 @@ mod managed_gateway_tool_tests {
     }
 }
 #[cfg(test)]
+#[path = "acp_session_tests/compaction_pre_prune_tests.rs"]
+mod compaction_pre_prune_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/interjection_tests.rs"]
 mod interjection_tests;
 #[cfg(test)]
@@ -1575,14 +1588,11 @@ mod recap_display_only_tests;
 #[path = "acp_session_tests/reminder_policy_tests.rs"]
 mod reminder_policy_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/truncation_recovery_tests.rs"]
-mod truncation_recovery_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/stop_cancelled_tests.rs"]
 mod stop_cancelled_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/compaction_pre_prune_tests.rs"]
-mod compaction_pre_prune_tests;
+#[path = "acp_session_tests/truncation_recovery_tests.rs"]
+mod truncation_recovery_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn_pipeline_v2_tests.rs"]
 mod turn_pipeline_v2_tests;

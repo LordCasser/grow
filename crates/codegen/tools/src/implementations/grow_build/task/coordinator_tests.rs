@@ -178,6 +178,8 @@ fn request(id: &str, background: bool) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         goal_context: None,
+        goal_stage_submit: None,
+        goal_stage_resume: None,
         cancel_token: CancellationToken::new(),
     }
 }

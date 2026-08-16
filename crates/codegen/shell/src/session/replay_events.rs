@@ -124,16 +124,24 @@ pub(crate) enum SessionEvent {
 /// Payload of [`SessionEvent::GoalStageCompleted`]. Carries the lease the
 /// stage was scheduled under (goal identity + definition revision +
 /// autonomy generation + foreground completion generation) plus the stage's
-/// outcome (or a string error when the stage task itself failed).
+/// outcome (or a string error when the stage task itself failed) and the
+/// child subagent id once the coordinator produced a terminal result for it
+/// (`None` when the spawn infrastructure failed before the child ran).
 #[derive(Debug)]
 pub(crate) struct GoalStageCompletion {
     pub(crate) lease: crate::session::goal_tracker::StageLease,
+    pub(crate) subagent_id: Option<String>,
     pub(crate) kind: GoalStageKind,
 }
 
 #[derive(Debug)]
 pub(crate) enum GoalStageKind {
-    Planner(Result<String, String>),
+    /// The planner no longer returns a Markdown document: its plan is
+    /// committed through `finalize_goal_plan`, so a clean completion
+    /// carries no payload. The mailbox decides from the current lease
+    /// whether the stage finalized (ignore) or ended without finalizing
+    /// (respawn accounting).
+    Planner(Result<(), String>),
     Verifier(Result<GoalVerifierOutcome, String>),
 }
 

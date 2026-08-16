@@ -791,6 +791,14 @@ pub(super) async fn run_session(
                             )
                             .await;
                     }
+                    SessionCommand::SetGoalStageSubmitHandle { handle } => {
+                        session
+                            .agent
+                            .borrow()
+                            .tool_bridge()
+                            .update_resource(handle)
+                            .await;
+                    }
                     SessionCommand::RestorePlanApproval => {
                         // Resume re-park: spawn the approval
                         // round-trip so the command loop is not blocked on

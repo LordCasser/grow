@@ -828,8 +828,10 @@ pub const EXPLORE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
 pub const GOAL_PLANNER_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     name: "goal-planner",
     description: "Host-owned read-only Goal planning stage.",
-    tools_template: "Read-only workspace inspection: ${{ tools.by_kind.read }}, \
-         ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}.",
+    tools_template: "Read-only workspace inspection (${{ tools.by_kind.read }}, \
+         ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}) plus structured Goal plan \
+         submission via submit_goal_plan_section and finalize_goal_plan; the host derives \
+         task ids and board Markdown.",
     prompt_template: EXPLORE_PROMPT,
 };
 

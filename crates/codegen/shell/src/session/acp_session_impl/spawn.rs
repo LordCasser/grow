@@ -2441,6 +2441,7 @@ pub(crate) async fn spawn_session_actor(
         goal_harness_enabled: std::sync::atomic::AtomicBool::new(false),
         goal_tracker,
         goal_stage_cancel: parking_lot::Mutex::new(None),
+        goal_plan_staging: std::sync::Mutex::new(None),
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,

@@ -306,6 +306,8 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         goal_context: None,
+        goal_stage_submit: None,
+        goal_stage_resume: None,
         cancel_token: CancellationToken::new(),
     }
 }
@@ -1171,6 +1173,8 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         fork_context,
         owner: SubagentOwner::Task,
         goal_context: None,
+        goal_stage_submit: None,
+        goal_stage_resume: None,
         cancel_token: CancellationToken::new(),
     }
 }

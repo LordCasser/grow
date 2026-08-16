@@ -763,9 +763,7 @@ impl SessionActor {
                 ::hooks::event::HookEventName::StopCancelled,
                 ::hooks::event::HookPayload::StopCancelled {
                     reason: crate::session::events::CancellationCategory::MidTurnAbort,
-                    trigger: trigger
-                        .as_deref()
-                        .map(::hooks::event::clip_cancel_trigger),
+                    trigger: trigger.as_deref().map(::hooks::event::clip_cancel_trigger),
                 },
                 Some(prompt_id),
                 None,

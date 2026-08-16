@@ -181,9 +181,7 @@ async fn terminal_boundary_discards_residual_same_turn_interjections() {
                 auto_promoted: None,
             });
 
-            actor
-                .discard_residual_interjections_at_turn_end()
-                .await;
+            actor.discard_residual_interjections_at_turn_end().await;
 
             assert!(actor.pending_interjections.is_empty());
             assert!(
@@ -231,9 +229,7 @@ async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explic
                 auto_promoted: Some(requeue("follow-up-2")),
             });
 
-            actor
-                .discard_residual_interjections_at_turn_end()
-                .await;
+            actor.discard_residual_interjections_at_turn_end().await;
 
             assert!(
                 actor.pending_interjections.is_empty(),
@@ -254,16 +250,13 @@ async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explic
             assert_eq!(meta.owner.as_deref(), Some("pager"));
             assert_eq!(meta.kind, "prompt");
             assert_eq!(meta.text, "first follow-up");
-            let back = state
-                .pending_inputs
-                .back()
-                .expect("second requeued entry");
+            let back = state.pending_inputs.back().expect("second requeued entry");
             assert_eq!(back.prompt_id, "follow-up-2");
             assert!(
                 state.pending_inputs.iter().all(|item| {
-                    item.prompt_blocks
-                        .iter()
-                        .all(|b| matches!(b, acp::ContentBlock::Text(_) | acp::ContentBlock::Image(_)))
+                    item.prompt_blocks.iter().all(|b| {
+                        matches!(b, acp::ContentBlock::Text(_) | acp::ContentBlock::Image(_))
+                    })
                 }),
                 "rebuilt blocks are plain text/image prompts"
             );
@@ -352,7 +345,8 @@ async fn auto_promote_follow_up_uses_the_interjection_path_once() {
                 matches!(
                     result,
                     Ok(crate::session::commands::PromptTurnOk {
-                        completion_kind: crate::session::commands::PromptCompletionKind::RemovedFromQueue,
+                        completion_kind:
+                            crate::session::commands::PromptCompletionKind::RemovedFromQueue,
                         ..
                     })
                 ),
@@ -386,8 +380,7 @@ async fn auto_promote_follow_up_uses_the_interjection_path_once() {
                     && args.request.method.as_ref() == "grow/session/interjection"
                 {
                     broadcasts.push(
-                        serde_json::from_str::<serde_json::Value>(args.request.params.get())
-                            .ok(),
+                        serde_json::from_str::<serde_json::Value>(args.request.params.get()).ok(),
                     );
                 }
             }

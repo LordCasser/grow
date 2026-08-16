@@ -315,7 +315,8 @@ fn explore_toolset() -> ToolServerConfig {
 
 /// Exact host-only toolset for the Goal planner. The planner receives the
 /// immutable Goal snapshot in its prompt and may re-read it, but has no shell,
-/// mutation, workflow, or delegation surface.
+/// mutation, workflow, or delegation surface. Plan submission flows through
+/// the structured section tools; the host owns ids and Markdown.
 fn goal_planner_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
@@ -323,6 +324,8 @@ fn goal_planner_toolset() -> ToolServerConfig {
             (&grow_build::ListDirTool).into(),
             (&grow_build::GrepTool).into(),
             (&grow_build::GetGoalTool).into(),
+            (&grow_build::SubmitGoalPlanSectionTool).into(),
+            (&grow_build::FinalizeGoalPlanTool).into(),
         ],
         behavior_preset: None,
     }

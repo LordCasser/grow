@@ -225,16 +225,21 @@ async fn seed_tool_result_rounds(actor: &SessionActor, count: usize) {
         actor
             .chat_state_handle
             .push_user_message(ConversationItem::user(format!("u{i}")));
-        actor.chat_state_handle.push_assistant_response(
-            ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
-                id: format!("call-{i}").into(),
-                name: "grep".to_string(),
-                arguments: "{}".into(),
-            }]),
-        );
         actor
             .chat_state_handle
-            .push_tool_result(ConversationItem::tool_result(format!("call-{i}"), big_tool_text()));
+            .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: format!("call-{i}").into(),
+                    name: "grep".to_string(),
+                    arguments: "{}".into(),
+                },
+            ]));
+        actor
+            .chat_state_handle
+            .push_tool_result(ConversationItem::tool_result(
+                format!("call-{i}"),
+                big_tool_text(),
+            ));
     }
     let _ = actor.chat_state_handle.get_conversation_len().await;
 }
@@ -261,8 +266,7 @@ fn drain_session_updates(
     while let Ok(msg) = rx.try_recv() {
         if let acp_transport::AcpClientMessage::ExtNotification(args) = msg
             && args.request.method.as_ref() == "grow/session_notification"
-            && let Ok(params) =
-                serde_json::from_str::<serde_json::Value>(args.request.params.get())
+            && let Ok(params) = serde_json::from_str::<serde_json::Value>(args.request.params.get())
             && let Some(kind) = params
                 .get("update")
                 .and_then(|u| u.get("sessionUpdate"))
@@ -306,7 +310,8 @@ fn capture_trace_events() -> (
                 .insert(field.name().to_string(), format!("{value:?}"));
         }
         fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.fields.insert(field.name().to_string(), value.to_string());
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
         }
     }
 
@@ -340,9 +345,7 @@ fn capture_trace_events() -> (
 
 /// Diagnostics events (target `diagnostics`) as `(name, payload)` pairs.
 /// Consumes `events` (a vec drained from the capture channel).
-fn diagnostic_events(
-    events: &[CapturedTraceEvent],
-) -> Vec<(String, serde_json::Value)> {
+fn diagnostic_events(events: &[CapturedTraceEvent]) -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();
     for event in events {
         if event.target != "diagnostics" {
@@ -504,8 +507,7 @@ fn pre_prune_insufficient_falls_back_to_summary() {
                 messages_turn(&[(&long_summary, END_TURN)], END_TURN),
             );
             let (actor, mut gateway_rx) =
-                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
-                    .await;
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
             seed_tool_result_rounds(&actor, 1).await;
             actor.chat_state_handle.record_token_usage(86_000);
             // A fresh oversized tool result this turn keeps `since_model`
@@ -543,9 +545,14 @@ fn pre_prune_insufficient_falls_back_to_summary() {
             let conversation = actor.chat_state_handle.get_conversation().await;
             let tool_texts = tool_result_texts(&conversation);
             assert_eq!(tool_texts.len(), 2);
-            assert_ne!(&tool_texts[0], &big_tool_text(), "prune must have trimmed it");
+            assert_ne!(
+                &tool_texts[0],
+                &big_tool_text(),
+                "prune must have trimmed it"
+            );
             assert_eq!(
-                &tool_texts[1], &big_tool_text(),
+                &tool_texts[1],
+                &big_tool_text(),
                 "the fresh tool result must be untouched"
             );
 
@@ -615,8 +622,7 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
                 messages_turn(&[(&long_summary, END_TURN)], END_TURN),
             );
             let (actor, _gateway_rx) =
-                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
-                    .await;
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
             actor
                 .chat_state_handle
                 .replace_system_head("test system prompt")
@@ -679,8 +685,7 @@ fn pre_prune_error_fails_open_to_summary() {
                 messages_turn(&[(&long_summary, END_TURN)], END_TURN),
             );
             let (actor, _gateway_rx) =
-                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 40_000)
-                    .await;
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 40_000).await;
             // One oversized tool result: plan selects it (50K static > 34K target).
             seed_tool_result_rounds(&actor, 1).await;
 
@@ -760,13 +765,11 @@ fn pre_prune_error_fails_open_to_summary() {
                 .replace_conversation_for_compaction(vec![
                     ConversationItem::system("test system prompt"),
                     ConversationItem::user("u0"),
-                    ConversationItem::assistant_tool_calls(vec![
-                        sampling_types::ToolCall {
-                            id: "call-0".into(),
-                            name: "grep".to_string(),
-                            arguments: "{}".into(),
-                        },
-                    ]),
+                    ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                        id: "call-0".into(),
+                        name: "grep".to_string(),
+                        arguments: "{}".into(),
+                    }]),
                     ConversationItem::tool_result("call-0", big_tool_text()),
                 ]);
             actor.chat_state_handle.record_token_usage(40_000);
@@ -817,8 +820,7 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
         rt.block_on(local.run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let (actor, _gateway_rx) =
-                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
-                    .await;
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
             let trigger = compaction::AutoCompactTriggerInfo {
                 tokens_used: 105_000,
                 context_window: 100_000,
@@ -919,9 +921,7 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
 /// or the conversation.
 #[test]
 fn pre_prune_blocked_by_account_and_turn_suppress() {
-    use crate::session::compaction_config::{
-        SUPPRESS_AUTH, SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS,
-    };
+    use crate::session::compaction_config::{SUPPRESS_AUTH, SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS};
     use std::sync::atomic::Ordering;
     run_with_session_stack(|| {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -932,8 +932,7 @@ fn pre_prune_blocked_by_account_and_turn_suppress() {
         rt.block_on(local.run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let (actor, _gateway_rx) =
-                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
-                    .await;
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
             // Two oversized rounds: the plan would be non-empty (100K > 85K
             // target), so these assertions really exercise the gate.
             seed_tool_result_rounds(&actor, 2).await;
@@ -1002,9 +1001,13 @@ fn pre_prune_never_touches_inherited_fork_prefix() {
         rt.block_on(local.run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             // The fork hint covers the four parent items.
-            let (actor, _gateway_rx) =
-                actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, Some(4))
-                    .await;
+            let (actor, _gateway_rx) = actor_with_sampler_cw_ex(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                100_000,
+                Some(4),
+            )
+            .await;
             // 40% threshold → target 40K tokens; default budget 5% = 5K tokens
             // (20KB). The parent's 40KB tool result (≈10K tokens) is a prune
             // candidate by size but lives inside the inherited prefix.
@@ -1025,10 +1028,12 @@ fn pre_prune_never_touches_inherited_fork_prefix() {
                     arguments: "{}".into(),
                 }]),
             );
-            actor.chat_state_handle.push_tool_result(ConversationItem::tool_result(
-                "call-parent",
-                parent_tool_text.clone(),
-            ));
+            actor
+                .chat_state_handle
+                .push_tool_result(ConversationItem::tool_result(
+                    "call-parent",
+                    parent_tool_text.clone(),
+                ));
             // Child turns (the prunable suffix): one oversized 200KB result.
             actor
                 .chat_state_handle
@@ -1216,7 +1221,8 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
         let snapshot_tool_texts = tool_result_texts(replaces[0]);
         assert_eq!(snapshot_tool_texts.len(), 1);
         assert_ne!(
-            &snapshot_tool_texts[0], &big_tool_text(),
+            &snapshot_tool_texts[0],
+            &big_tool_text(),
             "snapshot must carry the pruned content"
         );
         assert!(

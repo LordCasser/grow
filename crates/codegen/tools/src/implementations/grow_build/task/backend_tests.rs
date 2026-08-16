@@ -62,6 +62,8 @@ async fn channel_backend_spawn_success() {
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
         goal_context: None,
+        goal_stage_submit: None,
+        goal_stage_resume: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
@@ -96,6 +98,8 @@ async fn channel_backend_spawn_closed_channel() {
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
         goal_context: None,
+        goal_stage_submit: None,
+        goal_stage_resume: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
@@ -244,6 +248,8 @@ async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
             fork_context: false,
             owner,
             goal_context: None,
+            goal_stage_submit: None,
+            goal_stage_resume: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -298,6 +304,8 @@ async fn channel_backend_spawn_result_dropped() {
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
         goal_context: None,
+        goal_stage_submit: None,
+        goal_stage_resume: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 

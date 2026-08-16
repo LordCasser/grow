@@ -74,13 +74,36 @@ fn validate_goal_context(request: &SubagentRequest) -> Result<(), String> {
             && context.view.board_revision == *board_revision =>
         {
             if matches!(role, GoalSubagentRole::Planner | GoalSubagentRole::Verifier) {
-                if request.resume_from.is_some() {
-                    return Err("Goal stages cannot resume another subagent session".to_string());
+                // Resuming is a planner-only capability and the two resume
+                // fields must name the same prior child: `resume_from` is the
+                // live resume lookup key and `goal_stage_resume` is the
+                // host's record of the prior planning stage. Verifiers and
+                // every other Goal shape keep the fail-closed rejection.
+                let resume_pair_valid = match (role, &request.goal_stage_resume) {
+                    (GoalSubagentRole::Planner, Some(resume)) => {
+                        request.resume_from.as_deref() == Some(resume.prior_subagent_id.as_str())
+                    }
+                    _ => request.resume_from.is_none() && request.goal_stage_resume.is_none(),
+                };
+                if !resume_pair_valid {
+                    return Err(
+                        "Goal stage resume is restricted to a planner resuming its own prior \
+                         planning session; resume_from and goal_stage_resume must agree"
+                            .to_string(),
+                    );
+                }
+                if request.goal_stage_submit.is_some() && *role != GoalSubagentRole::Planner {
+                    return Err(
+                        "Only the Goal planner stage may carry a plan submit handle".to_string()
+                    );
                 }
                 if request.runtime_overrides.persona.is_some() {
                     return Err("Goal stages cannot apply a persona".to_string());
                 }
-                let expected_fork = *role == GoalSubagentRole::Planner;
+                // Fresh planners fork the parent context; a resuming planner
+                // relies on the resolved resume source (forking is skipped).
+                let expected_fork =
+                    *role == GoalSubagentRole::Planner && request.resume_from.is_none();
                 if request.fork_context != expected_fork {
                     return Err(format!(
                         "Goal {role:?} stage has an invalid context isolation policy"
@@ -497,8 +520,11 @@ pub(crate) async fn run_shell_child(
         &mut definition,
         allow_nested_subagents,
     );
-    if request.owner.goal_role().is_some() {
-        crate::agent::subagent::resolution::apply_goal_object_tool_policy(&mut definition);
+    if let Some(role) = request.owner.goal_role() {
+        crate::agent::subagent::resolution::apply_goal_object_tool_policy(
+            &mut definition,
+            role == GoalSubagentRole::Planner,
+        );
     }
     if let Some(mode) = effective_runtime.capability_mode {
         tracing::info!(
@@ -1176,6 +1202,11 @@ pub(crate) async fn run_shell_child(
         let _ = child_handle
             .cmd_tx
             .send(SessionCommand::SetGoalContextSnapshot { snapshot });
+    }
+    if let Some(handle) = request.goal_stage_submit.take() {
+        let _ = child_handle
+            .cmd_tx
+            .send(SessionCommand::SetGoalStageSubmitHandle { handle });
     }
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;

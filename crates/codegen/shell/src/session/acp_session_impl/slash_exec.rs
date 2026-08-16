@@ -1215,6 +1215,12 @@ impl SessionActor {
                     if let Some((_, cancel)) = self.goal_stage_cancel.lock().take() {
                         cancel.cancel();
                     }
+                    // Mirrors auto_pause_goal_if_active_with_message: the
+                    // planning epoch ends with the pause, so the transient
+                    // planner staging must not survive it (the helper lives
+                    // in the `goal` module; this module inlines the same
+                    // one-line reset).
+                    *self.goal_plan_staging.lock().expect("goal staging mutex") = None;
                     self.goal_notify_sender().emit_goal_updated(
                         &self.goal_tracker.lock(),
                         tokens_used,

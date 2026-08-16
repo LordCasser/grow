@@ -151,6 +151,14 @@ pub enum SessionCommand {
     SetGoalContextSnapshot {
         snapshot: tools::implementations::grow_build::update_goal::GoalContextSnapshot,
     },
+    /// Install the planner stage's submit channel in a delegated Goal
+    /// planner child. Only the host-injected planner stage carries this
+    /// handle; the tool layer gates submission on it plus the Planner
+    /// context snapshot. Late commands fail closed when the parent stage
+    /// drops the receiving end.
+    SetGoalStageSubmitHandle {
+        handle: tools::implementations::grow_build::update_goal::GoalStageSubmitHandle,
+    },
     /// Resume hook: after a session is restored with
     /// `approval_pending == true`, re-issue the `grow/plan_approval`
     /// reverse-request so the client re-shows approval chrome over a real live

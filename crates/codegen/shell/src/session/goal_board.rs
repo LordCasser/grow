@@ -1,4 +1,5 @@
-//! Canonical Goal blackboard parser and typed progress patcher.
+//! Canonical Goal blackboard parser, host-side plan assembler, and typed
+//! progress patcher.
 //!
 //! Markdown is the only durable task state. This module is the single write
 //! boundary: every planner document and primary-Agent progress patch is parsed
@@ -6,13 +7,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tool_types::{GoalProgressUpdate, GoalTaskProjection, GoalTaskStatus};
+use tool_types::{
+    GoalPlanAssemblyError, GoalPlanAssemblyIssue, GoalPlanSectionPayload, GoalPlanSpec,
+    GoalPlanTaskSpec, GoalProgressUpdate, GoalTaskProjection, GoalTaskStatus,
+};
 use unicode_width::UnicodeWidthStr;
 
 const MAX_BOARD_BYTES: usize = 64 * 1024;
 const MAX_TASKS: usize = 128;
 const MAX_DEPTH: usize = 4;
 const MAX_SUMMARY_COLUMNS: usize = 160;
+const MAX_METADATA_BYTES: usize = 4096;
 
 const HEADINGS: [&str; 5] = [
     "# Goal",
@@ -380,6 +385,276 @@ pub fn apply_runtime_feedback(
     parse_goal_board(objective, lines.join("\n"))
 }
 
+/// Assemble the canonical Goal blackboard Markdown from a structured plan.
+///
+/// The planner submits pure data: task ids, indentation, and every piece of
+/// document syntax are derived here by document-order depth-first traversal,
+/// so an assembled board is canonical by construction. Every violated rule is
+/// reported as a structured, entry-addressed issue and all issues are
+/// aggregated into one error — invalid input is never truncated or partially
+/// rendered. The assembled document is finally re-parsed through
+/// [`parse_goal_board`]; a runtime inconsistency is returned as an error
+/// rather than bypassed.
+pub fn assemble_goal_board(
+    objective: &str,
+    spec: &GoalPlanSpec,
+) -> Result<String, GoalPlanAssemblyError> {
+    let mut items = Vec::new();
+
+    let mut plan_tasks: Option<&[GoalPlanTaskSpec]> = None;
+    let mut goal_acceptance: Option<&[String]> = None;
+    let mut open_gaps: Option<&[String]> = None;
+    for (index, section) in spec.sections.iter().enumerate() {
+        let (duplicate, name) = match section {
+            GoalPlanSectionPayload::PlanTasks { tasks } => {
+                (plan_tasks.replace(tasks.as_slice()).is_some(), "plan_tasks")
+            }
+            GoalPlanSectionPayload::GoalAcceptance { items } => (
+                goal_acceptance.replace(items.as_slice()).is_some(),
+                "goal_acceptance",
+            ),
+            GoalPlanSectionPayload::OpenGaps { items } => {
+                (open_gaps.replace(items.as_slice()).is_some(), "open_gaps")
+            }
+        };
+        if duplicate {
+            items.push(assembly_issue(
+                format!("sections[{index}]"),
+                format!("duplicate `{name}` section; each section may appear at most once"),
+            ));
+        }
+    }
+
+    if let Some(tasks) = plan_tasks {
+        if tasks.is_empty() {
+            items.push(assembly_issue(
+                "tasks".into(),
+                "at least one plan task is required".into(),
+            ));
+        }
+        let mut sequence = 0_usize;
+        validate_task_tree(tasks, 1, "tasks", &mut sequence, &mut items);
+    } else {
+        items.push(assembly_issue(
+            "sections".into(),
+            "required `plan_tasks` section is missing".into(),
+        ));
+    }
+
+    if let Some(acceptance) = goal_acceptance {
+        if acceptance.is_empty() {
+            items.push(assembly_issue(
+                "goal_acceptance.items".into(),
+                "at least one Goal acceptance item is required".into(),
+            ));
+        }
+        for (index, item) in acceptance.iter().enumerate() {
+            validate_single_line(
+                format!("goal_acceptance.items[{index}]"),
+                "Goal acceptance item",
+                item,
+                &mut items,
+            );
+        }
+    } else {
+        items.push(assembly_issue(
+            "sections".into(),
+            "required `goal_acceptance` section is missing".into(),
+        ));
+    }
+
+    if let Some(gaps) = open_gaps {
+        for (index, item) in gaps.iter().enumerate() {
+            validate_single_line(
+                format!("open_gaps.items[{index}]"),
+                "Open gap item",
+                item,
+                &mut items,
+            );
+        }
+    }
+
+    let (tasks, acceptance) = match (plan_tasks, goal_acceptance) {
+        (Some(tasks), Some(acceptance)) if items.is_empty() => (tasks, acceptance),
+        _ => return Err(GoalPlanAssemblyError { items }),
+    };
+
+    let mut lines = vec!["# Goal".to_string(), String::new()];
+    lines.extend(objective.lines().map(|line| format!("> {line}")));
+    lines.push(String::new());
+    lines.push("## Plan".to_string());
+    lines.push(String::new());
+    render_task_tree(&mut lines, tasks, "T", 1);
+    lines.push(String::new());
+    lines.push("## Goal acceptance".to_string());
+    lines.push(String::new());
+    for item in acceptance {
+        lines.push(format!("- {}", escape_checkbox_markers(item.trim())));
+    }
+    lines.push(String::new());
+    lines.push("## Verification evidence".to_string());
+    lines.push(String::new());
+    lines.push("- Pending".to_string());
+    lines.push(String::new());
+    lines.push("## Open gaps".to_string());
+    lines.push(String::new());
+    match open_gaps {
+        Some(gaps) if !gaps.is_empty() => {
+            for item in gaps {
+                lines.push(format!("- {}", escape_checkbox_markers(item.trim())));
+            }
+        }
+        _ => lines.push("- None".to_string()),
+    }
+
+    let board = lines.join("\n");
+    if let Err(error) = parse_goal_board(objective, board.clone()) {
+        return Err(GoalPlanAssemblyError {
+            items: vec![assembly_issue(
+                "board".into(),
+                format!("assembled board failed canonical validation: {error}"),
+            )],
+        });
+    }
+    Ok(board)
+}
+
+fn assembly_issue(path: String, reason: String) -> GoalPlanAssemblyIssue {
+    GoalPlanAssemblyIssue { path, reason }
+}
+
+/// Depth-first validation in document order. `depth` is 1-based; `sequence`
+/// counts every visited task so the plan-wide task limit can be attributed to
+/// the exact entries that exceed it. `status` legality needs no check here:
+/// the `GoalTaskStatus` type rejects invalid tokens at deserialization.
+fn validate_task_tree(
+    tasks: &[GoalPlanTaskSpec],
+    depth: usize,
+    path: &str,
+    sequence: &mut usize,
+    items: &mut Vec<GoalPlanAssemblyIssue>,
+) {
+    for (index, task) in tasks.iter().enumerate() {
+        *sequence += 1;
+        let task_path = format!("{path}[{index}]");
+        if *sequence > MAX_TASKS {
+            items.push(assembly_issue(
+                task_path.clone(),
+                format!("plan exceeds the maximum of {MAX_TASKS} tasks"),
+            ));
+        }
+        if depth > MAX_DEPTH {
+            items.push(assembly_issue(
+                task_path.clone(),
+                format!("task nesting exceeds the maximum depth of {MAX_DEPTH}"),
+            ));
+        }
+        let summary = task.summary.trim();
+        if summary.is_empty() {
+            items.push(assembly_issue(
+                format!("{task_path}.summary"),
+                "task summary must not be empty".into(),
+            ));
+        } else if UnicodeWidthStr::width(summary) > MAX_SUMMARY_COLUMNS {
+            items.push(assembly_issue(
+                format!("{task_path}.summary"),
+                format!(
+                    "task summary must span at most {MAX_SUMMARY_COLUMNS} display columns, found {}",
+                    UnicodeWidthStr::width(summary)
+                ),
+            ));
+        }
+        for (field, value) in [
+            ("scope", &task.scope),
+            ("acceptance", &task.acceptance),
+            ("evidence", &task.evidence),
+            ("gap", &task.gap),
+        ] {
+            if let Some(value) = value {
+                validate_single_line(
+                    format!("{task_path}.{field}"),
+                    &format!("task {field}"),
+                    value,
+                    items,
+                );
+            }
+        }
+        validate_task_tree(
+            &task.children,
+            depth + 1,
+            &format!("{task_path}.children"),
+            sequence,
+            items,
+        );
+    }
+}
+
+/// One non-empty, single-line, size-bounded text field. Mirrors the text
+/// limits `apply_progress_updates` imposes on board patch fields.
+fn validate_single_line(
+    path: String,
+    label: &str,
+    value: &str,
+    items: &mut Vec<GoalPlanAssemblyIssue>,
+) {
+    if value.trim().is_empty() || value.contains(['\n', '\r']) || value.len() > MAX_METADATA_BYTES {
+        items.push(assembly_issue(
+            path,
+            format!(
+                "{label} must be a non-empty single line of at most {MAX_METADATA_BYTES} bytes"
+            ),
+        ));
+    }
+}
+
+/// Depth-first rendering in document order. Ids are host-assigned as
+/// `T1`, `T1.1`, `T1.2`, `T2`, … and indentation is derived from depth, so
+/// the output matches `parse_task_line` byte for byte. Metadata sub-lines use
+/// the same `  - Label: value` shape `apply_progress_updates` rewrites.
+fn render_task_tree(
+    lines: &mut Vec<String>,
+    tasks: &[GoalPlanTaskSpec],
+    prefix: &str,
+    depth: usize,
+) {
+    for (index, task) in tasks.iter().enumerate() {
+        let id = format!("{prefix}{}", index + 1);
+        let indent = " ".repeat((depth - 1) * 2);
+        let status = task.status.unwrap_or(GoalTaskStatus::Pending);
+        let checked = if status == GoalTaskStatus::Done {
+            'x'
+        } else {
+            ' '
+        };
+        lines.push(format!(
+            "{indent}- [{checked}] **{id}** `{}` — {}",
+            status.as_str(),
+            task.summary.trim()
+        ));
+        for (label, value) in [
+            ("Scope", &task.scope),
+            ("Acceptance", &task.acceptance),
+            ("Evidence", &task.evidence),
+            ("Gap", &task.gap),
+        ] {
+            if let Some(value) = value {
+                lines.push(format!("{indent}  - {label}: {}", value.trim()));
+            }
+        }
+        render_task_tree(lines, &task.children, &format!("{id}."), depth + 1);
+    }
+}
+
+/// Checkbox-looking prefixes would turn list items into fake task state and
+/// be rejected by `parse_goal_board`; escape them exactly like
+/// `apply_runtime_feedback` escapes runtime-owned section text.
+fn escape_checkbox_markers(value: &str) -> String {
+    value
+        .replace("[ ]", "\\[ \\]")
+        .replace("[x]", "\\[x\\]")
+        .replace("[X]", "\\[X\\]")
+}
+
 fn validate_objective(objective: &str, lines: &[&str]) -> Result<(), GoalBoardError> {
     let actual: Vec<String> = lines
         .iter()
@@ -719,5 +994,306 @@ mod tests {
             "    - Evidence: call graph checked\n    - [ ] **T1.1.1** `pending` — Level three\n      - [ ] **T1.1.1.1** `pending` — Level four\n        - [ ] **T1.1.1.1.1** `pending` — Level five",
         );
         assert!(parse_goal_board("ship safely", too_deep).is_err());
+    }
+}
+
+#[cfg(test)]
+mod assemble_tests {
+    use super::*;
+
+    fn plan_task(summary: &str) -> GoalPlanTaskSpec {
+        GoalPlanTaskSpec {
+            summary: summary.into(),
+            status: None,
+            scope: None,
+            acceptance: None,
+            evidence: None,
+            gap: None,
+            children: Vec::new(),
+        }
+    }
+
+    fn plan_spec(tasks: Vec<GoalPlanTaskSpec>, acceptance: &[&str]) -> GoalPlanSpec {
+        GoalPlanSpec {
+            sections: vec![
+                GoalPlanSectionPayload::PlanTasks { tasks },
+                GoalPlanSectionPayload::GoalAcceptance {
+                    items: acceptance.iter().map(|item| item.to_string()).collect(),
+                },
+            ],
+        }
+    }
+
+    fn error_paths(error: &GoalPlanAssemblyError) -> Vec<String> {
+        error.items.iter().map(|item| item.path.clone()).collect()
+    }
+
+    #[test]
+    fn assembled_multi_level_board_round_trips_and_projects_host_assigned_ids() {
+        let mut grandchild = plan_task("验证三层层级 depth-three nesting");
+        grandchild.status = Some(GoalTaskStatus::Done);
+        grandchild.evidence = Some("cargo test 绿".into());
+        let mut child = plan_task("Wire the host assembler");
+        child.status = Some(GoalTaskStatus::Done);
+        child.scope = Some("goal_board".into());
+        child.acceptance = Some("board round-trips".into());
+        child.children = vec![grandchild];
+        let mut root = plan_task("把黑板拼装移入宿主 move assembly host-side");
+        root.status = Some(GoalTaskStatus::InProgress);
+        root.scope = Some("planner contract".into());
+        root.acceptance = Some("canonical grammar".into());
+        root.evidence = Some("parser tests".into());
+        root.gap = Some("tool registration pending".into());
+        root.children = vec![child];
+        let mut spec = plan_spec(vec![root, plan_task("Second root")], &["tests pass"]);
+        spec.sections.push(GoalPlanSectionPayload::OpenGaps {
+            items: vec!["runtime wiring".into()],
+        });
+
+        let objective = "ship the goal runtime safely";
+        let assembled = assemble_goal_board(objective, &spec).unwrap();
+        let parsed = parse_goal_board(objective, assembled.clone()).unwrap();
+        let tasks = parsed.task_projection();
+
+        assert_eq!(tasks.len(), 4);
+        assert_eq!(
+            (
+                tasks[0].id.as_str(),
+                tasks[0].depth,
+                tasks[0].parent_id.as_deref()
+            ),
+            ("T1", 1, None)
+        );
+        assert_eq!(
+            (
+                tasks[1].id.as_str(),
+                tasks[1].depth,
+                tasks[1].parent_id.as_deref()
+            ),
+            ("T1.1", 2, Some("T1"))
+        );
+        assert_eq!(
+            (
+                tasks[2].id.as_str(),
+                tasks[2].depth,
+                tasks[2].parent_id.as_deref()
+            ),
+            ("T1.1.1", 3, Some("T1.1"))
+        );
+        assert_eq!(
+            (
+                tasks[3].id.as_str(),
+                tasks[3].depth,
+                tasks[3].parent_id.as_deref()
+            ),
+            ("T2", 1, None)
+        );
+        assert_eq!(tasks[0].status, GoalTaskStatus::InProgress);
+        assert_eq!(tasks[1].status, GoalTaskStatus::Done);
+        assert_eq!(tasks[3].status, GoalTaskStatus::Pending);
+        assert_eq!(
+            (tasks[0].completed_descendants, tasks[0].total_descendants),
+            (2, 2)
+        );
+
+        let lines: Vec<&str> = assembled.lines().collect();
+        assert_eq!(lines[0], "# Goal");
+        assert_eq!(lines[2], "> ship the goal runtime safely");
+        assert!(
+            assembled.contains(
+                "- [ ] **T1** `in_progress` — 把黑板拼装移入宿主 move assembly host-side"
+            )
+        );
+        assert!(assembled.contains("  - Scope: planner contract"));
+        assert!(assembled.contains("  - Acceptance: canonical grammar"));
+        assert!(assembled.contains("  - Evidence: parser tests"));
+        assert!(assembled.contains("  - Gap: tool registration pending"));
+        assert!(assembled.contains("  - [x] **T1.1** `done` — Wire the host assembler"));
+        assert!(
+            assembled.contains("    - [x] **T1.1.1** `done` — 验证三层层级 depth-three nesting")
+        );
+        assert!(assembled.contains("      - Evidence: cargo test 绿"));
+        assert!(assembled.contains("- [ ] **T2** `pending` — Second root"));
+        assert!(assembled.contains("## Goal acceptance\n\n- tests pass"));
+        assert!(assembled.contains("## Verification evidence\n\n- Pending"));
+        assert!(assembled.contains("## Open gaps\n\n- runtime wiring"));
+    }
+
+    #[test]
+    fn missing_open_gaps_section_renders_none() {
+        let spec = plan_spec(vec![plan_task("Only task")], &["accepted"]);
+        let assembled = assemble_goal_board("objective", &spec).unwrap();
+        assert!(assembled.contains("## Open gaps\n\n- None"));
+        assert!(parse_goal_board("objective", assembled).is_ok());
+    }
+
+    #[test]
+    fn depth_five_is_rejected_with_entry_path() {
+        let mut root = plan_task("L1");
+        let mut cursor = &mut root;
+        for level in 2..=5 {
+            cursor.children.push(plan_task(&format!("L{level}")));
+            cursor = cursor.children.last_mut().unwrap();
+        }
+        let error =
+            assemble_goal_board("objective", &plan_spec(vec![root], &["accepted"])).unwrap_err();
+        assert_eq!(
+            error_paths(&error),
+            vec!["tasks[0].children[0].children[0].children[0].children[0]"]
+        );
+    }
+
+    #[test]
+    fn task_129_is_rejected_with_entry_path() {
+        let tasks = (1..=MAX_TASKS + 1)
+            .map(|index| plan_task(&format!("Task {index}")))
+            .collect();
+        let error = assemble_goal_board("objective", &plan_spec(tasks, &["accepted"])).unwrap_err();
+        assert_eq!(error_paths(&error), vec![format!("tasks[{MAX_TASKS}]")]);
+        assert!(
+            error.items[0]
+                .reason
+                .contains(&format!("maximum of {MAX_TASKS} tasks"))
+        );
+    }
+
+    #[test]
+    fn empty_or_whitespace_summary_is_rejected() {
+        let spec = plan_spec(vec![plan_task("   "), plan_task("")], &["accepted"]);
+        let error = assemble_goal_board("objective", &spec).unwrap_err();
+        assert_eq!(
+            error_paths(&error),
+            vec!["tasks[0].summary", "tasks[1].summary"]
+        );
+    }
+
+    #[test]
+    fn overwide_cjk_summary_is_rejected_and_the_boundary_assembles() {
+        let boundary = plan_spec(
+            vec![plan_task(&"界".repeat(MAX_SUMMARY_COLUMNS / 2))],
+            &["accepted"],
+        );
+        assert!(assemble_goal_board("objective", &boundary).is_ok());
+
+        let overwide = plan_spec(
+            vec![plan_task(&"界".repeat(MAX_SUMMARY_COLUMNS / 2 + 1))],
+            &["accepted"],
+        );
+        let error = assemble_goal_board("objective", &overwide).unwrap_err();
+        assert_eq!(error_paths(&error), vec!["tasks[0].summary"]);
+        assert!(error.items[0].reason.contains("display columns"));
+    }
+
+    #[test]
+    fn multiline_and_oversized_metadata_are_rejected() {
+        let mut task = plan_task("Valid summary");
+        task.scope = Some("line one\nline two".into());
+        task.gap = Some("x".repeat(MAX_METADATA_BYTES + 1));
+        let error =
+            assemble_goal_board("objective", &plan_spec(vec![task], &["accepted"])).unwrap_err();
+        assert_eq!(error_paths(&error), vec!["tasks[0].scope", "tasks[0].gap"]);
+        assert!(error.items[0].reason.contains("single line"));
+        assert!(
+            error.items[1]
+                .reason
+                .contains(&format!("at most {MAX_METADATA_BYTES} bytes"))
+        );
+    }
+
+    #[test]
+    fn empty_goal_acceptance_and_multiline_items_are_rejected() {
+        let empty =
+            assemble_goal_board("objective", &plan_spec(vec![plan_task("Task")], &[])).unwrap_err();
+        assert_eq!(error_paths(&empty), vec!["goal_acceptance.items"]);
+
+        let multiline = plan_spec(vec![plan_task("Task")], &["fine", "bad\nline"]);
+        let error = assemble_goal_board("objective", &multiline).unwrap_err();
+        assert_eq!(error_paths(&error), vec!["goal_acceptance.items[1]"]);
+    }
+
+    #[test]
+    fn multiple_errors_are_aggregated_in_document_order() {
+        let mut overwide = plan_task(&"界".repeat(81));
+        overwide.evidence = Some("shared offender".into());
+        let mut empty = plan_task("");
+        empty.scope = Some("line one\nline two".into());
+        empty.children = vec![plan_task("")];
+        let spec = plan_spec(vec![overwide, empty], &["bad\nline", "good"]);
+        let error = assemble_goal_board("objective", &spec).unwrap_err();
+        assert_eq!(
+            error_paths(&error),
+            vec![
+                "tasks[0].summary",
+                "tasks[1].summary",
+                "tasks[1].scope",
+                "tasks[1].children[0].summary",
+                "goal_acceptance.items[0]",
+            ]
+        );
+    }
+
+    #[test]
+    fn objective_with_blank_lines_round_trips_as_blockquotes() {
+        let objective = "first line\n\nsecond line\nthird";
+        let spec = plan_spec(vec![plan_task("Task")], &["accepted"]);
+        let assembled = assemble_goal_board(objective, &spec).unwrap();
+        let lines: Vec<&str> = assembled.lines().collect();
+        assert_eq!(
+            lines[2..6],
+            ["> first line", "> ", "> second line", "> third"]
+        );
+        assert!(parse_goal_board(objective, assembled).is_ok());
+    }
+
+    #[test]
+    fn checkbox_like_list_items_are_escaped_and_still_parse() {
+        let mut spec = plan_spec(vec![plan_task("Task")], &["[ ] not a task"]);
+        spec.sections.push(GoalPlanSectionPayload::OpenGaps {
+            items: vec!["[X] done marker".into()],
+        });
+        let assembled = assemble_goal_board("objective", &spec).unwrap();
+        assert!(assembled.contains("- \\[ \\] not a task"));
+        assert!(assembled.contains("- \\[X\\] done marker"));
+        assert!(parse_goal_board("objective", assembled).is_ok());
+    }
+
+    #[test]
+    fn missing_and_duplicate_sections_are_rejected() {
+        let empty = GoalPlanSpec {
+            sections: Vec::new(),
+        };
+        let error = assemble_goal_board("objective", &empty).unwrap_err();
+        assert_eq!(error_paths(&error), vec!["sections", "sections"]);
+        assert!(
+            error.items[0]
+                .reason
+                .contains("`plan_tasks` section is missing")
+        );
+        assert!(
+            error.items[1]
+                .reason
+                .contains("`goal_acceptance` section is missing")
+        );
+
+        let duplicate = GoalPlanSpec {
+            sections: vec![
+                GoalPlanSectionPayload::PlanTasks {
+                    tasks: vec![plan_task("A")],
+                },
+                GoalPlanSectionPayload::PlanTasks {
+                    tasks: vec![plan_task("B")],
+                },
+                GoalPlanSectionPayload::GoalAcceptance {
+                    items: vec!["accepted".into()],
+                },
+            ],
+        };
+        let error = assemble_goal_board("objective", &duplicate).unwrap_err();
+        assert_eq!(error_paths(&error), vec!["sections[1]"]);
+        assert!(
+            error.items[0]
+                .reason
+                .contains("duplicate `plan_tasks` section")
+        );
     }
 }

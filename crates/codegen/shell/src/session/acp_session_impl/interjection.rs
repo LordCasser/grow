@@ -133,8 +133,9 @@ impl SessionActor {
         let auto = entry
             .auto_promoted
             .expect("only auto-promoted entries reach the requeue path");
-        let mut prompt_blocks =
-            vec![acp::ContentBlock::Text(acp::TextContent::new(entry.text.clone()))];
+        let mut prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            entry.text.clone(),
+        ))];
         prompt_blocks.extend(entry.attachments.into_iter().map(acp::ContentBlock::Image));
         let owner = auto.client_identifier.clone();
         let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();

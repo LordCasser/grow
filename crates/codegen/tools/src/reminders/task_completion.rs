@@ -598,6 +598,8 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::SchedulerList(_)
         | ToolOutput::UpdateGoal(_)
         | ToolOutput::GetGoal(_)
+        | ToolOutput::SubmitGoalPlanSection(_)
+        | ToolOutput::FinalizeGoalPlan(_)
         | ToolOutput::Workflow(_)
         | ToolOutput::Dynamic(_) => {}
     }

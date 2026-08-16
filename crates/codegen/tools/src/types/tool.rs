@@ -89,6 +89,7 @@ pub enum ToolKind {
     GoalProgressUpdate,
     GoalReplanRequest,
     GoalLifecycleUpdate,
+    GoalPlanSubmit,
     Workflow,
     CapabilityRequest,
     #[serde(other)]

@@ -51,7 +51,7 @@ where
 ///
 /// Kind semantics are pinned to `workspace::capability::kind_allowed`:
 /// - Read class (ReadOnly/ReadWrite/Execute): Read, Search, Lsp, ListDir,
-///   List, MemoryGet, MemorySearch, GoalRead.
+///   List, MemoryGet, MemorySearch, GoalRead, GoalPlanSubmit.
 /// - Search class: Search, WebFetch.
 /// - Edit class (ReadWrite): Edit, Write, Delete, Move, DeployApp.
 /// - Execute class (Execute): Execute, BackgroundTaskAction,
@@ -93,6 +93,8 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
         entry::<grow_build::UpdateGoalProgressTool>(ToolKind::GoalProgressUpdate),
         entry::<grow_build::RequestGoalReplanTool>(ToolKind::GoalReplanRequest),
         entry::<grow_build::UpdateGoalTool>(ToolKind::GoalLifecycleUpdate),
+        entry::<grow_build::SubmitGoalPlanSectionTool>(ToolKind::GoalPlanSubmit),
+        entry::<grow_build::FinalizeGoalPlanTool>(ToolKind::GoalPlanSubmit),
         // ── Grow orchestration ─────────────────────────────────────────────
         entry::<grow_build::TaskTool>(ToolKind::Task),
         entry::<grow_build::WorkflowTool>(ToolKind::Workflow),
