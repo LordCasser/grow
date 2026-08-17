@@ -8,7 +8,7 @@ use crate::session::persistence::{CHAT_FORMAT_VERSION, Summary};
 use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
 use async_trait::async_trait;
-use chat_state::StrictAppendAck;
+use chat_state::{StrictAppendAck, Timeline};
 use fs2::FileExt;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, Write};
@@ -81,8 +81,11 @@ impl JsonlStorageAdapter {
         &self,
         dir: &std::path::Path,
     ) -> std::io::Result<Vec<ConversationItem>> {
-        let chat_file = dir.join(super::CHAT_HISTORY_FILE);
-        self.read_chat_history_sync(chat_file, CHAT_FORMAT_VERSION)
+        let events =
+            self.read_jsonl::<chat_state::TimelineEvent>(dir.join(super::TIMELINE_FILE))?;
+        let timeline = Timeline::from_events(events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(timeline.surface().to_vec())
     }
     fn session_dir(&self, info: &Info) -> PathBuf {
         match &self.dir_mode {
@@ -99,15 +102,8 @@ impl JsonlStorageAdapter {
     fn chat_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::CHAT_HISTORY_FILE)
     }
-    fn ensure_chat_history(&self, info: &Info, chat_format_version: u8) -> io::Result<()> {
-        if chat_format_version != crate::session::persistence::CHAT_FORMAT_VERSION {
-            return Ok(());
-        }
-        let chat_file = self.chat_file(info);
-        if std::fs::metadata(&chat_file).map(|m| m.len()).unwrap_or(0) == 0 {
-            super::chat_rebuild::rebuild_chat_history(&self.session_dir(info))?;
-        }
-        Ok(())
+    fn timeline_file(&self, info: &Info) -> PathBuf {
+        self.session_dir(info).join(super::TIMELINE_FILE)
     }
     fn summary_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::SUMMARY_FILE)
@@ -1181,9 +1177,11 @@ impl JsonlStorageAdapter {
         let target_dir = self.session_dir(target_info);
         std::fs::create_dir_all(&target_dir)?;
         let source_summary = self.read_summary_sync(source_info)?;
-        let chat_format_version = source_summary.chat_format_version;
-        let mut chat_to_copy: Vec<ConversationItem> =
-            self.read_chat_history_sync(self.chat_file(source_info), chat_format_version)?;
+        let source_events =
+            self.read_jsonl::<chat_state::TimelineEvent>(self.timeline_file(source_info))?;
+        let source_timeline = Timeline::from_events(source_events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut chat_to_copy = source_timeline.surface().to_vec();
         let mut updates_to_copy: Vec<super::SessionUpdate> =
             self.read_updates_jsonl(self.updates_file(source_info))?;
         if let Some(target_idx) = options.target_prompt_index {
@@ -1295,6 +1293,19 @@ impl JsonlStorageAdapter {
             chat_content.extend(line);
         }
         std::fs::write(self.chat_file(target_info), chat_content)?;
+        // A fork starts a new event lineage from the inherited surface. Source
+        // replacement identities cannot be copied after truncation, filtering,
+        // cwd transformation, or reasoning stripping.
+        let fork_timeline = Timeline::from_seed(chat_to_copy.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut timeline_content = Vec::new();
+        for event in fork_timeline.events() {
+            let mut line = serde_json::to_vec(event)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            line.push(b'\n');
+            timeline_content.extend(line);
+        }
+        std::fs::write(self.timeline_file(target_info), timeline_content)?;
         let transformed_updates: Vec<super::SessionUpdate> = updates_to_copy
             .into_iter()
             .map(|u| transform_session_id_in_update(u, &target_info.id))
@@ -1590,6 +1601,13 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
     }
+    async fn append_timeline_event(
+        &self,
+        info: &Info,
+        event: &chat_state::TimelineEvent,
+    ) -> io::Result<()> {
+        self.append_jsonl(self.timeline_file(info), event).await
+    }
     async fn append_cwd_switch_commit_aware(
         &self,
         info: &Info,
@@ -1732,9 +1750,12 @@ impl StorageAdapter for JsonlStorageAdapter {
     }
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
         let summary = self.read_summary_sync(info)?;
-        let chat_file = self.chat_file(info);
-        self.ensure_chat_history(info, summary.chat_format_version)?;
-        let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
+        let timeline_events =
+            self.read_jsonl::<chat_state::TimelineEvent>(self.timeline_file(info))?;
+        let chat_history = Timeline::from_events(timeline_events.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .surface()
+            .to_vec();
         let updates = self.read_updates_jsonl(self.updates_file(info))?;
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
         let (session_control, session_control_rejected) = self.read_session_control_sync(info)?;
@@ -1749,6 +1770,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         let rewind_points = self.read_jsonl::<RewindPoint>(self.rewind_points_file(info))?;
         let result = PersistedData {
             summary,
+            timeline_events,
             chat_history,
             updates,
             plan_state,
@@ -1780,9 +1802,12 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
         let summary = self.read_summary_sync(info)?;
-        let chat_file = self.chat_file(info);
-        self.ensure_chat_history(info, summary.chat_format_version)?;
-        let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
+        let timeline_events =
+            self.read_jsonl::<chat_state::TimelineEvent>(self.timeline_file(info))?;
+        let chat_history = Timeline::from_events(timeline_events.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .surface()
+            .to_vec();
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
         let (session_control, session_control_rejected) = self.read_session_control_sync(info)?;
         let signals = self.read_optional_json_sync::<crate::session::signals::SessionSignals>(
@@ -1795,6 +1820,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         let workflow_runs = self.load_workflow_runs_sync(info)?;
         let result = super::PersistedDataLight {
             summary,
+            timeline_events,
             chat_history,
             plan_state,
             session_control,

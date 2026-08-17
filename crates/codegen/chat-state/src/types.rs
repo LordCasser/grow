@@ -16,15 +16,6 @@ pub const MEMORY_CONTEXT_OPEN_TAG: &str = "<memory-context>";
 /// Closing tag paired with [`MEMORY_CONTEXT_OPEN_TAG`].
 pub const MEMORY_CONTEXT_CLOSE_TAG: &str = "</memory-context>";
 
-/// Configuration for the ChatStateActor at spawn time.
-#[derive(Debug, Clone)]
-pub struct ChatStateConfig {
-    /// Initial conversation items to populate the state with.
-    pub initial_conversation: Vec<ConversationItem>,
-    /// Sampling configuration (model, context window, etc.).
-    pub sampling_config: SamplingConfig,
-}
-
 /// Immutable snapshot of the actor's state (for forking, rewind).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatStateSnapshot {

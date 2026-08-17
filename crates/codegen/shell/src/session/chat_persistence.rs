@@ -5,7 +5,7 @@
 
 use std::io;
 
-use chat_state::{ChatPersistence, StrictAppendAck, StrictAppendError};
+use chat_state::{ChatPersistence, StrictAppendAck, StrictAppendError, TimelineEvent};
 use sampling_types::ConversationItem;
 use tokio::sync::{mpsc, oneshot};
 
@@ -30,6 +30,10 @@ impl ChannelChatPersistence {
 }
 
 impl ChatPersistence for ChannelChatPersistence {
+    fn persist_timeline_event(&mut self, event: &TimelineEvent) {
+        let _ = self.tx.send(PersistenceMsg::Timeline(event.clone()));
+    }
+
     fn persist_message(&mut self, item: &ConversationItem) {
         let _ = self.tx.send(PersistenceMsg::Chat(item.clone()));
     }
@@ -103,6 +107,19 @@ mod tests {
         persistence.persist_message(&item);
         let msg = rx.recv().await.unwrap();
         assert!(matches!(msg, PersistenceMsg::Chat(_)));
+    }
+
+    #[tokio::test]
+    async fn channel_persistence_sends_timeline_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut persistence = ChannelChatPersistence::new(tx);
+        let timeline =
+            chat_state::Timeline::from_seed(vec![ConversationItem::user("test")]).unwrap();
+        persistence.persist_timeline_event(&timeline.events()[0]);
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            PersistenceMsg::Timeline(_)
+        ));
     }
 
     #[tokio::test]

@@ -34,6 +34,7 @@ pub(crate) const LEGACY_GOAL_STATE_FILE: &str = "goal/state.json";
 pub(crate) const ANNOUNCEMENT_STATE_FILE: &str = "announcement_state.json";
 pub(crate) const CHAT_HISTORY_FILE: &str = "chat_history.jsonl";
 pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
+pub(crate) const TIMELINE_FILE: &str = "timeline.jsonl";
 
 /// Write `bytes` to `path` by writing a uniquely named sibling temp file and
 /// renaming it over the target, so a crash or a concurrent writer never leaves a
@@ -201,8 +202,9 @@ fn temp_sibling(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Rebuild the derived `chat_history.jsonl` cache from `updates.jsonl`, the durable
-/// source of truth, so a session restores from its update stream alone.
+/// Rebuild the legacy display/diagnostic `chat_history.jsonl` cache from
+/// `updates.jsonl`. Conversation restart state comes only from `timeline.jsonl`;
+/// this repair path never fabricates durable conversation facts.
 pub(crate) mod chat_rebuild {
     use std::collections::{HashMap, HashSet};
     use std::io;
@@ -838,6 +840,8 @@ impl SessionUpdateEnvelope {
 #[derive(Debug, Clone)]
 pub struct PersistedData {
     pub summary: Summary,
+    /// Immutable conversation facts. This is the restart source of truth.
+    pub timeline_events: Vec<chat_state::TimelineEvent>,
     pub chat_history: Vec<ConversationItem>,
     /// All session updates (ACP updates and Grow extension updates) in chronological order
     pub updates: Vec<SessionUpdate>,
@@ -859,6 +863,7 @@ pub struct PersistedData {
 #[derive(Debug, Clone)]
 pub struct PersistedDataLight {
     pub summary: Summary,
+    pub timeline_events: Vec<chat_state::TimelineEvent>,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
     pub session_control: Option<crate::session::control::SessionControlSnapshot>,
@@ -1189,6 +1194,13 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Append a chat message and increment counter.
     async fn append_chat_message(&self, info: &Info, message: &ConversationItem) -> io::Result<()>;
+
+    /// Append one immutable conversation event without rewriting prior facts.
+    async fn append_timeline_event(
+        &self,
+        info: &Info,
+        event: &chat_state::TimelineEvent,
+    ) -> io::Result<()>;
 
     /// Append one working-directory switch generation exactly once.
     async fn append_cwd_switch_commit_aware(

@@ -2,7 +2,6 @@
 
 use super::ChatStateActor;
 use crate::compaction_utils::extract_last_user_query;
-use crate::events::ChatStateEvent;
 use crate::types::{AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, NotificationMeta};
 
 impl ChatStateActor {
@@ -17,7 +16,7 @@ impl ChatStateActor {
     /// Take a full snapshot of the actor's state.
     pub(super) fn snapshot(&self) -> ChatStateSnapshot {
         ChatStateSnapshot {
-            conversation: self.state.conversation.clone(),
+            conversation: self.state.timeline.surface().to_vec(),
             sampling_config: self.state.sampling_config.clone(),
             prompt_index: self.state.prompt_index,
             total_tokens: self.state.total_tokens,
@@ -53,9 +52,10 @@ impl ChatStateActor {
         // Find the conversation position of the Nth User item.
         // Items before that position are kept; from that position onward removed.
         let mut user_count = 0;
-        let mut truncate_at = self.state.conversation.len();
+        let surface = self.state.timeline.surface();
+        let mut truncate_at = surface.len();
 
-        for (i, item) in self.state.conversation.iter().enumerate() {
+        for (i, item) in surface.iter().enumerate() {
             if matches!(item, sampling_types::ConversationItem::User(_)) {
                 if user_count == target_prompt_index {
                     truncate_at = i;
@@ -65,19 +65,10 @@ impl ChatStateActor {
             }
         }
 
-        self.state.conversation.truncate(truncate_at);
+        let conversation = surface[..truncate_at].to_vec();
         self.state.prompt_texts.truncate(target_prompt_index);
         self.state.prompt_index = target_prompt_index;
-        self.state.total_tokens =
-            super::state::estimate_conversation_tokens(&self.state.conversation);
-        self.state.estimated_tokens_since_model = 0;
-        self.state.estimate_at_last_response = self.state.total_tokens;
-
-        self.persistence.replace_history(&self.state.conversation);
-
-        self.send_event(ChatStateEvent::ConversationReset {
-            new_len: self.state.conversation.len(),
-        });
+        self.install_conversation(conversation, false, crate::MessageCause::Rewind);
     }
 
     /// Check if auto-compact is needed based on token utilization.
@@ -106,7 +97,8 @@ impl ChatStateActor {
 
     pub(super) fn get_last_model_metadata(&self) -> crate::commands::ModelMetadata {
         self.state
-            .conversation
+            .timeline
+            .surface()
             .iter()
             .rev()
             .find_map(|item| {
@@ -126,13 +118,13 @@ impl ChatStateActor {
 
     /// Return the number of items in the conversation.
     pub(super) fn get_conversation_len(&self) -> usize {
-        self.state.conversation.len()
+        self.state.timeline.surface_len()
     }
 
     /// Whether the conversation has any assistant tool call without a matching
     /// `ToolResult` (the dangling-tool-call repair would fire on the next build).
     pub(super) fn has_dangling_tool_calls(&self) -> bool {
-        sampling_types::has_dangling_tool_calls(&self.state.conversation)
+        sampling_types::has_dangling_tool_calls(self.state.timeline.surface())
     }
 
     /// Return the text content of the last assistant message with non-empty text.
@@ -141,7 +133,7 @@ impl ChatStateActor {
     /// whose `content` field is non-empty after trimming. Returns `None` when
     /// no such item exists.
     pub(super) fn get_last_assistant_text(&self) -> Option<String> {
-        self.state.conversation.iter().rev().find_map(|item| {
+        self.state.timeline.surface().iter().rev().find_map(|item| {
             if let sampling_types::ConversationItem::Assistant(a) = item
                 && !a.content.trim().is_empty()
             {
@@ -161,7 +153,7 @@ impl ChatStateActor {
     ///
     /// [`SyntheticReason::starts_prompt_turn`]: sampling_types::SyntheticReason::starts_prompt_turn
     pub(super) fn get_last_assistant_text_in_turn(&self) -> Option<String> {
-        for item in self.state.conversation.iter().rev() {
+        for item in self.state.timeline.surface().iter().rev() {
             match item {
                 sampling_types::ConversationItem::Assistant(a) if !a.content.trim().is_empty() => {
                     return Some(a.content.as_ref().to_owned());
@@ -189,7 +181,7 @@ impl ChatStateActor {
     /// Callers that need "any text part" rather than "first-part-is-text"
     /// should use `get_conversation()` directly.
     pub(super) fn get_first_user_text(&self) -> Option<String> {
-        self.state.conversation.iter().find_map(|item| {
+        self.state.timeline.surface().iter().find_map(|item| {
             if let sampling_types::ConversationItem::User(u) = item {
                 // Only return text if the first part is Text — behaviour-preserving
                 // w.r.t. the original `content.first().and_then(|p| if Text { … })`.
@@ -211,7 +203,7 @@ impl ChatStateActor {
         &self,
         index: usize,
     ) -> Option<sampling_types::ConversationItem> {
-        self.state.conversation.get(index).cloned()
+        self.state.timeline.surface_item(index).cloned()
     }
 
     /// Return the processed text of the last user query (metadata tags stripped).
@@ -219,16 +211,16 @@ impl ChatStateActor {
     /// Delegates to [`extract_last_user_query`] so the caller does not need a
     /// full conversation clone.
     pub(super) fn get_last_user_query_text(&self) -> Option<String> {
-        extract_last_user_query(&self.state.conversation)
+        extract_last_user_query(self.state.timeline.surface())
     }
 
     /// Return conversation item counts by role without cloning any items.
     pub(super) fn get_conversation_counts(&self) -> ConversationCounts {
         let mut counts = ConversationCounts {
-            total: self.state.conversation.len(),
+            total: self.state.timeline.surface_len(),
             ..Default::default()
         };
-        for item in &self.state.conversation {
+        for item in self.state.timeline.surface() {
             match item {
                 sampling_types::ConversationItem::User(_) => counts.user += 1,
                 sampling_types::ConversationItem::Assistant(_) => {
@@ -248,7 +240,8 @@ impl ChatStateActor {
     /// Return the first `System` message in the conversation, or `None`.
     pub(super) fn get_system_message(&self) -> Option<sampling_types::ConversationItem> {
         self.state
-            .conversation
+            .timeline
+            .surface()
             .iter()
             .find(|item| matches!(item, sampling_types::ConversationItem::System(_)))
             .cloned()

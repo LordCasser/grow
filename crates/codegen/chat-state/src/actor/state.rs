@@ -9,6 +9,7 @@ use sampling_types::{
 
 use crate::types::Credentials;
 use crate::usage::UsageLedger;
+use crate::{EventSeq, Timeline};
 
 /// Bytes/4 estimate of the system prompt portion of a [`ConversationItem`].
 /// Returns 0 for non-system items so callers can pipe through whatever they
@@ -116,8 +117,8 @@ pub fn estimate_messages_tokens(items: &[ConversationItem]) -> u64 {
 ///
 /// All fields are owned exclusively by the actor task — no locks needed.
 pub(crate) struct ChatState {
-    /// The full conversation history.
-    pub conversation: Vec<ConversationItem>,
+    /// Durable conversation facts plus the current model-visible projection.
+    pub timeline: Timeline,
     /// Current sampling configuration (model, context window, etc.).
     pub sampling_config: SamplingConfig,
     /// Current prompt index (incremented per user turn).
@@ -157,31 +158,20 @@ pub(crate) struct ChatState {
     pub prompt_usage: Option<UsageLedger>,
     /// Lifetime session usage (not persisted).
     pub session_usage: UsageLedger,
-    /// Offset-based turn capture state. `Some` = capture active, `None` = inactive.
+    /// Event-sequence turn capture state. `Some` = capture active, `None` = inactive.
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),
     /// and `TruncateToPromptIndex` (rewind abandons the turn).
     pub(super) turn_capture: Option<TurnCaptureState>,
 }
 
-/// Tracks which conversation items belong to the current turn without
-/// cloning every pushed item into a side buffer.
+/// Tracks which append events belong to the current turn.
 ///
-/// Instead of duplicating each `ConversationItem` on push, we record the
-/// conversation length at capture start (`turn_start_offset`).  At take
-/// time, `conversation[turn_start_offset..]` gives us the turn's items
-/// with a single bulk clone.
-///
-/// When `replace_conversation` or `restore_snapshot` replaces the vec
-/// mid-turn, we snapshot `conversation[turn_start_offset..]` into
-/// `pre_replacement_messages` before the old vec is dropped, and reset
-/// the offset to the new vec's length.
+/// Surface replacements do not invalidate this cursor because accepted
+/// events are immutable. This is the primary reason turn capture belongs on
+/// the timeline rather than on projection offsets.
 pub(super) struct TurnCaptureState {
-    /// Index into `conversation` where this turn's messages start.
-    pub turn_start_offset: usize,
-    /// Messages saved from before a conversation replacement (compaction,
-    /// snapshot restore).  Extended (not replaced) if multiple replacements
-    /// occur in one turn.
-    pub pre_replacement_messages: Vec<ConversationItem>,
+    /// First event sequence owned by this turn.
+    pub turn_start_seq: EventSeq,
     /// Whether compaction occurred during this capture.
     pub compaction_occurred: bool,
 }
@@ -212,10 +202,18 @@ impl ChatState {
             );
         }
 
-        let initial_tokens = estimate_conversation_tokens(&conversation);
+        let timeline = Timeline::from_seed(conversation)
+            .expect("an in-memory seed conversation must form a valid timeline");
+
+        Self::from_timeline(timeline, sampling_config)
+    }
+
+    /// Restore state from an already validated durable timeline.
+    pub fn from_timeline(timeline: Timeline, sampling_config: SamplingConfig) -> Self {
+        let initial_tokens = estimate_conversation_tokens(timeline.surface());
 
         Self {
-            conversation,
+            timeline,
             sampling_config,
             prompt_index: 0,
             prompt_texts: Vec::new(),
@@ -281,7 +279,7 @@ mod tests {
         let state = ChatState::new(vec![], test_sampling_config());
         assert_eq!(state.prompt_index, 0);
         assert_eq!(state.total_tokens, 0); // empty conversation → 0
-        assert!(state.conversation.is_empty());
+        assert!(state.timeline.surface().is_empty());
         assert!(state.agent_edited_paths.is_empty());
         assert!(state.prompt_texts.is_empty());
         assert!(state.stream_start_ms.is_none());
@@ -296,7 +294,7 @@ mod tests {
             ConversationItem::user("hello"),
         ];
         let state = ChatState::new(items, test_sampling_config());
-        assert_eq!(state.conversation.len(), 2);
+        assert_eq!(state.timeline.surface_len(), 2);
     }
 
     #[test]

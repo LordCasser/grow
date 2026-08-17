@@ -74,11 +74,14 @@ impl TestHarness {
         items: Vec<ConversationItem>,
         config: SamplingConfig,
         mock: MockChatPersistence,
-        persistence_rx: MockPersistenceReceiver,
+        mut persistence_rx: MockPersistenceReceiver,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let token = tokio_util::sync::CancellationToken::new();
         let handle = ChatStateActor::spawn(items, config, Box::new(mock), event_tx, token.clone());
+        // Seed events are persisted at actor creation so later sequence numbers
+        // can be replayed without consulting chat_history.jsonl.
+        persistence_rx.drain();
         Self {
             handle,
             event_rx,
@@ -140,6 +143,47 @@ async fn actor_shuts_down_when_all_handles_dropped() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
+#[tokio::test]
+async fn restored_actor_replays_surface_and_continues_event_sequence() {
+    let mut timeline = crate::Timeline::from_seed(vec![
+        ConversationItem::user("old question"),
+        ConversationItem::assistant("old answer"),
+    ])
+    .unwrap();
+    timeline
+        .replace_all(
+            vec![ConversationItem::user("summary")],
+            crate::MessageCause::Compaction,
+        )
+        .unwrap();
+    let expected_seq = timeline.next_seq();
+    let (mock, mut persistence_rx) = MockChatPersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let token = tokio_util::sync::CancellationToken::new();
+    let handle = ChatStateActor::spawn_from_timeline_with_pruning(
+        timeline.events().to_vec(),
+        test_config(),
+        crate::PruningConfig::default(),
+        Box::new(mock),
+        event_tx,
+        token,
+    )
+    .unwrap();
+
+    assert_eq!(handle.get_conversation().await[0].text_content(), "summary");
+    assert!(
+        persistence_rx.drain().is_empty(),
+        "replay must not rewrite facts"
+    );
+    handle.push_assistant_response(ConversationItem::assistant("continued"));
+    let _ = handle.get_conversation().await;
+    let records = persistence_rx.drain();
+    let PersistenceRecord::Timeline(event) = &records[0] else {
+        panic!("expected timeline append, got {records:?}");
+    };
+    assert_eq!(event.seq, expected_seq);
+}
+
 // ============================================================================
 // Mutation tests
 // ============================================================================
@@ -153,8 +197,13 @@ async fn push_user_message_appends_and_persists() {
     assert_eq!(conv.len(), 1);
 
     let records = h.drain_persistence();
-    assert_eq!(records.len(), 1);
-    assert!(matches!(&records[0], PersistenceRecord::Message(_)));
+    assert!(matches!(
+        records.as_slice(),
+        [
+            PersistenceRecord::Timeline(_),
+            PersistenceRecord::Message(_)
+        ]
+    ));
 }
 
 #[tokio::test]
@@ -171,8 +220,13 @@ async fn push_user_message_and_ack_waits_for_actor_acceptance() {
     assert_eq!(conv.len(), 1);
 
     let records = h.drain_persistence();
-    assert_eq!(records.len(), 1);
-    assert!(matches!(&records[0], PersistenceRecord::Message(_)));
+    assert!(matches!(
+        records.as_slice(),
+        [
+            PersistenceRecord::Timeline(_),
+            PersistenceRecord::Message(_)
+        ]
+    ));
 }
 
 #[tokio::test]
@@ -210,7 +264,10 @@ async fn strict_switch_append_preserves_prefix_and_deduplicates_generation() {
     );
     assert!(matches!(
         h.drain_persistence().as_slice(),
-        [PersistenceRecord::AcknowledgedMessage(_)]
+        [
+            PersistenceRecord::AcknowledgedMessage(_),
+            PersistenceRecord::Timeline(_)
+        ]
     ));
 
     assert!(matches!(
@@ -428,7 +485,13 @@ async fn push_assistant_response_appends_and_persists() {
     assert_eq!(conv.len(), 1);
 
     let records = h.drain_persistence();
-    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records.as_slice(),
+        [
+            PersistenceRecord::Timeline(_),
+            PersistenceRecord::Message(_)
+        ]
+    ));
 }
 
 #[tokio::test]
@@ -441,7 +504,13 @@ async fn push_tool_result_appends_and_persists() {
     assert_eq!(conv.len(), 1);
 
     let records = h.drain_persistence();
-    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records.as_slice(),
+        [
+            PersistenceRecord::Timeline(_),
+            PersistenceRecord::Message(_)
+        ]
+    ));
 }
 
 #[tokio::test]
@@ -726,8 +795,13 @@ async fn replace_conversation_persists_and_emits_reset() {
     assert_eq!(conv.len(), 1);
 
     let records = h.drain_persistence();
-    assert_eq!(records.len(), 1);
-    assert!(matches!(&records[0], PersistenceRecord::ReplaceHistory(_)));
+    assert!(matches!(
+        records.as_slice(),
+        [
+            PersistenceRecord::Timeline(_),
+            PersistenceRecord::ReplaceHistory(_)
+        ]
+    ));
 }
 
 #[tokio::test]
@@ -4568,8 +4642,11 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
     // Persisted as a full-history replacement (the `chat_history.jsonl`
     // snapshot path shared with compaction); no per-message appends.
     let records = h.drain_persistence();
-    assert_eq!(records.len(), 1);
-    let PersistenceRecord::ReplaceHistory(items) = &records[0] else {
+    assert!(matches!(
+        records.first(),
+        Some(PersistenceRecord::Timeline(_))
+    ));
+    let PersistenceRecord::ReplaceHistory(items) = &records[1] else {
         panic!("expected ReplaceHistory, got {records:?}");
     };
     assert_eq!(items.len(), 2);

@@ -134,6 +134,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub initial_client_mcp_servers: Vec<acp::McpServer>,
     pub mcp_meta_config_map: McpMetaConfigMap,
     pub persistence: PersistenceHandle,
+    /// Durable timeline for a resumed/forked session. `None` starts a new lineage.
+    pub timeline_events: Option<Vec<chat_state::TimelineEvent>>,
     pub chat_history: Vec<crate::sampling::ConversationItem>,
     pub rewind_points_file_path: Option<std::path::PathBuf>,
     pub initial_total_tokens: u64,

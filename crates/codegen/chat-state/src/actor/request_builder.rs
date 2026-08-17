@@ -3,6 +3,7 @@
 use sampling_types::{ContentPart, ConversationItem, ConversationRequest, ToolSpec};
 
 use super::ChatStateActor;
+use crate::MessageCause;
 use crate::events::ChatStateEvent;
 use crate::types::PruningConfig;
 
@@ -46,15 +47,12 @@ impl ChatStateActor {
         if let Some(reminder) = memory_reminder.as_deref()
             && persist_memory_reminder
         {
-            // A live in-place inject can prepend a `System` item, shifting indices
-            // under an active capture; snapshot + rebase like the other mutators.
-            self.snapshot_turn_slice();
-            let injected = inject_memory_reminder(&mut self.state.conversation, reminder);
+            let mut conversation = self.state.timeline.surface().to_vec();
+            let injected = inject_memory_reminder(&mut conversation, reminder);
             if injected {
-                self.persistence.replace_history(&self.state.conversation);
+                self.install_conversation(conversation, false, MessageCause::MemoryContext);
                 memory_reminder = None;
             }
-            self.rebase_turn_capture_offset();
         }
         // Measure the exact serialized body and evict only once it approaches
         // the 50 MB ceiling. `conversation_body_bytes` is wire-accurate yet
@@ -63,15 +61,15 @@ impl ChatStateActor {
         // Eviction rewrites earlier turns and busts the KV-cache prefix, so we
         // only pay it when the body is actually near the limit (the original
         // behavior — evicting every turn — caused chronic cache misses).
-        let body_bytes = conversation_body_bytes(&self.state.conversation);
-        let inline_images = inline_image_count(&self.state.conversation);
+        let body_bytes = conversation_body_bytes(self.state.timeline.surface());
+        let inline_images = inline_image_count(self.state.timeline.surface());
         let needs_image_compaction = body_bytes >= IMAGE_COMPACT_TRIGGER_BYTES;
         let needs_mutation = needs_prune || memory_reminder.is_some() || needs_image_compaction;
 
         // Only allocate the mutable working copy when a mutation path is taken.
         let mut eviction: Option<ImageEvictionOutcome> = None;
         let items = if needs_mutation {
-            let mut items = self.state.conversation.clone();
+            let mut items = self.state.timeline.surface().to_vec();
 
             // Step 1: When the body nears the 50 MB ceiling, evict oldest
             // images down to the low-water mark (not just under the trigger).
@@ -100,7 +98,7 @@ impl ChatStateActor {
         } else {
             // Hot path: no pruning, no memory reminder, no old images —
             // clone directly into the request without any intermediate mutation passes.
-            self.state.conversation.clone()
+            self.state.timeline.surface().to_vec()
         };
 
         // Per-turn image-budget record for local verification. Emitted on the

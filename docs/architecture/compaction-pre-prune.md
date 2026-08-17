@@ -121,12 +121,13 @@ lives on `CompactionConfig` as `Cell<bool>` / `Cell<Option<u64>>` (the `!Send`
   surface is exactly the `AutoCompactStarted` / `AutoCompactCompleted`
   notifications described in §3 (the compaction attempt's own notifications,
   not conversation-content events).
-- **`chat_history.jsonl`**: rewritten through `replace_history` and carries the
+- **`timeline.jsonl`**: appends a `tool_result_prune` replacement event. Prior
+  tool output remains in the transcript projection while Surface carries the
   pruned content (head + marker + tail).
-- **`updates.jsonl`**: untouched by pruning — the append log retains the
-  original tool-result content, so rewind replay across a prune point restores
-  the unpruned content. This is the intended time-travel semantics: replay
-  rebuilds the conversation from the append log, which never saw the prune.
+- **`chat_history.jsonl`**: rewritten through `replace_history` only as a
+  derived cache of the current Surface.
+- **`updates.jsonl`**: untouched by pruning and remains the UI/diagnostic replay
+  used when an explicit rewind constructs a new Surface.
 - **Suppress state**: a prune whose strict gate passes stores
   `SUPPRESS_NONE` — pruning changed the effective context budget, which is
   the existing STICKY clear condition (same rule as a successful compaction,

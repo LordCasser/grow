@@ -759,6 +759,7 @@ pub(crate) async fn spawn_session_actor(
     support_permission: bool,
     auto_update: Option<bool>,
     persistence: PersistenceHandle,
+    timeline_events: Option<Vec<chat_state::TimelineEvent>>,
     mut conversation: Vec<ConversationItem>,
     rewind_points_path: Option<std::path::PathBuf>,
     initial_last_compaction: Option<usize>,
@@ -846,6 +847,14 @@ pub(crate) async fn spawn_session_actor(
         return Err(agent::AgentBuildError::InvalidConfig(
             "max_turns must be greater than 0".to_string(),
         ));
+    }
+    if let Some(events) = timeline_events.as_ref() {
+        let timeline = chat_state::Timeline::from_events(events.clone()).map_err(|error| {
+            agent::AgentBuildError::InvalidConfig(format!(
+                "invalid persisted conversation timeline: {error}"
+            ))
+        })?;
+        conversation = timeline.surface().to_vec();
     }
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     tracing::info!(
@@ -1015,16 +1024,33 @@ pub(crate) async fn spawn_session_actor(
         hard_clear_age_turns: session_pruning_config.hard_clear_age_turns,
     };
     let (chat_state_event_tx, chat_state_event_rx) = mpsc::unbounded_channel();
-    let chat_state_handle = chat_state::ChatStateActor::spawn_with_pruning(
-        conversation.clone(),
-        chat_state_sampling_config,
-        actor_pruning_config,
-        Box::new(super::chat_persistence::ChannelChatPersistence::new(
-            persistence.tx.clone(),
-        )),
-        chat_state_event_tx,
-        tokio_util::sync::CancellationToken::new(),
-    );
+    let chat_persistence = Box::new(super::chat_persistence::ChannelChatPersistence::new(
+        persistence.tx.clone(),
+    ));
+    let chat_state_handle = if let Some(events) = timeline_events {
+        chat_state::ChatStateActor::spawn_from_timeline_with_pruning(
+            events,
+            chat_state_sampling_config,
+            actor_pruning_config,
+            chat_persistence,
+            chat_state_event_tx,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .map_err(|error| {
+            agent::AgentBuildError::InvalidConfig(format!(
+                "invalid persisted conversation timeline: {error}"
+            ))
+        })?
+    } else {
+        chat_state::ChatStateActor::spawn_with_pruning(
+            conversation.clone(),
+            chat_state_sampling_config,
+            actor_pruning_config,
+            chat_persistence,
+            chat_state_event_tx,
+            tokio_util::sync::CancellationToken::new(),
+        )
+    };
     if (!initial_prompt_texts.is_empty()
         || initial_total_tokens > 0
         || initial_last_compaction.is_some())
@@ -2936,6 +2962,7 @@ pub(crate) async fn spawn_session_on_thread(
     support_permission: bool,
     auto_update: Option<bool>,
     persistence: PersistenceHandle,
+    timeline_events: Option<Vec<chat_state::TimelineEvent>>,
     conversation: Vec<ConversationItem>,
     rewind_points_path: Option<std::path::PathBuf>,
     fs_notify_config: Option<ClientFsConfig>,
@@ -3075,6 +3102,7 @@ pub(crate) async fn spawn_session_on_thread(
                     support_permission,
                     auto_update,
                     persistence,
+                    timeline_events,
                     conversation,
                     rewind_points_path,
                     initial_last_compaction,

@@ -19,6 +19,16 @@ fn create_test_chat_messages() -> Vec<ConversationItem> {
             ConversationItem::user("Test message"),
         ]
 }
+async fn append_timeline_seed(
+    adapter: &JsonlStorageAdapter,
+    info: &Info,
+    items: Vec<ConversationItem>,
+) {
+    let timeline = chat_state::Timeline::from_seed(items).unwrap();
+    for event in timeline.events() {
+        adapter.append_timeline_event(info, event).await.unwrap();
+    }
+}
 fn create_test_notification() -> acp::SessionNotification {
     acp::SessionNotification::new(
         acp::SessionId::new("test-session-123"),
@@ -119,6 +129,7 @@ async fn test_jsonl_round_trip() {
     for msg in &messages {
         adapter.append_chat_message(&info, msg).await.unwrap();
     }
+    append_timeline_seed(&adapter, &info, messages.clone()).await;
     let notification = create_test_notification();
     adapter
         .append_update(&info, &SessionUpdate::Acp(Box::new(notification)))
@@ -135,10 +146,53 @@ async fn test_jsonl_round_trip() {
     assert_eq!(loaded.updates.len(), 1);
     assert!(loaded.plan_state.is_some());
 }
-/// Resume from updates.jsonl alone: when chat_history.jsonl is missing, load
-/// rebuilds it from the ACP update stream (the durable source of truth).
+
 #[tokio::test]
-async fn load_rebuilds_chat_history_from_updates() {
+async fn timeline_round_trip_is_independent_of_chat_history_cache() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+
+    let original = vec![
+        ConversationItem::user("old question"),
+        ConversationItem::assistant("old answer"),
+    ];
+    for item in &original {
+        adapter.append_chat_message(&info, item).await.unwrap();
+    }
+    let mut timeline = chat_state::Timeline::from_seed(original).unwrap();
+    timeline
+        .replace_all(
+            vec![ConversationItem::user("compacted surface")],
+            chat_state::MessageCause::Compaction,
+        )
+        .unwrap();
+    for event in timeline.events() {
+        adapter.append_timeline_event(&info, event).await.unwrap();
+    }
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded.chat_history.len(), 1, "loaded conversation is the Timeline surface");
+    assert_eq!(loaded.chat_history[0].text_content(), "compacted surface");
+    assert_eq!(
+            adapter
+                .read_chat_history_sync(adapter.chat_file(&info), CHAT_FORMAT_VERSION)
+                .unwrap()
+                .len(),
+            2,
+            "the stale cache remains independently readable for diagnostics",
+        );
+    let replayed = chat_state::Timeline::from_events(loaded.timeline_events).unwrap();
+    assert_eq!(replayed.surface().len(), 1);
+    assert_eq!(replayed.surface()[0].text_content(), "compacted surface");
+    assert_eq!(replayed.transcript().len(), 2);
+}
+/// UI updates cannot synthesize conversation facts. Without Timeline events,
+/// the restart Surface is empty even when updates contain transcript-looking
+/// chunks.
+#[tokio::test]
+async fn updates_do_not_rebuild_timeline_surface() {
     use agent_client_protocol::{
         ContentBlock, ContentChunk, SessionUpdate as Acp, TextContent,
     };
@@ -163,14 +217,9 @@ async fn load_rebuilds_chat_history_from_updates() {
     let chat_path = adapter.session_dir(&info).join("chat_history.jsonl");
     assert_eq!(std::fs::metadata(&chat_path).map(|m| m.len()).unwrap_or(0), 0);
     let loaded = adapter.load_session(&info).await.unwrap();
-    assert_eq!(loaded.chat_history.len(), 2, "one user + one agent conversation item");
-    assert!(matches!(loaded.chat_history[0], ConversationItem::User(_)));
-    assert!(matches!(loaded.chat_history[1], ConversationItem::Assistant(_)));
-    let persisted = std::fs::read_to_string(&chat_path).unwrap();
-    assert!(
-            persisted.contains("ping") && persisted.contains("pong"),
-            "rebuilt cache carries the transcript text"
-        );
+    assert!(loaded.chat_history.is_empty());
+    assert!(loaded.timeline_events.is_empty());
+    assert_eq!(std::fs::metadata(&chat_path).map(|m| m.len()).unwrap_or(0), 0);
 }
 #[tokio::test]
 async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
@@ -1111,6 +1160,7 @@ async fn test_copy_session_data_basic() {
     for msg in &messages {
         adapter.append_chat_message(&source_info, msg).await.unwrap();
     }
+    append_timeline_seed(&adapter, &source_info, messages.clone()).await;
     let notification = create_test_notification();
     adapter
         .append_update(&source_info, &SessionUpdate::Acp(Box::new(notification)))
@@ -1169,6 +1219,12 @@ async fn test_copy_session_data_without_plan() {
         .append_chat_message(&source_info, &ConversationItem::user("Hello"))
         .await
         .unwrap();
+    append_timeline_seed(
+        &adapter,
+        &source_info,
+        vec![ConversationItem::user("Hello")],
+    )
+    .await;
     let target_info = Info {
         id: acp::SessionId::new("fork-source-no-plan-12345678"),
         cwd: "/target/workspace".to_string(),
@@ -1358,15 +1414,17 @@ async fn copy_session_data_fork_truncates_live_branch_inclusive() {
     ] {
         adapter.append_update(&source_info, &update).await.unwrap();
     }
-    for item in [
+    let conversation = vec![
         chat_user("P0", 0),
         ConversationItem::assistant("A0"),
         chat_user("P1b", 1),
         ConversationItem::assistant("A1b"),
         chat_user("P2", 2),
-    ] {
+    ];
+    for item in &conversation {
         adapter.append_chat_message(&source_info, &item).await.unwrap();
     }
+    append_timeline_seed(&adapter, &source_info, conversation).await;
     let fork_at = |target: usize, fork_id: &str| {
         let target_info = Info {
             id: acp::SessionId::new(fork_id),
@@ -2414,6 +2472,12 @@ async fn assert_copy_clears_pending_relocation(fork_filter: bool) {
         )
         .await
         .unwrap();
+    append_timeline_seed(
+        &adapter,
+        &source,
+        vec![ConversationItem::working_directory_switch("switch", 3)],
+    )
+    .await;
     adapter
         .copy_session_data(
             &source,
@@ -3625,15 +3689,10 @@ async fn append_update_terminates_torn_trailing_line() {
     let updates = adapter.read_updates_jsonl(updates_path).unwrap();
     assert_eq!(updates.len(), 2, "torn line skipped, real updates kept");
 }
-/// End-to-end resume-path regression for the incident: a live session
-/// whose `chat_history.jsonl` contains a merged record (crash mid-append,
-/// then log-and-continue appended the next record onto the partial line)
-/// must still load via `load_session_without_updates` — previously this
-/// returned InvalidData ("expected `,` or `}` at line 1 column N"),
-/// surfacing to the user as "Couldn't load session: … FS_OTHER" and
-/// permanently bricking the session.
+/// A corrupt projection cache cannot affect restart. The Surface is folded
+/// from Timeline without parsing `chat_history.jsonl`.
 #[tokio::test]
-async fn load_session_without_updates_survives_merged_chat_line() {
+async fn load_session_ignores_merged_chat_cache_line() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -3642,6 +3701,7 @@ async fn load_session_without_updates_survives_merged_chat_line() {
         .append_chat_message(&info, &ConversationItem::user("real turn"))
         .await
         .unwrap();
+    append_timeline_seed(&adapter, &info, vec![ConversationItem::user("real turn")]).await;
     {
         use std::io::Write as _;
         let mut f = std::fs::OpenOptions::new()
@@ -3658,7 +3718,7 @@ async fn load_session_without_updates_survives_merged_chat_line() {
     assert_eq!(
             user_text(&loaded.chat_history),
             vec!["real turn"],
-            "resume succeeds; only the merged record is dropped"
+            "restart uses Timeline and never parses the corrupt cache"
         );
 }
 

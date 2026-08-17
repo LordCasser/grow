@@ -86,6 +86,7 @@ pub enum PersistenceMsg {
             tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
     },
     ContentChunk(PersistenceContentChunk),
+    Timeline(chat_state::TimelineEvent),
     Chat(ConversationItem),
     AppendCwdSwitchAndAck {
         item: ConversationItem,
@@ -1468,6 +1469,12 @@ impl SessionPersistence {
                     let result = self.handle_durable_append(update).await;
                     let _ = respond_to.send(result);
                 }
+                PersistenceMsg::Timeline(event) => {
+                    if let Err(error) = self.storage.append_timeline_event(&self.info, &event).await
+                    {
+                        tracing::warn!(%error, seq = event.seq.get(), "failed to append timeline event");
+                    }
+                }
                 PersistenceMsg::Chat(chat_msg) => {
                     if let Err(e) = self
                         .storage
@@ -1927,6 +1934,7 @@ pub async fn new_with_explicit_dir(
 
 pub struct PersistedInfo {
     pub summary: Summary,
+    pub timeline_events: Vec<chat_state::TimelineEvent>,
     pub chat_history: Vec<ConversationItem>,
     /// All session updates (ACP updates and Grow extension updates) in chronological order
     pub updates: Vec<SessionUpdate>,
@@ -1942,6 +1950,7 @@ pub struct PersistedInfo {
 /// Same as PersistedInfo but without updates - for memory efficiency when streaming
 pub struct PersistedInfoLight {
     pub summary: Summary,
+    pub timeline_events: Vec<chat_state::TimelineEvent>,
     pub chat_history: Vec<ConversationItem>,
     pub plan_state: Option<TodoState>,
     pub session_control: Option<crate::session::control::SessionControlSnapshot>,
@@ -1976,6 +1985,7 @@ pub(crate) async fn load(
 
     let persisted_info = PersistedInfo {
         summary: persisted.summary,
+        timeline_events: persisted.timeline_events,
         chat_history: persisted.chat_history,
         updates: persisted.updates,
         plan_state: persisted.plan_state,
@@ -2039,6 +2049,7 @@ pub(crate) async fn load_light(
 
     let persisted_info = PersistedInfoLight {
         summary: persisted.summary,
+        timeline_events: persisted.timeline_events,
         chat_history: persisted.chat_history,
         plan_state: persisted.plan_state,
         session_control: persisted.session_control,

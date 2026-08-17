@@ -21,6 +21,7 @@ use crate::events::ChatStateEvent;
 use crate::handle::ChatStateHandle;
 use crate::persistence::ChatPersistence;
 use crate::types::{PruningConfig, TurnCapture};
+use crate::{Timeline, TimelineError, TimelineEvent};
 
 use sampling_types::{ConversationItem, SamplingConfig};
 use state::ChatState;
@@ -73,6 +74,46 @@ impl ChatStateActor {
         initial_conversation: Vec<ConversationItem>,
         sampling_config: SamplingConfig,
         pruning_config: PruningConfig,
+        mut persistence: Box<dyn ChatPersistence>,
+        event_tx: mpsc::UnboundedSender<ChatStateEvent>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> ChatStateHandle {
+        let state = ChatState::new(initial_conversation, sampling_config);
+        for event in state.timeline.events() {
+            persistence.persist_timeline_event(event);
+        }
+        Self::launch(
+            state,
+            pruning_config,
+            persistence,
+            event_tx,
+            cancellation_token,
+        )
+    }
+
+    /// Restore an actor from its durable append-only event stream.
+    pub fn spawn_from_timeline_with_pruning(
+        timeline_events: Vec<TimelineEvent>,
+        sampling_config: SamplingConfig,
+        pruning_config: PruningConfig,
+        persistence: Box<dyn ChatPersistence>,
+        event_tx: mpsc::UnboundedSender<ChatStateEvent>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Result<ChatStateHandle, TimelineError> {
+        let timeline = Timeline::from_events(timeline_events)?;
+        let state = ChatState::from_timeline(timeline, sampling_config);
+        Ok(Self::launch(
+            state,
+            pruning_config,
+            persistence,
+            event_tx,
+            cancellation_token,
+        ))
+    }
+
+    fn launch(
+        state: ChatState,
+        pruning_config: PruningConfig,
         persistence: Box<dyn ChatPersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
@@ -80,7 +121,7 @@ impl ChatStateActor {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
         let actor = ChatStateActor {
-            state: ChatState::new(initial_conversation, sampling_config),
+            state,
             pruning_config,
             persistence,
             cmd_rx,
@@ -273,8 +314,7 @@ impl ChatStateActor {
             }
             ChatStateCommand::BeginTurnCapture => {
                 self.state.turn_capture = Some(state::TurnCaptureState {
-                    turn_start_offset: self.state.conversation.len(),
-                    pre_replacement_messages: Vec::new(),
+                    turn_start_seq: self.state.timeline.next_seq(),
                     compaction_occurred: false,
                 });
             }
@@ -304,10 +344,10 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetConversation { reply } => {
                 tracing::debug!(
-                    conversation_len = self.state.conversation.len(),
+                    conversation_len = self.state.timeline.surface_len(),
                     "ChatState: cloning full conversation for GetConversation"
                 );
-                let _ = reply.send(self.state.conversation.clone());
+                let _ = reply.send(self.state.timeline.surface().to_vec());
             }
             ChatStateCommand::GetPromptIndex { reply } => {
                 let _ = reply.send(self.state.prompt_index);
@@ -342,7 +382,7 @@ impl ChatStateActor {
             }
             ChatStateCommand::Snapshot { reply } => {
                 tracing::debug!(
-                    conversation_len = self.state.conversation.len(),
+                    conversation_len = self.state.timeline.surface_len(),
                     "ChatState: cloning full state for Snapshot"
                 );
                 let _ = reply.send(self.snapshot());
@@ -369,17 +409,9 @@ impl ChatStateActor {
                 let _ = reply.send(self.get_last_model_metadata());
             }
             ChatStateCommand::TakeTurnMessages { reply } => {
-                let result = self.state.turn_capture.take().map(|cap| {
-                    let mut messages = cap.pre_replacement_messages;
-                    messages.extend(
-                        Self::turn_tail(&self.state.conversation, cap.turn_start_offset)
-                            .iter()
-                            .cloned(),
-                    );
-                    TurnCapture {
-                        messages,
-                        compaction_occurred: cap.compaction_occurred,
-                    }
+                let result = self.state.turn_capture.take().map(|cap| TurnCapture {
+                    messages: self.state.timeline.turn_items_since(cap.turn_start_seq),
+                    compaction_occurred: cap.compaction_occurred,
                 });
                 let _ = reply.send(result);
             }
@@ -412,7 +444,9 @@ impl ChatStateActor {
                 let _ = reply.send(self.get_system_message());
             }
             ChatStateCommand::GetEstimatedMessagesTokens { reply } => {
-                let _ = reply.send(state::estimate_messages_tokens(&self.state.conversation));
+                let _ = reply.send(state::estimate_messages_tokens(
+                    self.state.timeline.surface(),
+                ));
             }
         }
     }

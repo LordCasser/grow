@@ -10,6 +10,7 @@ use std::io;
 use sampling_types::ConversationItem;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::TimelineEvent;
 use crate::commands::{StrictAppendAck, StrictAppendError};
 
 /// Abstraction over chat-specific persistence operations.
@@ -21,6 +22,9 @@ use crate::commands::{StrictAppendAck, StrictAppendError};
 /// (which only needs `&self` to send, but `&mut self` is still correct
 /// because the actor is the sole owner).
 pub trait ChatPersistence: Send + 'static {
+    /// Append one immutable conversation fact to the durable timeline.
+    fn persist_timeline_event(&mut self, event: &TimelineEvent);
+
     /// Persist a single conversation item (append to chat_history.jsonl).
     fn persist_message(&mut self, item: &ConversationItem);
 
@@ -52,6 +56,8 @@ pub trait ChatPersistence: Send + 'static {
 /// A record of a persistence call, sent over a channel to the test.
 #[derive(Debug, Clone)]
 pub enum PersistenceRecord {
+    /// An immutable timeline event was appended.
+    Timeline(TimelineEvent),
     /// A single message was persisted.
     Message(ConversationItem),
     /// A persistence-acknowledged switch append was requested.
@@ -185,6 +191,10 @@ impl MockPersistenceReceiver {
 }
 
 impl ChatPersistence for MockChatPersistence {
+    fn persist_timeline_event(&mut self, event: &TimelineEvent) {
+        let _ = self.tx.send(PersistenceRecord::Timeline(event.clone()));
+    }
+
     fn persist_message(&mut self, item: &ConversationItem) {
         let _ = self.tx.send(PersistenceRecord::Message(item.clone()));
     }
@@ -261,6 +271,7 @@ impl ChatPersistence for MockChatPersistence {
 pub struct NullChatPersistence;
 
 impl ChatPersistence for NullChatPersistence {
+    fn persist_timeline_event(&mut self, _event: &TimelineEvent) {}
     fn persist_message(&mut self, _item: &ConversationItem) {}
     fn persist_working_directory_switch_and_ack(
         &mut self,

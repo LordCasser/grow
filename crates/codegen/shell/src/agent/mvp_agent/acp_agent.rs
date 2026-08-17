@@ -426,6 +426,7 @@ impl acp::Agent for MvpAgent {
                         initial_client_mcp_servers,
                         mcp_meta_config_map,
                         persistence,
+                        timeline_events: None,
                         chat_history,
                         rewind_points_file_path: None,
                         initial_total_tokens: 0,
@@ -673,6 +674,7 @@ impl acp::Agent for MvpAgent {
         drop(persistence_timer);
         let crate::session::persistence::PersistedInfoLight {
             mut summary,
+            timeline_events,
             chat_history,
             plan_state: _,
             mut session_control,
@@ -986,6 +988,7 @@ impl acp::Agent for MvpAgent {
                         initial_client_mcp_servers,
                         mcp_meta_config_map,
                         persistence,
+                        timeline_events: Some(timeline_events),
                         chat_history,
                         rewind_points_file_path,
                         initial_total_tokens,

@@ -9,6 +9,7 @@ use super::ChatStateActor;
 use super::request_builder::HARD_CLEAR_PLACEHOLDER;
 use crate::events::ChatStateEvent;
 use crate::types::ChatStateSnapshot;
+use crate::{MessageCause, TimelineEvent};
 
 /// Static string label for tracing on `ConversationItem` (avoids pulling
 /// the `Role` enum into the format string).
@@ -23,6 +24,17 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
     }
 }
 
+fn message_cause(item: &ConversationItem) -> MessageCause {
+    match item {
+        ConversationItem::System(_) => MessageCause::SystemPrompt,
+        ConversationItem::User(_) => MessageCause::User,
+        ConversationItem::Assistant(_)
+        | ConversationItem::BackendToolCall(_)
+        | ConversationItem::Reasoning(_) => MessageCause::Assistant,
+        ConversationItem::ToolResult(_) => MessageCause::ToolResult,
+    }
+}
+
 /// Marker inserted between the head and tail of a pruned tool-result text.
 ///
 /// Chosen so genuine tool output essentially never contains it verbatim:
@@ -34,6 +46,23 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
 pub(super) const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
 
 impl ChatStateActor {
+    fn persist_timeline_event(&mut self, event: TimelineEvent) {
+        self.persistence.persist_timeline_event(&event);
+    }
+
+    fn append_message_fact(&mut self, item: ConversationItem) {
+        let cause = message_cause(&item);
+        let event = self
+            .state
+            .timeline
+            .append(item.clone(), cause)
+            .expect("an assembled conversation item must append to the timeline");
+        self.persist_timeline_event(event);
+        // chat_history.jsonl is a derived display/diagnostic cache. Timeline
+        // persistence above is the authoritative write.
+        self.persistence.persist_message(&item);
+    }
+
     /// Repair any dangling tool calls in the conversation and persist the fix.
     ///
     /// A "dangling" tool call is an assistant message with tool call IDs that
@@ -59,25 +88,22 @@ impl ChatStateActor {
         &mut self,
         reason: DanglingToolCallReason,
     ) {
-        // In-place integrity repair can add/remove items ahead of an active capture's
-        // boundary, so snapshot + rebase the offset like the replace/restore paths.
-        self.snapshot_turn_slice();
-        let deduped = dedup_duplicate_tool_results(&mut self.state.conversation);
+        let mut conversation = self.state.timeline.surface().to_vec();
+        let deduped = dedup_duplicate_tool_results(&mut conversation);
         if deduped > 0 {
             tracing::info!(
                 deduped_count = deduped,
                 "Removed duplicate tool results in conversation"
             );
         }
-        let repaired = repair_dangling_tool_calls(&mut self.state.conversation, reason);
+        let repaired = repair_dangling_tool_calls(&mut conversation, reason);
         if repaired > 0 || deduped > 0 {
             tracing::info!(
                 repaired_count = repaired,
                 "Repaired dangling tool calls in conversation"
             );
-            self.persistence.replace_history(&self.state.conversation);
+            self.install_conversation(conversation, false, MessageCause::IntegrityRepair);
         }
-        self.rebase_turn_capture_offset();
     }
 
     /// Repair dangling tool calls after a harness-initiated halt.
@@ -97,11 +123,10 @@ impl ChatStateActor {
         &mut self,
         dry_run: bool,
     ) -> crate::compaction_utils::HistoryRepairReport {
+        let mut items = self.state.timeline.surface().to_vec();
         if dry_run {
-            let mut copy = self.state.conversation.clone();
-            return crate::compaction_utils::repair_history(&mut copy);
+            return crate::compaction_utils::repair_history(&mut items);
         }
-        let mut items = std::mem::take(&mut self.state.conversation);
         let report = crate::compaction_utils::repair_history(&mut items);
         if report.changed() {
             tracing::warn!(
@@ -111,10 +136,7 @@ impl ChatStateActor {
                 "History repair modified the conversation"
             );
             // Full replace: persists atomically and re-bases token estimates.
-            self.replace_conversation(items, false);
-        } else {
-            // Nothing changed — put the conversation back untouched.
-            self.state.conversation = items;
+            self.install_conversation(items, false, MessageCause::IntegrityRepair);
         }
         report
     }
@@ -125,12 +147,24 @@ impl ChatStateActor {
         generation: u64,
         authoritative: ConversationItem,
     ) {
-        let existing = self
+        let existing_index = self
             .state
-            .conversation
-            .iter_mut()
-            .find(|item| item.working_directory_switch_generation() == Some(generation));
-        if let Some(existing) = existing {
+            .timeline
+            .surface()
+            .iter()
+            .position(|item| item.working_directory_switch_generation() == Some(generation));
+        if let Some(index) = existing_index {
+            let existing = self
+                .state
+                .timeline
+                .surface_item(index)
+                .expect("surface index was just resolved");
+            if serde_json::to_value(existing).expect("conversation item must serialize")
+                == serde_json::to_value(&authoritative)
+                    .expect("authoritative conversation item must serialize")
+            {
+                return;
+            }
             let old_tokens = super::state::estimate_item_tokens(existing);
             let new_tokens = super::state::estimate_item_tokens(&authoritative);
             self.state.estimated_tokens_since_model = if new_tokens >= old_tokens {
@@ -142,11 +176,26 @@ impl ChatStateActor {
                     .estimated_tokens_since_model
                     .saturating_sub(old_tokens - new_tokens)
             };
-            *existing = authoritative;
+            let event = self
+                .state
+                .timeline
+                .replace_range(
+                    index,
+                    index,
+                    vec![authoritative],
+                    MessageCause::WorkingDirectory,
+                )
+                .expect("a current surface item must be replaceable");
+            self.persist_timeline_event(event);
         } else {
             self.state.estimated_tokens_since_model +=
                 super::state::estimate_item_tokens(&authoritative);
-            self.state.conversation.push(authoritative);
+            let event = self
+                .state
+                .timeline
+                .append(authoritative, MessageCause::WorkingDirectory)
+                .expect("a conversation item must append to the timeline");
+            self.persist_timeline_event(event);
         }
     }
 
@@ -164,8 +213,7 @@ impl ChatStateActor {
                 "ChatState: push_message updated estimated_tokens_since_model"
             );
         }
-        self.persistence.persist_message(&item);
-        self.state.conversation.push(item);
+        self.append_message_fact(item);
     }
 
     /// Push a user message, ensuring conversation integrity first.
@@ -198,8 +246,7 @@ impl ChatStateActor {
             model_reported_total = self.state.total_tokens,
             "ChatState: push_user_message updated estimated_tokens_since_model"
         );
-        self.persistence.persist_message(&item);
-        self.state.conversation.push(item);
+        self.append_message_fact(item);
         self.prune_retained_conversation();
     }
 
@@ -208,7 +255,7 @@ impl ChatStateActor {
     ///
     /// Unlike the API-copy pruning in `build_conversation_request` (which runs
     /// on a *clone* only when context > 50% full), this operates on
-    /// `self.state.conversation` directly and runs after every user turn.
+    /// the Timeline surface directly and runs after every user turn.
     ///
     /// # What this does
     ///
@@ -266,7 +313,8 @@ impl ChatStateActor {
         // synthetic messages the session contains.
         let total_user_items = self
             .state
-            .conversation
+            .timeline
+            .surface()
             .iter()
             .filter(|i| matches!(i, ConversationItem::User(_)))
             .count();
@@ -280,9 +328,11 @@ impl ChatStateActor {
         let mut cleared = 0usize;
         let mut turn_from_end: usize = 0;
         let mut seen_first_user = false;
+        let mut replacements = Vec::new();
+        let mut conversation = self.state.timeline.surface().to_vec();
 
-        for i in (0..self.state.conversation.len()).rev() {
-            if matches!(&self.state.conversation[i], ConversationItem::User(_)) {
+        for i in (0..conversation.len()).rev() {
+            if matches!(&conversation[i], ConversationItem::User(_)) {
                 if seen_first_user {
                     turn_from_end += 1;
                 }
@@ -290,7 +340,7 @@ impl ChatStateActor {
                 continue;
             }
 
-            let ConversationItem::ToolResult(tr) = &mut self.state.conversation[i] else {
+            let ConversationItem::ToolResult(tr) = &mut conversation[i] else {
                 continue;
             };
 
@@ -300,19 +350,34 @@ impl ChatStateActor {
 
             if tr.content.as_ref() != HARD_CLEAR_PLACEHOLDER {
                 tr.content = std::sync::Arc::<str>::from(HARD_CLEAR_PLACEHOLDER);
+                replacements.push((i, conversation[i].clone()));
                 cleared += 1;
             }
         }
 
         if cleared > 0 {
+            for (index, replacement) in replacements {
+                let event = self
+                    .state
+                    .timeline
+                    .replace_range(
+                        index,
+                        index,
+                        vec![replacement],
+                        MessageCause::ToolResultPrune,
+                    )
+                    .expect("retained tool-result identity must remain stable");
+                self.persist_timeline_event(event);
+            }
             let after_bytes = self.conversation_content_bytes();
             tracing::debug!(
                 hard_cleared = cleared,
                 bytes_freed = before_bytes.saturating_sub(after_bytes),
-                conversation_len = self.state.conversation.len(),
+                conversation_len = self.state.timeline.surface_len(),
                 "ChatState: in-memory tool-result prune"
             );
-            self.persistence.replace_history(&self.state.conversation);
+            self.persistence
+                .replace_history(self.state.timeline.surface());
         }
 
         cleared
@@ -371,18 +436,21 @@ impl ChatStateActor {
     ) -> Result<crate::commands::PruneReport, crate::commands::PruneError> {
         use crate::commands::{PruneError, PruneReport};
 
-        if self.state.conversation.is_empty() {
+        if self.state.timeline.surface().is_empty() {
             return Err(PruneError::EmptyConversation);
         }
 
         let tokens_before = self.state.total_tokens;
         let mut pruned_count = 0usize;
+        let mut replacements = Vec::new();
+        let mut conversation = self.state.timeline.surface().to_vec();
 
         for item in &plan.items {
-            let Some(slot) = self.state.conversation.get_mut(item.index) else {
+            let conversation_len = conversation.len();
+            let Some(slot) = conversation.get_mut(item.index) else {
                 tracing::warn!(
                     index = item.index,
-                    conversation_len = self.state.conversation.len(),
+                    conversation_len,
                     "PruneToolResults: plan index out of bounds; skipped"
                 );
                 continue;
@@ -416,22 +484,37 @@ impl ChatStateActor {
                 compaction::prune_tool_result_content(&tr.content, budget_tokens, PRUNE_MARKER)
             {
                 tr.content = std::sync::Arc::<str>::from(pruned);
+                replacements.push((item.index, conversation[item.index].clone()));
                 pruned_count += 1;
             }
         }
 
         let mut tokens_after = tokens_before;
         if pruned_count > 0 {
-            let reestimated = super::state::estimate_conversation_tokens(&self.state.conversation);
+            let reestimated = super::state::estimate_conversation_tokens(&conversation);
             // Prune must never appear to increase usage.
             tokens_after = tokens_before.min(reestimated);
             self.state.total_tokens = tokens_after;
-            self.persistence.replace_history(&self.state.conversation);
+            for (index, replacement) in replacements {
+                let event = self
+                    .state
+                    .timeline
+                    .replace_range(
+                        index,
+                        index,
+                        vec![replacement],
+                        MessageCause::ToolResultPrune,
+                    )
+                    .expect("a prune plan must preserve tool-result identity");
+                self.persist_timeline_event(event);
+            }
+            self.persistence
+                .replace_history(self.state.timeline.surface());
             tracing::info!(
                 pruned_count,
                 tokens_before,
                 tokens_after,
-                conversation_len = self.state.conversation.len(),
+                conversation_len = self.state.timeline.surface_len(),
                 "PruneToolResults: pruned oversized tool results"
             );
         }
@@ -449,7 +532,8 @@ impl ChatStateActor {
     /// Sums the byte lengths of all string fields; does not allocate.
     fn conversation_content_bytes(&self) -> usize {
         self.state
-            .conversation
+            .timeline
+            .surface()
             .iter()
             .map(|item| match item {
                 ConversationItem::System(s) => s.content.len(),
@@ -476,7 +560,7 @@ impl ChatStateActor {
     pub(super) fn record_token_usage(&mut self, total_tokens: u64) {
         self.state.estimated_tokens_since_model = 0;
         self.state.estimate_at_last_response =
-            super::state::estimate_conversation_tokens(&self.state.conversation);
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
         self.state.total_tokens = total_tokens;
         self.send_event(ChatStateEvent::TokensUpdated { total_tokens });
     }
@@ -569,21 +653,28 @@ impl ChatStateActor {
         items: Vec<ConversationItem>,
         is_compaction: bool,
     ) {
-        self.snapshot_turn_slice();
         if is_compaction && let Some(cap) = &mut self.state.turn_capture {
             cap.compaction_occurred = true;
         }
-        self.install_conversation(items, is_compaction);
-        self.rebase_turn_capture_offset();
+        let cause = if is_compaction {
+            MessageCause::Compaction
+        } else {
+            MessageCause::SessionRestore
+        };
+        self.install_conversation(items, is_compaction, cause);
     }
 
-    /// Install and persist a complete conversation without changing turn
-    /// capture offsets. Callers must preserve item count and identity when a
-    /// capture is active; full replacements use [`Self::replace_conversation`]
-    /// so the old turn tail is snapshotted first.
-    fn install_conversation(&mut self, items: Vec<ConversationItem>, is_compaction: bool) {
-        self.persistence.replace_history(&items);
-        self.install_persisted_conversation(items, is_compaction);
+    /// Install one complete surface projection and refresh the derived history
+    /// cache. The accepted timeline event remains the durable source of truth.
+    pub(super) fn install_conversation(
+        &mut self,
+        items: Vec<ConversationItem>,
+        is_compaction: bool,
+        cause: MessageCause,
+    ) {
+        self.install_persisted_conversation(items, is_compaction, cause);
+        self.persistence
+            .replace_history(self.state.timeline.surface());
     }
 
     /// Apply a full conversation replacement after its persistence operation
@@ -592,6 +683,7 @@ impl ChatStateActor {
         &mut self,
         items: Vec<ConversationItem>,
         is_compaction: bool,
+        cause: MessageCause,
     ) {
         let pre_replace_total = self.state.total_tokens;
         let base_estimate = super::state::estimate_conversation_tokens(&items);
@@ -606,13 +698,23 @@ impl ChatStateActor {
         if is_compaction && pre_replace_total > 0 {
             estimated_tokens = estimated_tokens.min(pre_replace_total);
         }
-        self.state.conversation = items;
+        let surface_changed = serde_json::to_value(self.state.timeline.surface())
+            .expect("conversation surface must serialize")
+            != serde_json::to_value(&items).expect("replacement surface must serialize");
+        if surface_changed {
+            let event = self
+                .state
+                .timeline
+                .replace_all(items, cause)
+                .expect("a current surface must accept a complete replacement");
+            self.persist_timeline_event(event);
+        }
         self.state.estimated_tokens_since_model = 0;
         self.state.total_tokens = estimated_tokens;
         self.state.estimate_at_last_response =
-            super::state::estimate_conversation_tokens(&self.state.conversation);
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
         self.send_event(ChatStateEvent::ConversationReset {
-            new_len: self.state.conversation.len(),
+            new_len: self.state.timeline.surface_len(),
         });
         self.send_event(ChatStateEvent::TokensUpdated {
             total_tokens: estimated_tokens,
@@ -639,7 +741,7 @@ impl ChatStateActor {
             .into_iter()
             .map(|rewrite| ((rewrite.item_index, rewrite.fingerprint.clone()), rewrite))
             .collect::<BTreeMap<_, _>>();
-        let groups = conversation_image_groups(&self.state.conversation);
+        let groups = conversation_image_groups(self.state.timeline.surface());
         if groups.is_empty() {
             report.unmatched_images = expected
                 .values()
@@ -648,7 +750,7 @@ impl ChatStateActor {
             return Some(report);
         }
 
-        let mut conversation = self.state.conversation.clone();
+        let mut conversation = self.state.timeline.surface().to_vec();
         for group in groups {
             let key = (group.item_index, group.fingerprint.clone());
             let rewrite = expected.remove(&key);
@@ -673,7 +775,7 @@ impl ChatStateActor {
             .sum::<usize>();
         debug_assert_eq!(
             conversation.len(),
-            self.state.conversation.len(),
+            self.state.timeline.surface_len(),
             "image rewrite must preserve conversation item identity"
         );
         let persisted = self
@@ -682,7 +784,11 @@ impl ChatStateActor {
             .await;
         match persisted {
             Ok(Ok(())) => {
-                self.install_persisted_conversation(conversation, false);
+                self.install_persisted_conversation(
+                    conversation,
+                    false,
+                    MessageCause::ImageRewrite,
+                );
                 Some(report)
             }
             Ok(Err(error)) => {
@@ -701,31 +807,25 @@ impl ChatStateActor {
     /// so it serializes with turn pushes — no lost-update race on a mid-turn
     /// reconnect. Returns whether the conversation changed.
     ///
-    /// The conversation is cloned (items are `Arc`-backed, so the clone is
-    /// shallow) rather than `mem::take`n: `replace_conversation` snapshots the
-    /// in-flight turn-capture tail from `state.conversation` before swapping,
-    /// so the state must stay intact until then.
+    /// The surface is cloned (items are `Arc`-backed, so the clone is shallow)
+    /// and committed as one replacement event.
     pub(super) fn replace_system_head(&mut self, prompt: &str) -> bool {
-        if let Some(ConversationItem::System(sys)) = self.state.conversation.first()
+        if let Some(ConversationItem::System(sys)) = self.state.timeline.surface().first()
             && crate::conversation_util::canonical_system_prompt_eq(sys.content.as_ref(), prompt)
         {
             return false;
         }
-        let mut conversation = self.state.conversation.clone();
+        let mut conversation = self.state.timeline.surface().to_vec();
         let changed =
             crate::conversation_util::replace_or_insert_system_head(&mut conversation, prompt);
         debug_assert!(changed, "head mismatch must produce a change");
-        self.replace_conversation(conversation, false);
+        self.install_conversation(conversation, false, MessageCause::SystemPrompt);
         changed
     }
 
     /// Restore all state fields from a snapshot.
     pub(super) fn restore_snapshot(&mut self, snap: ChatStateSnapshot) {
-        self.snapshot_turn_slice();
-        // Harness trace buffers are transient (not part of the snapshot) and
-        // intentionally survive a restore — see `replace_conversation`.
-        self.state.conversation = snap.conversation;
-        self.rebase_turn_capture_offset();
+        self.install_conversation(snap.conversation, false, MessageCause::SessionRestore);
         self.state.sampling_config = snap.sampling_config;
         self.state.prompt_index = snap.prompt_index;
         self.state.total_tokens = snap.total_tokens;
@@ -733,7 +833,7 @@ impl ChatStateActor {
         self.state.estimate_at_last_response = if snap.estimate_at_last_response > 0 {
             snap.estimate_at_last_response
         } else {
-            super::state::estimate_conversation_tokens(&self.state.conversation)
+            super::state::estimate_conversation_tokens(self.state.timeline.surface())
         };
         self.state.agent_edited_paths = snap.agent_edited_paths;
         self.state.prompt_texts = snap.prompt_texts;
@@ -743,48 +843,5 @@ impl ChatStateActor {
         self.state.credentials = snap.credentials;
         // Drop abandoned prompt usage; the session ledger is lifetime.
         self.state.prompt_usage = None;
-    }
-
-    /// If turn capture is active, append the current turn's tail items into
-    /// `pre_replacement_messages` before an in-place mutation shifts or drops them.
-    pub(super) fn snapshot_turn_slice(&mut self) {
-        if let Some(cap) = &mut self.state.turn_capture {
-            cap.pre_replacement_messages
-                .extend_from_slice(Self::turn_tail(
-                    &self.state.conversation,
-                    cap.turn_start_offset,
-                ));
-        }
-    }
-
-    /// Re-base an active turn capture's start offset to the current conversation
-    /// length after an in-place mutation, keeping the tail slice valid.
-    pub(super) fn rebase_turn_capture_offset(&mut self) {
-        if let Some(cap) = &mut self.state.turn_capture {
-            cap.turn_start_offset = self.state.conversation.len();
-        }
-    }
-
-    /// Fail-safe `conversation[offset..]` for turn capture: a capture accounting
-    /// slip must never abort the user's session (a raw index here SIGABRT-crashed
-    /// a live CLI), so an out-of-range offset yields an empty slice — loud in dev
-    /// via `debug_assert!`, with a prod breadcrumb via `error!`.
-    pub(super) fn turn_tail(
-        conversation: &[ConversationItem],
-        offset: usize,
-    ) -> &[ConversationItem] {
-        debug_assert!(
-            offset <= conversation.len(),
-            "turn_start_offset {offset} > len {}",
-            conversation.len()
-        );
-        conversation.get(offset..).unwrap_or_else(|| {
-            tracing::error!(
-                offset,
-                len = conversation.len(),
-                "turn-capture offset past conversation end; trace tail dropped"
-            );
-            &[]
-        })
     }
 }

@@ -1023,6 +1023,7 @@ pub(crate) async fn run_shell_child(
         true,
         None,
         persistence,
+        None,
         forked_conversation,
         None,
         None,

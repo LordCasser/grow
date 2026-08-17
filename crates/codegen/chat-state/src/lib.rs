@@ -1,4 +1,4 @@
-//! chat-state — Actor-based chat state management for Grow agents.
+//! chat-state — Timeline-backed session context management for Grow agents.
 //!
 //! This crate extracts conversation state management from `shell`'s
 //! `acp_session.rs` into a standalone actor. It follows the same actor pattern
@@ -10,7 +10,7 @@
 //! │  (push_user,   │                  │  (runs in dedicated tokio task)      │
 //! │   build_req)   │                  │                                      │
 //! └────────────────┘                  │  State (no locks needed):            │
-//!                                     │  - conversation: Vec<ConversationItem>│
+//!                                     │  - append-only Timeline              │
 //! ┌────────────────┐                  │  - sampling_config: SamplingConfig   │
 //! │   Query (e.g.  │ ── Cmd+Oneshot ─▶│  - prompt_index: usize              │
 //! │  get_conv)     │ ◀── Response ────│  - total_tokens: u64                │
@@ -32,6 +32,7 @@ pub mod conversation_util;
 pub mod events;
 pub mod handle;
 pub mod persistence;
+pub mod timeline;
 pub mod types;
 pub mod usage;
 
@@ -53,6 +54,10 @@ pub use handle::ChatStateHandle;
 pub use persistence::{
     ChatPersistence, MockChatPersistence, MockPersistenceReceiver, NullChatPersistence,
     PersistenceRecord,
+};
+pub use timeline::{
+    EventSeq, MessageCause, MessageEvent, SurfaceId, SurfaceOp, Timeline, TimelineError,
+    TimelineEvent, TimelineEventKind,
 };
 pub use types::*;
 pub use usage::{UsageLedger, UsageTotals};
