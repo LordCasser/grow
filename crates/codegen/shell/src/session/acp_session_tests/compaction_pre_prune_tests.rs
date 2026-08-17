@@ -1145,10 +1145,9 @@ fn pre_prune_never_touches_inherited_fork_prefix() {
 
 // ─── Display / logging layering ────────────────────────────────────────────
 
-/// Pruning persists only through `replace_history` (the `chat_history.jsonl`
-/// snapshot): the append log (`persist_message`, the updates.jsonl analogue)
-/// keeps the original tool-result content, no chat-state event is emitted, and
-/// the snapshot carries the pruned content.
+/// Pruning appends a content-only Timeline replacement and refreshes the
+/// display cache without emitting a pager event. The original tool result
+/// remains shadowed in the immutable ledger.
 #[test]
 fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
     let rt = tokio::runtime::Builder::new_current_thread()

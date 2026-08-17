@@ -868,7 +868,7 @@ impl SessionActor {
     /// — the prompt-scoped subagent count isn't available without
     /// plumbing the prompt_id through, which is more wiring than a
     /// prototype warrants. Operators correlating debug log lines with
-    /// gate decisions can look at the session's events.jsonl for the
+    /// gate decisions can inspect the session Timeline for the
     /// full subagent state.
     async fn snapshot_backing_task_count_for_debug_log(&self) -> usize {
         self.tool_bridge_handle()

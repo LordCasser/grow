@@ -353,6 +353,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             // The agent's tool bridge must know `todo_write` for it to parse + dispatch.
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+            begin_test_causal_turn(&actor);
 
             let mut client_hooks = crate::extensions::hooks::ClientHooks::new();
             for event in [
@@ -449,6 +450,7 @@ async fn pre_tool_use_deny_feeds_reason_back_and_continues_turn() {
             // The tool bridge must know `todo_write` so the call reaches the gate
             // rather than short-circuiting as an unknown tool.
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+            begin_test_causal_turn(&actor);
 
             install_client_hook(&actor, ::hooks::event::HookEventName::PreToolUse, &["cb_0"]);
             spawn_deny_responder(gateway_rx, "use read_file instead");

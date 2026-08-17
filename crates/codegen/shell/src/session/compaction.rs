@@ -657,11 +657,7 @@ impl SessionActor {
         self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
             .await;
         if let Err(e) = self
-            .run_compact_inner(
-                user_context,
-                None,
-                ::diagnostics::events::CompactionTrigger::Manual,
-            )
+            .run_compact_inner(user_context, ::diagnostics::events::CompactionTrigger::Manual)
             .await
         {
             let span = tracing::Span::current();
@@ -920,8 +916,7 @@ impl SessionActor {
             }
         }
     }
-    /// Inner implementation of compaction that supports an optional `auto_continue`
-    /// payload for the checkpoint.
+    /// Inner implementation of one causally recorded compaction transaction.
     #[tracing::instrument(
         name = "session.compact_inner",
         skip_all,
@@ -955,7 +950,54 @@ impl SessionActor {
     async fn run_compact_inner(
         &self,
         user_context: Option<String>,
-        auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
+        trigger: ::diagnostics::events::CompactionTrigger,
+    ) -> Result<(), acp::Error> {
+        let id = uuid::Uuid::now_v7().to_string();
+        let source_items = self.chat_state_handle.get_conversation_len().await;
+        let prompt_index = self.chat_state_handle.get_prompt_index().await;
+        self.chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                chat_state::CompactionEvent::Started {
+                    id: id.clone(),
+                    source_items,
+                    prompt_index,
+                },
+            ))
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "compaction start was not durably recorded: {error}"
+                ))
+            })?;
+        let started = std::time::Instant::now();
+        let result = self.run_compact_attempt(user_context, trigger).await;
+        let terminal = match &result {
+            Ok(()) => chat_state::CompactionEvent::Completed {
+                id,
+                source_items,
+                result_items: self.chat_state_handle.get_conversation_len().await,
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+            Err(error) => chat_state::CompactionEvent::Failed {
+                id,
+                duration_ms: started.elapsed().as_millis() as u64,
+                error: crate::util::truncate(&error.to_string(), 500).to_string(),
+            },
+        };
+        self.chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(terminal))
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "compaction terminal was not durably recorded: {error}"
+                ))
+            })?;
+        result
+    }
+
+    async fn run_compact_attempt(
+        &self,
+        user_context: Option<String>,
         trigger: ::diagnostics::events::CompactionTrigger,
     ) -> Result<(), acp::Error> {
         let (cancel, _cancel_scope) = self.compaction.cancel.enter();
@@ -1698,33 +1740,12 @@ impl SessionActor {
             })
         };
         let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
-        let original_user_info = self
-            .chat_state_handle
-            .get_conversation_item_at(1)
-            .await
-            .and_then(|item| match item {
-                ConversationItem::User(parts) => {
-                    parts.content.into_iter().next().and_then(|p| match p {
-                        sampling_types::ContentPart::Text { text } => {
-                            Some(text.as_ref().to_owned())
-                        }
-                        _ => None,
-                    })
-                }
-                _ => None,
-            });
         if cancel.is_cancelled() {
             return self.emit_compact_cancelled(auto_trigger).await;
         }
         self.persist_compaction_segment(&segment_messages, &generate_session_compact);
         self.chat_state_handle
             .record_compaction_at(prompt_index_at_compaction);
-        self.persist_compaction_checkpoint(
-            &compacted_history,
-            prompt_index_at_compaction,
-            auto_continue,
-            original_user_info,
-        );
         let prefix_len = if self
             .compaction
             .prefix_released
@@ -2379,7 +2400,7 @@ impl SessionActor {
         }
         let compact_start = std::time::Instant::now();
         let result = self
-            .run_compact_inner(None, None, ::diagnostics::events::CompactionTrigger::Auto)
+            .run_compact_inner(None, ::diagnostics::events::CompactionTrigger::Auto)
             .await;
         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
         match result {
@@ -2494,54 +2515,5 @@ impl SessionActor {
                 "Failed to send compaction request artifact to persistence channel"
             );
         }
-    }
-    /// Persist a compaction checkpoint: writes the compacted history to a separate file
-    /// and records a `CompactionCheckpoint` marker in `updates.jsonl`.
-    ///
-    /// `auto_continue` should be `Some` when this compaction was triggered by auto-compact
-    /// and an auto-continue prompt will follow.
-    fn persist_compaction_checkpoint(
-        &self,
-        compacted_history: &[ConversationItem],
-        prompt_index_at_compaction: usize,
-        auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
-        original_user_info: Option<String>,
-    ) {
-        use crate::extensions::notification::{
-            CompactionCheckpointFile, CompactionCheckpointInfo, SessionUpdate as GrowSessionUpdate,
-        };
-        let checkpoint_id = uuid::Uuid::new_v4().to_string();
-        let checkpoint_file = format!("compaction_checkpoints/{checkpoint_id}.json");
-        let created_at = chrono::Utc::now().to_rfc3339();
-        let file_data = CompactionCheckpointFile {
-            checkpoint_id: checkpoint_id.clone(),
-            prompt_index_at_compaction,
-            compacted_history: compacted_history.to_vec(),
-            schema_version: 1,
-            created_at: created_at.clone(),
-            original_user_info,
-            reread_file_paths: vec![],
-        };
-        if self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::CompactionCheckpoint(file_data))
-            .is_err()
-        {
-            tracing::warn!("Failed to send compaction checkpoint file to persistence channel");
-        }
-        let info = CompactionCheckpointInfo {
-            checkpoint_id,
-            prompt_index_at_compaction,
-            checkpoint_file,
-            auto_continue,
-            schema_version: 1,
-            created_at,
-        };
-        self.persist_update_only(GrowSessionUpdate::CompactionCheckpoint(Box::new(info)));
-        tracing::info!(
-            prompt_index_at_compaction,
-            "Persisted compaction checkpoint"
-        );
     }
 }

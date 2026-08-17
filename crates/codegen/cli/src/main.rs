@@ -1630,6 +1630,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                 return pager::trace_cmd::run(trace_args).await;
             }
+            Command::Trajectory(trajectory_args) => {
+                init_tracing_simple("cli");
+                return pager::trajectory_cmd::run(trajectory_args).await;
+            }
             Command::Memory(memory_args) => {
                 return pager::memory_cmd::run(memory_args);
             }

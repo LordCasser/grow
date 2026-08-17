@@ -590,17 +590,21 @@ impl SessionActor {
 
         self.events.cancel_active_tool();
         if rewound_input.is_none() {
-            // The trigger (esc / ctrl_c / …) rides in the events.jsonl
-            // `cancellation_context`; the category stays `MidTurnAbort` so the
-            // existing dashboards/dataset keep working.
+            // The trigger (esc / ctrl_c / …) rides in the Timeline terminal's
+            // details; the category stays `MidTurnAbort` for stable analysis.
             let cancellation_context = trigger
                 .as_deref()
                 .map(|t| serde_json::json!({ "trigger": t }));
-            self.emit_turn_ended(
-                crate::session::events::TurnOutcomeLabel::Cancelled,
-                Some(crate::session::events::CancellationCategory::MidTurnAbort),
-                cancellation_context,
-            );
+            if let Err(error) = self
+                .emit_turn_ended(
+                    crate::session::events::TurnOutcomeLabel::Cancelled,
+                    Some(crate::session::events::CancellationCategory::MidTurnAbort),
+                    cancellation_context,
+                )
+                .await
+            {
+                tracing::error!(?error, "failed to durably close cancelled turn");
+            }
             // Mark the next real user prompt as following a mid-turn abort so
             // replay/analytics/the model can see the user stopped this turn.
             self.events.set_prior_interrupt_category(

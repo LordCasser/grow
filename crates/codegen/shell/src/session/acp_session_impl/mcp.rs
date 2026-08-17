@@ -872,7 +872,6 @@ impl SessionActor {
         let session_id = self.session_info.id.0.as_ref();
         tokio::task::yield_now().await;
         let cwd = std::path::Path::new(&self.session_info.cwd);
-        let spawn_writer = self.events.writer();
         let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
             session_id,
             self.tool_context.process_scope.as_ref(),
@@ -985,7 +984,6 @@ impl SessionActor {
         let server_count = (mcp_server_configs.len() + acp_pending_names.len()) as u32;
         let mcp_strategy = self.mcp_strategy;
         let is_reinit = !existing_client_names.is_empty();
-        let event_writer = self.events.writer();
         let init_total_bg = init_total;
         tokio::task::spawn_local(async move {
             let handshake_start = std::time::Instant::now();
@@ -994,7 +992,6 @@ impl SessionActor {
             let mut futs = futures::stream::FuturesUnordered::new();
             for client in mcp_clients.iter() {
                 let mcp_state = std::sync::Arc::clone(&mcp_state_bg);
-                let ew = event_writer.clone();
                 let transport = server_transport_map
                     .get(client.server_name())
                     .copied()

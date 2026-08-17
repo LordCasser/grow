@@ -1533,6 +1533,24 @@ impl SessionActor {
         };
         let request_id = sampler::RequestId::random();
         let request_id_str = request_id.as_str().to_string();
+        let request_model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let input_message_count = request.items.len();
+        let request_tool_count = request.tools.len();
+        self.events
+            .request_started(
+                request_id_str.clone(),
+                request_model,
+                input_message_count,
+                request_tool_count,
+            )
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("model request was not durably recorded: {error}"))
+            })?;
         let collect = self
             .sampler_handle
             .submit_and_collect(request_id.clone(), request);
@@ -1542,6 +1560,8 @@ impl SessionActor {
             _ = super::tool_calls::wait_for_pending_interjection(
                 &self.pending_interjections,
             ) => {
+                self.events
+                    .request_cancel_requested(&request_id_str, "steered");
                 self.sampler_handle.cancel(request_id.clone());
                 // Steering restarts sampling inside the same visible turn; it
                 // never creates a second foreground owner or terminal event.
@@ -1555,6 +1575,22 @@ impl SessionActor {
             },
             result = &mut collect => Some(result),
         };
+        if tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx)
+            .await
+            .is_err()
+        {
+            self.turn_stream_drained.lock().take();
+            self.events.request_failed(
+                &request_id_str,
+                "stream_drain_timeout",
+                "sampler terminal event did not reach the session drainer",
+                false,
+            );
+            tracing::warn!(
+                sampler_request_id = request_id_str,
+                "sampler terminal-event barrier timed out"
+            );
+        }
         let Some(collected) = collected else {
             return Ok(SamplerTurnOutcome::Steered);
         };
@@ -1568,23 +1604,12 @@ impl SessionActor {
                 if metrics.attempts > 0 {
                     span.record("attempt", i64::from(metrics.attempts));
                 }
-                if tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx)
-                    .await
-                    .is_err()
-                {
-                    self.turn_stream_drained.lock().take();
-                    tracing::warn!(
-                        "stream-drain barrier timed out; proceeding to emit tool \
-                         calls (eventId ordering may be imperfect this turn)"
-                    );
-                }
                 Ok(SamplerTurnOutcome::Response(
                     Box::new(response),
                     Box::new(metrics),
                 ))
             }
             Err(rich_err) => {
-                self.turn_stream_drained.lock().take();
                 let info = sampler::SamplingErrorInfo::from(&rich_err);
                 match self
                     .handle_sampling_failure(

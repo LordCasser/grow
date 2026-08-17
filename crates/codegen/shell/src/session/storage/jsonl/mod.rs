@@ -1,14 +1,13 @@
 use super::{PersistedData, SessionUpdateEnvelope, StorageAdapter, updates_truncate_for_prompt};
-use crate::sampling::types::ChatRequestMessage;
 use crate::sampling::{
-    ContentPart, ConversationItem, conversation_truncate_for_prompt, transform_conversation_cwd,
+    ConversationItem, conversation_truncate_for_prompt, transform_conversation_cwd,
 };
 use crate::session::info::Info;
 use crate::session::persistence::{CHAT_FORMAT_VERSION, Summary};
 use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
 use async_trait::async_trait;
-use chat_state::{StrictAppendAck, Timeline};
+use chat_state::Timeline;
 use fs2::FileExt;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, Write};
@@ -75,14 +74,13 @@ impl JsonlStorageAdapter {
             update_append_probe: Some(std::sync::Arc::new(append_probe)),
         }
     }
-    /// Load chat history from a specific directory.
-    /// Used by fork bootstrap to load the copied parent conversation.
-    pub fn load_chat_history_from_dir(
+    /// Fold the canonical Timeline Surface from a specific session directory.
+    /// Used by fork and resume bootstrap after copying a session ledger.
+    pub(crate) fn load_timeline_surface_from_dir(
         &self,
         dir: &std::path::Path,
     ) -> std::io::Result<Vec<ConversationItem>> {
-        let events =
-            self.read_jsonl::<chat_state::TimelineEvent>(dir.join(super::TIMELINE_FILE))?;
+        let events = self.read_timeline(dir.join(super::TIMELINE_FILE))?;
         let timeline = Timeline::from_events(events)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         Ok(timeline.surface().to_vec())
@@ -252,6 +250,116 @@ impl JsonlStorageAdapter {
             .await
             .map_err(io::Error::other)?
     }
+
+    async fn append_timeline_event_with_durability(
+        path: PathBuf,
+        event: &chat_state::TimelineEvent,
+        durability: AppendDurability,
+    ) -> io::Result<()> {
+        let event_seq = event.seq.get();
+        let mut line = serde_json::to_vec(event)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        line.push(b'\n');
+        tokio::task::spawn_blocking(move || {
+            Self::append_timeline_line_sync(&path, line, event_seq, durability)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    /// Append one Timeline event with sequence-aware idempotence.
+    ///
+    /// A retry after a lost durability acknowledgement re-syncs the identical
+    /// tail instead of duplicating it. An incomplete final record is never a
+    /// committed fact and is truncated before the retry. Interior corruption,
+    /// sequence gaps and same-sequence conflicts fail closed.
+    fn append_timeline_line_sync(
+        path: &Path,
+        line: Vec<u8>,
+        event_seq: u64,
+        durability: AppendDurability,
+    ) -> io::Result<()> {
+        debug_assert!(line.ends_with(b"\n"));
+        let lock = Self::lock_append(path)?;
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            if bytes.last().is_some_and(|byte| *byte != b'\n') {
+                let complete_len = bytes
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(0, |index| index + 1);
+                tracing::warn!(
+                    path = %path.display(),
+                    discarded_bytes = bytes.len() - complete_len,
+                    "discarding incomplete Timeline tail before append"
+                );
+                file.set_len(complete_len as u64)?;
+                bytes.truncate(complete_len);
+            }
+
+            let last_line = bytes
+                .split(|byte| *byte == b'\n')
+                .rev()
+                .find(|line| !line.is_empty());
+            match last_line {
+                Some(last_line) => {
+                    let last: chat_state::TimelineEvent = serde_json::from_slice(last_line)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    if last.seq.get() == event_seq {
+                        if last_line != &line[..line.len() - 1] {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Timeline seq {event_seq} conflicts with persisted tail"),
+                            ));
+                        }
+                        if matches!(durability, AppendDurability::Durable) {
+                            Self::sync_file_durable(&file)?;
+                            drop(file);
+                            Self::sync_parent_directory(path)?;
+                        }
+                        return Ok(());
+                    }
+                    let expected = last.seq.get().checked_add(1).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Timeline sequence overflow")
+                    })?;
+                    if event_seq != expected {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Timeline append expected seq {expected}, received {event_seq}"
+                            ),
+                        ));
+                    }
+                }
+                None if event_seq != 0 => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("empty Timeline requires seq 0, received {event_seq}"),
+                    ));
+                }
+                None => {}
+            }
+
+            file.seek(io::SeekFrom::End(0))?;
+            file.write_all(&line)?;
+            file.flush()?;
+            if matches!(durability, AppendDurability::Durable) {
+                Self::sync_file_durable(&file)?;
+                drop(file);
+                Self::sync_parent_directory(path)?;
+            }
+            Ok(())
+        })();
+        let _ = lock.unlock();
+        result
+    }
     /// Append one JSONL record, healing a torn tail before writing.
     ///
     /// Appends are not crash-atomic: a process kill / `ENOSPC` mid-`write_all`
@@ -265,8 +373,8 @@ impl JsonlStorageAdapter {
     ///
     /// Before writing, check the last byte: if it isn't `\n`, prepend one so
     /// the torn record is terminated as its own (single) corrupt line. This
-    /// bounds the damage of any torn write to exactly one record, which the
-    /// lenient readers (e.g. [`Self::read_chat_history_sync`]) then skip.
+    /// bounds the damage of any torn write to exactly one cache record. The
+    /// canonical Timeline reader remains fail-closed and never reads this cache.
     async fn sync_file_path_durable(path: PathBuf) -> io::Result<()> {
         tokio::task::spawn_blocking(move || {
             let file = OpenOptions::new().read(true).open(&path)?;
@@ -322,132 +430,6 @@ impl JsonlStorageAdapter {
                 drop(file);
             }
             Ok(())
-        })();
-        let _ = lock.unlock();
-        result
-    }
-    async fn append_cwd_switch_with_bookkeeping(
-        &self,
-        info: &Info,
-        message: &ConversationItem,
-    ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
-        let path = self.chat_file(info);
-        let mut line = serde_json::to_vec(message).map_err(|error| {
-            super::AppendCwdSwitchError::NotCommitted(io::Error::new(
-                io::ErrorKind::InvalidData,
-                error,
-            ))
-        })?;
-        line.push(b'\n');
-        let generation = message
-            .working_directory_switch_generation()
-            .filter(|generation| *generation > 0)
-            .ok_or_else(|| {
-                super::AppendCwdSwitchError::NotCommitted(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "working-directory switch item must carry a nonzero generation",
-                ))
-            })?;
-        let disposition = tokio::task::spawn_blocking(move || {
-            Self::append_cwd_switch_line_sync_with(
-                &path,
-                line,
-                generation,
-                Self::sync_file_durable,
-                || Self::sync_parent_directory(&path),
-            )
-        })
-        .await
-        .map_err(|error| super::AppendCwdSwitchError::NotCommitted(io::Error::other(error)))??;
-        self.apply_summary_patch(
-            info,
-            super::summary_write::SummaryPatch {
-                record_activity: matches!(&disposition, StrictAppendAck::Appended),
-                chat_messages: matches!(&disposition, StrictAppendAck::Appended)
-                    .then_some(super::summary_write::CounterOp::Increment(1)),
-                chat_format_version: Some(CHAT_FORMAT_VERSION),
-                cwd_switch_bookkeeping_generation: Some(generation),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|source| super::AppendCwdSwitchError::Committed {
-            acknowledgement: disposition.clone(),
-            source,
-        })?;
-        Self::sync_file_path_durable(self.summary_file(info))
-            .await
-            .map_err(|source| super::AppendCwdSwitchError::Committed {
-                acknowledgement: disposition.clone(),
-                source,
-            })?;
-        Ok(disposition)
-    }
-    fn find_cwd_switch_generation(
-        path: &Path,
-        generation: u64,
-    ) -> io::Result<Option<ConversationItem>> {
-        let contents = match std::fs::read(path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        Ok(contents.split(|byte| *byte == b'\n').find_map(|line| {
-            let item = serde_json::from_slice::<ConversationItem>(line).ok()?;
-            (item.working_directory_switch_generation() == Some(generation)).then_some(item)
-        }))
-    }
-    pub(crate) fn append_cwd_switch_line_sync_with(
-        path: &Path,
-        mut line: Vec<u8>,
-        generation: u64,
-        mut sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
-        mut sync_parent: impl FnMut() -> io::Result<()>,
-    ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
-        let lock = Self::lock_append(path).map_err(super::AppendCwdSwitchError::NotCommitted)?;
-        let result = (|| {
-            if let Some(authoritative) = Self::find_cwd_switch_generation(path, generation)
-                .map_err(super::AppendCwdSwitchError::NotCommitted)?
-            {
-                return Ok(StrictAppendAck::AlreadyPresent(authoritative));
-            }
-            let mut file = OpenOptions::new()
-                .read(true)
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(super::AppendCwdSwitchError::NotCommitted)?;
-            let len = file
-                .metadata()
-                .map_err(super::AppendCwdSwitchError::NotCommitted)?
-                .len();
-            if len > 0 {
-                file.seek(io::SeekFrom::Start(len - 1))
-                    .map_err(super::AppendCwdSwitchError::NotCommitted)?;
-                let mut last = [0u8; 1];
-                file.read_exact(&mut last)
-                    .map_err(super::AppendCwdSwitchError::NotCommitted)?;
-                if last[0] != b'\n' {
-                    line.insert(0, b'\n');
-                }
-            }
-            file.write_all(&line)
-                .map_err(super::AppendCwdSwitchError::NotCommitted)?;
-            file.flush()
-                .map_err(|source| super::AppendCwdSwitchError::Committed {
-                    acknowledgement: StrictAppendAck::Appended,
-                    source,
-                })?;
-            sync_file(&file).map_err(|source| super::AppendCwdSwitchError::Committed {
-                acknowledgement: StrictAppendAck::Appended,
-                source,
-            })?;
-            drop(file);
-            sync_parent().map_err(|source| super::AppendCwdSwitchError::Committed {
-                acknowledgement: StrictAppendAck::Appended,
-                source,
-            })?;
-            Ok(StrictAppendAck::Appended)
         })();
         let _ = lock.unlock();
         result
@@ -533,6 +515,38 @@ impl JsonlStorageAdapter {
         }
         Ok(items)
     }
+
+    /// Read every complete Timeline record. A final non-newline-terminated
+    /// fragment was never committed and is ignored; every complete line is
+    /// parsed strictly so interior corruption still fails closed.
+    fn read_timeline(&self, path: PathBuf) -> io::Result<Vec<chat_state::TimelineEvent>> {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let complete_len = if bytes.last().is_none_or(|byte| *byte == b'\n') {
+            bytes.len()
+        } else {
+            bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |index| index + 1)
+        };
+        bytes[..complete_len]
+            .split(|byte| *byte == b'\n')
+            .enumerate()
+            .filter(|(_, line)| !line.is_empty())
+            .map(|(index, line)| {
+                serde_json::from_slice(line).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}:{}: {error}", path.display(), index + 1),
+                    )
+                })
+            })
+            .collect()
+    }
     /// Append a session update to the updates.jsonl file, wrapping it in an envelope with timestamp.
     pub(super) async fn append_update_to_file(
         &self,
@@ -576,8 +590,7 @@ impl JsonlStorageAdapter {
     /// Uses direct string-to-typed deserialization (via `SessionUpdateEnvelope::from_str`)
     /// with a borrowing envelope and `&RawValue` to avoid intermediate `Value` allocation.
     ///
-    /// Corruption-tolerant like [`Self::read_chat_history_sync`]: updates are
-    /// display/replay data appended non-atomically, so a torn line (crashed or
+    /// Updates are display/replay data appended non-atomically, so a torn line (crashed or
     /// racing append) is skipped with a warning instead of failing the caller
     /// (session load, fork copy). The live replay path is already lenient;
     /// this keeps the fork path from bricking on the same corruption.
@@ -872,161 +885,6 @@ impl JsonlStorageAdapter {
         }
         Ok(restored)
     }
-    /// Read chat history from JSONL file, handling both legacy ChatRequestMessage format
-    /// (version 0) and new ConversationItem format (version >= 1).
-    ///
-    /// Uses line-by-line format detection with fallback to handle mixed-format files
-    /// that can occur when continuing an old session with a newer binary.
-    ///
-    /// ## Corruption tolerance (torn / interleaved appends)
-    ///
-    /// Appends to `chat_history.jsonl` are not crash-atomic: a process kill
-    /// mid-append (auto-update leader relaunch), `ENOSPC`, or two writers
-    /// racing (a second persistence actor on reconnect) can leave a torn or
-    /// merged line — the classic symptom is a serde error like
-    /// ``expected `,` or `}` at line 1 column 571``. Failing the whole load on
-    /// one bad line bricks the session forever ("Couldn't load session:
-    /// FS_OTHER"), which is strictly worse than resuming without the damaged
-    /// record. Unparseable / undecodable lines are therefore *skipped* with a
-    /// warning, and the first time corruption is detected the raw file is
-    /// preserved as `chat_history.jsonl.corrupt` next to the original — the
-    /// post-load snapshot rewrite (`persist_chat_history_jsonl_sync`) scrubs
-    /// the bad lines from the live file, so the quarantine copy is the only
-    /// surviving evidence for debugging / manual recovery.
-    ///
-    /// Lines are split on raw `\n` bytes and parsed with `from_slice` so a
-    /// write torn mid-UTF-8-codepoint poisons only its own line, not the
-    /// whole-file `read_to_string`.
-    ///
-    /// ## Legacy reasoning reconstruction (in-memory upgrade)
-    ///
-    /// Older sessions stored reasoning either inline on the
-    /// assistant (`AssistantItem.reasoning`) or, for early
-    /// backend-search sessions, as `AssistantItem.raw_output: Vec<Value>`.
-    /// Newer sessions don't have those fields on `AssistantItem` so serde
-    /// would silently drop them. We pre-extract them via
-    /// [`sampling_types::upgrade_legacy_reasoning`] and emit
-    /// sibling `Reasoning` / `BackendToolCall` items *before* the
-    /// corresponding assistant — matching the order
-    /// `response_to_conversation_items` would produce. The file on disk
-    /// is not rewritten; this is a load-time-only transform so resumed
-    /// sessions get sibling-shape replay without any disk-write risk.
-    /// Idempotent: newer sessions have no `reasoning` / `raw_output` /
-    /// `reasoning_content` fields, so the upgrader produces no siblings.
-    /// The upgrader runs only for lines that decode successfully, so a
-    /// skipped corrupt line never emits orphaned siblings or pollutes the
-    /// sibling-dedup set.
-    fn read_chat_history_sync(
-        &self,
-        path: PathBuf,
-        chat_format_version: u8,
-    ) -> io::Result<Vec<ConversationItem>> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let contents = std::fs::read(&path)?;
-        let mut sibling_btc_ids_seen: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut upgraded_reasoning_count: usize = 0;
-        let mut upgraded_btc_count: usize = 0;
-        let mut skipped_lines: usize = 0;
-        let mut first_skipped: Option<(usize, String)> = None;
-        let mut skip_line = |line_no: usize, error: String| {
-            skipped_lines += 1;
-            if first_skipped.is_none() {
-                first_skipped = Some((line_no, error));
-            }
-        };
-        let mut items = Vec::new();
-        for (line_idx, line) in contents.split(|b| *b == b'\n').enumerate() {
-            let line = line.trim_ascii();
-            if line.is_empty() {
-                continue;
-            }
-            let raw: serde_json::Value = match serde_json::from_slice(line) {
-                Ok(raw) => raw,
-                Err(e) => {
-                    skip_line(line_idx + 1, e.to_string());
-                    continue;
-                }
-            };
-            let item_result = if chat_format_version >= CHAT_FORMAT_VERSION {
-                serde_json::from_value::<ConversationItem>(raw.clone()).or_else(|e| {
-                    serde_json::from_value::<ChatRequestMessage>(raw.clone())
-                        .map(ConversationItem::from)
-                        .map_err(|_| e)
-                })
-            } else {
-                serde_json::from_value::<ChatRequestMessage>(raw.clone())
-                    .map(ConversationItem::from)
-                    .or_else(|e| {
-                        serde_json::from_value::<ConversationItem>(raw.clone()).map_err(|_| e)
-                    })
-            };
-            let item = match item_result {
-                Ok(item) => item,
-                Err(e) => {
-                    skip_line(line_idx + 1, e.to_string());
-                    continue;
-                }
-            };
-            let siblings =
-                sampling_types::upgrade_legacy_reasoning(&raw, &mut sibling_btc_ids_seen);
-            for sib in siblings {
-                match &sib {
-                    ConversationItem::Reasoning(_) => upgraded_reasoning_count += 1,
-                    ConversationItem::BackendToolCall(_) => upgraded_btc_count += 1,
-                    _ => {}
-                }
-                items.push(sib);
-            }
-            if let ConversationItem::BackendToolCall(b) = &item {
-                sibling_btc_ids_seen.insert(b.id().to_string());
-            }
-            items.push(item);
-        }
-        let stripped = strip_invalid_images(&mut items);
-        if first_skipped.is_some() || stripped > 0 {
-            let quarantine = path.with_extension("jsonl.corrupt");
-            if !quarantine.exists()
-                && let Err(e) = std::fs::copy(&path, &quarantine)
-            {
-                tracing::warn!(
-                    error = %e,
-                    path = %quarantine.display(),
-                    "failed to write chat history quarantine copy"
-                );
-            }
-        }
-        if let Some((first_line, first_error)) = first_skipped {
-            tracing::warn!(
-                skipped = skipped_lines,
-                loaded = items.len(),
-                first_line,
-                first_error = %first_error,
-                path = %path.display(),
-                "skipped unparseable chat history lines (torn or interleaved \
-                 append — crashed mid-write or concurrent writer?); loading \
-                 the session without them, original preserved as *.corrupt"
-            );
-        }
-        if stripped > 0 {
-            tracing::warn!(
-                count = stripped,
-                path = %path.display(),
-                "stripped invalid images from loaded chat history, original \
-                 preserved as *.corrupt"
-            );
-        }
-        if upgraded_reasoning_count > 0 || upgraded_btc_count > 0 {
-            tracing::info!(
-                upgraded_reasoning = upgraded_reasoning_count,
-                upgraded_backend_tool_calls = upgraded_btc_count,
-                "reconstructed legacy reasoning siblings from pre-sibling-split session"
-            );
-        }
-        Ok(items)
-    }
     /// Apply a typed [`SummaryPatch`](super::summary_write::SummaryPatch) to
     /// this session's `summary.json` under an exclusive sidecar lock, so the
     /// read-modify-write serializes against every other writer (including a
@@ -1074,7 +932,7 @@ fn transform_session_id_in_update(
         }
     }
 }
-fn is_orchestration_projection_update(update: &super::SessionUpdate) -> bool {
+fn is_source_bound_projection_update(update: &super::SessionUpdate) -> bool {
     matches!(
         update,
         super::SessionUpdate::Grow(notification)
@@ -1177,8 +1035,7 @@ impl JsonlStorageAdapter {
         let target_dir = self.session_dir(target_info);
         std::fs::create_dir_all(&target_dir)?;
         let source_summary = self.read_summary_sync(source_info)?;
-        let source_events =
-            self.read_jsonl::<chat_state::TimelineEvent>(self.timeline_file(source_info))?;
+        let source_events = self.read_timeline(self.timeline_file(source_info))?;
         let source_timeline = Timeline::from_events(source_events)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let mut chat_to_copy = source_timeline.surface().to_vec();
@@ -1196,22 +1053,8 @@ impl JsonlStorageAdapter {
             fork_filter_chat(&mut chat_to_copy);
             updates_to_copy.clear();
         } else {
-            updates_to_copy.retain(|update| !is_orchestration_projection_update(update));
+            updates_to_copy.retain(|update| !is_source_bound_projection_update(update));
         }
-        let checkpoint_files: std::collections::BTreeSet<String> = updates_to_copy
-            .iter()
-            .filter_map(|update| {
-                let super::SessionUpdate::Grow(notification) = update else {
-                    return None;
-                };
-                let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) =
-                    &notification.update
-                else {
-                    return None;
-                };
-                Some(info.checkpoint_file.clone())
-            })
-            .collect();
         for target in [
             self.workflows_dir(target_info),
             self.legacy_goal_mode_state_file(target_info)
@@ -1425,74 +1268,6 @@ impl JsonlStorageAdapter {
         } else {
             0
         };
-        let mut compaction_checkpoints_copied = 0usize;
-        let source_session_dir = self.session_dir(source_info);
-        let checkpoint_dir_usable = if checkpoint_files.is_empty() {
-            false
-        } else {
-            match std::fs::symlink_metadata(source_session_dir.join("compaction_checkpoints")) {
-                Ok(meta) if meta.file_type().is_dir() => true,
-                Ok(meta) => {
-                    tracing::warn!(
-                        file_type = ?meta.file_type(),
-                        session_id = %source_info.id,
-                        "compaction_checkpoints is not a real directory; skipping checkpoint copy",
-                    );
-                    false
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    tracing::warn!(
-                        session_id = %source_info.id,
-                        "compaction_checkpoints directory missing; skipping checkpoint copy",
-                    );
-                    false
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        if checkpoint_dir_usable {
-            for checkpoint_file in &checkpoint_files {
-                let relative = Path::new(checkpoint_file);
-                let well_formed = relative.parent() == Some(Path::new("compaction_checkpoints"))
-                    && relative.extension() == Some("json".as_ref());
-                if !well_formed {
-                    tracing::warn!(
-                        checkpoint_file = %checkpoint_file,
-                        session_id = %source_info.id,
-                        "skipping compaction checkpoint with unexpected path during copy",
-                    );
-                    continue;
-                }
-                let src = source_session_dir.join(relative);
-                match std::fs::symlink_metadata(&src) {
-                    Ok(meta) if meta.file_type().is_file() => {}
-                    Ok(meta) => {
-                        tracing::warn!(
-                            path = %src.display(),
-                            file_type = ?meta.file_type(),
-                            session_id = %source_info.id,
-                            "compaction checkpoint source is not a regular file; skipping copy",
-                        );
-                        continue;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        tracing::warn!(
-                            path = %src.display(),
-                            session_id = %source_info.id,
-                            "compaction checkpoint file missing from source; skipping copy",
-                        );
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
-                let dst = target_dir.join(relative);
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::copy(&src, &dst)?;
-                compaction_checkpoints_copied += 1;
-            }
-        }
         Ok(super::CopySessionResult {
             chat_messages_copied: num_chat_messages,
             updates_copied: num_messages,
@@ -1502,7 +1277,6 @@ impl JsonlStorageAdapter {
             tool_state_copied,
             announcement_state_copied,
             compaction_segments_copied,
-            compaction_checkpoints_copied,
         })
     }
 }
@@ -1606,14 +1380,24 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         event: &chat_state::TimelineEvent,
     ) -> io::Result<()> {
-        self.append_jsonl(self.timeline_file(info), event).await
+        Self::append_timeline_event_with_durability(
+            self.timeline_file(info),
+            event,
+            AppendDurability::Buffered,
+        )
+        .await
     }
-    async fn append_cwd_switch_commit_aware(
+    async fn append_timeline_event_durable(
         &self,
         info: &Info,
-        message: &ConversationItem,
-    ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
-        self.append_cwd_switch_with_bookkeeping(info, message).await
+        event: &chat_state::TimelineEvent,
+    ) -> io::Result<()> {
+        Self::append_timeline_event_with_durability(
+            self.timeline_file(info),
+            event,
+            AppendDurability::Durable,
+        )
+        .await
     }
     async fn update_current_model_and_agent(
         &self,
@@ -1750,8 +1534,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     }
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
         let summary = self.read_summary_sync(info)?;
-        let timeline_events =
-            self.read_jsonl::<chat_state::TimelineEvent>(self.timeline_file(info))?;
+        let timeline_events = self.read_timeline(self.timeline_file(info))?;
         let chat_history = Timeline::from_events(timeline_events.clone())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
             .surface()
@@ -1802,8 +1585,7 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
         let summary = self.read_summary_sync(info)?;
-        let timeline_events =
-            self.read_jsonl::<chat_state::TimelineEvent>(self.timeline_file(info))?;
+        let timeline_events = self.read_timeline(self.timeline_file(info))?;
         let chat_history = Timeline::from_events(timeline_events.clone())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
             .surface()
@@ -1993,18 +1775,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         let path = self.btw_history_file(info);
         self.append_jsonl(path, entry).await
     }
-    async fn write_compaction_checkpoint(
-        &self,
-        info: &Info,
-        checkpoint: &crate::extensions::notification::CompactionCheckpointFile,
-    ) -> io::Result<()> {
-        let dir = self.session_dir(info).join("compaction_checkpoints");
-        tokio::fs::create_dir_all(&dir).await?;
-        let path = dir.join(format!("{}.json", checkpoint.checkpoint_id));
-        let bytes = serde_json::to_vec_pretty(checkpoint)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        tokio::fs::write(path, bytes).await
-    }
     async fn write_compaction_request(
         &self,
         info: &Info,
@@ -2065,94 +1835,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         f.write_all(row.as_bytes()).await?;
         f.flush().await?;
         Ok(())
-    }
-    async fn read_compaction_checkpoint(
-        &self,
-        info: &Info,
-        checkpoint_file: &str,
-    ) -> io::Result<crate::extensions::notification::CompactionCheckpointFile> {
-        let path = self.session_dir(info).join(checkpoint_file);
-        let bytes = tokio::fs::read(&path).await?;
-        serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    }
-}
-/// Max decoded size for a data-URI image loaded from persisted history.
-/// Generous (20 MB) — fresh images use 5 MB, but loaded ones just need sanity-checking.
-const MAX_LOADED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
-/// Strip data-URI images the API would reject (see
-/// [`persisted_image_reject_reason`](crate::session::image_normalize::persisted_image_reject_reason):
-/// malformed/oversized payloads, truncated or API-rejected formats,
-/// dimensions outside the floors/ceiling) from loaded conversation items,
-/// so a poisoned history recovers instead of 400ing on every turn.
-/// User parts become a text placeholder; `ToolResultItem.images` entries
-/// are removed. HTTP(S) URLs are left untouched.
-///
-/// Returns the number of images stripped.
-pub(crate) fn strip_invalid_images(items: &mut [ConversationItem]) -> usize {
-    fn invalid(part: &ContentPart) -> bool {
-        match part {
-            ContentPart::Image { url } => url.starts_with("data:") && !is_valid_data_uri_image(url),
-            _ => false,
-        }
-    }
-    let mut stripped = 0usize;
-    for item in items.iter_mut() {
-        match item {
-            ConversationItem::User(user) => {
-                for part in user.content.iter_mut() {
-                    if invalid(part) {
-                        *part = ContentPart::Text {
-                            text: std::sync::Arc::<str>::from(
-                                "[image removed \u{2014} invalid data]",
-                            ),
-                        };
-                        stripped += 1;
-                    }
-                }
-            }
-            ConversationItem::ToolResult(t) => {
-                let before = t.images.len();
-                t.images.retain(|part| !invalid(part));
-                stripped += before - t.images.len();
-            }
-            _ => {}
-        }
-    }
-    stripped
-}
-/// Check that a `data:` URI has a valid `;base64,` header and decodable payload
-/// within the size limit.
-fn is_valid_data_uri_image(url: &str) -> bool {
-    use base64::Engine as _;
-    let after_data = match url.strip_prefix("data:") {
-        Some(s) => s,
-        None => return false,
-    };
-    let comma = match after_data.find(',') {
-        Some(i) => i,
-        None => return false,
-    };
-    let header = &after_data[..comma];
-    let payload = &after_data[comma + 1..];
-    if !header
-        .as_bytes()
-        .windows(7)
-        .any(|w| w.eq_ignore_ascii_case(b";base64"))
-    {
-        return false;
-    }
-    if payload.len() * 3 / 4 > MAX_LOADED_IMAGE_BYTES {
-        return false;
-    }
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) else {
-        return false;
-    };
-    match crate::session::image_normalize::persisted_image_reject_reason(&bytes) {
-        None => true,
-        Some(reason) => {
-            tracing::warn!(reason, "stripping unsendable image from loaded history");
-            false
-        }
     }
 }
 #[cfg(test)]

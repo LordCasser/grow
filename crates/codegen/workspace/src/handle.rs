@@ -816,8 +816,8 @@ impl WorkspaceHandle {
             _ => HookReply::default(),
         }
     }
-    /// Sync a before-turn hook's YOLO state into the session, emitting
-    /// `YoloToggled` on transitions. No-op for unknown sessions.
+    /// Sync a before-turn hook's YOLO state into the session. No-op for
+    /// unknown sessions; the shell owns durable Timeline observations.
     fn sync_session_yolo_mode(&self, session_id: &str, yolo_mode: bool) {
         let Some(session) = self.session(session_id) else {
             return;
@@ -831,7 +831,6 @@ impl WorkspaceHandle {
                 "workspace: yolo_mode changed via before-turn hook"
             );
             session.set_yolo_mode(yolo_mode);
-            self.on_yolo_toggled(session_id, yolo_mode);
         }
     }
     /// Bookkeeping for a cancelled in-flight tool call: marks it as
@@ -858,22 +857,6 @@ impl WorkspaceHandle {
     pub fn on_session_ended(&self, session_id: &str) {
         self.shared.activity_tracker.session_ended(session_id);
         tracing::info!(%session_id, "session_ended cleanup completed");
-    }
-    /// Record a YOLO / always-approve mode toggle into the session's
-    /// `events.jsonl`. These volatile-config mutations are shell-owned; this is
-    /// the workspace-side emission entry point invoked by the server/shell forwarding
-    /// layer when it observes a `SetYoloMode` command for a bound session. A no-op
-    /// when events recording was enabled (no-op after removal of events system).
-    pub fn on_yolo_toggled(&self, session_id: &str, enabled: bool) {
-        tracing::debug!(%session_id, enabled, "workspace: yolo toggle recorded");
-    }
-    /// Record an MCP server enable/disable toggle into the session's
-    /// `events.jsonl`. Like [`on_yolo_toggled`](Self::on_yolo_toggled), this is
-    /// the workspace-side emission point for a shell-owned mutation; the server/shell
-    /// forwarding layer calls it when it observes an MCP toggle for a bound
-    /// session. A no-op when events recording is disabled.
-    pub fn on_mcp_server_toggled(&self, session_id: &str, server_name: &str, enabled: bool) {
-        tracing::debug!(%session_id, %server_name, enabled, "workspace: mcp toggle recorded");
     }
     /// Returns a cloned snapshot of the hook registry, disconnected
     /// from the workspace's live state.
@@ -1769,13 +1752,6 @@ pub fn resolve_workspace_home() -> std::path::PathBuf {
         return std::path::PathBuf::from(p);
     }
     config::grow_home().join("workspace")
-}
-/// Whether per-session `events.jsonl` recording is enabled
-/// (`GROW_WORKSPACE_EVENTS_ENABLED=true`). Any other value — including unset —
-/// keeps the legacy behaviour: [`WorkspaceShared::session_event_writer`] hands
-/// back a no-op writer and no `events.jsonl` is ever opened.
-fn events_enabled() -> bool {
-    std::env::var("GROW_WORKSPACE_EVENTS_ENABLED").as_deref() == Ok("true")
 }
 /// Watchdog for awaiting enqueue outcomes when answering an `After` turn
 /// hook. MUST undercut the requester's 10s hook deadline or the reply (and

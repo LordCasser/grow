@@ -19,6 +19,88 @@ fn update(info: &Info, text: String) -> SessionUpdate {
     )))
 }
 
+fn timeline_event(name: &str, timeline: &mut chat_state::Timeline) -> chat_state::TimelineEvent {
+    timeline
+        .record(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: "test".into(),
+                name: name.into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ))
+        .unwrap()
+}
+
+#[test]
+fn timeline_append_retries_are_idempotent_and_truncate_only_an_incomplete_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("timeline.jsonl");
+    let mut timeline = chat_state::Timeline::default();
+    let first = timeline_event("first", &mut timeline);
+    let second = timeline_event("second", &mut timeline);
+    let first_line = serde_json::to_vec(&first).unwrap();
+
+    JsonlStorageAdapter::append_timeline_line_sync(
+        &path,
+        [first_line.clone(), b"\n".to_vec()].concat(),
+        first.seq.get(),
+        AppendDurability::Buffered,
+    )
+    .unwrap();
+    JsonlStorageAdapter::append_timeline_line_sync(
+        &path,
+        [first_line, b"\n".to_vec()].concat(),
+        first.seq.get(),
+        AppendDurability::Buffered,
+    )
+    .unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"version\":2,\"seq\":")
+        .unwrap();
+
+    let mut second_line = serde_json::to_vec(&second).unwrap();
+    second_line.push(b'\n');
+    JsonlStorageAdapter::append_timeline_line_sync(
+        &path,
+        second_line,
+        second.seq.get(),
+        AppendDurability::Buffered,
+    )
+    .unwrap();
+
+    let lines = std::fs::read_to_string(path).unwrap();
+    assert_eq!(lines.lines().count(), 2);
+    let events = lines
+        .lines()
+        .map(|line| serde_json::from_str::<chat_state::TimelineEvent>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events[0].seq.get(), 0);
+    assert_eq!(events[1].seq.get(), 1);
+}
+
+#[test]
+fn timeline_reader_ignores_only_the_uncommitted_final_fragment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("timeline.jsonl");
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline_event("complete", &mut timeline);
+    let mut bytes = serde_json::to_vec(&event).unwrap();
+    bytes.extend_from_slice(b"\n{\"version\":");
+    bytes.extend_from_slice(&[0xe2, 0x82]);
+    std::fs::write(&path, bytes).unwrap();
+
+    assert_eq!(adapter.read_timeline(path.clone()).unwrap().len(), 1);
+
+    std::fs::write(&path, b"not-json\n{\"version\":").unwrap();
+    assert!(adapter.read_timeline(path).is_err());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ordinary_and_durable_appends_keep_every_physical_line_parseable() {
     const N: usize = 100;
@@ -140,197 +222,6 @@ fn file_barrier_error_propagates() {
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "file barrier failed");
-}
-
-#[test]
-fn cwd_switch_retry_after_post_append_barrier_failure_is_already_present() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("chat_history.jsonl");
-    let item = ConversationItem::working_directory_switch("moved", 3);
-    let mut line = serde_json::to_vec(&item).unwrap();
-    line.push(b'\n');
-
-    assert!(matches!(
-        JsonlStorageAdapter::append_cwd_switch_line_sync_with(
-            &path,
-            line.clone(),
-            3,
-            |_| Err(io::Error::other("file barrier failed")),
-            || Ok(()),
-        ),
-        Err(crate::session::storage::AppendCwdSwitchError::Committed {
-            acknowledgement: chat_state::StrictAppendAck::Appended,
-            ..
-        })
-    ));
-    assert!(matches!(
-        JsonlStorageAdapter::append_cwd_switch_line_sync_with(
-            &path,
-            line,
-            3,
-            |_| Ok(()),
-            || Ok(()),
-        )
-        .unwrap(),
-        chat_state::StrictAppendAck::AlreadyPresent(item)
-            if item.text_content() == "moved"
-    ));
-    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
-}
-
-#[tokio::test]
-async fn cwd_switch_retry_repairs_bookkeeping_without_duplicate() {
-    let dir = tempfile::tempdir().unwrap();
-    let info = info();
-    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
-    adapter
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-    let item = ConversationItem::working_directory_switch("moved", 4);
-
-    let summary_path = dir.path().join("summary.json");
-    let original_summary = std::fs::read(&summary_path).unwrap();
-    std::fs::write(&summary_path, b"invalid summary").unwrap();
-    assert!(matches!(
-        adapter.append_cwd_switch_commit_aware(&info, &item).await,
-        Err(crate::session::storage::AppendCwdSwitchError::Committed {
-            acknowledgement: chat_state::StrictAppendAck::Appended,
-            ..
-        })
-    ));
-    assert!(matches!(
-        adapter
-            .append_cwd_switch_commit_aware(
-                &info,
-                &ConversationItem::working_directory_switch("retry", 4),
-            )
-            .await,
-        Err(crate::session::storage::AppendCwdSwitchError::Committed {
-            acknowledgement: chat_state::StrictAppendAck::AlreadyPresent(authoritative),
-            ..
-        }) if authoritative.text_content() == "moved"
-    ));
-    std::fs::write(&summary_path, original_summary).unwrap();
-    assert_eq!(
-        adapter.read_summary_sync(&info).unwrap().num_chat_messages,
-        0
-    );
-
-    assert!(matches!(
-        adapter
-            .append_cwd_switch_commit_aware(&info, &item)
-            .await
-            .unwrap(),
-        chat_state::StrictAppendAck::AlreadyPresent(item)
-            if item.text_content() == "moved"
-    ));
-    let summary = adapter.read_summary_sync(&info).unwrap();
-    assert_eq!(summary.num_chat_messages, 1);
-    assert_eq!(summary.cwd_switch_bookkeeping_generation, 4);
-
-    assert!(matches!(
-        adapter
-            .append_cwd_switch_commit_aware(&info, &item)
-            .await
-            .unwrap(),
-        chat_state::StrictAppendAck::AlreadyPresent(item)
-            if item.text_content() == "moved"
-    ));
-    let retried = adapter.read_summary_sync(&info).unwrap();
-    assert_eq!(retried.num_chat_messages, 1);
-    assert_eq!(retried.cwd_switch_bookkeeping_generation, 4);
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
-            .unwrap()
-            .lines()
-            .count(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn cwd_switch_retained_by_history_replacement_is_not_recounted() {
-    let dir = tempfile::tempdir().unwrap();
-    let info = info();
-    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
-    adapter
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-    let item = ConversationItem::working_directory_switch("retained", 6);
-
-    adapter
-        .replace_chat_history(&info, std::slice::from_ref(&item))
-        .await
-        .unwrap();
-    let replaced = adapter.read_summary_sync(&info).unwrap();
-    assert_eq!(replaced.num_chat_messages, 1);
-    assert_eq!(replaced.cwd_switch_bookkeeping_generation, 6);
-
-    assert!(matches!(
-        adapter
-            .append_cwd_switch_commit_aware(
-                &info,
-                &ConversationItem::working_directory_switch("retry", 6),
-            )
-            .await
-            .unwrap(),
-        chat_state::StrictAppendAck::AlreadyPresent(authoritative)
-            if authoritative.text_content() == "retained"
-    ));
-    let summary = adapter.read_summary_sync(&info).unwrap();
-    assert_eq!(summary.num_chat_messages, 1);
-    assert_eq!(summary.cwd_switch_bookkeeping_generation, 6);
-    assert_eq!(
-        adapter
-            .read_chat_history_sync(adapter.chat_file(&info), CHAT_FORMAT_VERSION)
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn cwd_switch_reappend_after_history_replacement_restores_message_count() {
-    let dir = tempfile::tempdir().unwrap();
-    let info = info();
-    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
-    adapter
-        .init_session(&info, default_model_id())
-        .await
-        .unwrap();
-    let item = ConversationItem::working_directory_switch("moved", 7);
-
-    assert!(matches!(
-        adapter
-            .append_cwd_switch_commit_aware(&info, &item)
-            .await
-            .unwrap(),
-        chat_state::StrictAppendAck::Appended
-    ));
-    adapter.replace_chat_history(&info, &[]).await.unwrap();
-    let replaced = adapter.read_summary_sync(&info).unwrap();
-    assert_eq!(replaced.cwd_switch_bookkeeping_generation, 7);
-    assert_eq!(replaced.num_chat_messages, 0);
-
-    assert!(matches!(
-        adapter
-            .append_cwd_switch_commit_aware(&info, &item)
-            .await
-            .unwrap(),
-        chat_state::StrictAppendAck::Appended
-    ));
-    let summary = adapter.read_summary_sync(&info).unwrap();
-    assert_eq!(summary.cwd_switch_bookkeeping_generation, 7);
-    assert_eq!(summary.num_chat_messages, 1);
-    assert_eq!(
-        adapter
-            .read_chat_history_sync(adapter.chat_file(&info), CHAT_FORMAT_VERSION)
-            .unwrap()
-            .len(),
-        1
-    );
 }
 
 #[cfg(target_os = "macos")]

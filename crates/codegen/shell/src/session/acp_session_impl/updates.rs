@@ -663,8 +663,8 @@ impl SessionActor {
             ));
     }
     /// Persist an Grow extension notification to `updates.jsonl` **without** sending it
-    /// to the gateway/UI. Used for internal bookkeeping updates like `CompactionCheckpoint`
-    /// and `RewindMarker` that are only relevant during replay.
+    /// to the gateway/UI. `RewindMarker` preserves the UI replay branch; it
+    /// never participates in agent-state recovery.
     pub(super) fn persist_update_only(&self, update: GrowSessionUpdate) {
         let notification = GrowSessionNotification {
             session_id: self.session_info.id.clone(),

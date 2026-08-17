@@ -2,15 +2,15 @@
 //! corrupted tool-pairing history.
 //!
 //! A `ToolResult` whose owning assistant `tool_call` is missing (e.g. a
-//! torn/merged `chat_history.jsonl` line skipped on load) makes every request
+//! malformed historical import) makes every request
 //! 400 with "unexpected `tool_use_id` found in `tool_result` blocks". No
 //! in-band path can recover — compaction's sanitizer needs a model call that
 //! itself 400s — so the client invokes this method against the session.
 //!
 //! Repairs via [`chat_state::compaction_utils::repair_history`]. Resident
 //! sessions go through `SessionCommand::RepairHistory` (serialized with
-//! session activity, rejected mid-turn); non-resident sessions are repaired
-//! on disk via the atomic `replace_chat_history`.
+//! session activity, rejected mid-turn); non-resident sessions append the same
+//! recovery intent and Surface replacement directly to Timeline.
 
 use agent_client_protocol as acp;
 use chat_state::compaction_utils::HistoryRepairReport;
@@ -94,7 +94,7 @@ async fn handle_session_repair(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         return to_raw_response(&RepairSessionResponse::new(report, req.dry_run, true));
     }
 
-    // Disk rail: session not resident — repair `chat_history.jsonl` in place.
+    // Disk rail: session not resident — append a canonical Timeline repair.
     repair_on_disk(
         &crate::util::grow_home::grow_home(),
         &req.session_id,
@@ -103,9 +103,8 @@ async fn handle_session_repair(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     .await
 }
 
-/// Repair a non-resident session's history on disk: load via the resume
-/// path's corruption-tolerant reader (legacy upgrades apply), repair, write
-/// back atomically. `grow_root` is injectable for tests.
+/// Repair a non-resident session by folding Timeline, then appending recovery
+/// intent and replacement events. `grow_root` is injectable for tests.
 async fn repair_on_disk(grow_root: &std::path::Path, session_id: &str, dry_run: bool) -> ExtResult {
     let summary = crate::session::persistence::find_summary_by_session_id_in_root(
         session_id,
@@ -117,29 +116,36 @@ async fn repair_on_disk(grow_root: &std::path::Path, session_id: &str, dry_run: 
     let info = summary.info.clone();
 
     let storage = JsonlStorageAdapter::with_root(grow_root.to_path_buf());
-    let mut chat_history = storage
+    let persisted = storage
         .load_session_without_updates(&info)
         .await
         .map_err(|e| {
             acp::Error::internal_error().data(format!("failed to load session history: {e}"))
-        })?
-        .chat_history;
-
-    let report = chat_state::compaction_utils::repair_history(&mut chat_history);
+        })?;
+    let mut timeline =
+        chat_state::Timeline::from_events(persisted.timeline_events).map_err(|error| {
+            acp::Error::internal_error().data(format!("invalid session Timeline: {error}"))
+        })?;
+    let (report, repair_events) = timeline.repair_surface_history().map_err(|error| {
+        acp::Error::internal_error().data(format!("failed to build Timeline repair: {error}"))
+    })?;
 
     if report.changed() && !dry_run {
-        storage
-            .replace_chat_history(&info, &chat_history)
-            .await
-            .map_err(|e| {
-                acp::Error::internal_error().data(format!("failed to write repaired history: {e}"))
-            })?;
+        for event in repair_events {
+            storage
+                .append_timeline_event_durable(&info, &event)
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("failed to commit Timeline repair: {error}"))
+                })?;
+        }
         tracing::warn!(
             session_id,
             duplicates_removed = report.duplicates_removed,
             stripped_tool_result_ids = ?report.stripped_tool_result_ids,
             synthetic_results_inserted = report.synthetic_results_inserted,
-            "session history repaired on disk"
+            "session Timeline repaired on disk"
         );
     }
 
@@ -157,8 +163,7 @@ mod tests {
 
     const SESSION_ID: &str = "019f3df7-3d70-7f60-8ca0-a38d2d005670";
 
-    /// Seed `{root}/sessions/{cwd}/{id}/` with a summary and the given chat
-    /// history, returning the adapter + info for follow-up reads.
+    /// Seed `{root}/sessions/{cwd}/{id}/` with a summary and canonical Timeline.
     async fn seed_session(
         root: &std::path::Path,
         items: &[ConversationItem],
@@ -172,11 +177,12 @@ mod tests {
             .init_session(&info, default_model_id())
             .await
             .expect("init session");
-        for item in items {
+        let timeline = chat_state::Timeline::from_seed(items.to_vec()).unwrap();
+        for event in timeline.events() {
             adapter
-                .append_chat_message(&info, item)
+                .append_timeline_event(&info, event)
                 .await
-                .expect("append chat message");
+                .expect("append Timeline event");
         }
         (adapter, info)
     }

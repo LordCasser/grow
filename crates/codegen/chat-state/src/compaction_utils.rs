@@ -915,10 +915,10 @@ pub fn validate_compacted_history(items: &[ConversationItem]) -> Vec<String> {
                     seen_ids.insert(&tc.id);
                 }
             }
-            ConversationItem::ToolResult(tr) => {
-                if !seen_ids.contains(tr.tool_call_id.as_str()) {
-                    invalid_ids.push(tr.tool_call_id.clone());
-                }
+            ConversationItem::ToolResult(tr)
+                if !seen_ids.contains(tr.tool_call_id.as_str()) =>
+            {
+                invalid_ids.push(tr.tool_call_id.clone());
             }
             _ => {}
         }
@@ -995,14 +995,21 @@ impl HistoryRepairReport {
 /// backfill synthetic results for calls the stripping left unanswered.
 /// Pure and idempotent.
 pub fn repair_history(items: &mut Vec<ConversationItem>) -> HistoryRepairReport {
-    let duplicates_removed = sampling_types::dedup_duplicate_tool_results(items);
-    let stripped_tool_result_ids = strip_displaced_tool_results(items);
-    let synthetic_results_inserted = sampling_types::repair_dangling_tool_calls(
+    repair_history_with_reason(
         items,
         sampling_types::DanglingToolCallReason::HarnessHalted {
             class: "history_repair",
         },
-    );
+    )
+}
+
+pub(crate) fn repair_history_with_reason(
+    items: &mut Vec<ConversationItem>,
+    reason: sampling_types::DanglingToolCallReason,
+) -> HistoryRepairReport {
+    let duplicates_removed = sampling_types::dedup_duplicate_tool_results(items);
+    let stripped_tool_result_ids = strip_displaced_tool_results(items);
+    let synthetic_results_inserted = sampling_types::repair_dangling_tool_calls(items, reason);
     HistoryRepairReport {
         duplicates_removed,
         stripped_tool_result_ids,

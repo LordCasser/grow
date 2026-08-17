@@ -40,8 +40,7 @@ impl SessionActor {
             self.send_available_commands_update().await;
         }
         self.chat_state_handle
-            .replace_conversation(messages.clone());
-        persist_chat_history_jsonl_sync(&self.session_info, &messages);
+            .replace_conversation(messages);
     }
     /// Ensure the conversation carries the correct baseline skill
     /// `<system-reminder>`: exactly one for an agent that has skills and uses reminders,

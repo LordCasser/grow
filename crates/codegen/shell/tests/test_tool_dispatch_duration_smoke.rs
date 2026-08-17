@@ -2,7 +2,7 @@
 //!
 //! Scripts a model turn that calls `run_terminal_command` with `sleep 2`,
 //! runs headless against the mock inference server, then asserts
-//! `events.jsonl` has a `tool_completed` with multi-second `duration_ms`
+//! `timeline.jsonl` has a `tool/completed` fact with multi-second `duration_ms`
 //! and a non-empty `tool_call_id`.
 //!
 //! `#[ignore]` (needs a built binary). Run locally (auto-builds the pager):
@@ -55,19 +55,19 @@ fn enqueue_sleep_tool_turn(server: &MockInferenceServer) {
     server.set_response("slept");
 }
 
-/// Shell `tool_completed` for this call id. Workspace rows share the id and can
-/// also be multi-second (hub hop), so require omitted `source`.
-fn find_tool_completed(events_jsonl: &str, call_id: &str) -> Option<serde_json::Value> {
-    events_jsonl.lines().find_map(|line| {
+/// Canonical Timeline `tool/completed` for this call id.
+fn find_tool_completed(timeline_jsonl: &str, call_id: &str) -> Option<serde_json::Value> {
+    timeline_jsonl.lines().find_map(|line| {
         let v: serde_json::Value = serde_json::from_str(line).ok()?;
-        let is_match = v.get("type").and_then(|t| t.as_str()) == Some("tool_completed")
-            && v.get("tool_call_id").and_then(|t| t.as_str()) == Some(call_id)
-            && v.get("source").is_none();
-        is_match.then_some(v)
+        let event = v.get("event")?;
+        let is_match = v.get("type").and_then(|t| t.as_str()) == Some("tool")
+            && event.get("state").and_then(|state| state.as_str()) == Some("completed")
+            && event.get("call_id").and_then(|id| id.as_str()) == Some(call_id);
+        is_match.then_some(event.clone())
     })
 }
 
-fn collect_events_jsonl(root: &Path) -> Vec<(std::path::PathBuf, String)> {
+fn collect_timeline_jsonl(root: &Path) -> Vec<(std::path::PathBuf, String)> {
     let mut out = Vec::new();
     fn walk(dir: &Path, out: &mut Vec<(std::path::PathBuf, String)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -77,7 +77,7 @@ fn collect_events_jsonl(root: &Path) -> Vec<(std::path::PathBuf, String)> {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, out);
-            } else if path.file_name().and_then(|n| n.to_str()) == Some("events.jsonl")
+            } else if path.file_name().and_then(|n| n.to_str()) == Some("timeline.jsonl")
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
                 out.push((path, text));
@@ -118,22 +118,22 @@ async fn sleep_tool_records_multi_second_dispatch_duration() {
 
     // Session artifacts live under the sandbox GROW_HOME.
     let home = sandbox.grow_home();
-    let events_files = collect_events_jsonl(home);
+    let timeline_files = collect_timeline_jsonl(home);
     assert!(
-        !events_files.is_empty(),
-        "no events.jsonl under GROW_HOME {}\nstderr:\n{}",
+        !timeline_files.is_empty(),
+        "no timeline.jsonl under GROW_HOME {}\nstderr:\n{}",
         home.display(),
         stderr_tail(&result.stderr, 2000)
     );
 
-    let (path, ev) = events_files
+    let (path, ev) = timeline_files
         .iter()
         .find_map(|(path, text)| find_tool_completed(text, CALL_ID).map(|ev| (path, ev)))
         .unwrap_or_else(|| {
             panic!(
-                "no shell tool_completed (source omitted) for {CALL_ID} under {}\nfiles: {:?}",
+                "no Timeline tool/completed for {CALL_ID} under {}\nfiles: {:?}",
                 home.display(),
-                events_files
+                timeline_files
                     .iter()
                     .map(|(p, t)| (p.display().to_string(), t.lines().count()))
                     .collect::<Vec<_>>()
@@ -144,10 +144,10 @@ async fn sleep_tool_records_multi_second_dispatch_duration() {
         .get("duration_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or_else(|| panic!("duration_ms missing in {ev} ({})", path.display()));
-    let tool_name = ev.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
+    let tool_name = ev.get("name").and_then(|v| v.as_str()).unwrap_or("?");
 
     eprintln!(
-        "tool_completed path={} tool_name={tool_name} duration_ms={duration_ms}",
+        "tool/completed path={} tool_name={tool_name} duration_ms={duration_ms}",
         path.display()
     );
 

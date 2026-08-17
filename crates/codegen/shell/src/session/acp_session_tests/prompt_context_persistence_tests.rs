@@ -99,37 +99,29 @@ fn test_canonical_artifacts_coexist() {
     assert_eq!(read_ctx.version, 1);
 }
 
-/// Core invariant: `system_prompt.txt` must match the first System
-/// entry in `chat_history.jsonl`.
+/// Core invariant: `system_prompt.txt` must match the first System node in
+/// the canonical Timeline Surface.
 #[test]
-fn test_system_prompt_matches_chat_history_system_message() {
+fn test_system_prompt_matches_timeline_system_message() {
     let tmp = tempfile::tempdir().unwrap();
     let session_dir = tmp.path().join("session-consistency");
     std::fs::create_dir_all(&session_dir).unwrap();
 
     let system_prompt = "You are a Grow subagent.\n\n<tool_calling>\n...";
 
-    // Write system_prompt.txt (same string used for chat_history).
+    // Write the diagnostic mirror and build the canonical session seed.
     std::fs::write(session_dir.join(SYSTEM_PROMPT_FILENAME), system_prompt).unwrap();
-
-    // Simulate chat_history.jsonl first entry.
-    let entry = serde_json::json!({ "role": "system", "content": system_prompt });
-    std::fs::write(
-        session_dir.join("chat_history.jsonl"),
-        format!("{}\n", serde_json::to_string(&entry).unwrap()),
-    )
-    .unwrap();
+    let timeline = chat_state::Timeline::from_seed(vec![ConversationItem::system(system_prompt)])
+        .expect("valid seed Timeline");
 
     // Verify byte-identity.
     let file_prompt = std::fs::read_to_string(session_dir.join(SYSTEM_PROMPT_FILENAME)).unwrap();
-    let chat_json = std::fs::read_to_string(session_dir.join("chat_history.jsonl")).unwrap();
-    let first_line: serde_json::Value =
-        serde_json::from_str(chat_json.lines().next().unwrap()).unwrap();
+    let timeline_prompt = timeline.surface()[0].text_content();
 
     assert_eq!(
         file_prompt,
-        first_line["content"].as_str().unwrap(),
-        "system_prompt.txt must match first system message in chat_history.jsonl"
+        timeline_prompt,
+        "system_prompt.txt must match the Timeline system head"
     );
 }
 

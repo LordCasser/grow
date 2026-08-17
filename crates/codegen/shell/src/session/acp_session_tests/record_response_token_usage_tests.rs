@@ -132,8 +132,9 @@ async fn build_session_info_used_reflects_recorded_response() {
                 ));
             actor
                 .chat_state_handle
-                .push_user_message_and_ack(ConversationItem::user("hello hello hello hello"))
-                .await;
+                .push_user_message_durably(ConversationItem::user("hello hello hello hello"))
+                .await
+                .unwrap();
 
             actor.record_response_token_usage(&response_with_usage(120_000), None);
 

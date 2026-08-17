@@ -9,7 +9,6 @@ pub(crate) use crate::session::event_types::{
     CancellationCategory, EVENT_SCHEMA_VERSION, Event, InterjectionSource, Phase, RedirectKind,
     SessionRelationship, ToolCompletedSource, ToolOutcome, TurnOutcomeLabel,
 };
-pub(crate) use crate::session::event_writer::EventWriter;
 
 // ── Laziness detector (Layer 3) discriminator vocabulary ─────────────
 //

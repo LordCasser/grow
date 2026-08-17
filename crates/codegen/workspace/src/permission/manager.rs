@@ -1710,9 +1710,8 @@ fn spawn_permission_manager_with_pin(
                         auto_runtime.classifier_turns = turns;
                     }
                     // Tool name is the single source of truth shared with the
-                    // prompter's `events.jsonl` Permission* events (so the two
-                    // can never drift). access_kind / access_detail feed BOTH the
-                    // locally recorded PermissionEvent and the auto-mode classifier
+                    // prompter's permission diagnostics. access_kind / access_detail
+                    // feed BOTH the locally recorded PermissionEvent and the auto-mode classifier
                     // (`clf.classify(..., classifier_access_detail, ...)` below).
                     // The event retains the complete live detail for its modal;
                     // classifier input and durable audit use separate bounded or

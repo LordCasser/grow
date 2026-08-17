@@ -5,18 +5,20 @@ pub const EVENT_SCHEMA_VERSION: &str = "1.0";
 
 /// A single event in the per-turn event log.
 ///
-/// Each variant maps to a line in `events.jsonl`. The `type` field is the
-/// snake_case variant name (via `#[serde(tag = "type")]`). The `ts` field
-/// is added by [`super::log::EventWriter::emit`] at recording time.
+/// Shell-side producer vocabulary. `EventTracker` maps each value into the
+/// canonical Timeline as a typed fact or log-only observation.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     TurnStarted {
         session_id: String,
         turn_number: u64,
+        origin: String,
         model_id: String,
         yolo_mode: bool,
         conversation_message_count: usize,
+        prompt_index: Option<usize>,
+        prompt_text: Option<String>,
         session_relationship: SessionRelationship,
         schema_version: String,
         /// Set when this turn is the user's redirect after a Ctrl+C / Esc abort
@@ -463,9 +465,12 @@ mod tests {
         let with_kind = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
             turn_number: 2,
+            origin: "user".into(),
             model_id: "grow-4".into(),
             yolo_mode: false,
             conversation_message_count: 3,
+            prompt_index: Some(2),
+            prompt_text: Some("prompt".into()),
             session_relationship: SessionRelationship::Primary,
             schema_version: EVENT_SCHEMA_VERSION.into(),
             redirect_kind: Some(RedirectKind::QueuedAfterCancel),
@@ -477,9 +482,12 @@ mod tests {
         let normal = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
             turn_number: 1,
+            origin: "user".into(),
             model_id: "grow-4".into(),
             yolo_mode: false,
             conversation_message_count: 0,
+            prompt_index: Some(1),
+            prompt_text: Some("prompt".into()),
             session_relationship: SessionRelationship::Primary,
             schema_version: EVENT_SCHEMA_VERSION.into(),
             redirect_kind: None,

@@ -12,6 +12,38 @@ pub(crate) const HARNESS_VERIFIES_SENTENCE: &str =
 /// Plan-aware seed-todos instruction (`goal_plan_block.md`).
 pub(crate) const PLAN_SEED_TODOS_PHRASE: &str =
     "Seed todos from the plan's acceptance criteria via";
+/// Establish the causal scope that production creates before dispatching tools.
+///
+/// Tests that invoke `execute_tool_calls` directly deliberately bypass the
+/// session loop, so they must create the same Timeline turn/step boundary
+/// explicitly. The first durable tool append then acts as the FIFO barrier for
+/// these buffered start events.
+#[cfg(test)]
+pub(crate) fn begin_test_causal_turn(actor: &SessionActor) {
+    actor.events.begin_turn();
+    actor
+        .events
+        .emit(crate::session::events::Event::TurnStarted {
+            session_id: actor.session_id_string(),
+            turn_number: 1,
+            origin: "test".into(),
+            model_id: "test".into(),
+            yolo_mode: actor.permissions.is_yolo_mode(),
+            conversation_message_count: 0,
+            prompt_index: Some(0),
+            prompt_text: Some("test prompt".into()),
+            session_relationship: if actor.startup_hints.is_subagent {
+                crate::session::events::SessionRelationship::Subagent
+            } else {
+                crate::session::events::SessionRelationship::Primary
+            },
+            schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
+            redirect_kind: None,
+        });
+    actor
+        .events
+        .emit(crate::session::events::Event::LoopStarted { loop_index: 0 });
+}
 #[cfg(test)]
 pub(crate) async fn test_agent_default() -> agent::Agent {
     test_agent_with_tools(vec![]).await
@@ -216,6 +248,7 @@ pub(crate) async fn create_test_actor_ex(
         tokio_util::sync::CancellationToken::new(),
     );
     chat_state_handle.record_token_usage(total_tokens);
+    let events = crate::session::events::EventTracker::new(chat_state_handle.clone());
     let (goal_command_tx, goal_command_rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = SessionActor {
         session_info: SessionInfo {
@@ -357,7 +390,7 @@ pub(crate) async fn create_test_actor_ex(
         hook_load_errors: std::cell::RefCell::new(Vec::new()),
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
-        events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+        events,
         current_turn_number: std::cell::Cell::new(0),
         last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),

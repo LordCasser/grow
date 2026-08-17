@@ -2250,8 +2250,8 @@ pub(super) async fn run_session(
                         // Drop any queued synthetic auto-wake prompts and pending
                         // notifications before running hooks. Without this, a
                         // synthetic prompt that slipped through the per-tool-result
-                        // sweep could still get flushed to chat_history.jsonl by
-                        // any later persistence path, producing a trailing
+                        // sweep could still be accepted into Timeline by a later
+                        // path, producing a trailing
                         // `<system-reminder>` with no assistant reply. Placed
                         // BEFORE hook dispatch so the cleanup runs even if hooks
                         // abort.

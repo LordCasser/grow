@@ -62,6 +62,8 @@ See ~/.grow/README.md for more information.
     Export(crate::export_cmd::ExportArgs),
     /// Save session trace data locally
     Trace(crate::trace_cmd::TraceArgs),
+    /// Open the independent Timeline Trajectory debugger
+    Trajectory(crate::trajectory_cmd::TrajectoryArgs),
     /// Check for updates or install a specific version
     Update {
         /// Check for updates without installing.

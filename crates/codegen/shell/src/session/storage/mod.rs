@@ -202,352 +202,6 @@ fn temp_sibling(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Rebuild the legacy display/diagnostic `chat_history.jsonl` cache from
-/// `updates.jsonl`. Conversation restart state comes only from `timeline.jsonl`;
-/// this repair path never fabricates durable conversation facts.
-pub(crate) mod chat_rebuild {
-    use std::collections::{HashMap, HashSet};
-    use std::io;
-    use std::path::Path;
-
-    use agent_client_protocol as acp;
-
-    use super::{CHAT_HISTORY_FILE, SessionUpdate, UPDATES_FILE, UpdatesIterator};
-    use crate::sampling::{AssistantItem, ContentPart, ConversationItem, ToolCall};
-
-    /// Rebuild `chat_history.jsonl` from `updates.jsonl` alone. Builds a temp file and
-    /// renames it over the target, so a failed rebuild leaves the existing cache intact
-    /// rather than a truncated partial that load would trust.
-    pub(crate) fn rebuild_chat_history(dir: &Path) -> io::Result<usize> {
-        use std::io::{Seek, Write};
-
-        let updates_path = dir.join(UPDATES_FILE);
-        let Some(iter) = UpdatesIterator::open(&updates_path)? else {
-            return Ok(0);
-        };
-
-        let chat_path = dir.join(CHAT_HISTORY_FILE);
-        let tmp_path = dir.join(format!("{CHAT_HISTORY_FILE}.{}.tmp", uuid::Uuid::now_v7()));
-        let file = std::fs::File::create(&tmp_path)?;
-        let mut writer = std::io::BufWriter::new(file);
-        let mut reducer = ChatReducer::new();
-
-        for result in iter {
-            let update = match result {
-                Ok(u) => u,
-                Err(_) => continue,
-            };
-
-            for item in reducer.process(&update) {
-                if let Ok(line) = serde_json::to_string(&item) {
-                    let _ = writer.write_all(line.as_bytes());
-                    let _ = writer.write_all(b"\n");
-                }
-            }
-
-            // CompactionCheckpoint: truncate file and reset
-            if reducer.should_truncate() {
-                reducer.clear_truncate_flag();
-                let _ = writer.seek(std::io::SeekFrom::Start(0));
-                let _ = writer.get_mut().set_len(0);
-            }
-        }
-
-        for item in reducer.flush() {
-            if let Ok(line) = serde_json::to_string(&item) {
-                let _ = writer.write_all(line.as_bytes());
-                let _ = writer.write_all(b"\n");
-            }
-        }
-
-        if let Err(e) = writer.flush() {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-        drop(writer);
-        if let Err(e) = std::fs::rename(&tmp_path, &chat_path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-        Ok(reducer.count())
-    }
-
-    /// Reduces ACP session updates into conversation items.
-    ///
-    /// Turn boundaries: User→Agent flushes user, Agent→User flushes agent,
-    /// tool completion flushes agent before emitting result.
-    struct ChatReducer {
-        user_parts: Vec<ContentPart>,
-        agent_text: String,
-        agent_tool_calls: Vec<ToolCall>,
-
-        in_user_turn: bool,
-        has_agent_content: bool,
-        needs_truncate: bool,
-
-        tool_args: HashMap<String, String>,
-        emitted_tool_results: HashSet<String>,
-        item_count: usize,
-    }
-
-    impl ChatReducer {
-        fn new() -> Self {
-            Self {
-                user_parts: Vec::new(),
-                agent_text: String::new(),
-                agent_tool_calls: Vec::new(),
-                in_user_turn: false,
-                has_agent_content: false,
-                needs_truncate: false,
-                tool_args: HashMap::new(),
-                emitted_tool_results: HashSet::new(),
-                item_count: 0,
-            }
-        }
-
-        fn process(&mut self, update: &SessionUpdate) -> Vec<ConversationItem> {
-            match update {
-                SessionUpdate::Acp(n) => self.handle_acp(&n.update),
-                SessionUpdate::Grow(n) => self.handle_grow(&n.update),
-            }
-        }
-
-        fn handle_acp(&mut self, update: &acp::SessionUpdate) -> Vec<ConversationItem> {
-            match update {
-                acp::SessionUpdate::UserMessageChunk(chunk) => self.on_user_chunk(chunk),
-                acp::SessionUpdate::AgentMessageChunk(chunk) => self.on_agent_chunk(chunk),
-                acp::SessionUpdate::ToolCall(tc) => self.on_tool_call(tc),
-                acp::SessionUpdate::ToolCallUpdate(tc) => self.on_tool_call_update(tc),
-                _ => Vec::new(), // AgentThoughtChunk, Retry, Plan not needed
-            }
-        }
-
-        fn handle_grow(
-            &mut self,
-            update: &crate::extensions::notification::SessionUpdate,
-        ) -> Vec<ConversationItem> {
-            use crate::extensions::notification::SessionUpdate as GrowUpdate;
-
-            match update {
-                GrowUpdate::CompactionCheckpoint(_) => {
-                    self.reset();
-                    self.needs_truncate = true;
-                    Vec::new()
-                }
-                _ => Vec::new(), // DiffReview, MemoryFlush, etc. not needed
-            }
-        }
-
-        fn on_user_chunk(&mut self, chunk: &acp::ContentChunk) -> Vec<ConversationItem> {
-            if super::is_host_turn_chunk(chunk) {
-                return self.flush_host_turn_boundary();
-            }
-            let mut out = Vec::new();
-
-            if !self.in_user_turn {
-                out.extend(self.flush_agent());
-                self.in_user_turn = true;
-            }
-
-            match &chunk.content {
-                acp::ContentBlock::Text(t) => {
-                    self.user_parts.push(ContentPart::Text {
-                        text: std::sync::Arc::<str>::from(t.text.clone()),
-                    });
-                }
-                acp::ContentBlock::Image(img) => {
-                    if let Some(uri) = &img.uri {
-                        self.user_parts.push(ContentPart::Image {
-                            url: std::sync::Arc::<str>::from(uri.clone()),
-                        });
-                    }
-                }
-                _ => {} // Audio, Resource, etc. not needed for chat replay
-            }
-
-            out
-        }
-
-        fn on_agent_chunk(&mut self, chunk: &acp::ContentChunk) -> Vec<ConversationItem> {
-            if super::is_host_turn_chunk(chunk) {
-                return self.flush_host_turn_boundary();
-            }
-            let mut out = Vec::new();
-
-            if self.in_user_turn {
-                out.extend(self.flush_user());
-                self.in_user_turn = false;
-            }
-
-            if let acp::ContentBlock::Text(t) = &chunk.content {
-                self.agent_text.push_str(&t.text);
-                self.has_agent_content = true;
-            }
-
-            out
-        }
-
-        fn flush_host_turn_boundary(&mut self) -> Vec<ConversationItem> {
-            let mut out = Vec::new();
-            if self.in_user_turn {
-                out.extend(self.flush_user());
-                self.in_user_turn = false;
-            }
-            out.extend(self.flush_agent());
-            out
-        }
-
-        fn on_tool_call(&mut self, tc: &acp::ToolCall) -> Vec<ConversationItem> {
-            let id = tc.tool_call_id.0.to_string();
-            let args = tc
-                .raw_input
-                .as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-
-            self.tool_args.insert(id.clone(), args.clone());
-            self.agent_tool_calls.push(ToolCall {
-                id: std::sync::Arc::<str>::from(id),
-                name: tc.title.clone(),
-                arguments: std::sync::Arc::<str>::from(args),
-            });
-
-            Vec::new()
-        }
-
-        fn on_tool_call_update(&mut self, tc: &acp::ToolCallUpdate) -> Vec<ConversationItem> {
-            let id = tc.tool_call_id.0.to_string();
-            self.maybe_backfill_args(&id, &tc.fields);
-
-            if Self::is_completed(&tc.fields) && self.emitted_tool_results.insert(id.clone()) {
-                return self.emit_tool_result(&id, &tc.fields);
-            }
-            Vec::new()
-        }
-
-        /// Backfill tool arguments from ToolCallUpdate if ToolCall didn't have them.
-        fn maybe_backfill_args(&mut self, id: &str, fields: &acp::ToolCallUpdateFields) {
-            let Some(raw) = &fields.raw_input else { return };
-            let needs_backfill = self.tool_args.get(id).is_none_or(String::is_empty);
-            if !needs_backfill {
-                return;
-            }
-
-            let args = raw.to_string();
-            self.tool_args.insert(id.to_string(), args.clone());
-
-            if let Some(call) = self
-                .agent_tool_calls
-                .iter_mut()
-                .find(|c| c.id.as_ref() == id)
-            {
-                call.arguments = std::sync::Arc::<str>::from(args);
-            }
-        }
-
-        fn is_completed(fields: &acp::ToolCallUpdateFields) -> bool {
-            matches!(
-                fields.status,
-                Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
-            )
-        }
-
-        fn emit_tool_result(
-            &mut self,
-            id: &str,
-            fields: &acp::ToolCallUpdateFields,
-        ) -> Vec<ConversationItem> {
-            let mut out = Vec::new();
-            out.extend(self.flush_agent());
-
-            let content = extract_tool_result_text(fields);
-            let item = ConversationItem::tool_result(id.to_string(), content);
-            self.item_count += 1;
-            out.push(item);
-            out
-        }
-
-        fn flush_user(&mut self) -> Option<ConversationItem> {
-            if self.user_parts.is_empty() {
-                return None;
-            }
-            let item = ConversationItem::user_with_parts(std::mem::take(&mut self.user_parts));
-            self.item_count += 1;
-            Some(item)
-        }
-
-        fn flush_agent(&mut self) -> Option<ConversationItem> {
-            if !self.has_agent_content && self.agent_tool_calls.is_empty() {
-                return None;
-            }
-            let item = ConversationItem::Assistant(AssistantItem {
-                content: std::sync::Arc::<str>::from(std::mem::take(&mut self.agent_text)),
-                tool_calls: std::mem::take(&mut self.agent_tool_calls),
-                model_id: None,
-                model_fingerprint: None,
-                reasoning_effort: None,
-            });
-            self.has_agent_content = false;
-            self.item_count += 1;
-            Some(item)
-        }
-
-        fn flush(&mut self) -> Vec<ConversationItem> {
-            let mut out = Vec::new();
-            out.extend(self.flush_user());
-            out.extend(self.flush_agent());
-            out
-        }
-
-        fn reset(&mut self) {
-            self.user_parts.clear();
-            self.agent_text.clear();
-            self.agent_tool_calls.clear();
-            self.tool_args.clear();
-            self.emitted_tool_results.clear();
-            self.in_user_turn = false;
-            self.has_agent_content = false;
-            self.item_count = 0;
-        }
-
-        fn should_truncate(&self) -> bool {
-            self.needs_truncate
-        }
-
-        fn clear_truncate_flag(&mut self) {
-            self.needs_truncate = false;
-        }
-
-        fn count(&self) -> usize {
-            self.item_count
-        }
-    }
-
-    /// Extract displayable text from a completed ToolCallUpdate.
-    fn extract_tool_result_text(fields: &acp::ToolCallUpdateFields) -> String {
-        if let Some(content) = &fields.content {
-            let text: String = content
-                .iter()
-                .filter_map(|c| match c {
-                    acp::ToolCallContent::Content(acp::Content {
-                        content: acp::ContentBlock::Text(t),
-                        ..
-                    }) => Some(t.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            if !text.is_empty() {
-                return text;
-            }
-        }
-        if let Some(raw) = &fields.raw_output {
-            return raw.to_string();
-        }
-        String::new()
-    }
-}
-
 /// Iterator that streams session updates from a JSONL file without loading all into memory.
 /// Each call to `next()` reads and parses one line.
 pub struct UpdatesIterator {
@@ -893,10 +547,6 @@ pub struct CopySessionResult {
     /// Number of `compaction/segment_*.md` (+ `INDEX.md`) files copied from the
     /// source session's compaction archive. `0` when disabled or none exist.
     pub compaction_segments_copied: usize,
-    /// Number of `compaction_checkpoints/{uuid}.json` files copied for the
-    /// checkpoint records retained in the copied updates. `0` when no records
-    /// survive the copy or their files are missing from the source.
-    pub compaction_checkpoints_copied: usize,
 }
 
 /// Options for copying session data during fork
@@ -1116,15 +766,6 @@ pub enum AppendUpdateError {
     Committed(io::Error),
 }
 
-#[derive(Debug)]
-pub enum AppendCwdSwitchError {
-    NotCommitted(io::Error),
-    Committed {
-        acknowledgement: chat_state::StrictAppendAck,
-        source: io::Error,
-    },
-}
-
 impl AppendUpdateError {
     pub fn into_io_error(self) -> io::Error {
         match self {
@@ -1202,16 +843,16 @@ pub trait StorageAdapter: Send + Sync {
         event: &chat_state::TimelineEvent,
     ) -> io::Result<()>;
 
-    /// Append one working-directory switch generation exactly once.
-    async fn append_cwd_switch_commit_aware(
+    /// Append one timeline boundary and sync it before returning.
+    async fn append_timeline_event_durable(
         &self,
         _info: &Info,
-        _message: &ConversationItem,
-    ) -> Result<chat_state::StrictAppendAck, AppendCwdSwitchError> {
-        Err(AppendCwdSwitchError::NotCommitted(io::Error::new(
+        _event: &chat_state::TimelineEvent,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "working-directory switch append is unsupported",
-        )))
+            "durable timeline append is unsupported",
+        ))
     }
 
     /// Update the current model in summary (delegates to
@@ -1356,13 +997,6 @@ pub trait StorageAdapter: Send + Sync {
         entry: &crate::session::persistence::BtwEntry,
     ) -> io::Result<()>;
 
-    /// Write a compaction checkpoint file to `compaction_checkpoints/{checkpoint_id}.json`.
-    async fn write_compaction_checkpoint(
-        &self,
-        info: &Info,
-        checkpoint: &crate::extensions::notification::CompactionCheckpointFile,
-    ) -> io::Result<()>;
-
     /// Write a compaction request artifact to `compaction_requests/{request_id}.json`.
     /// Captures the exact request sent to the compaction model and the response
     /// (or final error) it produced. Used for offline prompt iteration.
@@ -1389,12 +1023,6 @@ pub trait StorageAdapter: Send + Sync {
         segment: &crate::extensions::notification::CompactionSegmentFile,
     ) -> io::Result<()>;
 
-    /// Read a compaction checkpoint file by its relative path within the session directory.
-    async fn read_compaction_checkpoint(
-        &self,
-        info: &Info,
-        checkpoint_file: &str,
-    ) -> io::Result<crate::extensions::notification::CompactionCheckpointFile>;
 }
 
 pub use jsonl::JsonlStorageAdapter;
@@ -2854,7 +2482,7 @@ mod tests {
 
     /// Full round-trip: simulate a session with two user prompts, one rewind,
     /// then a new prompt.  Assemble the events into prompts the same way
-    /// `load_user_prompts_from_updates` does.
+    /// the session-search projection does.
     #[test]
     fn full_round_trip_with_rewind() {
         // Turn 1: "first prompt"

@@ -5,7 +5,7 @@
 
 use std::io;
 
-use chat_state::{ChatPersistence, StrictAppendAck, StrictAppendError, TimelineEvent};
+use chat_state::{ChatPersistence, TimelineEvent};
 use sampling_types::ConversationItem;
 use tokio::sync::{mpsc, oneshot};
 
@@ -15,7 +15,6 @@ use super::persistence::PersistenceMsg;
 ///
 /// Translates:
 /// - `persist_message` → `PersistenceMsg::Chat`
-/// - `persist_working_directory_switch_and_ack` → `PersistenceMsg::AppendCwdSwitchAndAck`
 /// - `replace_history` → `PersistenceMsg::ReplaceChatHistory`
 /// - `flush` → `PersistenceMsg::Flush`
 pub struct ChannelChatPersistence {
@@ -34,48 +33,15 @@ impl ChatPersistence for ChannelChatPersistence {
         let _ = self.tx.send(PersistenceMsg::Timeline(event.clone()));
     }
 
-    fn persist_message(&mut self, item: &ConversationItem) {
-        let _ = self.tx.send(PersistenceMsg::Chat(item.clone()));
-    }
-
-    fn persist_working_directory_switch_and_ack(
+    fn persist_timeline_event_and_ack(
         &mut self,
-        item: &ConversationItem,
-    ) -> oneshot::Receiver<Result<StrictAppendAck, StrictAppendError>> {
-        let (reply, receiver) = oneshot::channel();
-        if self
-            .tx
-            .send(PersistenceMsg::AppendCwdSwitchAndAck {
-                item: item.clone(),
-                respond_to: reply,
-            })
-            .is_err()
-        {
-            let (reply, receiver) = oneshot::channel();
-            let _ = reply.send(Err(StrictAppendError::Indeterminate(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "session persistence actor unavailable; retry by generation",
-            ))));
-            return receiver;
-        }
-        receiver
-    }
-
-    fn replace_history(&mut self, items: &[ConversationItem]) {
-        let _ = self
-            .tx
-            .send(PersistenceMsg::ReplaceChatHistory(items.to_vec()));
-    }
-
-    fn replace_history_and_ack(
-        &mut self,
-        items: &[ConversationItem],
+        event: &TimelineEvent,
     ) -> oneshot::Receiver<io::Result<()>> {
         let (respond_to, receiver) = oneshot::channel();
         if self
             .tx
-            .send(PersistenceMsg::ReplaceChatHistoryAndAck {
-                messages: items.to_vec(),
+            .send(PersistenceMsg::TimelineDurablyAndAck {
+                event: event.clone(),
                 respond_to,
             })
             .is_err()
@@ -88,6 +54,16 @@ impl ChatPersistence for ChannelChatPersistence {
             return receiver;
         }
         receiver
+    }
+
+    fn persist_message(&mut self, item: &ConversationItem) {
+        let _ = self.tx.send(PersistenceMsg::Chat(item.clone()));
+    }
+
+    fn replace_history(&mut self, items: &[ConversationItem]) {
+        let _ = self
+            .tx
+            .send(PersistenceMsg::ReplaceChatHistory(items.to_vec()));
     }
 
     fn flush(&mut self) {
@@ -123,78 +99,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_persistence_sends_acknowledged_chat_append() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut persistence = ChannelChatPersistence::new(tx);
-        let item = ConversationItem::working_directory_switch("moved", 1);
-        let ack = persistence.persist_working_directory_switch_and_ack(&item);
-        let msg = rx.recv().await.unwrap();
-        let PersistenceMsg::AppendCwdSwitchAndAck {
-            item: persisted,
-            respond_to,
-        } = msg
-        else {
-            panic!("expected acknowledged chat append");
-        };
-        assert_eq!(
-            serde_json::to_vec(&persisted).unwrap(),
-            serde_json::to_vec(&item).unwrap()
-        );
-        respond_to.send(Ok(StrictAppendAck::Appended)).unwrap();
-        assert!(matches!(
-            ack.await.unwrap().unwrap(),
-            StrictAppendAck::Appended
-        ));
-    }
-
-    #[tokio::test]
     async fn channel_persistence_sends_replace_history() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut persistence = ChannelChatPersistence::new(tx);
         persistence.replace_history(&[ConversationItem::system("compacted")]);
         let msg = rx.recv().await.unwrap();
         assert!(matches!(msg, PersistenceMsg::ReplaceChatHistory(_)));
-    }
-
-    #[tokio::test]
-    async fn acknowledged_history_replacement_waits_for_storage_commit() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut persistence = ChannelChatPersistence::new(tx);
-        let item = ConversationItem::system("image-free history");
-        let mut ack = persistence.replace_history_and_ack(std::slice::from_ref(&item));
-        let msg = rx.recv().await.unwrap();
-        let PersistenceMsg::ReplaceChatHistoryAndAck {
-            messages,
-            respond_to,
-        } = msg
-        else {
-            panic!("expected acknowledged history replacement");
-        };
-        assert_eq!(
-            serde_json::to_vec(&messages).unwrap(),
-            serde_json::to_vec(&vec![item]).unwrap()
-        );
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(10), &mut ack)
-                .await
-                .is_err(),
-            "recovery must not resume before durable storage acknowledges the rewrite"
-        );
-        respond_to.send(Ok(())).unwrap();
-        ack.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn acknowledged_history_replacement_reports_closed_storage() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        let mut persistence = ChannelChatPersistence::new(tx);
-        let error = persistence
-            .replace_history_and_ack(&[ConversationItem::system("history")])
-            .await
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[tokio::test]

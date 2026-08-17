@@ -13,6 +13,17 @@ use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
     TurnCapture,
 };
+use crate::{MessageCause, TimelineEventKind, TrajectorySnapshot};
+
+#[derive(Debug, thiserror::Error)]
+pub enum TimelineWriteError {
+    #[error("timeline event violates the causal fold: {0}")]
+    Invalid(#[from] crate::TimelineError),
+    #[error("timeline event was not durably committed: {0}")]
+    Persistence(#[source] std::io::Error),
+    #[error("timeline persistence acknowledgement was lost")]
+    AcknowledgementLost,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelMetadata {
@@ -73,37 +84,13 @@ pub enum PruneError {
     ActorUnavailable,
 }
 
-/// Refusal reply for [`ChatStateCommand::RepairHistory`]: a turn was in
-/// flight, and in-flight tool calls must not be treated as dangling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RepairHistoryBlocked;
-
-impl std::fmt::Display for RepairHistoryBlocked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "cannot repair history while a turn is in flight; stop the turn first"
-        )
-    }
-}
-
-impl std::error::Error for RepairHistoryBlocked {}
-
-/// Result of a strict persistence-acknowledged working-directory switch append.
-#[derive(Debug, Clone)]
-pub enum StrictAppendAck {
-    Appended,
-    AlreadyPresent(ConversationItem),
-}
-
-#[derive(Debug)]
-pub enum StrictAppendError {
-    NotCommitted(std::io::Error),
-    Committed {
-        acknowledgement: StrictAppendAck,
-        source: std::io::Error,
-    },
-    Indeterminate(std::io::Error),
+/// Failure modes for an explicit Surface integrity repair.
+#[derive(Debug, thiserror::Error)]
+pub enum RepairHistoryError {
+    #[error("cannot repair history while a turn is in flight; stop the turn first")]
+    TurnActive,
+    #[error(transparent)]
+    Timeline(#[from] TimelineWriteError),
 }
 
 /// Commands sent to the ChatStateActor via mpsc channel.
@@ -112,19 +99,21 @@ pub enum ChatStateCommand {
     /// Push a user message into the conversation.
     PushUserMessage { item: ConversationItem },
 
-    /// Push a user message and acknowledge once the chat-state actor has
-    /// accepted and processed it.
-    PushUserMessageAndAck {
-        item: ConversationItem,
-        reply: oneshot::Sender<()>,
+    /// Append a non-message causal fact. Validation and ordering remain owned
+    /// by the chat-state actor.
+    RecordTimelineEvent { kind: TimelineEventKind },
+
+    /// Prepare, durably commit, then accept a causal boundary. The actor does
+    /// not process another command while awaiting this acknowledgement.
+    RecordTimelineEventDurably {
+        kind: TimelineEventKind,
+        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
-    /// Append one working-directory switch without repair or pruning, then
-    /// acknowledge only after persistence processes the generation-aware append.
-    AppendWorkingDirectorySwitchAndAck {
-        content: String,
-        cwd_generation: std::num::NonZeroU64,
-        reply: oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>,
+    /// Persist the exact user-message event, then accept it into Timeline.
+    PushUserMessageDurably {
+        item: ConversationItem,
+        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
     /// Push a user message with an explicit dangling-repair reason.
@@ -187,7 +176,14 @@ pub enum ChatStateCommand {
     /// Replace conversation history.
     ReplaceConversation {
         items: Vec<ConversationItem>,
-        is_compaction: bool,
+        cause: MessageCause,
+    },
+
+    /// Replace the Surface only after the canonical Timeline event is durable.
+    ReplaceConversationDurably {
+        items: Vec<ConversationItem>,
+        cause: MessageCause,
+        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
     /// Atomically replace every canonical user/tool-result image with either
@@ -225,7 +221,7 @@ pub enum ChatStateCommand {
         dry_run: bool,
         turn_active: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         reply: oneshot::Sender<
-            Result<crate::compaction_utils::HistoryRepairReport, RepairHistoryBlocked>,
+            Result<crate::compaction_utils::HistoryRepairReport, RepairHistoryError>,
         >,
     },
 
@@ -278,6 +274,16 @@ pub enum ChatStateCommand {
 
     /// Get a clone of the full conversation.
     GetConversation {
+        reply: oneshot::Sender<Vec<ConversationItem>>,
+    },
+
+    /// Build the independent debug/read model directly from Timeline.
+    GetTrajectory {
+        reply: oneshot::Sender<TrajectorySnapshot>,
+    },
+
+    GetRewindSurface {
+        target_prompt_index: usize,
         reply: oneshot::Sender<Vec<ConversationItem>>,
     },
 
@@ -435,14 +441,8 @@ mod tests {
             item: ConversationItem::user("hello"),
         };
         let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::PushUserMessageAndAck {
+        let _ = ChatStateCommand::PushUserMessageDurably {
             item: ConversationItem::user("hello"),
-            reply: tx,
-        };
-        let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::AppendWorkingDirectorySwitchAndAck {
-            content: "moved".into(),
-            cwd_generation: std::num::NonZeroU64::new(1).unwrap(),
             reply: tx,
         };
         let _ = ChatStateCommand::PushAssistantResponse {
@@ -480,7 +480,13 @@ mod tests {
         };
         let _ = ChatStateCommand::ReplaceConversation {
             items: vec![],
-            is_compaction: false,
+            cause: MessageCause::SessionRestore,
+        };
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::ReplaceConversationDurably {
+            items: vec![],
+            cause: MessageCause::Rewind,
+            reply: tx,
         };
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::PruneToolResults {
@@ -496,6 +502,12 @@ mod tests {
         // Queries
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetConversation { reply: tx };
+
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::GetRewindSurface {
+            target_prompt_index: 0,
+            reply: tx,
+        };
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetPromptIndex { reply: tx };

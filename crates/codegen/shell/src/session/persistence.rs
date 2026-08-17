@@ -87,20 +87,13 @@ pub enum PersistenceMsg {
     },
     ContentChunk(PersistenceContentChunk),
     Timeline(chat_state::TimelineEvent),
-    Chat(ConversationItem),
-    AppendCwdSwitchAndAck {
-        item: ConversationItem,
-        respond_to: tokio::sync::oneshot::Sender<
-            Result<chat_state::StrictAppendAck, chat_state::StrictAppendError>,
-        >,
-    },
-    /// Replace the entire chat history (used for compaction)
-    ReplaceChatHistory(Vec<ConversationItem>),
-    /// Durable full-history replacement used by irreversible recovery paths.
-    ReplaceChatHistoryAndAck {
-        messages: Vec<ConversationItem>,
+    TimelineDurablyAndAck {
+        event: chat_state::TimelineEvent,
         respond_to: tokio::sync::oneshot::Sender<std::io::Result<()>>,
     },
+    Chat(ConversationItem),
+    /// Replace the entire chat history (used for compaction)
+    ReplaceChatHistory(Vec<ConversationItem>),
     CurrentModel {
         model_id: acp::ModelId,
         /// The active agent definition name (e.g. `"grow-build"`).
@@ -146,8 +139,6 @@ pub enum PersistenceMsg {
         commit: Option<String>,
         branch: Option<String>,
     },
-    /// Persist a compaction checkpoint file to `compaction_checkpoints/{id}.json`.
-    CompactionCheckpoint(crate::extensions::notification::CompactionCheckpointFile),
     /// Persist a compaction request+response artifact to
     /// `compaction_requests/{request_id}.json`. Used for offline prompt
     /// iteration — captures the exact ConversationItem list sent to the
@@ -1475,6 +1466,13 @@ impl SessionPersistence {
                         tracing::warn!(%error, seq = event.seq.get(), "failed to append timeline event");
                     }
                 }
+                PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
+                    let result = self
+                        .storage
+                        .append_timeline_event_durable(&self.info, &event)
+                        .await;
+                    let _ = respond_to.send(result);
+                }
                 PersistenceMsg::Chat(chat_msg) => {
                     if let Err(e) = self
                         .storage
@@ -1483,25 +1481,6 @@ impl SessionPersistence {
                     {
                         tracing::warn!(?e, "failed to write chat message");
                     }
-                }
-                PersistenceMsg::AppendCwdSwitchAndAck { item, respond_to } => {
-                    let result = self
-                        .storage
-                        .append_cwd_switch_commit_aware(&self.info, &item)
-                        .await
-                        .map_err(|error| match error {
-                            crate::session::storage::AppendCwdSwitchError::NotCommitted(error) => {
-                                chat_state::StrictAppendError::NotCommitted(error)
-                            }
-                            crate::session::storage::AppendCwdSwitchError::Committed {
-                                acknowledgement,
-                                source,
-                            } => chat_state::StrictAppendError::Committed {
-                                acknowledgement,
-                                source,
-                            },
-                        });
-                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::ReplaceChatHistory(messages) => {
                     tracing::info!(
@@ -1515,23 +1494,6 @@ impl SessionPersistence {
                     {
                         tracing::warn!(?e, "failed to replace chat history");
                     }
-                }
-                PersistenceMsg::ReplaceChatHistoryAndAck {
-                    messages,
-                    respond_to,
-                } => {
-                    tracing::info!(
-                        num_messages = messages.len(),
-                        "Replacing chat history with durability acknowledgement"
-                    );
-                    let result = self
-                        .storage
-                        .replace_chat_history(&self.info, &messages)
-                        .await;
-                    if let Err(error) = &result {
-                        tracing::warn!(?error, "failed to durably replace chat history");
-                    }
-                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::CurrentModel {
                     model_id,
@@ -1698,15 +1660,6 @@ impl SessionPersistence {
                         .await
                     {
                         tracing::warn!(?e, "failed to persist git HEAD");
-                    }
-                }
-                PersistenceMsg::CompactionCheckpoint(checkpoint) => {
-                    if let Err(e) = self
-                        .storage
-                        .write_compaction_checkpoint(&self.info, &checkpoint)
-                        .await
-                    {
-                        tracing::warn!(?e, "failed to write compaction checkpoint file");
                     }
                 }
                 PersistenceMsg::CompactionRequest(request) => {

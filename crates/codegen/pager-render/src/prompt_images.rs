@@ -1068,7 +1068,7 @@ pub fn session_images_dir(
 /// Derive the `mermaid/` cache directory for a session.
 ///
 /// Mirrors [`session_images_dir`]: rendered diagram PNGs live alongside the
-/// session's other artifacts (`events.jsonl`, `images/`) so they are owned by
+/// session's other artifacts (`timeline.jsonl`, `images/`) so they are owned by
 /// the session and torn down with it. Returns `None` until session identity is
 /// known (no diagrams are cached on disk before then).
 pub fn session_mermaid_dir(

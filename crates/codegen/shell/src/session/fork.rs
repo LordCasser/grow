@@ -93,9 +93,8 @@ pub async fn fork_session(request: ForkSessionRequest) -> io::Result<ForkSession
         target_prompt_index: request.target_prompt_index,
         session_kind: request.session_kind.clone(),
         source_workspace_dir: request.source_workspace_dir.clone(),
-        // Carry the parent's compaction segment archive into the fork so the
-        // child retains pre-compaction history (the live summary is already
-        // copied via chat_history.jsonl).
+        // Carry the parent's compaction segment archive for offline inspection;
+        // the fork's live Surface is materialized into its new Timeline.
         copy_compaction_segments: true,
         ..Default::default()
     };

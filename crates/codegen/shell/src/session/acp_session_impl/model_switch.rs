@@ -327,8 +327,6 @@ impl SessionActor {
         }
         save_prompt_context(&self.session_info, &new_prompt_context);
         save_system_prompt(&self.session_info, &new_system_prompt);
-        let snapshot = self.chat_state_handle.get_conversation().await;
-        persist_chat_history_jsonl_sync(&self.session_info, &snapshot);
         let _ = self
             .notifications
             .persistence_tx

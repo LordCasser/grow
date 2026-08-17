@@ -604,15 +604,6 @@ pub enum SessionUpdate {
     /// forever; on receipt the pager clears it. Never emitted for an automatic
     /// recap (those show no spinner).
     SessionRecapUnavailable,
-    /// A compaction checkpoint marker written to `updates.jsonl`.
-    ///
-    /// This is **persist-only** — it is never sent to the gateway/UI. It records
-    /// that a compaction occurred so the replay pipeline can reconstruct the
-    /// model's conversation view when rewinding across the compaction boundary.
-    ///
-    /// The actual compacted conversation is stored in a separate file under
-    /// `compaction_checkpoints/{checkpoint_id}.json` to keep `updates.jsonl` lean.
-    CompactionCheckpoint(Box<CompactionCheckpointInfo>),
     /// A rewind marker written to `updates.jsonl` when a rewind occurs.
     ///
     /// This is **persist-only** — it is never sent to the gateway/UI. Because
@@ -1179,72 +1170,6 @@ pub struct DiffContent {
     /// The diff details.
     #[serde(flatten)]
     pub diff: acp::Diff,
-}
-
-// ── Compaction checkpoint types ────────────────────────────────────────
-
-/// Metadata stored in `updates.jsonl` as a `CompactionCheckpoint` session update.
-///
-/// This is a lightweight reference; the full compacted conversation lives in a
-/// separate file (`compaction_checkpoints/{checkpoint_id}.json`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct CompactionCheckpointInfo {
-    /// Unique checkpoint identifier (UUID).
-    pub checkpoint_id: String,
-    /// The prompt index at the time compaction completed.
-    /// The next real user prompt will receive this index.
-    pub prompt_index_at_compaction: usize,
-    /// Relative path to the checkpoint file inside the session directory
-    /// (e.g., `"compaction_checkpoints/<uuid>.json"`).
-    pub checkpoint_file: String,
-    /// If this compaction was triggered by auto-compact, contains the
-    /// auto-continue prompt that was injected after compaction.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_continue: Option<AutoContinueInfo>,
-    /// Schema version for forward compatibility.
-    pub schema_version: u32,
-    /// ISO 8601 timestamp of when the checkpoint was created.
-    pub created_at: String,
-}
-
-/// Information about the auto-continue prompt injected after auto-compaction.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct AutoContinueInfo {
-    /// The exact text of the auto-continue prompt that was added as a user message.
-    pub prompt_text: String,
-}
-
-/// The on-disk format for a compaction checkpoint file.
-///
-/// Stored at `{session_dir}/compaction_checkpoints/{checkpoint_id}.json`.
-/// Contains the full compacted conversation history so the replay pipeline can
-/// deterministically reconstruct the model's view without re-running compaction.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct CompactionCheckpointFile {
-    /// Unique checkpoint identifier (matches [`CompactionCheckpointInfo::checkpoint_id`]).
-    pub checkpoint_id: String,
-    /// The prompt index at the time compaction completed.
-    pub prompt_index_at_compaction: usize,
-    /// The exact compacted conversation used by the model.
-    pub compacted_history: Vec<crate::sampling::ConversationItem>,
-    /// Schema version for forward compatibility.
-    pub schema_version: u32,
-    /// ISO 8601 timestamp of when the checkpoint was created.
-    pub created_at: String,
-    /// The original User(user_info) text from before compaction.
-    /// Used during cross-compaction rewind to restore the correct user_info
-    /// that the model originally saw for pre-compaction turns, rather than
-    /// the rebuilt user_info from the compacted conversation.
-    /// `None` in older checkpoints (schema_version 1 without this field).
-    #[serde(default)]
-    pub original_user_info: Option<String>,
-    /// File paths that were re-read and injected after compaction.
-    /// Informational — for debugging and replay understanding.
-    #[serde(default)]
-    pub reread_file_paths: Vec<String>,
 }
 
 /// A compaction segment to persist under `compaction/segment_NNN.md`. Storage

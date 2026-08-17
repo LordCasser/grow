@@ -126,10 +126,9 @@ impl TurnSpanTotals {
 /// How the turn's per-block user-message echo is published to clients /
 /// `updates.jsonl`.
 ///
-/// Every turn consumes a `prompt_index`, and rewind / fork truncation
-/// (`replay_to_prompt`, `updates_truncate_for_prompt`) recover turn
-/// boundaries by counting persisted `UserMessageChunk` runs — so every mode
-/// persists the echo. Turns whose content must not render as a user prompt
+/// Every turn consumes a `prompt_index`. Timeline owns rewind boundaries;
+/// `updates.jsonl` retains every echo only for client replay. Turns whose
+/// content must not render as a user prompt
 /// (notification drain) are hidden by the *pager* via the
 /// `hideFromScrollback` chunk meta, not by omitting the persisted line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,9 +509,12 @@ impl SessionActor {
         self.emit_event(crate::session::events::Event::TurnStarted {
             session_id: self.session_id_string(),
             turn_number,
+            origin: origin.wire_name().to_string(),
             model_id: model_id.clone(),
             yolo_mode,
             conversation_message_count: msg_count,
+            prompt_index: Some(turn_number as usize),
+            prompt_text: Some(original_prompt_text.trim().to_owned()),
             session_relationship: crate::session::events::SessionRelationship::Primary,
             schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
             redirect_kind,
@@ -802,33 +804,16 @@ impl SessionActor {
             if let Some(ack) = persist_ack {
                 if self
                     .chat_state_handle
-                    .push_user_message_and_ack(user_chat)
+                    .push_user_message_durably(user_chat)
                     .await
-                    .is_some()
+                    .is_ok()
                 {
-                    let (flush_tx, flush_rx) = oneshot::channel();
-                    if self
-                        .notifications
-                        .persistence_tx
-                        .send(PersistenceMsg::FlushAndAck {
-                            respond_to: flush_tx,
-                        })
-                        .is_ok()
-                        && flush_rx.await.is_ok()
-                    {
-                        let _ = ack.send(());
-                    } else {
-                        tracing::error!(
-                            session_id = %self.session_info.id.0,
-                            prompt_id = %prompt_id,
-                            "persist_ack flush barrier failed"
-                        );
-                    }
+                    let _ = ack.send(());
                 } else {
                     tracing::error!(
                         session_id = %self.session_info.id.0,
                         prompt_id = %prompt_id,
-                        "persist_ack skipped: chat-state actor unavailable"
+                        "persist_ack skipped: user-message Timeline commit failed"
                     );
                 }
             } else {
@@ -913,13 +898,31 @@ impl SessionActor {
             })),
         );
         let turn_tool_count = self.events.tool_count_this_turn();
+        let (timeline_outcome, timeline_category, timeline_context) = match &result {
+            Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. }) => (
+                crate::session::events::TurnOutcomeLabel::Completed,
+                None,
+                None,
+            ),
+            Ok(TurnOutcome::Cancelled { category, context }) => (
+                crate::session::events::TurnOutcomeLabel::Cancelled,
+                *category,
+                context.clone(),
+            ),
+            Ok(TurnOutcome::MaxTurnsReached { limit }) => (
+                crate::session::events::TurnOutcomeLabel::Cancelled,
+                None,
+                Some(serde_json::json!({
+                    "reason": "max_turns_reached",
+                    "limit": limit,
+                })),
+            ),
+            Err(_) => (crate::session::events::TurnOutcomeLabel::Error, None, None),
+        };
+        self.emit_turn_ended(timeline_outcome, timeline_category, timeline_context)
+            .await?;
         match &result {
             Ok(TurnOutcome::Completed { refusal, .. }) => {
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Completed,
-                    None,
-                    None,
-                );
                 if let Some(explanation) = refusal {
                     let details = (!explanation.is_empty()).then(|| explanation.clone());
                     self.dispatch_hook(
@@ -955,11 +958,6 @@ impl SessionActor {
                 });
             }
             Ok(TurnOutcome::StationarityEnded { .. }) => {
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Completed,
-                    None,
-                    None,
-                );
                 self.send_after_turn_event(tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
                     outcome: tool_protocol::turn_hook::TurnHookOutcome::Completed,
@@ -981,11 +979,6 @@ impl SessionActor {
                 });
             }
             Ok(TurnOutcome::Cancelled { category, context }) => {
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Cancelled,
-                    *category,
-                    context.clone(),
-                );
                 if let Some(cause) = category {
                     self.events.set_prior_interrupt_category(*cause);
                 }
@@ -1011,14 +1004,6 @@ impl SessionActor {
             }
             Ok(TurnOutcome::MaxTurnsReached { limit }) => {
                 tracing::info!(limit, "turn ended: max_turns reached");
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Cancelled,
-                    None,
-                    Some(serde_json::json!({
-                        "reason": "max_turns_reached",
-                        "limit": limit,
-                    })),
-                );
                 self.send_after_turn_event(tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
                     outcome: tool_protocol::turn_hook::TurnHookOutcome::Cancelled,
@@ -1043,7 +1028,6 @@ impl SessionActor {
                 });
             }
             Err(err) => {
-                self.emit_turn_ended(crate::session::events::TurnOutcomeLabel::Error, None, None);
                 self.send_after_turn_event(tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
                     outcome: tool_protocol::turn_hook::TurnHookOutcome::Error,

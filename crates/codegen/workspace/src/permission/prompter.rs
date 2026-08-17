@@ -492,7 +492,7 @@ impl AcpPrompter {
         self
     }
 
-    /// Attach a per-session `events.jsonl` writer so [`request`](Self::request)
+    /// Build the permission choices for one access request.
     fn build_options(
         &self,
         access: &AccessKind,
@@ -1498,7 +1498,7 @@ mod tests {
         );
     }
 
-    // ── events.jsonl emission ─────────────────────────────────
+    // ── permission diagnostics ─────────────────────────────────
 
     #[test]
     fn tool_name_for_access_pins_canonical_names() {
@@ -1533,13 +1533,8 @@ mod tests {
         );
     }
 
-    /// The default constructor leaves the event writer as `noop()` — the live
-    /// shell path relies on this to avoid double-emitting alongside its own
-    /// `EventTracker`. With a `noop` writer there is no backing file to observe,
-    /// so the strongest assertion available is that `request()` still returns the
-    /// correct `PromptOutcome` (here `Error`, from the dropped gateway receiver)
-    /// without requiring a writer. The *positive* emission path is covered by
-    /// `request_emits_permission_requested_and_resolved`.
+    /// The default constructor needs no diagnostic writer. The request still
+    /// returns the correct `PromptOutcome` when the gateway is unavailable.
     #[tokio::test]
     async fn request_with_default_noop_writer_returns_outcome() {
         let (tx, rx) = mpsc::unbounded_channel();

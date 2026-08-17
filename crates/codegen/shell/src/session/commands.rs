@@ -183,11 +183,8 @@ pub enum SessionCommand {
         /// Actor-authoritative admission and deferred fallback for terminal task wakes.
         admission: Option<TaskWakeAdmission>,
         respond_to: oneshot::Sender<PromptTurnResult>,
-        /// Optional oneshot fired after the user message has been appended to
-        /// chat history and a persistence flush barrier has completed, before
-        /// LLM inference begins. Used by callers that need to ensure
-        /// `chat_history.jsonl` includes the prompt before trace snapshots or
-        /// `session/load`.
+        /// Optional oneshot fired after the user-message Timeline event is
+        /// durably committed, before LLM inference begins.
         persist_ack: Option<oneshot::Sender<()>>,
         /// Pre-parsed prompt content blocks from `parse_prompt`, sent back to the
         /// caller so it can use the fully-rendered prompt for metadata.json without

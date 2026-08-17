@@ -3,7 +3,7 @@
 //! the unified path now uses `prepare_chat_completion().conversation_collect()`,
 //! which surfaces the connection failure as the
 //! `ClassifierError` abort. Observe state mutations + the
-//! per-test `events.jsonl`.
+//! canonical per-test Timeline observations.
 //!
 //! Tests that depend on a *successful* classifier response are
 //! out of scope here — they'd require a real `SamplerActor`
@@ -42,8 +42,7 @@ fn detector_entry(
     }
 }
 
-/// Construct a test actor with the events.jsonl rerouted into a
-/// tempdir and `current_model_id` pointing at a per-model config
+/// Construct a test actor with `current_model_id` pointing at a per-model config
 /// supplied by the caller. The actor's sampling config uses a
 /// `http://localhost` base URL with nothing listening, so
 /// `prepare_chat_completion().conversation_collect()` fails with
@@ -59,7 +58,6 @@ async fn make_laziness_actor(
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    actor.events = crate::session::events::EventTracker::local(tmp.path());
     // Install the test model into the catalog and point the
     // current id at it. `insert_test_entry` is gated on
     // `#[cfg(test)]` so it does NOT leak into release builds.
@@ -74,8 +72,22 @@ async fn make_laziness_actor(
     (Arc::new(actor), tmp)
 }
 
-fn events_log(tmp: &tempfile::TempDir) -> String {
-    std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap_or_default()
+async fn events_log(actor: &SessionActor) -> String {
+    let Some(snapshot) = actor.chat_state_handle.trajectory().await else {
+        return String::new();
+    };
+    snapshot
+        .rows
+        .into_iter()
+        .filter(|row| row.category == "observation")
+        .filter_map(|row| {
+            let event = row.details.get("event")?;
+            let mut data = event.get("data")?.as_object()?.clone();
+            data.insert("type".into(), serde_json::Value::String(row.name));
+            serde_json::to_string(&data).ok()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn has_event_with(log: &str, ty: &str, predicate: impl Fn(&serde_json::Value) -> bool) -> bool {
@@ -101,8 +113,7 @@ async fn disabled_detector_is_a_no_op() {
             })
             .await;
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
-            drop(Arc::try_unwrap(actor).ok().unwrap()); // flush events.jsonl
-            let log = events_log(&tmp);
+            let log = events_log(&actor).await;
             // Tightened to a single substring check so
             // a future `laziness_nudge_fired` (or any other
             // `laziness_*` event variant) is also caught. The
@@ -140,8 +151,7 @@ async fn user_input_bump_during_idle_wait_aborts_with_user_input() {
             });
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             bump_task.await.unwrap();
-            drop(Arc::try_unwrap(actor).ok().unwrap());
-            let log = events_log(&tmp);
+            let log = events_log(&actor).await;
             assert!(
                 has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
                     == crate::session::events::LAZINESS_ABORT_USER_INPUT),
@@ -174,8 +184,7 @@ async fn model_switch_during_idle_wait_aborts_with_model_switch() {
             });
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             switch_task.await.unwrap();
-            drop(Arc::try_unwrap(actor).ok().unwrap());
-            let log = events_log(&tmp);
+            let log = events_log(&actor).await;
             assert!(
                 has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
                     == crate::session::events::LAZINESS_ABORT_MODEL_SWITCH),
@@ -272,7 +281,6 @@ async fn sampler_error_aborts_with_classifier_error() {
                 let state = actor.state.lock().await;
                 (state.nudges_used_this_session, state.pending_inputs.len())
             };
-            drop(Arc::try_unwrap(actor).ok().unwrap());
             assert_eq!(nudges, 0, "no nudge on sampler error");
             // Invisibility contract: the classifier must NEVER
             // push a synthetic InputItem into `pending_inputs`,
@@ -283,7 +291,7 @@ async fn sampler_error_aborts_with_classifier_error() {
                 pending, 0,
                 "classifier must not enqueue any synthetic input",
             );
-            let log = events_log(&tmp);
+            let log = events_log(&actor).await;
             assert!(
                 has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
                     == crate::session::events::LAZINESS_ABORT_CLASSIFIER_ERROR),
@@ -344,9 +352,8 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
             SessionActor::maybe_fire_laziness_check(actor.clone()).await;
             poison_task.await.unwrap();
             let nudges = actor.state.lock().await.nudges_used_this_session;
-            drop(Arc::try_unwrap(actor).ok().unwrap());
             assert_eq!(nudges, 0, "no state mutation on idle re-check failure");
-            let log = events_log(&tmp);
+            let log = events_log(&actor).await;
             // The re-check failure is a silent return (the
             // condition that we wanted to nudge no longer holds);
             // no abort event is appropriate. The classifier did
@@ -467,8 +474,7 @@ async fn emit_laziness_abort_writes_each_reason_with_the_correct_const() {
             for reason in LazinessAbortReason::all() {
                 actor.emit_laziness_abort(*reason);
             }
-            drop(Arc::try_unwrap(actor).ok().unwrap());
-            let log = events_log(&tmp);
+            let log = events_log(&actor).await;
             for reason in LazinessAbortReason::all() {
                 let expected = reason.as_const_str();
                 assert!(
@@ -543,7 +549,6 @@ async fn make_debug_actor(
     let (persistence_tx, _persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    actor.events = crate::session::events::EventTracker::local(tmp.path());
     let mut entry = detector_entry(false, 0, None);
     entry.info.laziness_detector = detector;
     actor

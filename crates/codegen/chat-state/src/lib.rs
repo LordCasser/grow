@@ -33,6 +33,7 @@ pub mod events;
 pub mod handle;
 pub mod persistence;
 pub mod timeline;
+pub mod trajectory;
 pub mod types;
 pub mod usage;
 
@@ -44,8 +45,8 @@ pub use actor::state::{
     estimate_tool_definitions_tokens,
 };
 pub use commands::{
-    ImageRewrite, ImageRewriteReport, ModelMetadata, PruneError, PruneReport, StrictAppendAck,
-    StrictAppendError,
+    ImageRewrite, ImageRewriteReport, ModelMetadata, PruneError, PruneReport, RepairHistoryError,
+    TimelineWriteError,
 };
 pub use compaction_mode::CompactionMode;
 pub use compaction_transcript::CompactionDetail;
@@ -56,8 +57,10 @@ pub use persistence::{
     PersistenceRecord,
 };
 pub use timeline::{
-    EventSeq, MessageCause, MessageEvent, SurfaceId, SurfaceOp, Timeline, TimelineError,
-    TimelineEvent, TimelineEventKind,
+    CompactionEvent, EventSeq, MessageCause, MessageEvent, ObservationEvent, RecoveryEvent,
+    RequestEvent, RequestUsage, StepEvent, StepId, SurfaceId, SurfaceOp, TIMELINE_SCHEMA_VERSION,
+    Timeline, TimelineError, TimelineEvent, TimelineEventKind, ToolEvent, TurnEvent, TurnId,
 };
+pub use trajectory::{SurfaceVisibility, TrajectoryRow, TrajectorySnapshot};
 pub use types::*;
 pub use usage::{UsageLedger, UsageTotals};

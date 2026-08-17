@@ -1420,8 +1420,8 @@ mod tests {
         assert_eq!(git_op_cwd(handle, &None).unwrap(), workspace_root);
     }
     /// Regression: a long-lived (leader) workspace must reclaim the per-session
-    /// `FinalizedToolset` — and the MCP tools / `McpState` / `events.jsonl`
-    /// `EventWriter` it transitively pins — when a session ends.
+    /// `FinalizedToolset` — and the MCP tools / `McpState` it transitively pins
+    /// — when a session ends.
     /// `bind_local_session` installs the toolset on a leader-level workspace
     /// session; without `end_local_session` that session (and everything it
     /// holds) leaks for the life of the process.

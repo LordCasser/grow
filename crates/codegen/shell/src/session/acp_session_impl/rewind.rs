@@ -83,75 +83,6 @@ impl SessionActor {
         RewindPointsResponse { rewind_points }
     }
 
-    /// Load user prompts from `updates.jsonl` in chronological order.
-    ///
-    /// Each `UserMessageChunk` sequence is merged into a single prompt string.
-    /// `RewindMarker` entries truncate the list back to the marker's target so
-    /// only prompts from the current timeline are returned.
-    ///
-    /// Uses [`PromptExtractIterator`] which peeks at the `update.sessionUpdate`
-    /// discriminant field without fully deserialising every notification.  This
-    /// avoids large `acp::SessionNotification` allocations for the many update
-    /// types (tool calls, assistant chunks, etc.) that are irrelevant to prompt
-    /// extraction.
-    pub(super) fn load_user_prompts_from_updates(
-        updates_path: &std::path::Path,
-    ) -> std::io::Result<Vec<String>> {
-        use crate::session::storage::{PromptExtractIterator, collect_prompts_from_events};
-
-        let Some(iter) = PromptExtractIterator::open(updates_path)? else {
-            return Ok(vec![]);
-        };
-
-        tracing::debug!(
-            path = %updates_path.display(),
-            "load_user_prompts_from_updates: starting selective scan"
-        );
-
-        let prompts = collect_prompts_from_events(iter);
-
-        tracing::debug!(
-            prompt_count = prompts.len(),
-            "load_user_prompts_from_updates: done"
-        );
-
-        Ok(prompts)
-    }
-
-    /// Check whether rewinding to `target_index` needs replay because a
-    /// compaction has occurred, meaning we need to replay `updates.jsonl`
-    /// to reconstruct the conversation.
-    ///
-    /// Always use replay when compaction has occurred, regardless of whether
-    /// the target is before, at, or after the compaction point.
-    ///
-    /// Post-compaction, the in-memory conversation has a different number of
-    /// User messages than `prompt_index` implies (compaction collapses N+1
-    /// user messages into ~3). `truncate_to_prompt_index` counts User items
-    /// to find the cut point, so it produces wrong results for ALL
-    /// post-compaction targets — not just at the boundary.
-    ///
-    /// `replay_to_prompt` reads `updates.jsonl` from scratch and handles
-    /// compaction checkpoints correctly, so it always produces the right
-    /// conversation regardless of target position.
-    async fn needs_compaction_replay(&self) -> bool {
-        let last = self
-            .chat_state_handle
-            .snapshot()
-            .await
-            .and_then(|s| s.last_compaction_prompt_index);
-        match last {
-            Some(compaction_at) => {
-                tracing::info!(
-                    compaction_at,
-                    "Compaction detected — using replay for rewind"
-                );
-                true
-            }
-            None => false,
-        }
-    }
-
     /// Handle a rewind request with mode support.
     ///
     /// Semantics: "restore state before prompt N ran" — prompts 0..N-1 are kept.
@@ -338,123 +269,26 @@ impl SessionActor {
         // Execute conversation rewind
         let mut prompt_text: Option<String> = None;
         if wants_conversation_rewind {
-            let session_dir = crate::session::persistence::session_dir(&self.session_info);
-            let updates_path = session_dir.join("updates.jsonl");
-
             if let Some(snap) = self.chat_state_handle.snapshot().await {
                 prompt_text = snap.prompt_texts.get(target_index).cloned();
             }
 
-            // Store for edit-and-retry detection in the next prompt() call
+            // Store for edit-and-retry detection in the next prompt() call.
             if let Ok(mut pending) = self.rewind_pending_prompt.lock() {
                 *pending = prompt_text.clone();
             }
 
-            // Check cross-compaction before rewinding.
-            let needs_replay = self.needs_compaction_replay().await;
-
-            // Get conversation from the chat state actor for truncation logic.
-            let mut conversation = self.chat_state_handle.get_conversation().await;
-
-            // Cross-compaction replay recomputes whether a compaction summary
-            // survives; `None` keeps the existing marker (standard truncation).
-            let mut replay_compaction_marker: Option<Option<usize>> = None;
-
-            if needs_replay {
-                // Cross-compaction rewind: reconstruct conversation from updates.jsonl.
-                // Run on the blocking pool since replay does synchronous file I/O
-                // (reading checkpoint files + scanning updates.jsonl).
-                let replay_updates = updates_path.clone();
-                let replay_session_dir = session_dir.clone();
-                let replay_target = target_index;
-                let replay_result = tokio::task::spawn_blocking(move || {
-                    crate::session::helpers::replay::replay_to_prompt(
-                        &replay_updates,
-                        &replay_session_dir,
-                        replay_target,
-                    )
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?;
-                match replay_result {
-                    Ok(replay_result) => {
-                        tracing::info!(
-                            target_index,
-                            prompt_index_reached = replay_result.prompt_index_reached,
-                            conversation_len = replay_result.conversation.len(),
-                            "Cross-compaction rewind: conversation reconstructed via replay"
-                        );
-                        // The rebuilt conversation drops the summary unless a
-                        // checkpoint survived; carry the recomputed marker to
-                        // the snapshot restore so the stale value isn't reused.
-                        replay_compaction_marker = Some(replay_result.last_compaction_prompt_index);
-                        // The replay result may or may not include the session
-                        // preamble (System + User(user_info)):
-                        // - Checkpoint loaded (target >= compaction_at): the
-                        //   checkpoint's compacted_history already has System +
-                        //   User prefix. Use directly.
-                        // - Raw updates (target < compaction_at): replay only
-                        //   accumulates user/agent turns from updates.jsonl.
-                        //   Prepend System + original User(user_info) so the
-                        //   model sees the same preamble it originally saw.
-                        if matches!(
-                            replay_result.conversation.first(),
-                            Some(ConversationItem::System(_))
-                        ) {
-                            conversation = replay_result.conversation;
-                        } else {
-                            // Keep System (index 0). Replace User(user_info) at
-                            // index 1 with the original from the checkpoint if
-                            // available, otherwise keep the current one.
-                            if let Some(ui0) = replay_result.original_user_info {
-                                conversation.truncate(1); // keep System only
-                                conversation.push(ConversationItem::user(ui0));
-                            } else {
-                                conversation.truncate(2); // keep System + current user_info
-                            }
-                            conversation.extend(replay_result.conversation);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            ?e,
-                            target_index,
-                            "Cross-compaction replay failed — rewind aborted"
-                        );
-                        // Do NOT fall back to truncation: the post-compaction
-                        // conversation has wrong user-message counts, and raw
-                        // replay without a checkpoint produces an oversized
-                        // conversation that will exceed the context window.
-                        // Return a clear error so the user can rewind to a
-                        // different (post-compaction) prompt instead.
-                        return Ok(RewindResponse {
-                            success: false,
-                            target_prompt_index: target_index,
-                            mode,
-                            reverted_files: vec![],
-                            clean_files: vec![],
-                            conflicts: vec![],
-                            prompt_text: None,
-                            error: Some(format!(
-                                "Cannot rewind to prompt #{} — compaction checkpoint data is \
-                                 unavailable ({e}). Try rewinding to a prompt after the \
-                                 compaction point instead.",
-                                target_index,
-                            )),
-                        });
-                    }
-                }
-            } else {
-                // Standard rewind: truncate in-memory conversation. "Rewind
-                // to N" = restore state before prompt N ran, keeping 0..N-1;
-                // target 0 keeps only the session preamble.
-                let keep_count = conversation_truncate_for_prompt(&conversation, target_index);
-                conversation.truncate(keep_count);
-            }
+            let conversation = self
+                .chat_state_handle
+                .get_rewind_surface(target_index)
+                .await;
 
             // Write the truncated conversation back via the actor
-            // (handles both state update + persistence).
-            self.chat_state_handle.replace_conversation(conversation);
+            // only after the canonical Timeline replacement is durable.
+            self.chat_state_handle
+                .replace_conversation_for_rewind(conversation)
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to commit rewind Timeline: {error}"))?;
             // Use a snapshot to set the correct prompt_index and truncated prompt_texts.
             // The actor's TruncateToPromptIndex doesn't apply here because the
             // conversation was already truncated locally. Instead, snapshot + restore
@@ -462,12 +296,9 @@ impl SessionActor {
             if let Some(mut snap) = self.chat_state_handle.snapshot().await {
                 snap.prompt_index = target_index;
                 snap.prompt_texts.truncate(target_index);
-                // Cross-compaction rewind recomputes the marker (the rebuilt
-                // conversation may have dropped the summary); standard
-                // truncation keeps the existing marker.
-                let new_marker =
-                    replay_compaction_marker.unwrap_or(snap.last_compaction_prompt_index);
-                snap.last_compaction_prompt_index = new_marker;
+                // Rewind materializes the uncompressed Timeline branch, so no
+                // compaction summary remains active in the selected Surface.
+                snap.last_compaction_prompt_index = None;
                 self.chat_state_handle.restore_snapshot(snap);
             }
 
@@ -487,8 +318,7 @@ impl SessionActor {
                 );
             }
 
-            // Append a RewindMarker to updates.jsonl so the replay pipeline can
-            // handle timeline branching (updates.jsonl is append-only).
+            // UI replay keeps a branch marker as a derived display cache.
             self.persist_update_only(GrowSessionUpdate::RewindMarker {
                 target_prompt_index: target_index,
                 created_at: chrono::Utc::now().to_rfc3339(),
@@ -547,9 +377,8 @@ impl SessionActor {
     }
 
     /// Out-of-band history repair (`grow/session/repair`) for a resident
-    /// session: run `chat_state::compaction_utils::repair_history` inside
-    /// the chat-state actor, then flush persistence so `chat_history.jsonl`
-    /// is rewritten on disk before the caller sees success.
+    /// session: run the repair inside the chat-state actor and acknowledge
+    /// only after its canonical Timeline replacement is durable.
     ///
     /// Refused while a turn is in flight (in-flight tool calls legitimately
     /// await their results). The refusal is enforced inside the chat-state
@@ -566,7 +395,7 @@ impl SessionActor {
         // turn, and another session's turn end could clear it mid-turn).
         let turn_flag = self.session_turn_active.clone();
         if turn_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!(chat_state::commands::RepairHistoryBlocked);
+            anyhow::bail!(chat_state::RepairHistoryError::TurnActive);
         }
 
         let report = self
@@ -577,19 +406,6 @@ impl SessionActor {
             .map_err(anyhow::Error::new)?;
 
         if report.changed() && !dry_run {
-            // Flush barrier: success must mean the rewrite is on disk.
-            let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
-            if self
-                .notifications
-                .persistence_tx
-                .send(PersistenceMsg::FlushAndAck {
-                    respond_to: flush_tx,
-                })
-                .is_err()
-                || flush_rx.await.is_err()
-            {
-                anyhow::bail!("history repaired in memory but the persistence flush failed");
-            }
             tracing::warn!(
                 session_id = %self.session_info.id.0,
                 duplicates_removed = report.duplicates_removed,

@@ -182,7 +182,7 @@ impl ChatState {
     ///
     /// Repairs any dangling tool calls in the initial conversation. This handles
     /// the race condition where the process was killed mid-tool-execution and
-    /// `chat_history.jsonl` has an assistant message with tool call IDs that
+    /// the restored Timeline Surface has an assistant message with tool call IDs that
     /// lack matching `ToolResult` entries. Without this, the in-memory state
     /// would carry broken conversation history until the next `build_request`.
     pub fn new(mut conversation: Vec<ConversationItem>, sampling_config: SamplingConfig) -> Self {

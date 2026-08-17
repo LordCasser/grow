@@ -791,13 +791,19 @@ impl SessionActor {
     fn emit_event(&self, event: crate::session::events::Event) {
         self.events.emit(event);
     }
-    fn emit_turn_ended(
+    async fn emit_turn_ended(
         &self,
         outcome: crate::session::events::TurnOutcomeLabel,
         category: Option<crate::session::events::CancellationCategory>,
         context: Option<serde_json::Value>,
-    ) {
-        self.events.emit_turn_ended(outcome, category, context);
+    ) -> Result<(), acp::Error> {
+        self.events
+            .emit_turn_ended(outcome, category, context)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("turn terminal was not durably recorded: {error}"))
+            })
     }
     /// Current model ID for structured tracing span attributes. Reads from chat_state_handle
     /// so it always reflects the latest model override — no stale cached field.
@@ -963,48 +969,8 @@ fn save_prompt_context(session_info: &SessionInfo, prompt_context: &agent::Promp
     }
 }
 const SYSTEM_PROMPT_FILENAME: &str = "system_prompt.txt";
-/// Synchronously and atomically rewrite `{session_dir}/chat_history.jsonl`.
-///
-/// Serializes to a temp file then `rename`s over the target, matching the
-/// persistence actor's own crash-safety (a truncating in-place write can tear
-/// the file on crash / `ENOSPC`). Best-effort with a logged failure.
-///
-/// Callers use this for a *synchronous* on-disk snapshot at spawn / initialize /
-/// agent-rebuild: `chat_state_handle.replace_conversation` persists the same
-/// content, but only after two async actor hops, so a reload that races the
-/// first prompt could otherwise read the bare pre-enrichment template. A
-/// distinct temp suffix (`.sync.tmp`) avoids clobbering the persistence actor's
-/// own `chat_history.jsonl.tmp`; whichever atomic `rename` lands last wins and
-/// the content is identical, so the two writers can never produce a torn file.
-fn persist_chat_history_jsonl_sync(session_info: &SessionInfo, conversation: &[ConversationItem]) {
-    let dir = crate::session::persistence::session_dir(session_info);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(session_id = %session_info.id.0, ?e,
-            "persist_chat_history_jsonl_sync: failed to create session dir");
-        return;
-    }
-    let final_path = dir.join("chat_history.jsonl");
-    let tmp_path = dir.join("chat_history.jsonl.sync.tmp");
-    let result = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        let mut buf = Vec::new();
-        for item in conversation {
-            serde_json::to_writer(&mut buf, item)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            buf.push(b'\n');
-        }
-        std::fs::File::create(&tmp_path)?.write_all(&buf)?;
-        std::fs::rename(&tmp_path, &final_path)?;
-        Ok(())
-    })();
-    if let Err(e) = result {
-        tracing::warn!(session_id = %session_info.id.0, ?e,
-            "persist_chat_history_jsonl_sync: failed to persist chat_history.jsonl");
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-}
 /// Persist the exact rendered system prompt to `{session_dir}/system_prompt.txt`.
-/// Should match the first System entry in `chat_history.jsonl` modulo trailing
+/// Should match the current Timeline Surface's first System entry modulo trailing
 /// newlines (`canonical_system_prompt_eq`); a trailing-newline-only difference
 /// is benign, and this artifact is a convenience mirror, not the source of truth
 /// (the conversation head is).
@@ -1021,8 +987,7 @@ fn save_system_prompt(session_info: &SessionInfo, system_prompt: &str) {
 }
 /// Load the canonical system prompt from `{session_dir}/system_prompt.txt`.
 ///
-/// Returns `None` for sessions created before this artifact existed.
-/// Callers should fall back to extracting from `chat_history.jsonl` if absent.
+/// Returns `None` when the diagnostic artifact does not exist.
 #[expect(dead_code, reason = "API for future viewers/debug tools")]
 pub(crate) fn load_system_prompt(session_info: &SessionInfo) -> Option<String> {
     let dir = crate::session::persistence::session_dir(session_info);
@@ -1372,8 +1337,6 @@ mod laziness_detector_tests;
 #[path = "acp_session_tests/laziness/laziness_integration_tests.rs"]
 mod laziness_integration_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/load_user_prompts_tests.rs"]
-mod load_user_prompts_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/parallel_dispatch_tests.rs"]
 mod parallel_dispatch_tests;

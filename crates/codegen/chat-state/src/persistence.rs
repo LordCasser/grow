@@ -11,7 +11,6 @@ use sampling_types::ConversationItem;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::TimelineEvent;
-use crate::commands::{StrictAppendAck, StrictAppendError};
 
 /// Abstraction over chat-specific persistence operations.
 ///
@@ -25,25 +24,17 @@ pub trait ChatPersistence: Send + 'static {
     /// Append one immutable conversation fact to the durable timeline.
     fn persist_timeline_event(&mut self, event: &TimelineEvent);
 
+    /// Durably append one immutable fact and acknowledge its commit.
+    fn persist_timeline_event_and_ack(
+        &mut self,
+        event: &TimelineEvent,
+    ) -> oneshot::Receiver<io::Result<()>>;
+
     /// Persist a single conversation item (append to chat_history.jsonl).
     fn persist_message(&mut self, item: &ConversationItem);
 
-    /// Persist one working-directory switch generation and report commit status.
-    fn persist_working_directory_switch_and_ack(
-        &mut self,
-        item: &ConversationItem,
-    ) -> oneshot::Receiver<Result<StrictAppendAck, StrictAppendError>>;
-
     /// Replace the entire chat history (compaction / rewind).
     fn replace_history(&mut self, items: &[ConversationItem]);
-
-    /// Replace the entire chat history and acknowledge the durable commit.
-    /// Recovery paths that permanently discard unsupported content must not
-    /// update in-memory state or resample before this succeeds.
-    fn replace_history_and_ack(
-        &mut self,
-        items: &[ConversationItem],
-    ) -> oneshot::Receiver<io::Result<()>>;
 
     /// Flush pending writes to disk.
     fn flush(&mut self);
@@ -60,8 +51,6 @@ pub enum PersistenceRecord {
     Timeline(TimelineEvent),
     /// A single message was persisted.
     Message(ConversationItem),
-    /// A persistence-acknowledged switch append was requested.
-    AcknowledgedMessage(ConversationItem),
     /// The full history was replaced.
     ReplaceHistory(Vec<ConversationItem>),
     /// A flush was requested.
@@ -73,19 +62,13 @@ pub enum PersistenceRecord {
 /// the actor did. No locks, no atomics — just message passing.
 pub struct MockChatPersistence {
     tx: mpsc::UnboundedSender<PersistenceRecord>,
-    persistence_ack_tx:
-        Option<mpsc::UnboundedSender<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>>>,
-    history_replacement_ack_tx: Option<mpsc::UnboundedSender<oneshot::Sender<io::Result<()>>>>,
-    persisted_working_directory_switches: Vec<ConversationItem>,
+    timeline_ack_tx: Option<mpsc::UnboundedSender<oneshot::Sender<io::Result<()>>>>,
 }
 
 /// Receiver side of the mock. Held by the test to drain and inspect records.
 pub struct MockPersistenceReceiver {
     rx: mpsc::UnboundedReceiver<PersistenceRecord>,
-    persistence_ack_rx: Option<
-        mpsc::UnboundedReceiver<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>>,
-    >,
-    history_replacement_ack_rx: Option<mpsc::UnboundedReceiver<oneshot::Sender<io::Result<()>>>>,
+    timeline_ack_rx: Option<mpsc::UnboundedReceiver<oneshot::Sender<io::Result<()>>>>,
 }
 
 impl MockChatPersistence {
@@ -96,53 +79,27 @@ impl MockChatPersistence {
         (
             Self {
                 tx,
-                persistence_ack_tx: None,
-                history_replacement_ack_tx: None,
-                persisted_working_directory_switches: Vec::new(),
+                timeline_ack_tx: None,
             },
             MockPersistenceReceiver {
                 rx,
-                persistence_ack_rx: None,
-                history_replacement_ack_rx: None,
+                timeline_ack_rx: None,
             },
         )
     }
 
-    /// Create a mock whose persistence acknowledgement is test-controlled.
-    pub fn new_with_manual_persistence_ack() -> (Self, MockPersistenceReceiver) {
+    /// Create a mock whose durable Timeline acknowledgement is test-controlled.
+    pub fn new_with_manual_timeline_ack() -> (Self, MockPersistenceReceiver) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let (persistence_ack_tx, persistence_ack_rx) = mpsc::unbounded_channel();
+        let (timeline_ack_tx, timeline_ack_rx) = mpsc::unbounded_channel();
         (
             Self {
                 tx,
-                persistence_ack_tx: Some(persistence_ack_tx),
-                history_replacement_ack_tx: None,
-                persisted_working_directory_switches: Vec::new(),
+                timeline_ack_tx: Some(timeline_ack_tx),
             },
             MockPersistenceReceiver {
                 rx,
-                persistence_ack_rx: Some(persistence_ack_rx),
-                history_replacement_ack_rx: None,
-            },
-        )
-    }
-
-    /// Create a mock whose full-history replacement acknowledgement is
-    /// test-controlled.
-    pub fn new_with_manual_history_replacement_ack() -> (Self, MockPersistenceReceiver) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (history_replacement_ack_tx, history_replacement_ack_rx) = mpsc::unbounded_channel();
-        (
-            Self {
-                tx,
-                persistence_ack_tx: None,
-                history_replacement_ack_tx: Some(history_replacement_ack_tx),
-                persisted_working_directory_switches: Vec::new(),
-            },
-            MockPersistenceReceiver {
-                rx,
-                persistence_ack_rx: None,
-                history_replacement_ack_rx: Some(history_replacement_ack_rx),
+                timeline_ack_rx: Some(timeline_ack_rx),
             },
         )
     }
@@ -158,21 +115,8 @@ impl MockPersistenceReceiver {
         records
     }
 
-    /// Receive the next manual persistence acknowledgement sender.
-    pub async fn next_persistence_ack(
-        &mut self,
-    ) -> Option<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>> {
-        match &mut self.persistence_ack_rx {
-            Some(rx) => rx.recv().await,
-            None => None,
-        }
-    }
-
-    /// Receive the next manual full-history replacement acknowledgement.
-    pub async fn next_history_replacement_ack(
-        &mut self,
-    ) -> Option<oneshot::Sender<io::Result<()>>> {
-        match &mut self.history_replacement_ack_rx {
+    pub async fn next_timeline_ack(&mut self) -> Option<oneshot::Sender<io::Result<()>>> {
+        match &mut self.timeline_ack_rx {
             Some(rx) => rx.recv().await,
             None => None,
         }
@@ -195,67 +139,33 @@ impl ChatPersistence for MockChatPersistence {
         let _ = self.tx.send(PersistenceRecord::Timeline(event.clone()));
     }
 
-    fn persist_message(&mut self, item: &ConversationItem) {
-        let _ = self.tx.send(PersistenceRecord::Message(item.clone()));
-    }
-
-    fn persist_working_directory_switch_and_ack(
+    fn persist_timeline_event_and_ack(
         &mut self,
-        item: &ConversationItem,
-    ) -> oneshot::Receiver<Result<StrictAppendAck, StrictAppendError>> {
+        event: &TimelineEvent,
+    ) -> oneshot::Receiver<io::Result<()>> {
         let (reply, receiver) = oneshot::channel();
-        let sent = self
+        let result = self
             .tx
-            .send(PersistenceRecord::AcknowledgedMessage(item.clone()))
-            .map_err(|_| {
-                StrictAppendError::NotCommitted(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "mock persistence closed",
-                ))
-            });
-        if let Err(error) = sent {
+            .send(PersistenceRecord::Timeline(event.clone()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mock persistence closed"));
+        if let Err(error) = result {
             let _ = reply.send(Err(error));
-        } else if let Some(ack_tx) = &self.persistence_ack_tx {
+        } else if let Some(ack_tx) = &self.timeline_ack_tx {
             let _ = ack_tx.send(reply);
         } else {
-            let generation = item.working_directory_switch_generation();
-            let acknowledgement = self
-                .persisted_working_directory_switches
-                .iter()
-                .find(|persisted| persisted.working_directory_switch_generation() == generation)
-                .cloned()
-                .map_or(StrictAppendAck::Appended, StrictAppendAck::AlreadyPresent);
-            if matches!(&acknowledgement, StrictAppendAck::Appended) {
-                self.persisted_working_directory_switches.push(item.clone());
-            }
-            let _ = reply.send(Ok(acknowledgement));
+            let _ = reply.send(Ok(()));
         }
         receiver
+    }
+
+    fn persist_message(&mut self, item: &ConversationItem) {
+        let _ = self.tx.send(PersistenceRecord::Message(item.clone()));
     }
 
     fn replace_history(&mut self, items: &[ConversationItem]) {
         let _ = self
             .tx
             .send(PersistenceRecord::ReplaceHistory(items.to_vec()));
-    }
-
-    fn replace_history_and_ack(
-        &mut self,
-        items: &[ConversationItem],
-    ) -> oneshot::Receiver<io::Result<()>> {
-        let (reply, receiver) = oneshot::channel();
-        let result = self
-            .tx
-            .send(PersistenceRecord::ReplaceHistory(items.to_vec()))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mock persistence closed"));
-        if let Err(error) = result {
-            let _ = reply.send(Err(error));
-        } else if let Some(ack_tx) = &self.history_replacement_ack_tx {
-            let _ = ack_tx.send(reply);
-        } else {
-            let _ = reply.send(Ok(()));
-        }
-        receiver
     }
 
     fn flush(&mut self) {
@@ -272,24 +182,17 @@ pub struct NullChatPersistence;
 
 impl ChatPersistence for NullChatPersistence {
     fn persist_timeline_event(&mut self, _event: &TimelineEvent) {}
-    fn persist_message(&mut self, _item: &ConversationItem) {}
-    fn persist_working_directory_switch_and_ack(
+
+    fn persist_timeline_event_and_ack(
         &mut self,
-        _item: &ConversationItem,
-    ) -> oneshot::Receiver<Result<StrictAppendAck, StrictAppendError>> {
-        let (reply, receiver) = oneshot::channel();
-        let _ = reply.send(Ok(StrictAppendAck::Appended));
-        receiver
-    }
-    fn replace_history(&mut self, _items: &[ConversationItem]) {}
-    fn replace_history_and_ack(
-        &mut self,
-        _items: &[ConversationItem],
+        _event: &TimelineEvent,
     ) -> oneshot::Receiver<io::Result<()>> {
         let (reply, receiver) = oneshot::channel();
         let _ = reply.send(Ok(()));
         receiver
     }
+    fn persist_message(&mut self, _item: &ConversationItem) {}
+    fn replace_history(&mut self, _items: &[ConversationItem]) {}
     fn flush(&mut self) {}
 }
 
@@ -340,28 +243,6 @@ mod tests {
                 .iter()
                 .all(|r| matches!(r, PersistenceRecord::Flush))
         );
-    }
-
-    #[tokio::test]
-    async fn mock_persistence_deduplicates_working_directory_generation() {
-        let (mut mock, _rx) = MockChatPersistence::new();
-        let first = ConversationItem::working_directory_switch("authoritative", 4);
-        assert!(matches!(
-            mock.persist_working_directory_switch_and_ack(&first)
-                .await
-                .unwrap()
-                .unwrap(),
-            StrictAppendAck::Appended
-        ));
-        assert!(matches!(
-            mock.persist_working_directory_switch_and_ack(
-                &ConversationItem::working_directory_switch("retry", 4),
-            )
-            .await
-            .unwrap()
-            .unwrap(),
-            StrictAppendAck::AlreadyPresent(item) if item.text_content() == "authoritative"
-        ));
     }
 
     #[test]

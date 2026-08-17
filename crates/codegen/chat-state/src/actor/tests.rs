@@ -6,7 +6,6 @@ use std::time::Duration;
 use sampling_types::{ConversationItem, SamplingConfig};
 use tokio::sync::mpsc;
 
-use crate::StrictAppendAck;
 use crate::actor::ChatStateActor;
 use crate::events::ChatStateEvent;
 use crate::persistence::{MockChatPersistence, MockPersistenceReceiver, PersistenceRecord};
@@ -60,13 +59,8 @@ impl TestHarness {
         Self::with_persistence(items, config, mock, persistence_rx)
     }
 
-    fn with_manual_persistence_ack(items: Vec<ConversationItem>) -> Self {
-        let (mock, persistence_rx) = MockChatPersistence::new_with_manual_persistence_ack();
-        Self::with_persistence(items, test_config(), mock, persistence_rx)
-    }
-
-    fn with_manual_history_replacement_ack(items: Vec<ConversationItem>) -> Self {
-        let (mock, persistence_rx) = MockChatPersistence::new_with_manual_history_replacement_ack();
+    fn with_manual_timeline_ack(items: Vec<ConversationItem>) -> Self {
+        let (mock, persistence_rx) = MockChatPersistence::new_with_manual_timeline_ack();
         Self::with_persistence(items, test_config(), mock, persistence_rx)
     }
 
@@ -168,6 +162,7 @@ async fn restored_actor_replays_surface_and_continues_event_sequence() {
         event_tx,
         token,
     )
+    .await
     .unwrap();
 
     assert_eq!(handle.get_conversation().await[0].text_content(), "summary");
@@ -182,6 +177,46 @@ async fn restored_actor_replays_surface_and_continues_event_sequence() {
         panic!("expected timeline append, got {records:?}");
     };
     assert_eq!(event.seq, expected_seq);
+}
+
+#[tokio::test]
+async fn restored_actor_durably_repairs_dangling_tool_surface_before_launch() {
+    let timeline = crate::Timeline::from_seed(vec![ConversationItem::Assistant(
+        sampling_types::AssistantItem {
+            content: "".into(),
+            tool_calls: vec![sampling_types::ToolCall {
+                id: "dangling".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }],
+            model_id: Some("model".into()),
+            model_fingerprint: None,
+            reasoning_effort: None,
+        },
+    )])
+    .unwrap();
+    let (mock, mut persistence_rx) = MockChatPersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn_from_timeline_with_pruning(
+        timeline.events().to_vec(),
+        test_config(),
+        crate::PruningConfig::default(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let surface = handle.get_conversation().await;
+    assert_eq!(surface.len(), 2);
+    assert!(matches!(surface[1], ConversationItem::ToolResult(_)));
+    let recovery = persistence_rx
+        .drain()
+        .into_iter()
+        .filter(|record| matches!(record, PersistenceRecord::Timeline(_)))
+        .count();
+    assert_eq!(recovery, 2, "recovery intent and replacement must commit");
 }
 
 // ============================================================================
@@ -207,14 +242,14 @@ async fn push_user_message_appends_and_persists() {
 }
 
 #[tokio::test]
-async fn push_user_message_and_ack_waits_for_actor_acceptance() {
+async fn push_user_message_durably_waits_for_timeline_commit() {
     let mut h = TestHarness::new();
     let ack = h
         .handle
-        .push_user_message_and_ack(ConversationItem::user("hello"))
+        .push_user_message_durably(ConversationItem::user("hello"))
         .await;
 
-    assert!(ack.is_some());
+    assert!(ack.is_ok());
 
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 1);
@@ -228,253 +263,6 @@ async fn push_user_message_and_ack_waits_for_actor_acceptance() {
         ]
     ));
 }
-
-#[tokio::test]
-async fn strict_switch_append_preserves_prefix_and_deduplicates_generation() {
-    let prefix = vec![
-        ConversationItem::system("sys"),
-        ConversationItem::assistant("assistant"),
-        ConversationItem::tool_result("dangling", "must remain"),
-    ];
-    let prefix_json: Vec<Vec<u8>> = prefix
-        .iter()
-        .map(|item| serde_json::to_vec(item).unwrap())
-        .collect();
-    let mut h = TestHarness::with_conversation(prefix);
-    let reminder = ConversationItem::working_directory_switch("moved", 3);
-
-    assert!(matches!(
-        h.handle
-            .append_working_directory_switch_and_ack(
-                "moved".into(),
-                std::num::NonZeroU64::new(3).unwrap(),
-            )
-            .await
-            .unwrap(),
-        StrictAppendAck::Appended
-    ));
-    let conversation = h.handle.get_conversation().await;
-    assert_eq!(conversation.len(), 4);
-    for (actual, expected) in conversation.iter().zip(&prefix_json) {
-        assert_eq!(serde_json::to_vec(actual).unwrap(), *expected);
-    }
-    assert_eq!(
-        serde_json::to_vec(&conversation[3]).unwrap(),
-        serde_json::to_vec(&reminder).unwrap()
-    );
-    assert!(matches!(
-        h.drain_persistence().as_slice(),
-        [
-            PersistenceRecord::AcknowledgedMessage(_),
-            PersistenceRecord::Timeline(_)
-        ]
-    ));
-
-    assert!(matches!(
-        h.handle
-            .append_working_directory_switch_and_ack(
-                "different text".into(),
-                std::num::NonZeroU64::new(3).unwrap(),
-            )
-            .await
-            .unwrap(),
-        StrictAppendAck::AlreadyPresent(_)
-    ));
-    assert_eq!(h.handle.get_conversation().await.len(), 4);
-    assert!(matches!(
-        h.drain_persistence().as_slice(),
-        [PersistenceRecord::AcknowledgedMessage(_)]
-    ));
-
-    assert!(matches!(
-        h.handle
-            .append_working_directory_switch_and_ack(
-                "next move".into(),
-                std::num::NonZeroU64::new(4).unwrap(),
-            )
-            .await
-            .unwrap(),
-        StrictAppendAck::Appended
-    ));
-    assert_eq!(h.handle.get_conversation().await.len(), 5);
-}
-
-#[tokio::test]
-async fn strict_switch_append_ack_waits_for_persistence() {
-    let mut h = TestHarness::with_manual_persistence_ack(vec![]);
-    let handle = h.handle.clone();
-    let task = tokio::spawn(async move {
-        handle
-            .append_working_directory_switch_and_ack(
-                "moved".into(),
-                std::num::NonZeroU64::new(1).unwrap(),
-            )
-            .await
-    });
-    let persistence_ack = h
-        .persistence_rx
-        .next_persistence_ack()
-        .await
-        .expect("acknowledged append requested");
-    assert!(matches!(
-        h.drain_persistence().as_slice(),
-        [PersistenceRecord::AcknowledgedMessage(_)]
-    ));
-    assert!(!task.is_finished(), "actor ack must wait for persistence");
-    persistence_ack.send(Ok(StrictAppendAck::Appended)).unwrap();
-    assert!(matches!(
-        task.await.unwrap().unwrap(),
-        StrictAppendAck::Appended
-    ));
-}
-
-#[tokio::test]
-async fn committed_storage_result_converges_actor_memory() {
-    let mut h = TestHarness::with_manual_persistence_ack(vec![]);
-    let handle = h.handle.clone();
-    let task = tokio::spawn(async move {
-        handle
-            .append_working_directory_switch_and_ack(
-                "moved".into(),
-                std::num::NonZeroU64::new(2).unwrap(),
-            )
-            .await
-    });
-    let persistence_ack = h.persistence_rx.next_persistence_ack().await.unwrap();
-    persistence_ack
-        .send(Err(crate::StrictAppendError::Committed {
-            acknowledgement: StrictAppendAck::Appended,
-            source: std::io::Error::other("summary failed"),
-        }))
-        .unwrap();
-    let result = task.await.unwrap();
-    assert!(matches!(
-        result,
-        Err(crate::StrictAppendError::Committed {
-            acknowledgement: StrictAppendAck::Appended,
-            ..
-        })
-    ));
-    let conversation = h.handle.get_conversation().await;
-    assert_eq!(conversation.len(), 1);
-    assert_eq!(
-        conversation[0].working_directory_switch_generation(),
-        Some(2)
-    );
-}
-
-#[tokio::test]
-async fn already_present_replaces_stale_switch_in_actor_memory() {
-    let generation = NonZeroU64::new(3).unwrap();
-    let mut h =
-        TestHarness::with_manual_persistence_ack(vec![ConversationItem::working_directory_switch(
-            "stale",
-            generation.get(),
-        )]);
-    let handle = h.handle.clone();
-    let task = tokio::spawn(async move {
-        handle
-            .append_working_directory_switch_and_ack("candidate".into(), generation)
-            .await
-    });
-    h.persistence_rx
-        .next_persistence_ack()
-        .await
-        .unwrap()
-        .send(Ok(StrictAppendAck::AlreadyPresent(
-            ConversationItem::working_directory_switch("authoritative", generation.get()),
-        )))
-        .unwrap();
-
-    assert!(matches!(
-        task.await.unwrap().unwrap(),
-        StrictAppendAck::AlreadyPresent(item) if item.text_content() == "authoritative"
-    ));
-    let conversation = h.handle.get_conversation().await;
-    assert_eq!(conversation.len(), 1);
-    assert_eq!(conversation[0].text_content(), "authoritative");
-}
-
-#[tokio::test]
-async fn committed_already_present_replaces_retry_candidate_in_actor_memory() {
-    let generation = NonZeroU64::new(4).unwrap();
-    let mut h =
-        TestHarness::with_manual_persistence_ack(vec![ConversationItem::working_directory_switch(
-            "retry candidate",
-            generation.get(),
-        )]);
-    let handle = h.handle.clone();
-    let task = tokio::spawn(async move {
-        handle
-            .append_working_directory_switch_and_ack("another retry".into(), generation)
-            .await
-    });
-    h.persistence_rx
-        .next_persistence_ack()
-        .await
-        .unwrap()
-        .send(Err(crate::StrictAppendError::Committed {
-            acknowledgement: StrictAppendAck::AlreadyPresent(
-                ConversationItem::working_directory_switch("authoritative", generation.get()),
-            ),
-            source: std::io::Error::other("summary failed"),
-        }))
-        .unwrap();
-
-    assert!(matches!(
-        task.await.unwrap(),
-        Err(crate::StrictAppendError::Committed {
-            acknowledgement: StrictAppendAck::AlreadyPresent(item),
-            ..
-        }) if item.text_content() == "authoritative"
-    ));
-    let conversation = h.handle.get_conversation().await;
-    assert_eq!(conversation.len(), 1);
-    assert_eq!(conversation[0].text_content(), "authoritative");
-}
-
-#[tokio::test]
-async fn dropped_storage_reply_is_indeterminate_and_leaves_memory_unchanged() {
-    let mut h = TestHarness::with_manual_persistence_ack(vec![]);
-    let handle = h.handle.clone();
-    let task = tokio::spawn(async move {
-        handle
-            .append_working_directory_switch_and_ack(
-                "moved".into(),
-                std::num::NonZeroU64::new(2).unwrap(),
-            )
-            .await
-    });
-    drop(h.persistence_rx.next_persistence_ack().await.unwrap());
-    assert!(matches!(
-        task.await.unwrap(),
-        Err(crate::StrictAppendError::Indeterminate(_))
-    ));
-    assert!(h.handle.get_conversation().await.is_empty());
-}
-
-#[tokio::test]
-async fn uncommitted_storage_error_leaves_actor_memory_unchanged() {
-    let mut h = TestHarness::with_manual_persistence_ack(vec![]);
-    let handle = h.handle.clone();
-    let task = tokio::spawn(async move {
-        handle
-            .append_working_directory_switch_and_ack(
-                "moved".into(),
-                std::num::NonZeroU64::new(2).unwrap(),
-            )
-            .await
-    });
-    let persistence_ack = h.persistence_rx.next_persistence_ack().await.unwrap();
-    persistence_ack
-        .send(Err(crate::StrictAppendError::NotCommitted(
-            std::io::Error::other("append failed"),
-        )))
-        .unwrap();
-    assert!(task.await.unwrap().is_err());
-    assert!(h.handle.get_conversation().await.is_empty());
-}
-
 #[tokio::test]
 async fn push_assistant_response_appends_and_persists() {
     let mut h = TestHarness::new();
@@ -915,7 +703,7 @@ async fn failed_image_rewrite_persistence_leaves_memory_unchanged() {
         expected_image_count: groups[0].image_count(),
         replacement: Some("converted image".to_owned()),
     };
-    let mut h = TestHarness::with_manual_history_replacement_ack(vec![user.clone()]);
+    let mut h = TestHarness::with_manual_timeline_ack(vec![user.clone()]);
     let handle = h.handle.clone();
     let rewrite_future = async move {
         handle
@@ -925,9 +713,9 @@ async fn failed_image_rewrite_persistence_leaves_memory_unchanged() {
     let reject_persistence = async {
         let acknowledge = h
             .persistence_rx
-            .next_history_replacement_ack()
+            .next_timeline_ack()
             .await
-            .expect("history replacement acknowledgement");
+            .expect("Timeline acknowledgement");
         acknowledge
             .send(Err(std::io::Error::other("simulated disk failure")))
             .unwrap();
@@ -938,6 +726,64 @@ async fn failed_image_rewrite_persistence_leaves_memory_unchanged() {
         serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
         serde_json::to_vec(&vec![user]).unwrap(),
         "a failed durable replacement must not mutate the live conversation"
+    );
+}
+
+#[tokio::test]
+async fn failed_durable_rewind_leaves_surface_unchanged() {
+    let original = ConversationItem::user("original");
+    let mut h = TestHarness::with_manual_timeline_ack(vec![original.clone()]);
+    let handle = h.handle.clone();
+    let replace = async move {
+        handle
+            .replace_conversation_for_rewind(vec![ConversationItem::user("rewound")])
+            .await
+    };
+    let reject = async {
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("Timeline acknowledgement")
+            .send(Err(std::io::Error::other("simulated disk failure")))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(replace, reject);
+    assert!(matches!(
+        result,
+        Err(crate::TimelineWriteError::Persistence(_))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
+        serde_json::to_vec(&vec![original]).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn failed_durable_user_message_leaves_surface_unchanged() {
+    let original = ConversationItem::system("system");
+    let mut h = TestHarness::with_manual_timeline_ack(vec![original.clone()]);
+    let handle = h.handle.clone();
+    let push = async move {
+        handle
+            .push_user_message_durably(ConversationItem::user("not committed"))
+            .await
+    };
+    let reject = async {
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("Timeline acknowledgement")
+            .send(Err(std::io::Error::other("simulated disk failure")))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(push, reject);
+    assert!(matches!(
+        result,
+        Err(crate::TimelineWriteError::Persistence(_))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
+        serde_json::to_vec(&vec![original]).unwrap()
     );
 }
 
@@ -2163,7 +2009,7 @@ async fn parallel_tool_calls_with_rejection_persists_all_items() {
 ///   1. Model emits 3 parallel tool calls (single assistant message)
 ///   2. Tool #1 executes and its result is persisted
 ///   3. User cancels (Ctrl+C) or app crashes BEFORE tool #2/#3 results are pushed
-///   4. On session reload, chat_history.jsonl has the assistant (3 calls) + only 1 result
+///   4. On session reload, Timeline has the assistant (3 calls) + only 1 result
 ///
 /// `ChatState::new` now repairs dangling tool calls eagerly at initialization,
 /// so the actor's in-memory conversation is clean from the start — not just the
@@ -2172,7 +2018,7 @@ async fn parallel_tool_calls_with_rejection_persists_all_items() {
 async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
     use sampling_types::ToolCall;
 
-    // Simulate what chat_history.jsonl looks like after a crash:
+    // Simulate what the Timeline Surface looks like after a crash:
     // The assistant message (with 3 tool calls) was persisted, and only
     // tool #1's result was persisted before the process died.
     let crashed_conversation = vec![
@@ -4544,7 +4390,10 @@ async fn repair_history_command_refused_while_turn_active() {
         .repair_history(false, Some(flag.clone()))
         .await
         .unwrap();
-    assert!(matches!(result, Err(crate::commands::RepairHistoryBlocked)));
+    assert!(matches!(
+        result,
+        Err(crate::commands::RepairHistoryError::TurnActive)
+    ));
     // Nothing was mutated or persisted.
     assert_eq!(h.handle.get_conversation().await.len(), 2);
     assert!(h.drain_persistence().is_empty());
@@ -4558,6 +4407,42 @@ async fn repair_history_command_refused_while_turn_active() {
         .unwrap()
         .unwrap();
     assert_eq!(report.stripped_tool_result_ids, vec!["call_ORPHAN"]);
+}
+
+#[tokio::test]
+async fn repair_history_does_not_mutate_when_timeline_commit_fails() {
+    let corrupted = vec![
+        ConversationItem::user("prompt"),
+        ConversationItem::tool_result("call_ORPHAN", "orphaned"),
+    ];
+    let mut h = TestHarness::with_manual_timeline_ack(corrupted.clone());
+    let handle = h.handle.clone();
+    let repair = async move { handle.repair_history(false, None).await.unwrap() };
+    let reject = async {
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("Timeline acknowledgement")
+            .send(Err(std::io::Error::other("simulated disk failure")))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(repair, reject);
+    assert!(matches!(
+        result,
+        Err(crate::RepairHistoryError::Timeline(
+            crate::TimelineWriteError::Persistence(_)
+        ))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
+        serde_json::to_vec(&corrupted).unwrap()
+    );
+    assert!(
+        !h.drain_persistence()
+            .iter()
+            .any(|record| matches!(record, PersistenceRecord::ReplaceHistory(_))),
+        "derived cache must not advance after a failed Timeline commit"
+    );
 }
 
 // ============================================================================
@@ -4639,8 +4524,8 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
 
     assert_eq!(h.handle.get_total_tokens().await, report.tokens_after);
 
-    // Persisted as a full-history replacement (the `chat_history.jsonl`
-    // snapshot path shared with compaction); no per-message appends.
+    // Persisted as a Timeline replacement plus a refreshed projection cache;
+    // no per-message appends.
     let records = h.drain_persistence();
     assert!(matches!(
         records.first(),

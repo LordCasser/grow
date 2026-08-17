@@ -10,12 +10,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::{
     ChatStateCommand, ImageRewrite, ImageRewriteReport, PruneError, PruneReport,
-    RepairHistoryBlocked, StrictAppendAck, StrictAppendError,
+    RepairHistoryError, TimelineWriteError,
 };
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
     TurnCapture,
 };
+use crate::{TimelineEventKind, TrajectorySnapshot};
 
 /// Handle to communicate with ChatStateActor.
 /// This is cheap to clone and can be shared across tasks.
@@ -44,36 +45,33 @@ impl ChatStateHandle {
         let _ = self.cmd_tx.send(ChatStateCommand::PushUserMessage { item });
     }
 
-    /// Push a user message and await acknowledgement that the chat-state actor
-    /// has accepted and processed it.
-    pub async fn push_user_message_and_ack(&self, item: ConversationItem) -> Option<()> {
-        self.query("PushUserMessageAndAck", |reply| {
-            ChatStateCommand::PushUserMessageAndAck { item, reply }
-        })
-        .await
+    pub fn record_timeline_event(&self, kind: TimelineEventKind) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::RecordTimelineEvent { kind });
     }
 
-    /// Strictly append one working-directory switch and await persistence.
-    /// A matching generation returns `AlreadyPresent`; indeterminate errors must be retried.
-    pub async fn append_working_directory_switch_and_ack(
+    pub async fn record_timeline_event_durably(
         &self,
-        content: String,
-        cwd_generation: std::num::NonZeroU64,
-    ) -> Result<StrictAppendAck, StrictAppendError> {
-        self.query("AppendWorkingDirectorySwitchAndAck", |reply| {
-            ChatStateCommand::AppendWorkingDirectorySwitchAndAck {
-                content,
-                cwd_generation,
-                reply,
-            }
+        kind: TimelineEventKind,
+    ) -> Result<(), TimelineWriteError> {
+        self.query("RecordTimelineEventDurably", |reply| {
+            ChatStateCommand::RecordTimelineEventDurably { kind, reply }
         })
         .await
-        .unwrap_or_else(|| {
-            Err(StrictAppendError::Indeterminate(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "chat-state actor unavailable; retry by generation",
-            )))
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
+    /// Push a user message and return only after its Timeline event is durable.
+    pub async fn push_user_message_durably(
+        &self,
+        item: ConversationItem,
+    ) -> Result<(), TimelineWriteError> {
+        self.query("PushUserMessageDurably", |reply| {
+            ChatStateCommand::PushUserMessageDurably { item, reply }
         })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
     /// Push a user message with an explicit dangling-repair reason.
@@ -196,20 +194,34 @@ impl ChatStateHandle {
 
     /// Replace conversation history.
     pub fn replace_conversation(&self, items: Vec<ConversationItem>) {
-        self.send_replace(items, false);
+        self.send_replace(items, crate::MessageCause::SessionRestore);
     }
 
     /// Replace conversation history for compaction.
     /// Sets `compaction_occurred` on the active turn capture.
     pub fn replace_conversation_for_compaction(&self, items: Vec<ConversationItem>) {
-        self.send_replace(items, true);
+        self.send_replace(items, crate::MessageCause::Compaction);
     }
 
-    fn send_replace(&self, items: Vec<ConversationItem>, is_compaction: bool) {
-        let _ = self.cmd_tx.send(ChatStateCommand::ReplaceConversation {
-            items,
-            is_compaction,
-        });
+    pub async fn replace_conversation_for_rewind(
+        &self,
+        items: Vec<ConversationItem>,
+    ) -> Result<(), TimelineWriteError> {
+        self.query("ReplaceConversationDurably", |reply| {
+            ChatStateCommand::ReplaceConversationDurably {
+                items,
+                cause: crate::MessageCause::Rewind,
+                reply,
+            }
+        })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
+    }
+
+    fn send_replace(&self, items: Vec<ConversationItem>, cause: crate::MessageCause) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::ReplaceConversation { items, cause });
     }
 
     /// Atomically rewrite all canonical image groups and await the persisted
@@ -256,7 +268,7 @@ impl ChatStateHandle {
         &self,
         dry_run: bool,
         turn_active: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Option<Result<crate::compaction_utils::HistoryRepairReport, RepairHistoryBlocked>> {
+    ) -> Option<Result<crate::compaction_utils::HistoryRepairReport, RepairHistoryError>> {
         self.query("RepairHistory", |reply| ChatStateCommand::RepairHistory {
             dry_run,
             turn_active,
@@ -370,6 +382,24 @@ impl ChatStateHandle {
     pub async fn get_conversation(&self) -> Vec<ConversationItem> {
         self.query("GetConversation", |reply| {
             ChatStateCommand::GetConversation { reply }
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    pub async fn trajectory(&self) -> Option<TrajectorySnapshot> {
+        self.query("GetTrajectory", |reply| ChatStateCommand::GetTrajectory {
+            reply,
+        })
+        .await
+    }
+
+    pub async fn get_rewind_surface(&self, target_prompt_index: usize) -> Vec<ConversationItem> {
+        self.query("GetRewindSurface", |reply| {
+            ChatStateCommand::GetRewindSurface {
+                target_prompt_index,
+                reply,
+            }
         })
         .await
         .unwrap_or_default()

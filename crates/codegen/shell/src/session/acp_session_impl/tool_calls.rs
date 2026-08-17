@@ -733,7 +733,6 @@ impl SessionActor {
             match self.prepare_tool_call(call, deferred_followups).await? {
                 Ok(prepared) => approved.push(prepared),
                 Err(tool_loop) => {
-                    self.events.tool_finished();
                     if let Some((server, tool)) =
                         crate::session::mcp_servers::parse_mcp_tool_name(&call_name)
                     {
@@ -784,9 +783,31 @@ impl SessionActor {
                     format!("{reason}: `{}` was not executed", prepared.tool_name),
                 )
                 .await?;
-                self.events.tool_finished();
             }
             return Ok(());
+        }
+
+        // Tool execution is a fail-closed boundary. Persist every approved
+        // start before any dispatch future is allowed to poll.
+        for prepared in &mut approved {
+            if prepared.call_id.is_empty() {
+                prepared.call_id = format!("synthetic-{}", uuid::Uuid::now_v7());
+            }
+        }
+        for prepared in &approved {
+            if let Err(error) = self
+                .events
+                .tool_started(
+                    prepared.tool_name.clone(),
+                    prepared.call_id.clone(),
+                    Some(prepared.parsed_args.clone()),
+                )
+                .await
+            {
+                self.events.cancel_active_tool();
+                return Err(acp::Error::internal_error()
+                    .data(format!("tool start was not durably recorded: {error}")));
+            }
         }
         let write_paths: std::collections::HashSet<String> = approved
             .iter()
@@ -960,21 +981,7 @@ impl SessionActor {
                 .take()
                 .expect("dispatch index should match an approved slot exactly once");
             self.signals_handle().record_tool_call(&prepared.tool_name);
-            let tool_call_id = if prepared.call_id.is_empty() {
-                tracing::warn!(
-                    tool = %prepared.tool_name,
-                    batch_idx = idx,
-                    "tool call id empty; synthesizing join key"
-                );
-                format!("missing-call-id-{idx}")
-            } else {
-                prepared.call_id.clone()
-            };
-            self.events.tool_started(
-                prepared.tool_name.clone(),
-                tool_call_id.clone(),
-                duration_ms,
-            );
+            let tool_call_id = prepared.call_id.clone();
             let mut post_tool_use_result: Option<serde_json::Value> = None;
             let tool_result_size_bytes = match &result {
                 Ok(tool_result) => tool_result.prompt_text.len() as i64,
@@ -1117,7 +1124,6 @@ impl SessionActor {
                 )
                 .await;
             }
-            self.events.tool_finished();
             let tool_outcome = match &tool_loop {
                 _ if tool_failed => crate::session::events::ToolOutcome::Error,
                 ToolLoop::Continue => crate::session::events::ToolOutcome::Success,
@@ -2737,8 +2743,8 @@ impl SessionActor {
     ///
     /// Called from `SessionCommand::Shutdown` as a defensive backstop
     /// so a synthetic prompt that slipped past the per-tool-result
-    /// sweep cannot be flushed to `chat_history.jsonl` after the actor
-    /// returns. Real user inputs are preserved.
+    /// sweep cannot be accepted into Timeline after the actor returns. Real
+    /// user inputs are preserved.
     pub(super) async fn drop_pending_synthetic_items(&self) {
         let mut state = self.state.lock().await;
         let mut kept = VecDeque::with_capacity(state.pending_inputs.len());
@@ -3110,8 +3116,11 @@ impl SessionActor {
             SamplingEvent::StreamStarted { timestamp_ms, .. } => {
                 self.chat_state_handle.record_stream_start(timestamp_ms);
             }
-            SamplingEvent::FirstToken { .. } => {
-                self.emit_event(crate::session::events::Event::FirstToken);
+            SamplingEvent::FirstToken { request_id } => {
+                self.events
+                    .request_event(chat_state::RequestEvent::FirstToken {
+                        id: request_id.as_str().to_string(),
+                    });
             }
             SamplingEvent::ChannelToken {
                 channel,
@@ -3177,8 +3186,23 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Completed {
-                response, metrics, ..
+                request_id,
+                response,
+                metrics,
             } => {
+                let usage = response.usage.as_ref();
+                self.events.request_completed(
+                    request_id.as_str(),
+                    metrics.time_to_first_token_ms,
+                    chat_state::RequestUsage {
+                        input_tokens: usage.map(|usage| u64::from(usage.prompt_tokens)),
+                        output_tokens: usage.map(|usage| u64::from(usage.completion_tokens)),
+                        cache_read_tokens: usage.map(|usage| u64::from(usage.cached_prompt_tokens)),
+                        cache_write_tokens: usage
+                            .map(|usage| u64::from(usage.cache_creation_prompt_tokens)),
+                    },
+                    response.items.len(),
+                );
                 if let Some(tx) = self.turn_stream_drained.lock().take() {
                     let _ = tx.send(());
                 }
@@ -3216,6 +3240,13 @@ impl SessionActor {
                 doom_loop_triggers,
                 doom_loop_aborted_at_chunk,
             } => {
+                self.events
+                    .request_event(chat_state::RequestEvent::Retrying {
+                        id: request_id.as_str().to_string(),
+                        attempt,
+                        max_retries,
+                        reason: crate::util::truncate(&reason, 500).to_string(),
+                    });
                 if kind == sampler::SamplingErrorKind::DoomLoopDetected {
                     let triggers = doom_loop_triggers.unwrap_or_default();
                     {
@@ -3247,6 +3278,16 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Failed { request_id, error } => {
+                let timeline_error = crate::util::truncate(&error.message, 500).to_string();
+                self.events.request_failed(
+                    request_id.as_str(),
+                    error.kind.as_str(),
+                    &timeline_error,
+                    error.is_retryable,
+                );
+                if let Some(tx) = self.turn_stream_drained.lock().take() {
+                    let _ = tx.send(());
+                }
                 if error.message == "request cancelled"
                     && self.goal_loop_active()
                     && !self.pending_interjections.is_empty()

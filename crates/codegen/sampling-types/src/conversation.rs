@@ -37,7 +37,7 @@ pub enum ConversationItem {
     /// (currently code interpreter). These are NOT
     /// executed by the client — the server already ran them and fed
     /// results into the model's context. Stored so they can be:
-    /// 1. Persisted to chat_history.jsonl for session replay/fork
+    /// 1. Persisted as canonical Timeline message facts for resume/fork
     /// 2. Sent back to the Responses API as input items for context continuity
     /// 3. Rendered by the pager (search queries, sources, etc.)
     BackendToolCall(BackendToolCallItem),
@@ -1698,152 +1698,6 @@ pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, te
     );
 }
 
-/// Reconstruct sibling `Reasoning` + `BackendToolCall` items from a
-/// legacy chat-history row's raw JSON.
-///
-/// Legacy sessions stored reasoning either inline on the assistant
-/// item (`AssistantItem.reasoning: Option<ReasoningContent>`) or, for
-/// earlier backend-search sessions, in `AssistantItem.raw_output:
-/// Option<Vec<serde_json::Value>>` (the full ordered Responses-API output
-/// list including N parallel `tco_*` blobs). In the current format those fields no
-/// longer exist on `AssistantItem`, so serde silently drops them on
-/// deserialize. This function recovers them as sibling
-/// `ConversationItem::Reasoning(_)` / `BackendToolCall(_)` items that
-/// should be inserted immediately *before* the resulting assistant in the
-/// loaded conversation — matching the order
-/// `response_to_conversation_items` would emit if the new binary had
-/// captured the original response.
-///
-/// Returns an empty `Vec` for non-assistant rows, already-current-format
-/// rows, and rows with no recoverable reasoning data.
-///
-/// ## Dedup with sibling `BackendToolCall` rows
-///
-/// `BackendToolCall` was already a sibling variant in legacy rows, so the
-/// same web-search / x-search / code-interpreter call can appear *both*
-/// as a sibling line *and* inside the following assistant's
-/// `raw_output`. The caller threads `sibling_btc_ids_seen` across calls
-/// (updating it when it sees a `BackendToolCall` row in the JSONL stream)
-/// so we don't double-emit. We also write any newly-emitted ids back
-/// into the set so subsequent assistants don't re-emit.
-///
-/// ## Lossless fields preserved
-///
-/// `raw_output` path: the entry is the literal `rs::OutputItem` JSON, so
-/// we round-trip it through `serde_json::from_value::<rs::OutputItem>`.
-/// `id`, `summary`, `content`, `encrypted_content`, `status` all survive.
-///
-/// Singular `reasoning` path: builds a synthetic `rs::ReasoningItem`
-/// from the legacy `ReasoningContent { text, encrypted, id }`. `id` is
-/// preserved when present; Anthropic Thinking blocks never carried one
-/// ([stream/messages.rs:340](crates/codegen/sampler/src/stream/messages.rs))
-/// so the synthesized id is the empty string in that case.
-///
-/// v0 `ChatRequestMessage` path: top-level `reasoning_content: String`
-/// becomes a single `SummaryText`-only sibling. No id / encrypted.
-pub fn upgrade_legacy_reasoning(
-    raw: &serde_json::Value,
-    sibling_btc_ids_seen: &mut std::collections::HashSet<String>,
-) -> Vec<ConversationItem> {
-    let mut siblings: Vec<ConversationItem> = Vec::new();
-    let Some(obj) = raw.as_object() else {
-        return siblings;
-    };
-
-    // v1 assistant: type == "assistant"
-    let is_v1_assistant = obj.get("type").and_then(|t| t.as_str()) == Some("assistant");
-    // v0 assistant: role == "assistant" with top-level reasoning_content
-    let is_v0_assistant = obj.get("role").and_then(|r| r.as_str()) == Some("assistant");
-
-    if !is_v1_assistant && !is_v0_assistant {
-        return siblings;
-    }
-
-    // Path A — v1 with `raw_output` (backend-search era). Expand each entry
-    // as `rs::OutputItem` and lift Reasoning / backend-tool items to
-    // siblings. `Message` / `FunctionCall` are already on the assistant
-    // row (content / tool_calls), so skip them.
-    if let Some(raw_output) = obj.get("raw_output").and_then(|v| v.as_array()) {
-        for entry in raw_output {
-            let Ok(item) = serde_json::from_value::<rs::OutputItem>(entry.clone()) else {
-                continue;
-            };
-            match item {
-                rs::OutputItem::Reasoning(r) => {
-                    siblings.push(ConversationItem::Reasoning(r));
-                }
-                rs::OutputItem::CodeInterpreterCall(ci) => {
-                    if sibling_btc_ids_seen.insert(ci.id.clone()) {
-                        siblings.push(ConversationItem::BackendToolCall(BackendToolCallItem {
-                            kind: BackendToolKind::CodeInterpreter(ci),
-                        }));
-                    }
-                }
-                _ => {}
-            }
-        }
-        // raw_output is the most fidelitous source; if it was present we
-        // ignore singular `reasoning` (the two are mutually exclusive in
-        // practice and raw_output is the superset).
-        return siblings;
-    }
-
-    // Path B — v1 with singular `reasoning: ReasoningContent` (earlier
-    // clients or chat-completions written as v1).
-    if is_v1_assistant && let Some(reasoning) = obj.get("reasoning").and_then(|r| r.as_object()) {
-        let text = reasoning.get("text").and_then(|t| t.as_str());
-        let encrypted = reasoning.get("encrypted").and_then(|t| t.as_str());
-        let id = reasoning
-            .get("id")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-        if let Some(item) = build_synthetic_reasoning(id, text, encrypted) {
-            siblings.push(ConversationItem::Reasoning(item));
-        }
-        return siblings;
-    }
-
-    // Path C — v0 `ChatRequestMessage` with top-level `reasoning_content`.
-    if is_v0_assistant
-        && let Some(rc) = obj.get("reasoning_content").and_then(|t| t.as_str())
-        && !rc.is_empty()
-        && let Some(item) = build_synthetic_reasoning(String::new(), Some(rc), None)
-    {
-        siblings.push(ConversationItem::Reasoning(item));
-    }
-
-    siblings
-}
-
-/// Build a `rs::ReasoningItem` from legacy text / encrypted strings.
-/// Returns `None` when there's nothing to preserve.
-fn build_synthetic_reasoning(
-    id: String,
-    text: Option<&str>,
-    encrypted: Option<&str>,
-) -> Option<rs::ReasoningItem> {
-    let text = text.filter(|t| !t.is_empty());
-    let encrypted = encrypted.filter(|e| !e.is_empty());
-    if text.is_none() && encrypted.is_none() {
-        return None;
-    }
-    let summary = match text {
-        Some(t) => vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-            text: t.to_string(),
-        })],
-        None => Vec::new(),
-    };
-    Some(rs::ReasoningItem {
-        // async-openai >= 0.41: `id` is `Option<String>`; keep the previous
-        // always-present-empty wire format.
-        id: Some(id),
-        summary,
-        content: None,
-        encrypted_content: encrypted.map(String::from),
-        status: None,
-    })
-}
 
 impl UserItem {
     /// Add an image to this user message
@@ -3035,6 +2889,9 @@ pub enum DanglingToolCallReason {
     ///
     /// Default fallback when no more specific reason is plumbed through.
     UserCancelled,
+    /// The process stopped after the assistant declared the call but before a
+    /// result fact was committed.
+    ProcessInterrupted,
     /// Harness halted the turn (internal error, policy guard, etc.).
     ///
     /// `class` is a stable taxonomy tag used by metrics and the synthetic
@@ -3168,6 +3025,9 @@ fn synthetic_dangling_result_text(name: &str, reason: DanglingToolCallReason) ->
         DanglingToolCallReason::UserCancelled => {
             format!("Tool execution was cancelled by the user (tool `{name}` was not executed).")
         }
+        DanglingToolCallReason::ProcessInterrupted => format!(
+            "Tool execution was interrupted before a result was recorded (tool `{name}` may not have started).",
+        ),
         DanglingToolCallReason::HarnessHalted { class } => format!(
             "Tool execution was halted by the harness ({class}); the tool `{name}` was not executed.",
         ),
@@ -9122,191 +8982,6 @@ mod tests {
             msgs[1].reasoning_content.as_deref(),
             None,
             "reasoning separated from the assistant by a user message is dropped"
-        );
-    }
-
-    // ========================================================================
-    // upgrade_legacy_reasoning — legacy in-memory reconstruction
-    // ========================================================================
-    //
-    // Three legacy on-disk shapes that the on-read upgrader must lift to
-    // sibling Reasoning / BackendToolCall items:
-    //
-    //   1. v1 assistant with `raw_output: Vec<OutputItem>` (backend-search era)
-    //   2. v1 assistant with singular `reasoning: ReasoningContent`
-    //      (earlier grow-build / chat-completions written as v1)
-    //   3. v0 `ChatRequestMessage` with top-level `reasoning_content`
-    //
-    // Idempotent (current-format rows produce zero siblings) — verified by
-    // `upgrade_is_idempotent_on_post_pr_rows`.
-
-    #[test]
-    fn upgrade_legacy_reasoning_singular_grow_build_shape() {
-        // Synthetic fixture (truncated text + encrypted stub)
-        // (truncated text + encrypted for readability). The assistant row
-        // carries `reasoning: { text, encrypted, id }` inline — the
-        // earlier shape.
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "Web search results for cats and dogs...",
-            "reasoning": {
-                "text": "The web search results for cats and dogs are mostly about",
-                "encrypted": "bIfXFNBiP8EI8F7pkKC1tgbYjvVuIctMAlCUGMii",
-                "id": "rs_00000000-0000-4000-8000-000000000001"
-            },
-            "model_id": "grow-build",
-            "model_fingerprint": "fp_test000000000001"
-        });
-        let mut seen = std::collections::HashSet::new();
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        assert_eq!(siblings.len(), 1, "exactly one sibling Reasoning emitted");
-        let ConversationItem::Reasoning(r) = &siblings[0] else {
-            panic!("expected Reasoning sibling, got {:?}", siblings[0]);
-        };
-        assert_eq!(
-            r.id.as_deref(),
-            Some("rs_00000000-0000-4000-8000-000000000001")
-        );
-        assert_eq!(r.summary.len(), 1);
-        let rs::SummaryPart::SummaryText(s) = &r.summary[0];
-        assert_eq!(
-            s.text,
-            "The web search results for cats and dogs are mostly about"
-        );
-        assert_eq!(
-            r.encrypted_content.as_deref(),
-            Some("bIfXFNBiP8EI8F7pkKC1tgbYjvVuIctMAlCUGMii")
-        );
-    }
-
-    #[test]
-    fn upgrade_legacy_reasoning_singular_anthropic_no_id() {
-        // Anthropic streaming sets id = "" (see stream/messages.rs:340).
-        // The upgrader must still emit a sibling carrying text + signature.
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "answer",
-            "reasoning": {
-                "text": "Let me think about this...",
-                "encrypted": "anthropic-signature-bytes-here",
-                "id": ""
-            },
-            "model_id": "messages-compatible-model"
-        });
-        let mut seen = std::collections::HashSet::new();
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        assert_eq!(siblings.len(), 1);
-        let ConversationItem::Reasoning(r) = &siblings[0] else {
-            panic!("expected Reasoning sibling");
-        };
-        assert_eq!(r.id.as_deref(), Some(""));
-        assert_eq!(
-            r.encrypted_content.as_deref(),
-            Some("anthropic-signature-bytes-here")
-        );
-    }
-
-    #[test]
-    fn upgrade_legacy_reasoning_singular_chat_completions_text_only() {
-        // Chat-completions has only text (no encrypted, no id).
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "answer",
-            "reasoning": {"text": "step-by-step plain reasoning"}
-        });
-        let mut seen = std::collections::HashSet::new();
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        assert_eq!(siblings.len(), 1);
-        let ConversationItem::Reasoning(r) = &siblings[0] else {
-            panic!("expected Reasoning sibling");
-        };
-        assert_eq!(r.id.as_deref(), Some(""));
-        assert!(r.encrypted_content.is_none());
-        let rs::SummaryPart::SummaryText(s) = &r.summary[0];
-        assert_eq!(s.text, "step-by-step plain reasoning");
-    }
-
-    #[test]
-    fn upgrade_legacy_reasoning_v0_chat_request_message_shape() {
-        // v0 on disk: top-level role + reasoning_content.
-        let raw = serde_json::json!({
-            "role": "assistant",
-            "content": "v0 answer",
-            "reasoning_content": "v0-style plain text reasoning"
-        });
-        let mut seen = std::collections::HashSet::new();
-        let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        assert_eq!(siblings.len(), 1);
-        let ConversationItem::Reasoning(r) = &siblings[0] else {
-            panic!("expected Reasoning sibling");
-        };
-        let rs::SummaryPart::SummaryText(s) = &r.summary[0];
-        assert_eq!(s.text, "v0-style plain text reasoning");
-    }
-
-    #[test]
-    fn upgrade_is_idempotent_on_post_pr_rows() {
-        // Current-format assistant has neither `reasoning` nor `raw_output`;
-        // upgrader must produce zero siblings (so re-running the load
-        // path doesn't accumulate duplicates).
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "answer",
-            "model_id": "grow-build"
-        });
-        let mut seen = std::collections::HashSet::new();
-        assert!(upgrade_legacy_reasoning(&raw, &mut seen).is_empty());
-
-        // Standalone sibling rows are also no-ops.
-        let r = serde_json::json!({"type":"reasoning","id":"rs_1","summary":[]});
-        assert!(upgrade_legacy_reasoning(&r, &mut seen).is_empty());
-
-        let u = serde_json::json!({"type":"user","content":[{"type":"text","text":"hi"}]});
-        assert!(upgrade_legacy_reasoning(&u, &mut seen).is_empty());
-
-        let s = serde_json::json!({"type":"system","content":"prompt"});
-        assert!(upgrade_legacy_reasoning(&s, &mut seen).is_empty());
-    }
-
-    #[test]
-    fn upgrade_skips_assistant_with_empty_reasoning() {
-        // Assistant with `reasoning: {}` (no text / encrypted / id) — no
-        // sibling should be emitted; there's nothing to preserve.
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "answer",
-            "reasoning": {}
-        });
-        let mut seen = std::collections::HashSet::new();
-        assert!(upgrade_legacy_reasoning(&raw, &mut seen).is_empty());
-    }
-
-    #[test]
-    fn upgrade_then_fold_through_conversation_to_chat_messages() {
-        // End-to-end: lift legacy `reasoning` to a sibling, then run the
-        // chat-completions wire path. Reasoning must land on the next
-        // assistant's `reasoning_content`. This mirrors what the real
-        // load-then-replay flow does for a legacy session.
-        let raw = serde_json::json!({
-            "type": "assistant",
-            "content": "the answer",
-            "reasoning": {"text": "step-by-step", "id": "rs_x"}
-        });
-        let mut seen = std::collections::HashSet::new();
-        let mut siblings = upgrade_legacy_reasoning(&raw, &mut seen);
-        // Append the assistant (post-strip) by re-deserializing the same
-        // raw value as the new AssistantItem (which silently ignores
-        // `reasoning`).
-        let assistant: ConversationItem = serde_json::from_value(raw).unwrap();
-        siblings.push(assistant);
-
-        let msgs = conversation_to_chat_messages(siblings);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, Role::Assistant);
-        assert_eq!(
-            msgs[0].reasoning_content.as_deref(),
-            Some("step-by-step"),
-            "reconstructed sibling folded onto assistant.reasoning_content"
         );
     }
 

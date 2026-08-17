@@ -32,7 +32,7 @@ use tools::implementations::grow_build::bash::BashTool;
 use tools::registry::types::ToolConfig;
 use workspace::permission::{ClientType, PermissionEvent, spawn_permission_manager};
 
-use super::support::{create_test_actor_ex, test_agent_with_tools};
+use super::support::{begin_test_causal_turn, create_test_actor_ex, test_agent_with_tools};
 use super::{PersistenceMsg, ReplayBuffer, SessionActor, SessionEvent, ToolLoop};
 
 /// Subagent session id used by every test in this file.
@@ -201,6 +201,7 @@ async fn make_subagent_fixture_with_replies(
             None,
         )
         .expect("bind_local_session must succeed");
+    begin_test_causal_turn(&actor);
 
     (actor, event_rx, log, permission_events)
 }

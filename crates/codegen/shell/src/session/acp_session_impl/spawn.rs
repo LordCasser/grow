@@ -1036,6 +1036,7 @@ pub(crate) async fn spawn_session_actor(
             chat_state_event_tx,
             tokio_util::sync::CancellationToken::new(),
         )
+        .await
         .map_err(|error| {
             agent::AgentBuildError::InvalidConfig(format!(
                 "invalid persisted conversation timeline: {error}"
@@ -1766,7 +1767,6 @@ pub(crate) async fn spawn_session_actor(
             .surfaces_local_date(),
         &conversation,
     );
-    persist_chat_history_jsonl_sync(&session_info, &conversation);
     chat_state_handle.replace_conversation(conversation);
     let (signals_handle, signals_actor) = crate::session::signals::SessionSignalsActor::new();
     tokio::spawn(signals_actor.run());
@@ -2351,7 +2351,7 @@ pub(crate) async fn spawn_session_actor(
         mcp_state: mcp_state.clone(),
         mcp_strategy,
         initial_client_mcp_servers: initial_client_mcp_servers.clone(),
-        chat_state_handle,
+        chat_state_handle: chat_state_handle.clone(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: current_prompt_id.clone(),
         pending_interactions: pending_interactions.clone(),
@@ -2512,9 +2512,7 @@ pub(crate) async fn spawn_session_actor(
         hook_load_errors: std::cell::RefCell::new(_hook_load_errors),
         plugin_registry: std::cell::RefCell::new(plugin_registry.clone()),
         plugin_registry_handle,
-        events: crate::session::events::EventTracker::new(
-            &crate::session::persistence::session_dir(&session_info),
-        ),
+        events: crate::session::events::EventTracker::new(chat_state_handle.clone()),
         current_turn_number: std::cell::Cell::new(0),
         last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),
@@ -3053,27 +3051,16 @@ pub(crate) async fn spawn_session_on_thread(
         .name(thread_name)
         .stack_size(SESSION_THREAD_STACK_SIZE)
         .spawn(move || {
-            let (initial_last_compaction, initial_prompt_texts) = {
-                let session_dir = crate::session::persistence::session_dir(&session_info);
-                let updates_path = session_dir.join("updates.jsonl");
-                let initial_last_compaction = {
-                    let _timer = crate::instrumentation_timer!(
-                        "session.spawn_actor.find_compaction_checkpoint"
-                    );
-                    crate::session::helpers::replay::find_latest_compaction_checkpoint(
-                        &updates_path,
+            let (initial_last_compaction, initial_prompt_texts) = timeline_events
+                .as_ref()
+                .and_then(|events| chat_state::Timeline::from_events(events.clone()).ok())
+                .map(|timeline| {
+                    (
+                        timeline.last_completed_compaction_prompt_index(),
+                        timeline.prompt_texts(),
                     )
-                    .ok()
-                    .flatten()
-                    .map(|cp| cp.prompt_index_at_compaction)
-                };
-                let initial_prompt_texts = {
-                    let _timer =
-                        crate::instrumentation_timer!("session.spawn_actor.load_user_prompts");
-                    SessionActor::load_user_prompts_from_updates(&updates_path).unwrap_or_default()
-                };
-                (initial_last_compaction, initial_prompt_texts)
-            };
+                })
+                .unwrap_or_default();
             let rt = match build_session_runtime() {
                 Ok(rt) => rt,
                 Err(e) => {

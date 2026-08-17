@@ -119,15 +119,16 @@ impl ChatStateActor {
     /// [`Self::ensure_conversation_integrity`], this also removes orphaned
     /// `ToolResult`s — the shape that bricks a session with provider 400s.
     /// `dry_run` only reports.
-    pub(super) fn repair_history(
+    pub(super) async fn repair_history(
         &mut self,
         dry_run: bool,
-    ) -> crate::compaction_utils::HistoryRepairReport {
-        let mut items = self.state.timeline.surface().to_vec();
+    ) -> Result<crate::compaction_utils::HistoryRepairReport, crate::commands::TimelineWriteError>
+    {
+        let mut candidate = self.state.timeline.clone();
+        let (report, events) = candidate.repair_surface_history()?;
         if dry_run {
-            return crate::compaction_utils::repair_history(&mut items);
+            return Ok(report);
         }
-        let report = crate::compaction_utils::repair_history(&mut items);
         if report.changed() {
             tracing::warn!(
                 duplicates_removed = report.duplicates_removed,
@@ -135,68 +136,16 @@ impl ChatStateActor {
                 synthetic_results_inserted = report.synthetic_results_inserted,
                 "History repair modified the conversation"
             );
-            // Full replace: persists atomically and re-bases token estimates.
-            self.install_conversation(items, false, MessageCause::IntegrityRepair);
-        }
-        report
-    }
-
-    /// Make memory match the disk-authoritative switch for one generation.
-    pub(super) fn converge_working_directory_switch(
-        &mut self,
-        generation: u64,
-        authoritative: ConversationItem,
-    ) {
-        let existing_index = self
-            .state
-            .timeline
-            .surface()
-            .iter()
-            .position(|item| item.working_directory_switch_generation() == Some(generation));
-        if let Some(index) = existing_index {
-            let existing = self
-                .state
-                .timeline
-                .surface_item(index)
-                .expect("surface index was just resolved");
-            if serde_json::to_value(existing).expect("conversation item must serialize")
-                == serde_json::to_value(&authoritative)
-                    .expect("authoritative conversation item must serialize")
-            {
-                return;
+            debug_assert_eq!(events.len(), 1, "explicit repair is one Surface event");
+            for event in events {
+                self.commit_timeline_event(event).await?;
             }
-            let old_tokens = super::state::estimate_item_tokens(existing);
-            let new_tokens = super::state::estimate_item_tokens(&authoritative);
-            self.state.estimated_tokens_since_model = if new_tokens >= old_tokens {
-                self.state
-                    .estimated_tokens_since_model
-                    .saturating_add(new_tokens - old_tokens)
-            } else {
-                self.state
-                    .estimated_tokens_since_model
-                    .saturating_sub(old_tokens - new_tokens)
-            };
-            let event = self
-                .state
-                .timeline
-                .replace_range(
-                    index,
-                    index,
-                    vec![authoritative],
-                    MessageCause::WorkingDirectory,
-                )
-                .expect("a current surface item must be replaceable");
-            self.persist_timeline_event(event);
-        } else {
-            self.state.estimated_tokens_since_model +=
-                super::state::estimate_item_tokens(&authoritative);
-            let event = self
-                .state
-                .timeline
-                .append(authoritative, MessageCause::WorkingDirectory)
-                .expect("a conversation item must append to the timeline");
-            self.persist_timeline_event(event);
+            let pre_replace_total = self.state.total_tokens;
+            self.refresh_surface_projection(false, pre_replace_total);
+            self.persistence
+                .replace_history(self.state.timeline.surface());
         }
+        Ok(report)
     }
 
     /// Push any conversation item (user, assistant, or tool result) and persist it.
@@ -228,6 +177,31 @@ impl ChatStateActor {
     /// retained memory without waiting for the context-window threshold.
     pub(super) fn push_user_message(&mut self, item: ConversationItem) {
         self.push_user_message_with_repair_reason(item, DanglingToolCallReason::UserCancelled);
+    }
+
+    /// Commit the user-message fact before exposing it through Surface.
+    pub(super) async fn push_user_message_durably(
+        &mut self,
+        item: ConversationItem,
+    ) -> Result<(), crate::commands::TimelineWriteError> {
+        self.ensure_conversation_integrity();
+        let cause = message_cause(&item);
+        let mut candidate = self.state.timeline.clone();
+        let event = candidate.append(item.clone(), cause)?;
+        self.commit_timeline_event(event).await?;
+
+        let estimated_tokens = super::state::estimate_item_tokens(&item);
+        self.state.estimated_tokens_since_model += estimated_tokens;
+        tracing::debug!(
+            item_kind = item_kind_str(&item),
+            estimated_tokens_delta = estimated_tokens,
+            estimated_total = self.state.total_tokens + self.state.estimated_tokens_since_model,
+            model_reported_total = self.state.total_tokens,
+            "ChatState: durable user message updated estimated_tokens_since_model"
+        );
+        self.persistence.persist_message(&item);
+        self.prune_retained_conversation();
+        Ok(())
     }
 
     /// Like [`Self::push_user_message`] but takes an explicit repair reason.
@@ -287,10 +261,9 @@ impl ChatStateActor {
     ///
     /// # Replay / rewind correctness
     ///
-    /// `updates.jsonl` is **never touched**, so cross-compaction
-    /// `replay_to_prompt` is unaffected.  The pruned `chat_history.jsonl`
-    /// on disk mirrors the in-memory state — both lose old bulk content but
-    /// `updates.jsonl` retains the original data for replay.
+    /// The original node remains in Timeline and only the Surface projection
+    /// changes, so rewind can expand the unpruned branch without consulting a
+    /// second replay log. `chat_history.jsonl` merely mirrors the new Surface.
     pub(super) fn prune_retained_conversation(&mut self) -> usize {
         if !self.pruning_config.enabled {
             return 0;
@@ -385,9 +358,8 @@ impl ChatStateActor {
 
     /// Apply a [`compaction::PrunePlan`] to the stored conversation in one
     /// actor transaction: replace the `content` of each planned `ToolResult`
-    /// with head + marker + tail and persist the whole history through
-    /// `replace_history` (the same `chat_history.jsonl` snapshot path as
-    /// compaction). `images`, `tool_call_id`, and every other structural
+    /// with head + marker + tail as a Timeline replacement, then refresh the
+    /// derived history cache. `images`, `tool_call_id`, and every other structural
     /// field are preserved; conversation length and item identity never
     /// change.
     ///
@@ -402,10 +374,9 @@ impl ChatStateActor {
     ///
     /// No `ChatStateEvent` is published: the pager renders streamed wire
     /// events, so pruning stored state must not disturb what the user already
-    /// saw. `updates.jsonl` is never written — `replace_history` only
-    /// rewrites the `chat_history.jsonl` snapshot, and rewind replay across a
-    /// prune point restores the unpruned content (correct time-travel
-    /// semantics). `snapshot_turn_slice` / `rebase_turn_capture_offset` need
+    /// saw. Rewind expands the shadowed Timeline node and restores the
+    /// unpruned content (correct time-travel semantics).
+    /// `snapshot_turn_slice` / `rebase_turn_capture_offset` need
     /// no action: pruning swaps only `content` in place, so the captured turn
     /// tail and its `turn_start_offset` slicing stay valid.
     ///
@@ -651,17 +622,39 @@ impl ChatStateActor {
     pub(super) fn replace_conversation(
         &mut self,
         items: Vec<ConversationItem>,
-        is_compaction: bool,
+        cause: MessageCause,
     ) {
+        let is_compaction = cause == MessageCause::Compaction;
         if is_compaction && let Some(cap) = &mut self.state.turn_capture {
             cap.compaction_occurred = true;
         }
-        let cause = if is_compaction {
-            MessageCause::Compaction
-        } else {
-            MessageCause::SessionRestore
-        };
         self.install_conversation(items, is_compaction, cause);
+    }
+
+    /// Replace the Surface only after its exact Timeline event is durable.
+    pub(super) async fn replace_conversation_durably(
+        &mut self,
+        items: Vec<ConversationItem>,
+        cause: MessageCause,
+    ) -> Result<(), crate::commands::TimelineWriteError> {
+        let is_compaction = cause == MessageCause::Compaction;
+        if is_compaction && let Some(cap) = &mut self.state.turn_capture {
+            cap.compaction_occurred = true;
+        }
+        let unchanged = serde_json::to_value(self.state.timeline.surface())
+            .expect("conversation surface must serialize")
+            == serde_json::to_value(&items).expect("replacement surface must serialize");
+        if unchanged {
+            return Ok(());
+        }
+        let mut candidate = self.state.timeline.clone();
+        let event = candidate.replace_all(items, cause)?;
+        let pre_replace_total = self.state.total_tokens;
+        self.commit_timeline_event(event).await?;
+        self.refresh_surface_projection(is_compaction, pre_replace_total);
+        self.persistence
+            .replace_history(self.state.timeline.surface());
+        Ok(())
     }
 
     /// Install one complete surface projection and refresh the derived history
@@ -686,18 +679,6 @@ impl ChatStateActor {
         cause: MessageCause,
     ) {
         let pre_replace_total = self.state.total_tokens;
-        let base_estimate = super::state::estimate_conversation_tokens(&items);
-        let mut estimated_tokens =
-            if is_compaction && pre_replace_total > 0 && self.state.estimate_at_last_response > 0 {
-                let ratio = pre_replace_total as f64 / self.state.estimate_at_last_response as f64;
-                (base_estimate as f64 * ratio).round() as u64
-            } else {
-                base_estimate
-            };
-        // Compaction must never appear to increase usage.
-        if is_compaction && pre_replace_total > 0 {
-            estimated_tokens = estimated_tokens.min(pre_replace_total);
-        }
         let surface_changed = serde_json::to_value(self.state.timeline.surface())
             .expect("conversation surface must serialize")
             != serde_json::to_value(&items).expect("replacement surface must serialize");
@@ -708,6 +689,23 @@ impl ChatStateActor {
                 .replace_all(items, cause)
                 .expect("a current surface must accept a complete replacement");
             self.persist_timeline_event(event);
+        }
+        self.refresh_surface_projection(is_compaction, pre_replace_total);
+    }
+
+    fn refresh_surface_projection(&mut self, is_compaction: bool, pre_replace_total: u64) {
+        let base_estimate =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
+        let mut estimated_tokens =
+            if is_compaction && pre_replace_total > 0 && self.state.estimate_at_last_response > 0 {
+                let ratio = pre_replace_total as f64 / self.state.estimate_at_last_response as f64;
+                (base_estimate as f64 * ratio).round() as u64
+            } else {
+                base_estimate
+            };
+        // Compaction must never appear to increase usage.
+        if is_compaction && pre_replace_total > 0 {
+            estimated_tokens = estimated_tokens.min(pre_replace_total);
         }
         self.state.estimated_tokens_since_model = 0;
         self.state.total_tokens = estimated_tokens;
@@ -778,28 +776,14 @@ impl ChatStateActor {
             self.state.timeline.surface_len(),
             "image rewrite must preserve conversation item identity"
         );
-        let persisted = self
-            .persistence
-            .replace_history_and_ack(&conversation)
-            .await;
-        match persisted {
-            Ok(Ok(())) => {
-                self.install_persisted_conversation(
-                    conversation,
-                    false,
-                    MessageCause::ImageRewrite,
-                );
-                Some(report)
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "image history rewrite was not persisted");
-                None
-            }
-            Err(_) => {
-                tracing::warn!("image history rewrite persistence acknowledgement was dropped");
-                None
-            }
+        if let Err(error) = self
+            .replace_conversation_durably(conversation, MessageCause::ImageRewrite)
+            .await
+        {
+            tracing::warn!(%error, "image rewrite Timeline event was not committed");
+            return None;
         }
+        Some(report)
     }
 
     /// Atomically swap the leading `System` message with `prompt` (or insert one

@@ -69,6 +69,7 @@ pub use pager_render::{
 };
 pub mod trace_cmd;
 pub mod tracing;
+pub mod trajectory_cmd;
 pub mod unified_log;
 pub mod views;
 pub mod worktree_cmd;

@@ -16,12 +16,12 @@ mod tests;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::commands::{ChatStateCommand, StrictAppendAck};
+use crate::commands::ChatStateCommand;
 use crate::events::ChatStateEvent;
 use crate::handle::ChatStateHandle;
 use crate::persistence::ChatPersistence;
 use crate::types::{PruningConfig, TurnCapture};
-use crate::{Timeline, TimelineError, TimelineEvent};
+use crate::{Timeline, TimelineEvent};
 
 use sampling_types::{ConversationItem, SamplingConfig};
 use state::ChatState;
@@ -44,6 +44,25 @@ pub struct ChatStateActor {
 }
 
 impl ChatStateActor {
+    /// Commit an already validated event before admitting it to actor state.
+    /// The exact event bytes, including seq and timestamp, cross the durable
+    /// boundary so a lost acknowledgement can be retried idempotently by the
+    /// storage layer.
+    async fn commit_timeline_event(
+        &mut self,
+        event: TimelineEvent,
+    ) -> Result<(), crate::commands::TimelineWriteError> {
+        self.persistence
+            .persist_timeline_event_and_ack(&event)
+            .await
+            .map_err(|_| crate::commands::TimelineWriteError::AcknowledgementLost)?
+            .map_err(crate::commands::TimelineWriteError::Persistence)?;
+        self.state
+            .timeline
+            .accept(event)
+            .map_err(crate::commands::TimelineWriteError::Invalid)
+    }
+
     /// Send an event to subscribers, logging if the channel is closed.
     fn send_event(&self, event: ChatStateEvent) {
         if self.event_tx.send(event).is_err() {
@@ -92,15 +111,25 @@ impl ChatStateActor {
     }
 
     /// Restore an actor from its durable append-only event stream.
-    pub fn spawn_from_timeline_with_pruning(
+    pub async fn spawn_from_timeline_with_pruning(
         timeline_events: Vec<TimelineEvent>,
         sampling_config: SamplingConfig,
         pruning_config: PruningConfig,
         persistence: Box<dyn ChatPersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
-    ) -> Result<ChatStateHandle, TimelineError> {
-        let timeline = Timeline::from_events(timeline_events)?;
+    ) -> Result<ChatStateHandle, crate::commands::TimelineWriteError> {
+        let mut timeline = Timeline::from_events(timeline_events)?;
+        let mut recovery_events = timeline.recover_interrupted()?;
+        recovery_events.extend(timeline.recover_surface_integrity()?);
+        let mut persistence = persistence;
+        for event in recovery_events {
+            persistence
+                .persist_timeline_event_and_ack(&event)
+                .await
+                .map_err(|_| crate::commands::TimelineWriteError::AcknowledgementLost)?
+                .map_err(crate::commands::TimelineWriteError::Persistence)?;
+        }
         let state = ChatState::from_timeline(timeline, sampling_config);
         Ok(Self::launch(
             state,
@@ -161,44 +190,21 @@ impl ChatStateActor {
             ChatStateCommand::PushUserMessage { item } => {
                 self.push_user_message(item);
             }
-            ChatStateCommand::PushUserMessageAndAck { item, reply } => {
-                self.push_user_message(item);
-                let _ = reply.send(());
-            }
-            ChatStateCommand::AppendWorkingDirectorySwitchAndAck {
-                content,
-                cwd_generation,
-                reply,
-            } => {
-                let generation = cwd_generation.get();
-                let candidate = ConversationItem::working_directory_switch(content, generation);
-                let persist_rx = self
-                    .persistence
-                    .persist_working_directory_switch_and_ack(&candidate);
-                let result = persist_rx.await.unwrap_or_else(|_| {
-                    Err(crate::commands::StrictAppendError::Indeterminate(
-                        std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
-                            "working-directory switch acknowledgement dropped; retry by generation",
-                        ),
-                    ))
-                });
-                let authoritative = match &result {
-                    Ok(StrictAppendAck::Appended)
-                    | Err(crate::commands::StrictAppendError::Committed {
-                        acknowledgement: StrictAppendAck::Appended,
-                        ..
-                    }) => Some(&candidate),
-                    Ok(StrictAppendAck::AlreadyPresent(authoritative))
-                    | Err(crate::commands::StrictAppendError::Committed {
-                        acknowledgement: StrictAppendAck::AlreadyPresent(authoritative),
-                        ..
-                    }) => Some(authoritative),
-                    Err(_) => None,
-                };
-                if let Some(authoritative) = authoritative {
-                    self.converge_working_directory_switch(generation, authoritative.clone());
+            ChatStateCommand::RecordTimelineEvent { kind } => {
+                match self.state.timeline.record(kind) {
+                    Ok(event) => self.persistence.persist_timeline_event(&event),
+                    Err(error) => tracing::error!(%error, "rejected invalid timeline event"),
                 }
+            }
+            ChatStateCommand::RecordTimelineEventDurably { kind, reply } => {
+                let result = match self.state.timeline.prepare(kind) {
+                    Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                    Ok(event) => self.commit_timeline_event(event).await,
+                };
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::PushUserMessageDurably { item, reply } => {
+                let result = self.push_user_message_durably(item).await;
                 let _ = reply.send(result);
             }
             ChatStateCommand::PushUserMessageWithRepairReason { item, reason } => {
@@ -256,11 +262,16 @@ impl ChatStateActor {
             ChatStateCommand::RecordTurnStart { timestamp_ms } => {
                 self.state.turn_start_ms = Some(timestamp_ms);
             }
-            ChatStateCommand::ReplaceConversation {
+            ChatStateCommand::ReplaceConversation { items, cause } => {
+                self.replace_conversation(items, cause);
+            }
+            ChatStateCommand::ReplaceConversationDurably {
                 items,
-                is_compaction,
+                cause,
+                reply,
             } => {
-                self.replace_conversation(items, is_compaction);
+                let result = self.replace_conversation_durably(items, cause).await;
+                let _ = reply.send(result);
             }
             ChatStateCommand::PruneToolResults { plan, reply } => {
                 let report = self.prune_tool_results(plan);
@@ -287,9 +298,11 @@ impl ChatStateActor {
                     .map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
                     .unwrap_or(false);
                 let result = if blocked {
-                    Err(crate::commands::RepairHistoryBlocked)
+                    Err(crate::commands::RepairHistoryError::TurnActive)
                 } else {
-                    Ok(self.repair_history(dry_run))
+                    self.repair_history(dry_run)
+                        .await
+                        .map_err(crate::commands::RepairHistoryError::Timeline)
                 };
                 let _ = reply.send(result);
             }
@@ -348,6 +361,15 @@ impl ChatStateActor {
                     "ChatState: cloning full conversation for GetConversation"
                 );
                 let _ = reply.send(self.state.timeline.surface().to_vec());
+            }
+            ChatStateCommand::GetTrajectory { reply } => {
+                let _ = reply.send(self.state.timeline.trajectory());
+            }
+            ChatStateCommand::GetRewindSurface {
+                target_prompt_index,
+                reply,
+            } => {
+                let _ = reply.send(self.state.timeline.rewind_surface(target_prompt_index));
             }
             ChatStateCommand::GetPromptIndex { reply } => {
                 let _ = reply.send(self.state.prompt_index);

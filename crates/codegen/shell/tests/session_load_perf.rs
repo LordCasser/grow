@@ -59,20 +59,6 @@ fn perf_spec() -> SessionSpec {
 
 // ───────────────────────── session setup ─────────────────────────
 
-/// Recursively copy a directory tree (real-session overlay only).
-fn copy_tree(src: &Path, dst: &Path) {
-    std::fs::create_dir_all(dst).unwrap();
-    for entry in std::fs::read_dir(src).unwrap().flatten() {
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_tree(&from, &to);
-        } else {
-            std::fs::copy(&from, &to).unwrap();
-        }
-    }
-}
-
 /// Prepare a session on disk under `root` for working dir `cwd`. With
 /// `GROW_PERF_SESSION_SRC` set, copy a real session over a registered stub
 /// (keeping our `summary.json`); otherwise synthesize one via
@@ -93,15 +79,16 @@ async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, 
         .await
         .expect("init_session");
     let dir = synth::locate_session_dir(root, &id);
-    for name in ["updates.jsonl", "rewind_points.jsonl", "chat_history.jsonl"] {
+    for name in [
+        "timeline.jsonl",
+        "updates.jsonl",
+        "rewind_points.jsonl",
+        "chat_history.jsonl",
+    ] {
         let from = Path::new(&src).join(name);
         if from.exists() {
             std::fs::copy(&from, dir.join(name)).unwrap();
         }
-    }
-    let ckpt = Path::new(&src).join("compaction_checkpoints");
-    if ckpt.is_dir() {
-        copy_tree(&ckpt, &dir.join("compaction_checkpoints"));
     }
     eprintln!("[perf] using REAL session copied from {src}");
     (info, dir)

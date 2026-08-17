@@ -1324,14 +1324,17 @@ async fn copy_session_data_preserves_parent_chat_history() {
         cwd: "/workspace".to_string(),
     };
     adapter.init_session(&parent_info, acp::ModelId::new("test-model")).await.unwrap();
-    adapter
-        .append_chat_message(&parent_info, &ConversationItem::user("What files?"))
-        .await
-        .unwrap();
-    adapter
-        .append_chat_message(&parent_info, &ConversationItem::assistant("listed"))
-        .await
-        .unwrap();
+    let timeline = chat_state::Timeline::from_seed(vec![
+        ConversationItem::user("What files?"),
+        ConversationItem::assistant("listed"),
+    ])
+    .unwrap();
+    for event in timeline.events() {
+        adapter
+            .append_timeline_event(&parent_info, event)
+            .await
+            .unwrap();
+    }
     let child_info = SessionInfo {
         id: acp::SessionId::new("child-fork-test"),
         cwd: "/workspace".to_string(),

@@ -26,16 +26,16 @@ Grow stores each session in its own directory, grouped by working directory. It 
 ```
 ~/.grow/sessions/<encoded-cwd>/<session-id>/
   summary.json            # metadata: summary/title, timestamps, model ID, message counts
-  updates.jsonl           # ACP session update stream (conversation + tool calls)
-  chat_history.jsonl      # raw chat messages sent to the model
+  timeline.jsonl          # authoritative causal ledger for runtime recovery
+  updates.jsonl           # derived ACP replay/display stream
+  chat_history.jsonl      # derived model-message diagnostic cache
   plan.json               # TODO/task list state
   rewind_points.jsonl     # file snapshots for /rewind undo
   signals.json            # session signals (token usage, tool/turn counters)
-  compaction_checkpoints/ # saved state from compaction (manual or auto)
   subagents/              # per-subagent metadata (meta.json); the child sessions live in the normal sessions tree
 ```
 
-`summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
+`summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `timeline.jsonl` is the only authoritative conversation log used to recover model context and lifecycle state. `updates.jsonl` and `chat_history.jsonl` are rebuildable projections and never participate in recovery decisions.
 
 ---
 
@@ -275,15 +275,25 @@ Resume a session in a fresh worktree with `grow -w -r <session-id>`.
 
 ## Session Storage Details
 
+### Trajectory Debugger
+
+Open the causal ledger for the most recent session in the current directory:
+
+```
+grow trajectory
+```
+
+Pass a session ID to inspect another session, or use `--no-open` to print the local URL without launching a browser. The page tails `timeline.jsonl` and exposes category, visibility, and text filters plus a canonical event inspector. The server only accepts loopback bind addresses; it is a read-only debugger and never mutates the session.
+
 ### Persistence Format
 
-Grow stores the conversation as newline-delimited JSON (JSONL). Each line in `updates.jsonl` is a self-contained ACP session update event. This format supports:
+Grow stores runtime causality as newline-delimited JSON (JSONL). Each line in `timeline.jsonl` is a sequenced, self-contained lifecycle fact. This format supports:
 
 - Incremental writes (append-only during a session)
-- Efficient streaming reads (for session restore)
-- Easy debugging (each line is valid JSON)
+- Deterministic recovery by folding one ordered ledger
+- Easy debugging through `grow trajectory` (each line is valid JSON)
 
-The smaller state files -- `summary.json`, `plan.json`, and `signals.json` -- are plain JSON rather than JSONL. JSONL is the source of truth for session content; `grow sessions search` additionally maintains a local SQLite FTS5 index over session titles and prompts for fast keyword search.
+The smaller state files -- `summary.json`, `plan.json`, and `signals.json` -- are plain JSON rather than JSONL. `timeline.jsonl` is the source of truth for session content and agent execution; `updates.jsonl` remains the client replay stream. `grow sessions search` additionally maintains a local SQLite FTS5 index over session titles and prompts for fast keyword search.
 
 ### Session Metadata
 
@@ -299,7 +309,7 @@ The smaller state files -- `summary.json`, `plan.json`, and `signals.json` -- ar
 
 ### Disk Usage
 
-Rewind point snapshots (copies of modified files) are the largest contributor to disk usage in sessions that modify many files. Use `/compact` to reduce history size.
+Rewind point snapshots (copies of modified files) are the largest contributor to disk usage in sessions that modify many files. `/compact` reduces active model context, but intentionally does not discard the causal history required for recovery and cross-compaction rewind.
 
 ---
 

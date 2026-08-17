@@ -1075,23 +1075,24 @@ async fn bootstrap_initial_context(
             copy_options,
         ) {
             Ok(result) => {
-                let conversation = match storage.load_chat_history_from_dir(child_session_dir) {
-                    Ok(items) if !items.is_empty() => items,
-                    Ok(_) => {
-                        return BootstrapInitialContext::ResumeAbort(format!(
-                            "Cannot resume from subagent '{}': \
-                             copied transcript is empty",
-                            source.subagent_id,
-                        ));
-                    }
-                    Err(e) => {
-                        return BootstrapInitialContext::ResumeAbort(format!(
-                            "Cannot resume from subagent '{}': \
-                             failed to load copied transcript: {e}",
-                            source.subagent_id,
-                        ));
-                    }
-                };
+                let conversation =
+                    match storage.load_timeline_surface_from_dir(child_session_dir) {
+                        Ok(items) if !items.is_empty() => items,
+                        Ok(_) => {
+                            return BootstrapInitialContext::ResumeAbort(format!(
+                                "Cannot resume from subagent '{}': \
+                                 copied transcript is empty",
+                                source.subagent_id,
+                            ));
+                        }
+                        Err(e) => {
+                            return BootstrapInitialContext::ResumeAbort(format!(
+                                "Cannot resume from subagent '{}': \
+                                 failed to load copied transcript: {e}",
+                                source.subagent_id,
+                            ));
+                        }
+                    };
                 let estimated_tokens = chat_state::estimate_conversation_tokens(&conversation);
                 const SAFE_RESUME_PERCENT: u64 = 80;
                 let threshold = child_context_window * SAFE_RESUME_PERCENT / 100;
@@ -1190,7 +1191,7 @@ async fn bootstrap_initial_context(
                     "Fork-copied parent session data into child (disk fallback)"
                 );
                 let items = storage
-                    .load_chat_history_from_dir(child_session_dir)
+                    .load_timeline_surface_from_dir(child_session_dir)
                     .unwrap_or_else(|e| {
                         tracing::warn!(
                             error = %e,

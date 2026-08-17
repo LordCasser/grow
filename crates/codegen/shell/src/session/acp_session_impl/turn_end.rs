@@ -371,38 +371,21 @@ impl SessionActor {
             ),
             extra_meta,
         );
+        // The canonical Turn terminal was already durably committed through
+        // EventTracker before completion reaches this UI projection. Keep the
+        // replay update as a rebuildable cache; it is no longer a second
+        // authoritative terminal record.
         let update = crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone()));
-        let (respond_to, response) = tokio::sync::oneshot::channel();
-        let dispatched = self
+        let projected = self
             .notifications
             .persistence_tx
-            .send(PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to })
+            .send(PersistenceMsg::Update(update))
             .is_ok();
-        let persisted = if dispatched {
-            match response.await {
-                Ok(Ok(())) => true,
-                Ok(Err(crate::session::storage::AppendUpdateError::Committed(error))) => {
-                    tracing::error!(%error, "TurnCompleted append reached storage but its durable sync failed");
-                    false
-                }
-                Ok(Err(crate::session::storage::AppendUpdateError::NotCommitted(error))) => {
-                    tracing::error!(%error, "TurnCompleted was not persisted");
-                    false
-                }
-                Err(error) => {
-                    tracing::error!(%error, "TurnCompleted persistence acknowledgement was lost");
-                    false
-                }
-            }
-        } else {
-            tracing::error!("TurnCompleted persistence actor is unavailable");
-            false
-        };
-        // Keep the live client terminal even on storage failure so foreground
-        // ownership cannot appear wedged. Goal completion itself remains
-        // fail-closed on `persisted` above.
+        if !projected {
+            tracing::warn!("TurnCompleted replay projection was not queued");
+        }
         self.forward_grow_notification(notification).await;
-        persisted
+        true
     }
 
     /// Diagnostic error category; delegates to `stop_failure_error_type` so the
