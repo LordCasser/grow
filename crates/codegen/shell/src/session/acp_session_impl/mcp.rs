@@ -1438,9 +1438,9 @@ impl SessionActor {
     /// fails to render.
     async fn rendered_mcp_hint(&self) -> Option<String> {
         let hint_template = if self.subagent_capabilities.is_some() {
-            "\nTo use MCP tools, call `${{ tools.by_kind.search_tool }}` first. If its server has `requires_grant`, call `${{ tools.by_kind.capability_request }}` with target type `mcp_server` and a task-specific purpose, wait for `granted`, then call `${{ tools.by_kind.use_tool }}` with the exact returned schema. The eventual MCP call still requires permission."
+            "\nWhen a connected MCP server could provide authoritative data or an in-scope action for the assigned task, proactively call `${{ tools.by_kind.search_tool }}` instead of guessing or waiting for an explicit MCP request. If its server has `requires_grant`, call `${{ tools.by_kind.capability_request }}` with target type `mcp_server` and a task-specific purpose, wait for `granted`, then call `${{ tools.by_kind.use_tool }}` with the exact returned schema. The eventual MCP call still requires permission."
         } else {
-            "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`."
+            "\nWhen a connected MCP server could provide authoritative data or perform an in-scope action for the user's request, proactively call `${{ tools.by_kind.search_tool }}` before answering instead of guessing or asking the user to copy that data. You MUST retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`."
         };
         self.tool_bridge_handle()
             .render_prompt(hint_template, &serde_json::json!({}))

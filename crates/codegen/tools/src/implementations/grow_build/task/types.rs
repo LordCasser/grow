@@ -341,6 +341,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::AskUser,
                 ToolKind::Skill,
                 ToolKind::GoalRead,
+                ToolKind::GoalPlanSubmit,
                 ToolKind::SearchTool,
                 ToolKind::UseTool,
                 ToolKind::CapabilityRequest,
@@ -367,6 +368,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::AskUser,
                 ToolKind::Skill,
                 ToolKind::GoalRead,
+                ToolKind::GoalPlanSubmit,
                 ToolKind::SearchTool,
                 ToolKind::UseTool,
                 ToolKind::CapabilityRequest,
@@ -391,6 +393,7 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::AskUser,
                 ToolKind::Skill,
                 ToolKind::GoalRead,
+                ToolKind::GoalPlanSubmit,
                 ToolKind::SearchTool,
                 ToolKind::UseTool,
                 ToolKind::CapabilityRequest,
@@ -1187,10 +1190,11 @@ mod tests {
     }
 
     #[test]
-    fn every_subagent_mode_fails_closed_and_restricted_modes_keep_goal_read_only() {
+    fn restricted_modes_keep_stage_bound_goal_tools_and_reject_goal_mutations() {
         let mut opaque = ToolConfig::from_id("custom:opaque");
         opaque.kind = None;
         let goal_read = tc("Grow:get_goal", ToolKind::GoalRead);
+        let goal_plan_submit = tc("Grow:submit_goal_plan_section", ToolKind::GoalPlanSubmit);
         let goal_progress = tc("Grow:update_goal_progress", ToolKind::GoalProgressUpdate);
         let goal_replan = tc("Grow:request_goal_replan", ToolKind::GoalReplanRequest);
         let goal_lifecycle = tc("Grow:update_goal", ToolKind::GoalLifecycleUpdate);
@@ -1204,6 +1208,7 @@ mod tests {
                 tools: vec![
                     opaque.clone(),
                     goal_read.clone(),
+                    goal_plan_submit.clone(),
                     goal_progress.clone(),
                     goal_replan.clone(),
                     goal_lifecycle.clone(),
@@ -1212,13 +1217,18 @@ mod tests {
             };
             mode.filter_tool_config(&mut config);
             let kinds: Vec<_> = config.tools.iter().filter_map(|tool| tool.kind).collect();
-            assert_eq!(kinds, [ToolKind::GoalRead], "mode={mode:?}");
+            assert_eq!(
+                kinds,
+                [ToolKind::GoalRead, ToolKind::GoalPlanSubmit],
+                "mode={mode:?}"
+            );
         }
 
         let mut all = ToolServerConfig {
             tools: vec![
                 opaque,
                 goal_read,
+                goal_plan_submit,
                 goal_progress,
                 goal_replan,
                 goal_lifecycle,
@@ -1227,7 +1237,7 @@ mod tests {
         };
         SubagentCapabilityMode::All.filter_tool_config(&mut all);
         assert!(all.tools.iter().all(|tool| tool.kind.is_some()));
-        assert_eq!(all.tools.len(), 4, "All keeps every classified capability");
+        assert_eq!(all.tools.len(), 5, "All keeps every classified capability");
     }
 
     #[test]

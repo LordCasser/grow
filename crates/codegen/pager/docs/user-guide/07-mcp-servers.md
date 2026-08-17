@@ -210,6 +210,8 @@ The model has access to two built-in tools for working with MCP servers:
 - `search_tool` — Discover available integration tools across all enabled MCP servers. Use this to find tools by name or description.
 - `use_tool` — Call an integration tool discovered via `search_tool`. Specify the fully-qualified tool name (e.g., `github__create_issue`).
 
+Grow keeps the request prefix stable by sending these two discovery tools rather than every dynamic MCP schema. A system reminder lists connected servers and tells the model to search proactively when a server can provide authoritative data or an in-scope action; `search_tool` returns the exact schema required by `use_tool`.
+
 ---
 
 ## Compatibility

@@ -206,6 +206,7 @@ async fn live_child_judge_receives_primary_context_without_chat_state_pollution(
             let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
             config.base_url = server.url();
             config.api_backend = sampling_types::ApiBackend::Responses;
+            config.reasoning_effort = Some(sampling_types::ReasoningEffort::Max);
             actor.chat_state_handle.update_sampling_config(config);
             let mut trusted_user =
                 super::ConversationItem::user(format!("implement {PRIMARY_MARKER}"));
@@ -263,6 +264,10 @@ async fn live_child_judge_receives_primary_context_without_chat_state_pollution(
             assert_eq!(body["text"]["format"]["type"], "json_schema");
             assert_eq!(body["text"]["format"]["strict"], true);
             assert_eq!(body["max_output_tokens"], 1024);
+            assert!(
+                body.pointer("/reasoning/effort").is_none(),
+                "child safety judgment must not inherit the active turn's max reasoning effort: {body:#}"
+            );
             assert!(
                 body.get("tools")
                     .and_then(serde_json::Value::as_array)

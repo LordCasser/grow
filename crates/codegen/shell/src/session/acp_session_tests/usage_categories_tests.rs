@@ -84,6 +84,12 @@ async fn mcp_snapshot_matches_full_mode_injected_reminder() {
                 .await
                 .expect("servers installed");
             assert_eq!(snapshot.server_count, 1);
+            assert!(
+                snapshot.text.contains("proactively call")
+                    && snapshot.text.contains("before answering"),
+                "the model-facing MCP reminder must carry the proactive-use policy: {}",
+                snapshot.text
+            );
             actor
                 .mcp_reminder_dirty
                 .store(true, std::sync::atomic::Ordering::Relaxed);

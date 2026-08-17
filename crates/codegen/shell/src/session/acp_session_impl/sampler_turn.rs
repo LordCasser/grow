@@ -968,15 +968,20 @@ impl SessionActor {
                                         e.to_string(),
                                     )
                                 })?;
-                            let sampling_config =
-                                session.chat_state_handle.get_sampling_config().await;
-                            let model = sampling_config
-                                .as_ref()
-                                .map(|config| config.model.clone())
+                            let model = session
+                                .chat_state_handle
+                                .get_sampling_config()
+                                .await
+                                .map(|config| config.model)
                                 .unwrap_or_default();
-                            let reasoning_effort =
-                                sampling_config.and_then(|config| config.reasoning_effort);
-                            (client, model, reasoning_effort)
+                            // Child safety judgments use the primary session's
+                            // active model, but they are classifier calls rather
+                            // than continuations of the active turn. Inheriting
+                            // a `max` turn effort can consume the whole bounded
+                            // attempt window before the short JSON verdict is
+                            // produced. Keep effort under the classifier policy
+                            // for both primary and child judgment paths.
+                            (client, model, classifier_reasoning_effort)
                         } else {
                             let (client, model) = match &aux_classifier_sampler {
                                 Ok(Some((client, model))) => (client.clone(), model.clone()),
