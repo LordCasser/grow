@@ -35,13 +35,9 @@ pub struct ChatStateActor {
     pruning_config: PruningConfig,
     /// Persistence implementation — owned exclusively, called with `&mut self`.
     persistence: Box<dyn TimelinePersistence>,
-    /// Seed facts already present in `state` whose acknowledged writes were
-    /// dispatched before the actor was launched. Live commands are not
-    /// admitted until this prefix is durable.
-    bootstrap_events: Vec<(
-        TimelineEvent,
-        tokio::sync::oneshot::Receiver<std::io::Result<()>>,
-    )>,
+    /// Seed/recovery facts already present in `state`. The actor persists this
+    /// prefix strictly one event at a time before admitting live commands.
+    bootstrap_events: Vec<TimelineEvent>,
     /// Channel to receive commands from handles.
     cmd_rx: mpsc::UnboundedReceiver<ChatStateCommand>,
     /// Channel to send events to the session main loop.
@@ -53,14 +49,14 @@ pub struct ChatStateActor {
 impl ChatStateActor {
     /// Commit an already validated event before admitting it to actor state.
     /// The exact event bytes, including seq and timestamp, cross the durable
-    /// boundary. If the acknowledgement channel itself disappears, retry the
-    /// same immutable event once so sequence-idempotent storage can resolve an
-    /// otherwise ambiguous commit outcome.
+    /// boundary. Any failed or ambiguous acknowledgement keeps this exact
+    /// event in the actor's single pending slot until durable success or
+    /// session cancellation.
     async fn commit_timeline_event(
         &mut self,
         event: TimelineEvent,
     ) -> Result<TimelineEvent, crate::commands::TimelineWriteError> {
-        persist_timeline_event_durably(self.persistence.as_mut(), &event).await?;
+        self.persist_pending_timeline_event(&event).await?;
         let committed = event.clone();
         let previous_prompt_index = self.state.timeline.next_prompt_index();
         self.state
@@ -75,24 +71,19 @@ impl ChatStateActor {
     /// same immutable event is retried until it commits or the actor is
     /// cancelled, so a transient ENOSPC/lock/I/O failure cannot create a
     /// missing sequence and poison every later append.
-    async fn persist_buffered_timeline_event(
+    async fn persist_pending_timeline_event(
         &mut self,
         event: &TimelineEvent,
-        initial_ack: Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
-    ) -> bool {
-        let mut initial_ack = initial_ack;
+    ) -> Result<(), crate::commands::TimelineWriteError> {
         let mut retry_delay = std::time::Duration::from_millis(25);
         loop {
-            let result = if let Some(ack) = initial_ack.take() {
-                match ack.await {
-                    Ok(result) => result.map_err(crate::commands::TimelineWriteError::Persistence),
-                    Err(_) => Err(crate::commands::TimelineWriteError::AcknowledgementLost),
-                }
-            } else {
-                persist_timeline_event_durably(self.persistence.as_mut(), event).await
+            let result = self.persistence.persist_timeline_event_and_ack(event).await;
+            let result = match result {
+                Ok(result) => result.map_err(crate::commands::TimelineWriteError::Persistence),
+                Err(_) => Err(crate::commands::TimelineWriteError::AcknowledgementLost),
             };
             match result {
-                Ok(()) => return true,
+                Ok(()) => return Ok(()),
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -104,7 +95,9 @@ impl ChatStateActor {
             }
             tokio::select! {
                 biased;
-                _ = self.cancellation_token.cancelled() => return false,
+                _ = self.cancellation_token.cancelled() => {
+                    return Err(crate::commands::TimelineWriteError::Cancelled);
+                }
                 _ = tokio::time::sleep(retry_delay) => {}
             }
             retry_delay = retry_delay
@@ -114,7 +107,7 @@ impl ChatStateActor {
     }
 
     async fn commit_buffered_timeline_event(&mut self, event: TimelineEvent) -> bool {
-        if !self.persist_buffered_timeline_event(&event, None).await {
+        if self.persist_pending_timeline_event(&event).await.is_err() {
             return false;
         }
         let previous_prompt_index = self.state.timeline.next_prompt_index();
@@ -166,21 +159,12 @@ impl ChatStateActor {
         initial_conversation: Vec<ConversationItem>,
         sampling_config: SamplingConfig,
         pruning_config: PruningConfig,
-        mut persistence: Box<dyn TimelinePersistence>,
+        persistence: Box<dyn TimelinePersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
         let state = ChatState::new(initial_conversation, sampling_config);
-        let bootstrap_events = state
-            .timeline
-            .events()
-            .iter()
-            .cloned()
-            .map(|event| {
-                let acknowledgement = persistence.persist_timeline_event_and_ack(&event);
-                (event, acknowledgement)
-            })
-            .collect();
+        let bootstrap_events = state.timeline.events().to_vec();
         Self::launch(
             state,
             pruning_config,
@@ -225,16 +209,12 @@ impl ChatStateActor {
     ) -> Result<ChatStateHandle, crate::commands::TimelineWriteError> {
         let mut recovery_events = timeline.recover_interrupted()?;
         recovery_events.extend(timeline.recover_surface_integrity()?);
-        let mut persistence = persistence;
-        for event in recovery_events {
-            persist_timeline_event_durably(persistence.as_mut(), &event).await?;
-        }
         let state = ChatState::from_timeline(timeline, sampling_config);
         Ok(Self::launch(
             state,
             pruning_config,
             persistence,
-            Vec::new(),
+            recovery_events,
             event_tx,
             cancellation_token,
         ))
@@ -244,15 +224,13 @@ impl ChatStateActor {
         state: ChatState,
         pruning_config: PruningConfig,
         persistence: Box<dyn TimelinePersistence>,
-        bootstrap_events: Vec<(
-            TimelineEvent,
-            tokio::sync::oneshot::Receiver<std::io::Result<()>>,
-        )>,
+        bootstrap_events: Vec<TimelineEvent>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
+        let actor_cancellation = cancellation_token.child_token();
         let actor = ChatStateActor {
             state,
             pruning_config,
@@ -260,21 +238,18 @@ impl ChatStateActor {
             bootstrap_events,
             cmd_rx,
             event_tx,
-            cancellation_token,
+            cancellation_token: actor_cancellation.clone(),
         };
 
         tokio::spawn(actor.run());
 
-        ChatStateHandle::new(cmd_tx)
+        ChatStateHandle::new(cmd_tx, actor_cancellation)
     }
 
     /// Main actor loop — processes commands until shutdown or cancellation.
     async fn run(mut self) {
-        for (event, acknowledgement) in std::mem::take(&mut self.bootstrap_events) {
-            if !self
-                .persist_buffered_timeline_event(&event, Some(acknowledgement))
-                .await
-            {
+        for event in std::mem::take(&mut self.bootstrap_events) {
+            if self.persist_pending_timeline_event(&event).await.is_err() {
                 debug!("ChatStateActor cancelled before bootstrap Timeline became durable");
                 return;
             }
@@ -688,25 +663,4 @@ impl ChatStateActor {
             }
         }
     }
-}
-
-async fn persist_timeline_event_durably(
-    persistence: &mut dyn TimelinePersistence,
-    event: &TimelineEvent,
-) -> Result<(), crate::commands::TimelineWriteError> {
-    for attempt in 0..2 {
-        match persistence.persist_timeline_event_and_ack(event).await {
-            Ok(result) => {
-                return result.map_err(crate::commands::TimelineWriteError::Persistence);
-            }
-            Err(_) if attempt == 0 => {
-                tracing::warn!(
-                    seq = event.seq.get(),
-                    "Timeline acknowledgement channel was lost; retrying the exact event"
-                );
-            }
-            Err(_) => return Err(crate::commands::TimelineWriteError::AcknowledgementLost),
-        }
-    }
-    unreachable!("bounded Timeline acknowledgement loop always returns")
 }

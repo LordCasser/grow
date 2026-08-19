@@ -3,6 +3,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
@@ -372,7 +373,9 @@ pub(crate) fn write_workflow_run_manifest(
         "Workflow run directory",
         true,
     )?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
+    let lock = lock_workflow_state(&run_dir)?;
+    #[cfg(any(unix, windows))]
     let cleared = match run_dir.read_bounded(
         std::ffi::OsStr::new("cleared"),
         "Workflow cleared marker",
@@ -382,12 +385,12 @@ pub(crate) fn write_workflow_run_manifest(
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => return Err(error),
     };
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let cleared = false;
     if cleared {
         return Ok(());
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     match run_dir.read_bounded(
         std::ffi::OsStr::new("state.json"),
         "Workflow manifest",
@@ -422,90 +425,78 @@ pub(crate) fn write_workflow_run_manifest(
             format!("Workflow manifest exceeds {MAX_WORKFLOW_MANIFEST_BYTES} bytes"),
         ));
     }
-    crate::session::storage::write_contained_atomic_durable(
-        session_dir,
-        &run_relative.join("state.json"),
-        &json,
-    )
+    #[cfg(any(unix, windows))]
+    let result = run_dir.write_atomic(std::ffi::OsStr::new("state.json"), &json, true, true);
+    #[cfg(any(unix, windows))]
+    {
+        let _ = lock.unlock();
+        result
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (run_dir, json);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative Workflow storage is unsupported on this platform",
+        ))
+    }
 }
 
 pub(crate) fn tombstone_workflow_run(session_dir: &Path, run_id: &str) -> io::Result<()> {
     validate_run_id(run_id)?;
     let run_relative = Path::new("workflows").join(run_id);
-    crate::session::storage::write_contained_atomic_durable(
-        session_dir,
-        &run_relative.join("cleared"),
-        b"",
-    )?;
     let run_dir = crate::session::storage::ContainedDirectory::open(
         session_dir,
         &run_relative,
         "Workflow run directory",
-        false,
+        true,
     )?;
-    #[cfg(unix)]
-    match run_dir.remove_file(std::ffi::OsStr::new("state.json"), true) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    #[cfg(any(unix, windows))]
+    {
+        let lock = lock_workflow_state(&run_dir)?;
+        let result = (|| {
+            run_dir.write_atomic(std::ffi::OsStr::new("cleared"), b"", true, true)?;
+            match run_dir.remove_file(std::ffi::OsStr::new("state.json"), true) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            Ok(())
+        })();
+        let _ = lock.unlock();
+        result
     }
-    Ok(())
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = run_dir;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative Workflow storage is unsupported on this platform",
+        ))
+    }
 }
 
-pub(crate) fn read_bounded_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Workflow artifact has no parent",
-        )
-    })?;
-    crate::session::storage::require_regular_directory(parent, "Workflow artifact directory")?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "workflow artifact is not a regular file: {}",
-                path.display()
-            ),
-        ));
+#[cfg(any(unix, windows))]
+fn lock_workflow_state(
+    run_dir: &crate::session::storage::ContainedDirectory,
+) -> io::Result<std::fs::File> {
+    let lock = run_dir.open_read_write_create(std::ffi::OsStr::new("state.lock"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "timed out waiting for Workflow state lock",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
     }
-    if metadata.len() > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "workflow artifact exceeds {limit} bytes: {}",
-                path.display()
-            ),
-        ));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = options.open(path)?;
-    let opened = file.metadata()?;
-    if !opened.is_file() || opened.len() > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("workflow artifact changed during open: {}", path.display()),
-        ));
-    }
-    let mut bytes = Vec::with_capacity(opened.len() as usize);
-    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "workflow artifact exceeds {limit} bytes: {}",
-                path.display()
-            ),
-        ));
-    }
-    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -599,6 +590,51 @@ mod tests {
             "disk full"
         );
         writer.await.unwrap();
+    }
+
+    fn manifest(run_id: &str, revision: u64) -> WorkflowRunManifest {
+        let mut state = WorkflowTracker::default().start_run(
+            run_id.into(),
+            "demo".into(),
+            "objective".into(),
+            Vec::new(),
+            Some(8),
+            Some(format!("workflows/{run_id}/journal.jsonl")),
+        );
+        state.revision = revision;
+        WorkflowRunManifest {
+            version: WORKFLOW_RUN_MANIFEST_VERSION,
+            state,
+            script_revision: 0,
+        }
+    }
+
+    #[test]
+    fn stale_workflow_manifest_cannot_overwrite_newer_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let newer = manifest("wf_revision", 7);
+        let stale = manifest("wf_revision", 6);
+        write_workflow_run_manifest(dir.path(), &newer).unwrap();
+        write_workflow_run_manifest(dir.path(), &stale).unwrap();
+
+        let persisted: WorkflowRunManifest = serde_json::from_slice(
+            &std::fs::read(dir.path().join("workflows/wf_revision/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.state.revision, 7);
+    }
+
+    #[test]
+    fn workflow_tombstone_prevents_manifest_recreation() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = manifest("wf_cleared", 1);
+        write_workflow_run_manifest(dir.path(), &first).unwrap();
+        tombstone_workflow_run(dir.path(), "wf_cleared").unwrap();
+        write_workflow_run_manifest(dir.path(), &manifest("wf_cleared", 2)).unwrap();
+
+        let run_dir = dir.path().join("workflows/wf_cleared");
+        assert!(run_dir.join("cleared").exists());
+        assert!(!run_dir.join("state.json").exists());
     }
 
     #[test]

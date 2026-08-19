@@ -140,6 +140,7 @@ struct TestHarness {
     handle: crate::handle::ChatStateHandle,
     event_rx: mpsc::UnboundedReceiver<ChatStateEvent>,
     persistence_rx: MockPersistenceReceiver,
+    bootstrap_records_to_skip: usize,
     _cancellation_token: tokio_util::sync::CancellationToken,
 }
 
@@ -184,18 +185,21 @@ impl TestHarness {
         items: Vec<ConversationItem>,
         config: SamplingConfig,
         mock: MockTimelinePersistence,
-        mut persistence_rx: MockPersistenceReceiver,
+        persistence_rx: MockPersistenceReceiver,
     ) -> Self {
+        let bootstrap_records_to_skip =
+            crate::actor::state::ChatState::new(items.clone(), config.clone())
+                .timeline
+                .events()
+                .len();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let token = tokio_util::sync::CancellationToken::new();
         let handle = ChatStateActor::spawn(items, config, Box::new(mock), event_tx, token.clone());
-        // Seed durable writes are dispatched before actor creation returns, so
-        // later sequence numbers can be replayed from the Timeline alone.
-        persistence_rx.drain();
         Self {
             handle,
             event_rx,
             persistence_rx,
+            bootstrap_records_to_skip,
             _cancellation_token: token,
         }
     }
@@ -219,8 +223,36 @@ impl TestHarness {
 
     /// Drain all pending persistence records.
     fn drain_persistence(&mut self) -> Vec<PersistenceRecord> {
-        self.persistence_rx.drain()
+        self.persistence_rx
+            .drain()
+            .into_iter()
+            .filter(|record| {
+                if self.bootstrap_records_to_skip > 0
+                    && matches!(record, PersistenceRecord::Timeline(_))
+                {
+                    self.bootstrap_records_to_skip -= 1;
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect()
     }
+}
+
+async fn fail_once_then_ack_exact_retry(persistence_rx: &mut MockPersistenceReceiver) {
+    persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("first Timeline acknowledgement")
+        .send(Err(std::io::Error::other("simulated disk failure")))
+        .unwrap();
+    persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("exact Timeline retry acknowledgement")
+        .send(Ok(()))
+        .unwrap();
 }
 
 async fn replace_test_surface(
@@ -1021,7 +1053,7 @@ async fn atomic_image_rewrite_preserves_message_metadata_and_tool_pairing() {
 }
 
 #[tokio::test]
-async fn failed_image_rewrite_persistence_leaves_memory_unchanged() {
+async fn image_rewrite_retries_an_uncertain_persistence_failure() {
     use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
 
     let user = ConversationItem::User(UserItem {
@@ -1044,55 +1076,30 @@ async fn failed_image_rewrite_persistence_leaves_memory_unchanged() {
             .rewrite_images_and_ack(vec![rewrite], "dropped".to_owned())
             .await
     };
-    let reject_persistence = async {
-        let acknowledge = h
-            .persistence_rx
-            .next_timeline_ack()
-            .await
-            .expect("Timeline acknowledgement");
-        acknowledge
-            .send(Err(std::io::Error::other("simulated disk failure")))
-            .unwrap();
-    };
-    let (report, ()) = tokio::join!(rewrite_future, reject_persistence);
-    assert!(report.is_none());
-    assert_eq!(
+    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let (report, ()) = tokio::join!(rewrite_future, retry);
+    assert!(report.is_some());
+    assert_ne!(
         serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
         serde_json::to_vec(&vec![user]).unwrap(),
-        "a failed durable replacement must not mutate the live conversation"
     );
 }
 
 #[tokio::test]
-async fn failed_durable_rewind_leaves_surface_unchanged() {
+async fn durable_rewind_retries_an_uncertain_persistence_failure() {
     let original = marked_user("original", 0);
     let mut h = TestHarness::with_manual_timeline_ack_after(vec![], 3);
     h.handle.push_user_message(original.clone());
     record_prompt(&h.handle, "original").await;
     let handle = h.handle.clone();
     let mut replace = std::pin::pin!(async move { handle.rewind_durably(0).await });
-    let acknowledge = tokio::select! {
-        result = &mut replace => panic!("rewind returned before persistence acknowledgement: {result:?}"),
-        acknowledge = h.persistence_rx.next_timeline_ack() => {
-            acknowledge.expect("Timeline acknowledgement")
-        }
-    };
-    acknowledge
-        .send(Err(std::io::Error::other("simulated disk failure")))
-        .unwrap();
-    let result = replace.await;
-    assert!(matches!(
-        result,
-        Err(crate::TimelineWriteError::Persistence(_))
-    ));
-    assert_eq!(
-        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
-        serde_json::to_vec(&vec![original]).unwrap()
-    );
+    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let (result, ()) = tokio::join!(&mut replace, retry);
+    result.unwrap();
 }
 
 #[tokio::test]
-async fn failed_durable_user_message_leaves_surface_unchanged() {
+async fn durable_user_message_retries_an_uncertain_persistence_failure() {
     let original = ConversationItem::system("system");
     let mut h = TestHarness::with_manual_timeline_ack(vec![original.clone()]);
     let handle = h.handle.clone();
@@ -1101,23 +1108,10 @@ async fn failed_durable_user_message_leaves_surface_unchanged() {
             .push_user_message_durably(ConversationItem::user("not committed"))
             .await
     };
-    let reject = async {
-        h.persistence_rx
-            .next_timeline_ack()
-            .await
-            .expect("Timeline acknowledgement")
-            .send(Err(std::io::Error::other("simulated disk failure")))
-            .unwrap();
-    };
-    let (result, ()) = tokio::join!(push, reject);
-    assert!(matches!(
-        result,
-        Err(crate::TimelineWriteError::Persistence(_))
-    ));
-    assert_eq!(
-        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
-        serde_json::to_vec(&vec![original]).unwrap()
-    );
+    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let (result, ()) = tokio::join!(push, retry);
+    result.unwrap();
+    assert_eq!(h.handle.get_conversation().await.len(), 2);
 }
 
 #[tokio::test]
@@ -1160,6 +1154,94 @@ async fn lost_timeline_ack_retries_the_exact_event_once() {
         serde_json::to_value(&events[1]).unwrap(),
     );
     assert_eq!(h.handle.get_conversation().await.len(), 1);
+}
+
+#[tokio::test]
+async fn bootstrap_persists_strictly_one_event_at_a_time() {
+    let seed = vec![
+        ConversationItem::system("system"),
+        ConversationItem::user("user"),
+    ];
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        seed,
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+
+    let first = persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("first bootstrap acknowledgement");
+    let records = persistence_rx.drain();
+    assert_eq!(records.len(), 1);
+    let PersistenceRecord::Timeline(first_event) = &records[0] else {
+        panic!("expected first bootstrap event");
+    };
+    assert_eq!(first_event.seq.get(), 0);
+    first
+        .send(Err(std::io::Error::other("committed state unknown")))
+        .unwrap();
+
+    let retry = persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("exact bootstrap retry acknowledgement");
+    let records = persistence_rx.drain();
+    assert_eq!(records.len(), 1);
+    let PersistenceRecord::Timeline(retried_event) = &records[0] else {
+        panic!("expected retried bootstrap event");
+    };
+    assert_eq!(
+        serde_json::to_value(retried_event).unwrap(),
+        serde_json::to_value(first_event).unwrap()
+    );
+    retry.send(Ok(())).unwrap();
+
+    let second = persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("second bootstrap acknowledgement");
+    let records = persistence_rx.drain();
+    assert_eq!(records.len(), 1);
+    let PersistenceRecord::Timeline(second_event) = &records[0] else {
+        panic!("expected second bootstrap event");
+    };
+    assert_eq!(second_event.seq.get(), 1);
+    second.send(Ok(())).unwrap();
+    assert_eq!(handle.get_conversation().await.len(), 2);
+}
+
+#[tokio::test]
+async fn dropping_last_handle_cancels_a_permanently_failing_pending_event() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    handle.push_assistant_response(ConversationItem::assistant("pending"));
+    persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("pending acknowledgement")
+        .send(Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "persistence actor stopped",
+        )))
+        .unwrap();
+
+    drop(handle);
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+        .await
+        .expect("actor must stop after its last handle is dropped");
+    assert!(closed.is_none());
 }
 
 #[tokio::test]
@@ -1644,7 +1726,7 @@ async fn replace_system_head_preserves_active_turn_capture() {
 }
 
 #[tokio::test]
-async fn replace_system_head_does_not_advance_surface_when_commit_fails() {
+async fn replace_system_head_retries_an_uncertain_commit() {
     let original = vec![
         ConversationItem::system("old"),
         ConversationItem::user("keep me"),
@@ -1652,25 +1734,10 @@ async fn replace_system_head_does_not_advance_surface_when_commit_fails() {
     let mut h = TestHarness::with_manual_timeline_ack(original.clone());
     let handle = h.handle.clone();
     let replace = async move { handle.replace_system_head("new").await };
-    let reject = async {
-        h.persistence_rx
-            .next_timeline_ack()
-            .await
-            .expect("Timeline acknowledgement")
-            .send(Err(std::io::Error::other("simulated disk failure")))
-            .unwrap();
-    };
-    let (result, ()) = tokio::join!(replace, reject);
-
-    assert!(matches!(
-        result,
-        Err(crate::TimelineWriteError::Persistence(_))
-    ));
-    assert_eq!(
-        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
-        serde_json::to_vec(&original).unwrap(),
-        "a rejected system-head event must not change Surface"
-    );
+    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let (result, ()) = tokio::join!(replace, retry);
+    assert_eq!(result.unwrap(), true);
+    assert_eq!(h.handle.get_conversation().await[0].text_content(), "new");
 }
 
 #[tokio::test]
@@ -2173,7 +2240,7 @@ async fn build_request_can_persist_memory_into_actor_state() {
 }
 
 #[tokio::test]
-async fn persistent_memory_context_does_not_advance_surface_when_commit_fails() {
+async fn persistent_memory_context_retries_an_uncertain_commit() {
     let original = vec![ConversationItem::system("system")];
     let mut h = TestHarness::with_manual_timeline_ack(original.clone());
     let handle = h.handle.clone();
@@ -2182,24 +2249,12 @@ async fn persistent_memory_context_does_not_advance_surface_when_commit_fails() 
             .build_request(vec![], Some("remember".to_owned()), true)
             .await
     };
-    let reject = async {
-        h.persistence_rx
-            .next_timeline_ack()
-            .await
-            .expect("Timeline acknowledgement")
-            .send(Err(std::io::Error::other("simulated disk failure")))
-            .unwrap();
-    };
-    let (result, ()) = tokio::join!(build, reject);
-
-    assert!(matches!(
-        result,
-        Err(crate::TimelineWriteError::Persistence(_))
-    ));
-    assert_eq!(
+    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let (result, ()) = tokio::join!(build, retry);
+    result.unwrap();
+    assert_ne!(
         serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
         serde_json::to_vec(&original).unwrap(),
-        "a rejected memory-context event must not change Surface"
     );
 }
 
@@ -4888,7 +4943,7 @@ async fn repair_history_command_refused_while_turn_active() {
 }
 
 #[tokio::test]
-async fn repair_history_does_not_mutate_when_timeline_commit_fails() {
+async fn repair_history_retries_an_uncertain_timeline_commit() {
     let corrupted = vec![
         ConversationItem::user("prompt"),
         ConversationItem::tool_result("call_ORPHAN", "orphaned"),
@@ -4896,22 +4951,10 @@ async fn repair_history_does_not_mutate_when_timeline_commit_fails() {
     let mut h = TestHarness::with_manual_timeline_ack(corrupted.clone());
     let handle = h.handle.clone();
     let repair = async move { handle.repair_history(false, None).await.unwrap() };
-    let reject = async {
-        h.persistence_rx
-            .next_timeline_ack()
-            .await
-            .expect("Timeline acknowledgement")
-            .send(Err(std::io::Error::other("simulated disk failure")))
-            .unwrap();
-    };
-    let (result, ()) = tokio::join!(repair, reject);
-    assert!(matches!(
-        result,
-        Err(crate::RepairHistoryError::Timeline(
-            crate::TimelineWriteError::Persistence(_)
-        ))
-    ));
-    assert_eq!(
+    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let (result, ()) = tokio::join!(repair, retry);
+    assert!(result.is_ok());
+    assert_ne!(
         serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
         serde_json::to_vec(&corrupted).unwrap()
     );
@@ -4920,8 +4963,8 @@ async fn repair_history_does_not_mutate_when_timeline_commit_fails() {
             .iter()
             .filter_map(persisted_messages)
             .count(),
-        1,
-        "the failed durable attempt is recorded by the mock exactly once"
+        2,
+        "the exact durable event is retried after an uncertain failure"
     );
 }
 
@@ -5108,7 +5151,7 @@ async fn prune_tool_results_never_appears_to_increase_usage() {
 }
 
 #[tokio::test]
-async fn prune_tool_results_does_not_mutate_when_timeline_commit_fails() {
+async fn prune_tool_results_retries_an_uncertain_timeline_commit() {
     use compaction::{PruneItem, PrunePlan};
 
     let original = vec![ConversationItem::tool_result("call-1", "x".repeat(4000))];
@@ -5126,25 +5169,12 @@ async fn prune_tool_results_does_not_mutate_when_timeline_commit_fails() {
             })
             .await
     };
-    let reject = async {
-        h.persistence_rx
-            .next_timeline_ack()
-            .await
-            .expect("Timeline acknowledgement")
-            .send(Err(std::io::Error::other("simulated disk failure")))
-            .unwrap();
-    };
-    let (result, ()) = tokio::join!(prune, reject);
-    assert!(matches!(
-        result,
-        Err(crate::commands::PruneError::Timeline(
-            crate::TimelineWriteError::Persistence(_)
-        ))
-    ));
-    assert_eq!(
+    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let (result, ()) = tokio::join!(prune, retry);
+    assert!(result.is_ok());
+    assert_ne!(
         serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
         serde_json::to_vec(&original).unwrap(),
-        "rejected pruning must not change the live Surface"
     );
 }
 

@@ -93,16 +93,24 @@ pub async fn serve(
     }
     let session_dir = super::persistence::find_session_dir_by_id(session_id)
         .ok_or_else(|| anyhow::anyhow!("session '{session_id}' was not found"))?;
-    let timeline_path = session_dir.join(super::storage::TIMELINE_FILE);
-    super::storage::open_regular_nofollow(&timeline_path, "Trajectory Timeline ledger").map_err(
-        |error| {
+    let session = super::storage::ContainedDirectory::open(
+        &session_dir,
+        Path::new(""),
+        "Trajectory session directory",
+        false,
+    )?;
+    session
+        .open_regular(
+            std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
+            "Trajectory Timeline ledger",
+        )
+        .map_err(|error| {
             anyhow::anyhow!(
                 "session '{}' has no readable Timeline v7 ledger at {}: {error}",
                 session_id,
-                timeline_path.display()
+                session_dir.join(super::storage::TIMELINE_FILE).display()
             )
-        },
-    )?;
+        })?;
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let local = listener.local_addr()?;
@@ -320,12 +328,31 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
 }
 
 fn session_actor_ref(session_dir: &Path, session_id: &str) -> anyhow::Result<String> {
-    let summary = super::persistence::read_summary_in_session_dir(session_dir)?;
+    let directory = super::storage::ContainedDirectory::open(
+        session_dir,
+        Path::new(""),
+        "Trajectory session directory",
+        false,
+    )?;
+    let summary = read_summary_from_directory(&directory)?;
     let actor = match summary.session_kind.as_deref() {
         Some(kind) if kind.starts_with("subagent") => format!("subagent:{session_id}"),
         _ => "main".into(),
     };
     Ok(actor)
+}
+
+fn read_summary_from_directory(
+    directory: &super::storage::ContainedDirectory,
+) -> anyhow::Result<super::persistence::Summary> {
+    let bytes = directory.read_bounded(
+        std::ffi::OsStr::new(super::storage::SUMMARY_FILE),
+        "Trajectory session summary",
+        super::storage::MAX_SESSION_SUMMARY_BYTES,
+    )?;
+    let summary: super::persistence::Summary = serde_json::from_slice(&bytes)?;
+    summary.validate_current_format()?;
+    Ok(summary)
 }
 
 fn dimension_matches(actual: &str, filter: &str) -> bool {
@@ -349,12 +376,29 @@ impl SessionTrajectoryCache {
         resolver: &super::storage::relocation::RelocationView,
         visited: &mut BTreeSet<String>,
     ) -> anyhow::Result<()> {
+        let directory = super::storage::ContainedDirectory::open(
+            session_dir,
+            Path::new(""),
+            "Trajectory session directory",
+            false,
+        )?;
+        self.refresh_tree_from_directory(session_dir, &directory, timeline_id, resolver, visited)
+    }
+
+    fn refresh_tree_from_directory(
+        &mut self,
+        session_dir: &Path,
+        directory: &super::storage::ContainedDirectory,
+        timeline_id: &str,
+        resolver: &super::storage::relocation::RelocationView,
+        visited: &mut BTreeSet<String>,
+    ) -> anyhow::Result<()> {
         if !self.session_dir.as_os_str().is_empty() && self.session_dir != session_dir {
             *self = Self::default();
         }
         self.session_dir = session_dir.to_owned();
-        self.refresh(&session_dir.join(super::storage::TIMELINE_FILE))?;
-        self.refresh_sidebands(&session_dir.join("sidebands"))?;
+        self.refresh_from_directory(directory)?;
+        self.refresh_sidebands(directory)?;
         for sideband_id in self.sidebands.keys() {
             if !visited.insert(sideband_id.clone()) {
                 anyhow::bail!(
@@ -362,7 +406,7 @@ impl SessionTrajectoryCache {
                 );
             }
         }
-        self.refresh_workflows(timeline_id, visited)?;
+        self.refresh_workflows(directory, timeline_id, visited)?;
 
         let terminals = self
             .timeline
@@ -406,7 +450,13 @@ impl SessionTrajectoryCache {
                 }
                 continue;
             };
-            let summary = super::persistence::read_summary_in_session_dir(&child_dir)?;
+            let child_directory = super::storage::ContainedDirectory::open(
+                &child_dir,
+                Path::new(""),
+                "Trajectory child session directory",
+                false,
+            )?;
+            let summary = read_summary_from_directory(&child_directory)?;
             if summary.info.id.to_string() != spawn.child_session_id
                 || summary.parent_session_id.as_deref() != Some(timeline_id)
                 || !summary
@@ -421,14 +471,10 @@ impl SessionTrajectoryCache {
                     spawn_seq.get()
                 );
             }
-            let child_timeline_path = child_dir.join(super::storage::TIMELINE_FILE);
-            match std::fs::symlink_metadata(&child_timeline_path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    anyhow::bail!(
-                        "child Timeline is not a regular file: {}",
-                        child_timeline_path.display()
-                    );
-                }
+            match child_directory.open_regular(
+                std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
+                "Trajectory child Timeline ledger",
+            ) {
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     if terminal.is_some_and(terminal_requires_child) {
@@ -445,7 +491,13 @@ impl SessionTrajectoryCache {
                 .children
                 .entry(spawn.child_session_id.clone())
                 .or_default();
-            child.refresh_tree(&child_dir, &spawn.child_session_id, resolver, visited)?;
+            child.refresh_tree_from_directory(
+                &child_dir,
+                &child_directory,
+                &spawn.child_session_id,
+                resolver,
+                visited,
+            )?;
             if child.timeline.events().is_empty() && terminal.is_none() {
                 seen.insert(spawn.child_session_id.clone());
                 continue;
@@ -468,8 +520,15 @@ impl SessionTrajectoryCache {
         Ok(())
     }
 
-    fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
-        let mut file = super::storage::open_regular_nofollow(path, "Trajectory Timeline ledger")?;
+    fn refresh_from_directory(
+        &mut self,
+        directory: &super::storage::ContainedDirectory,
+    ) -> anyhow::Result<()> {
+        let path = directory.display_path().join(super::storage::TIMELINE_FILE);
+        let mut file = directory.open_regular(
+            std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
+            "Trajectory Timeline ledger",
+        )?;
         let file_len = file.metadata()?.len();
         if file_len < self.offset
             || !ledger_prefix_matches(self.offset, self.prefix_hash, &mut file)?
@@ -478,7 +537,7 @@ impl SessionTrajectoryCache {
             *self = Self::default();
             self.session_dir = session_dir;
         }
-        let (bytes, complete_len) = read_ledger_batch(&mut file, self.offset, path)?;
+        let (bytes, complete_len) = read_ledger_batch(&mut file, self.offset, &path)?;
         if complete_len == 0 {
             return Ok(());
         }
@@ -504,64 +563,57 @@ impl SessionTrajectoryCache {
         Ok(())
     }
 
-    fn refresh_sidebands(&mut self, directory: &Path) -> anyhow::Result<()> {
-        match std::fs::symlink_metadata(directory) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                anyhow::bail!(
-                    "Trajectory sidebands path is not a regular directory: {}",
-                    directory.display()
-                );
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.sidebands.clear();
-                return Ok(());
-            }
-            Err(error) => return Err(error.into()),
-        }
-        let mut entries = std::fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(std::fs::DirEntry::file_name);
+    #[cfg(test)]
+    fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("test ledger has no parent"))?;
+        let directory = super::storage::ContainedDirectory::open(
+            parent,
+            Path::new(""),
+            "Trajectory test directory",
+            false,
+        )?;
+        self.refresh_from_directory(&directory)
+    }
+
+    fn refresh_sidebands(
+        &mut self,
+        directory: &super::storage::ContainedDirectory,
+    ) -> anyhow::Result<()> {
+        let sideband_ids = self
+            .timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Sideband(spawn) => Some(spawn.sideband_id.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::new();
-        for entry in entries {
-            if !entry.file_type()?.is_dir() {
-                anyhow::bail!(
-                    "unsupported entry in Trajectory sidebands directory: {}",
-                    entry.path().display()
-                );
-            }
-            let sideband_id = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("Trajectory sideband id is not valid UTF-8"))?;
+        for sideband_id in sideband_ids {
             chat_state::validate_sideband_id(&sideband_id)?;
-            let path = entry.path().join(super::storage::TIMELINE_FILE);
-            match std::fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    anyhow::bail!(
-                        "Trajectory sideband ledger is not a regular file: {}",
-                        path.display()
-                    );
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    let children =
-                        std::fs::read_dir(entry.path())?.collect::<Result<Vec<_>, _>>()?;
-                    if children.is_empty()
-                        || children.iter().all(|child| {
-                            child.file_name().to_string_lossy()
-                                == format!("{}.lock", super::storage::TIMELINE_FILE)
-                        })
-                    {
-                        continue;
-                    }
-                    anyhow::bail!(
-                        "Trajectory sideband {sideband_id} directory has no Timeline ledger"
-                    );
-                }
+            let sideband_dir = match directory.open_relative(
+                &Path::new(super::storage::SIDEBANDS_DIR).join(&sideband_id),
+                "Trajectory sideband directory",
+                false,
+            ) {
+                Ok(sideband_dir) => sideband_dir,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
-            }
+            };
             let sideband = self.sidebands.entry(sideband_id.clone()).or_default();
-            sideband.refresh(&path)?;
+            match sideband.refresh_from_directory(&sideband_dir) {
+                Ok(()) => {}
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
             if !sideband.events.is_empty() {
                 seen.insert(sideband_id.clone());
             }
@@ -572,6 +624,7 @@ impl SessionTrajectoryCache {
 
     fn refresh_workflows(
         &mut self,
+        directory: &super::storage::ContainedDirectory,
         timeline_id: &str,
         visited: &mut BTreeSet<String>,
     ) -> anyhow::Result<()> {
@@ -593,16 +646,6 @@ impl SessionTrajectoryCache {
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
-        let directory = self.session_dir.join("workflows");
-        if !spawns.is_empty() {
-            let metadata = std::fs::symlink_metadata(&directory)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                anyhow::bail!(
-                    "Trajectory workflows path is not a regular directory: {}",
-                    directory.display()
-                );
-            }
-        }
         let mut seen = BTreeSet::new();
         for (run_id, (spawn_seq, name, objective, private)) in &spawns {
             if !visited.insert(run_id.clone()) {
@@ -611,36 +654,37 @@ impl SessionTrajectoryCache {
                 );
             }
             super::workflow::store::validate_run_id(run_id)?;
-            let run_dir = directory.join(run_id);
-            let run_metadata = match std::fs::symlink_metadata(&run_dir) {
-                Ok(metadata) => metadata,
+            let run_dir = match directory.open_relative(
+                &Path::new("workflows").join(run_id),
+                "Trajectory Workflow run directory",
+                false,
+            ) {
+                Ok(run_dir) => run_dir,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
-            if run_metadata.file_type().is_symlink() || !run_metadata.is_dir() {
-                anyhow::bail!(
-                    "Workflow run directory is not a regular directory: {}",
-                    run_dir.display()
-                );
-            }
-            match std::fs::symlink_metadata(run_dir.join("cleared")) {
-                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                    continue;
-                }
-                Ok(_) => anyhow::bail!("Workflow cleared marker is not a regular file"),
+            match run_dir.read_bounded(
+                std::ffi::OsStr::new("cleared"),
+                "Trajectory Workflow cleared marker",
+                0,
+            ) {
+                Ok(_) => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            let manifest_path = run_dir.join("state.json");
-            let manifest = match super::workflow::store::read_bounded_nofollow(
-                &manifest_path,
+            let manifest = match run_dir.read_bounded(
+                std::ffi::OsStr::new("state.json"),
+                "Trajectory Workflow manifest",
                 super::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES,
             ) {
                 Ok(bytes) => {
                     serde_json::from_slice::<super::workflow::store::WorkflowRunManifest>(&bytes)?
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    match std::fs::symlink_metadata(run_dir.join("journal.jsonl")) {
+                    match run_dir.open_regular(
+                        std::ffi::OsStr::new("journal.jsonl"),
+                        "Trajectory Workflow journal",
+                    ) {
                         Ok(_) => anyhow::bail!(
                             "Workflow {run_id} has a journal but no manifest under t:{timeline_id}/{spawn_seq}"
                         ),
@@ -661,11 +705,13 @@ impl SessionTrajectoryCache {
             {
                 anyhow::bail!("Workflow manifest does not match spawn t:{timeline_id}/{spawn_seq}");
             }
-            let journal_path = run_dir.join("journal.jsonl");
             let journal = self.workflows.entry(run_id.clone()).or_default();
-            match std::fs::symlink_metadata(&journal_path) {
+            match run_dir.open_regular(
+                std::ffi::OsStr::new("journal.jsonl"),
+                "Trajectory Workflow journal",
+            ) {
                 Ok(_) => {
-                    journal.refresh(&journal_path)?;
+                    journal.refresh_from_directory(&run_dir)?;
                     validate_workflow_journal_links(&self.timeline, run_id, journal)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1030,15 +1076,22 @@ fn validate_workflow_journal_links(
 }
 
 impl SidebandCache {
-    fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
-        let mut file = super::storage::open_regular_nofollow(path, "Trajectory sideband ledger")?;
+    fn refresh_from_directory(
+        &mut self,
+        directory: &super::storage::ContainedDirectory,
+    ) -> anyhow::Result<()> {
+        let path = directory.display_path().join(super::storage::TIMELINE_FILE);
+        let mut file = directory.open_regular(
+            std::ffi::OsStr::new(super::storage::TIMELINE_FILE),
+            "Trajectory sideband ledger",
+        )?;
         let file_len = file.metadata()?.len();
         if file_len < self.offset
             || !ledger_prefix_matches(self.offset, self.prefix_hash, &mut file)?
         {
             *self = Self::default();
         }
-        let (bytes, complete_len) = read_ledger_batch(&mut file, self.offset, path)?;
+        let (bytes, complete_len) = read_ledger_batch(&mut file, self.offset, &path)?;
         if complete_len == 0 {
             return Ok(());
         }
@@ -1059,25 +1112,32 @@ impl SidebandCache {
         refresh_ledger_prefix_hash(self.offset, &mut self.prefix_hash, &mut file)?;
         Ok(())
     }
+
+    #[cfg(test)]
+    fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("test ledger has no parent"))?;
+        let directory = super::storage::ContainedDirectory::open(
+            parent,
+            Path::new(""),
+            "Trajectory sideband test directory",
+            false,
+        )?;
+        self.refresh_from_directory(&directory)
+    }
 }
 
 impl WorkflowJournalCache {
-    fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
-        let metadata = std::fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_file()
-            || metadata.len() > workflow::journal::MAX_JOURNAL_BYTES
-        {
-            anyhow::bail!("invalid Workflow journal: {}", path.display());
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(path)?;
+    fn refresh_from_directory(
+        &mut self,
+        directory: &super::storage::ContainedDirectory,
+    ) -> anyhow::Result<()> {
+        let path = directory.display_path().join("journal.jsonl");
+        let mut file = directory.open_regular(
+            std::ffi::OsStr::new("journal.jsonl"),
+            "Trajectory Workflow journal",
+        )?;
         let opened = file.metadata()?;
         if !opened.is_file() || opened.len() > workflow::journal::MAX_JOURNAL_BYTES {
             anyhow::bail!("Workflow journal changed during open: {}", path.display());
@@ -1121,6 +1181,20 @@ impl WorkflowJournalCache {
         self.offset = self.offset.saturating_add(complete_len as u64);
         refresh_ledger_prefix_hash(self.offset, &mut self.prefix_hash, &mut file)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("test ledger has no parent"))?;
+        let directory = super::storage::ContainedDirectory::open(
+            parent,
+            Path::new(""),
+            "Trajectory Workflow test directory",
+            false,
+        )?;
+        self.refresh_from_directory(&directory)
     }
 
     fn prefix_matches(&self, file: &mut std::fs::File) -> anyhow::Result<bool> {
@@ -1672,7 +1746,7 @@ mod tests {
         let error = SessionTrajectoryCache::default()
             .refresh(&link)
             .expect_err("Trajectory must not follow ledger symlinks");
-        assert!(error.to_string().contains("not a regular file"));
+        assert!(error.to_string().contains("symlink"), "{error:#}");
     }
 
     #[test]

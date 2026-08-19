@@ -266,16 +266,28 @@ pub(crate) fn find_summary_by_session_id_in_root(
 
 pub(crate) fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
     let path = session_dir.join("summary.json");
-    let bytes = crate::session::storage::read_bounded_regular_file(
-        &path,
-        "session summary",
-        crate::session::storage::MAX_SESSION_SUMMARY_BYTES,
+    let directory = crate::session::storage::ContainedDirectory::open(
+        session_dir,
+        Path::new(""),
+        "session directory",
+        false,
     )
     .map_err(|error| RelocationError::Io {
-        operation: "read",
-        path: path.clone(),
+        operation: "open",
+        path: session_dir.to_path_buf(),
         source: error,
     })?;
+    let bytes = directory
+        .read_bounded(
+            std::ffi::OsStr::new("summary.json"),
+            "session summary",
+            crate::session::storage::MAX_SESSION_SUMMARY_BYTES,
+        )
+        .map_err(|error| RelocationError::Io {
+            operation: "read",
+            path: path.clone(),
+            source: error,
+        })?;
     let summary: Summary =
         serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json {
             path: path.clone(),
@@ -454,27 +466,30 @@ pub(crate) fn referenced_prompt_blob_hashes(
 }
 
 pub(crate) fn verified_prompt_blob_bytes(session_dir: &Path, hash: &str) -> io::Result<Vec<u8>> {
-    let prompts = crate::session::storage::require_contained_directory(
+    let prompts = crate::session::storage::ContainedDirectory::open(
         session_dir,
         Path::new("prompts"),
         "immutable prompt blob directory",
+        false,
     )?;
-    let path = prompts.join(format!("{hash}.txt"));
-    let bytes = crate::session::storage::read_bounded_regular_file(
-        &path,
-        "immutable prompt blob",
-        MAX_IMMUTABLE_BLOB_BYTES,
-    )
-    .map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Timeline references missing prompt blob {}", path.display()),
-            )
-        } else {
-            error
-        }
-    })?;
+    let file_name = format!("{hash}.txt");
+    let path = prompts.display_path().join(&file_name);
+    let bytes = prompts
+        .read_bounded(
+            std::ffi::OsStr::new(&file_name),
+            "immutable prompt blob",
+            MAX_IMMUTABLE_BLOB_BYTES,
+        )
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Timeline references missing prompt blob {}", path.display()),
+                )
+            } else {
+                error
+            }
+        })?;
     if blake3::hash(&bytes).to_hex().as_str() != hash {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -600,7 +615,7 @@ pub fn write_immutable_blob(root: &Path, relative: &Path, content: &[u8]) -> io:
         "immutable blob directory",
         true,
     )?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     match parent.write_atomic(file_name, content, true, false) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -619,7 +634,7 @@ pub fn write_immutable_blob(root: &Path, relative: &Path, content: &[u8]) -> io:
         }
         Err(error) => Err(error),
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (parent, file_name, content);
         Err(io::Error::new(

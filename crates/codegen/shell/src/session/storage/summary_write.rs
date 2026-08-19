@@ -179,7 +179,7 @@ pub(crate) fn apply_patch_locked(
             .map_err(|error| {
                 io::Error::new(error.kind(), format!("open summary directory: {error}"))
             })?;
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (directory, summary_name, lock_name, patch);
         return Err(io::Error::new(
@@ -187,7 +187,7 @@ pub(crate) fn apply_patch_locked(
             "handle-relative summary storage is unsupported on this platform",
         ));
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let lock = directory
             .open_read_write_create(lock_name)
@@ -201,7 +201,7 @@ pub(crate) fn apply_patch_locked(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_modify_write(
     directory: &super::ContainedDirectory,
     summary_name: &std::ffi::OsStr,
@@ -215,7 +215,7 @@ fn read_modify_write(
     Ok(title_applied)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_summary_contained(
     directory: &super::ContainedDirectory,
     summary_name: &std::ffi::OsStr,
@@ -237,7 +237,7 @@ fn read_summary_contained(
     Ok(summary)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 fn read_summary(path: &Path) -> io::Result<Summary> {
     let parent = path
         .parent()
@@ -250,7 +250,7 @@ fn read_summary(path: &Path) -> io::Result<Summary> {
     read_summary_contained(&directory, name)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn write_summary_atomic(
     directory: &super::ContainedDirectory,
     summary_name: &std::ffi::OsStr,

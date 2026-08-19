@@ -77,26 +77,18 @@ pub(crate) fn create_contained_dir_all(
     contained_directory(root, relative, description, true)
 }
 
-pub(crate) fn require_contained_directory(
-    root: &Path,
-    relative: &Path,
-    description: &str,
-) -> io::Result<PathBuf> {
-    contained_directory(root, relative, description, false)
-}
-
 fn contained_directory(
     root: &Path,
     relative: &Path,
     description: &str,
     create_missing: bool,
 ) -> io::Result<PathBuf> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         return ContainedDirectory::open(root, relative, description, create_missing)
             .map(|directory| directory.path);
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         require_regular_directory(root, description)?;
         let mut current = root.to_path_buf();
@@ -200,6 +192,31 @@ impl ContainedDirectory {
             path.push(name);
         }
         Ok(Self { path, handle })
+    }
+
+    pub(crate) fn open_relative(
+        &self,
+        relative: &Path,
+        description: &str,
+        create_missing: bool,
+    ) -> io::Result<Self> {
+        let mut handle = self.handle.try_clone()?;
+        let mut path = self.path.clone();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{description} path must be relative and contained"),
+                ));
+            };
+            handle = Self::open_child_directory(&handle, name, description, create_missing)?;
+            path.push(name);
+        }
+        Ok(Self { path, handle })
+    }
+
+    pub(crate) fn display_path(&self) -> &Path {
+        &self.path
     }
 
     fn open_child_directory(
@@ -336,6 +353,31 @@ impl ContainedDirectory {
         description: &str,
         max_bytes: u64,
     ) -> io::Result<Vec<u8>> {
+        let mut file = self.open_regular(name, description)?;
+        let metadata = file.metadata()?;
+        if metadata.len() > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} exceeds the byte limit"),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} grew while reading"),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn open_regular(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<std::fs::File> {
         let name = Self::component(name)?;
         let fd = unsafe {
             libc::openat(
@@ -355,24 +397,15 @@ impl ContainedDirectory {
                 error
             });
         }
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
         let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > max_bytes {
+        if !metadata.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{description} is not a bounded regular file"),
+                format!("{description} is not a regular file"),
             ));
         }
-        let mut bytes = Vec::new();
-        file.take(max_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > max_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{description} grew while reading"),
-            ));
-        }
-        Ok(bytes)
+        Ok(file)
     }
 
     pub(crate) fn sync(&self) -> io::Result<()> {
@@ -495,10 +528,252 @@ impl ContainedDirectory {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) struct ContainedDirectory {
+    path: PathBuf,
+    handle: cap_std::fs::Dir,
+}
+
+#[cfg(windows)]
+impl ContainedDirectory {
+    pub(crate) fn open(
+        root: &Path,
+        relative: &Path,
+        description: &str,
+        create_missing: bool,
+    ) -> io::Result<Self> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        // Open the authority itself without traversing a reparse point. The
+        // capability therefore names the directory we validated, even if the
+        // ambient path is concurrently renamed or replaced afterwards.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let root_handle = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(root)?;
+        let metadata = root_handle.metadata()?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} authority is not a regular directory"),
+            ));
+        }
+        let handle = cap_std::fs::Dir::from_std_file(root_handle);
+        let root = Self {
+            path: root.to_path_buf(),
+            handle,
+        };
+        root.open_relative(relative, description, create_missing)
+    }
+
+    pub(crate) fn open_relative(
+        &self,
+        relative: &Path,
+        description: &str,
+        create_missing: bool,
+    ) -> io::Result<Self> {
+        let mut handle = self.handle.try_clone()?;
+        let mut path = self.path.clone();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{description} path must be relative and contained"),
+                ));
+            };
+            handle = Self::open_child_directory(&handle, name, description, create_missing)?;
+            path.push(name);
+        }
+        Ok(Self { path, handle })
+    }
+
+    pub(crate) fn display_path(&self) -> &Path {
+        &self.path
+    }
+
+    fn open_child_directory(
+        parent: &cap_std::fs::Dir,
+        name: &std::ffi::OsStr,
+        description: &str,
+        create_missing: bool,
+    ) -> io::Result<cap_std::fs::Dir> {
+        Self::component(name)?;
+        match parent.open_dir(name) {
+            Ok(directory) => Ok(directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && create_missing => {
+                match parent.create_dir(name) {
+                    Ok(()) => parent.try_clone()?.into_std_file().sync_all()?,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                parent.open_dir(name).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("{description} is not a contained regular directory: {error}"),
+                    )
+                })
+            }
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!("{description} is not a contained regular directory: {error}"),
+            )),
+        }
+    }
+
+    fn component(name: &std::ffi::OsStr) -> io::Result<()> {
+        if Path::new(name).components().count() != 1
+            || !matches!(
+                Path::new(name).components().next(),
+                Some(Component::Normal(_))
+            )
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "contained file name must be one normal component",
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_existing_reparse_or_non_file(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<()> {
+        match self.handle.symlink_metadata(name) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{description} is not a regular file"),
+                ))
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn open_read_write_create(
+        &self,
+        name: &std::ffi::OsStr,
+    ) -> io::Result<std::fs::File> {
+        Self::component(name)?;
+        self.reject_existing_reparse_or_non_file(name, "contained write target")?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        let file = self.handle.open_with(name, &options)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "contained write target is not a regular file",
+            ));
+        }
+        Ok(file.into_std())
+    }
+
+    pub(crate) fn read_bounded(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+        max_bytes: u64,
+    ) -> io::Result<Vec<u8>> {
+        let mut file = self.open_regular(name, description)?;
+        let metadata = file.metadata()?;
+        if metadata.len() > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} exceeds the byte limit"),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} grew while reading"),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn open_regular(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+    ) -> io::Result<std::fs::File> {
+        Self::component(name)?;
+        self.reject_existing_reparse_or_non_file(name, description)?;
+        let file = self.handle.open(name)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is not a regular file"),
+            ));
+        }
+        Ok(file.into_std())
+    }
+
+    pub(crate) fn sync(&self) -> io::Result<()> {
+        self.handle.try_clone()?.into_std_file().sync_all()
+    }
+
+    pub(crate) fn remove_file(&self, name: &std::ffi::OsStr, durable: bool) -> io::Result<()> {
+        Self::component(name)?;
+        self.handle.remove_file(name)?;
+        if durable {
+            self.sync()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn write_atomic(
+        &self,
+        name: &std::ffi::OsStr,
+        bytes: &[u8],
+        durable: bool,
+        replace: bool,
+    ) -> io::Result<()> {
+        Self::component(name)?;
+        self.reject_existing_reparse_or_non_file(name, "contained write target")?;
+        let tmp_name = format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        );
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = self.handle.open_with(&tmp_name, &options)?;
+        let result = (|| {
+            file.write_all(bytes)?;
+            if durable {
+                file.sync_all()?;
+            }
+            drop(file);
+            if replace {
+                self.handle.rename(&tmp_name, &self.handle, name)?;
+            } else {
+                self.handle.hard_link(&tmp_name, &self.handle, name)?;
+                self.handle.remove_file(&tmp_name)?;
+            }
+            if durable {
+                self.sync()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = self.handle.remove_file(&tmp_name);
+        }
+        result
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) struct ContainedDirectory;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl ContainedDirectory {
     pub(crate) fn open(
         _root: &Path,
@@ -549,11 +824,11 @@ fn write_contained_atomic_inner(
         )
     })?;
     let directory = ContainedDirectory::open(root, parent, "contained write directory", true)?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         directory.write_atomic(name, bytes, durable, replace)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (directory, name, bytes, durable, replace);
         Err(io::Error::new(
@@ -623,9 +898,41 @@ pub(crate) fn read_timeline_file(path: &Path) -> io::Result<Vec<chat_state::Time
 /// Read and validate the canonical Timeline for one explicit session
 /// directory. This is the only cross-crate disk projection entry point.
 pub fn read_timeline_in_session_dir(dir: &Path) -> io::Result<chat_state::Timeline> {
-    let events = read_timeline_file(&dir.join(TIMELINE_FILE))?;
+    let directory = ContainedDirectory::open(
+        dir,
+        Path::new(""),
+        "mandatory Timeline session directory",
+        false,
+    )?;
+    let events = read_committed_jsonl_from_directory(
+        &directory,
+        std::ffi::OsStr::new(TIMELINE_FILE),
+        "mandatory Timeline ledger",
+        MAX_JSONL_ENTRY_BYTES,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mandatory Timeline ledger is missing",
+            )
+        } else {
+            error
+        }
+    })?;
     chat_state::Timeline::from_events(events)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub(crate) fn read_committed_jsonl_from_directory<T: serde::de::DeserializeOwned>(
+    directory: &ContainedDirectory,
+    name: &std::ffi::OsStr,
+    description: &str,
+    max_entry_bytes: u64,
+) -> io::Result<Vec<T>> {
+    let file = directory.open_regular(name, description)?;
+    let path = directory.display_path().join(name);
+    read_committed_jsonl_from_file(file, path, description, max_entry_bytes)
 }
 
 /// Read complete records from an append-only JSONL ledger. A torn final
@@ -653,12 +960,17 @@ fn read_committed_jsonl_file_with_limit<T: serde::de::DeserializeOwned>(
             error
         }
     })?;
-    let mut lines = CommittedJsonlLines::from_file(
-        file,
-        path.to_path_buf(),
-        description.to_owned(),
-        max_entry_bytes,
-    );
+    read_committed_jsonl_from_file(file, path.to_path_buf(), description, max_entry_bytes)
+}
+
+fn read_committed_jsonl_from_file<T: serde::de::DeserializeOwned>(
+    file: std::fs::File,
+    path: PathBuf,
+    description: &str,
+    max_entry_bytes: u64,
+) -> io::Result<Vec<T>> {
+    let mut lines =
+        CommittedJsonlLines::from_file(file, path.clone(), description.to_owned(), max_entry_bytes);
     let mut items = Vec::new();
     while let Some(line) = lines.next() {
         let line = line?;
@@ -810,29 +1122,14 @@ pub(crate) fn open_regular_nofollow(path: &Path, description: &str) -> io::Resul
             "regular file path has no parent",
         )
     })?;
-    require_regular_directory(parent, description)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{description} is not a regular file: {}", path.display()),
-        ));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{description} changed during open: {}", path.display()),
-        ));
-    }
-    Ok(file)
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "regular file path has no file name",
+        )
+    })?;
+    let directory = ContainedDirectory::open(parent, Path::new(""), description, false)?;
+    directory.open_regular(name, description)
 }
 
 pub(crate) fn open_optional_regular_nofollow(
@@ -850,33 +1147,12 @@ pub(crate) fn open_read_write_create_nofollow(path: &Path) -> io::Result<std::fs
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "write target has no parent"))?;
-    require_regular_directory(parent, "write target directory")?;
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("write target is not a regular file: {}", path.display()),
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("write target changed during open: {}", path.display()),
-        ));
-    }
-    Ok(file)
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "write target has no file name")
+    })?;
+    let directory =
+        ContainedDirectory::open(parent, Path::new(""), "write target directory", false)?;
+    directory.open_read_write_create(name)
 }
 
 pub(crate) fn read_bounded_regular_file(
@@ -1078,11 +1354,11 @@ fn write_bytes_atomic_inner(path: &Path, bytes: &[u8], durable: bool) -> io::Res
     })?;
     let directory =
         ContainedDirectory::open(parent, Path::new(""), "atomic write directory", false)?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         directory.write_atomic(name, bytes, durable, true)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (directory, name, bytes, durable);
         Err(io::Error::new(
@@ -1216,7 +1492,7 @@ pub(crate) async fn write_bytes_atomic_durable_async(
 }
 
 /// Serialize `items` to newline-delimited JSON bytes.
-fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec<u8>> {
+pub(crate) fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec<u8>> {
     let mut content = Vec::new();
     for item in items {
         let start = content.len();
@@ -2529,6 +2805,8 @@ mod tests {
         std::fs::create_dir_all(root.path().join("sidebands/id")).unwrap();
         std::fs::write(outside.path().join("timeline.jsonl"), b"outside").unwrap();
         std::fs::write(outside.path().join("state.json"), b"outside-state").unwrap();
+        std::fs::write(root.path().join("sidebands/id/read.json"), b"inside-read").unwrap();
+        std::fs::write(outside.path().join("read.json"), b"outside-read").unwrap();
 
         let pinned = ContainedDirectory::open(
             root.path(),
@@ -2540,6 +2818,13 @@ mod tests {
         let detached = root.path().join("sidebands/id-detached");
         std::fs::rename(root.path().join("sidebands/id"), &detached).unwrap();
         symlink(outside.path(), root.path().join("sidebands/id")).unwrap();
+
+        assert_eq!(
+            pinned
+                .read_bounded(std::ffi::OsStr::new("read.json"), "race read", 64)
+                .unwrap(),
+            b"inside-read"
+        );
 
         let mut append = pinned
             .open_read_write_create(std::ffi::OsStr::new("timeline.jsonl"))
@@ -2562,6 +2847,10 @@ mod tests {
         assert_eq!(
             std::fs::read(outside.path().join("state.json")).unwrap(),
             b"outside-state"
+        );
+        assert_eq!(
+            std::fs::read(outside.path().join("read.json")).unwrap(),
+            b"outside-read"
         );
         assert_eq!(
             std::fs::read(detached.join("timeline.jsonl")).unwrap(),
@@ -2637,7 +2926,7 @@ mod tests {
         let error = read_committed_jsonl_file::<u64>(&link, "test ledger")
             .expect_err("canonical ledgers must not follow symlinks");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("not a regular file"));
+        assert!(error.to_string().contains("symlink"), "{error}");
     }
 
     #[test]

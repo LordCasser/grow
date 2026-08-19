@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_turn_terminal_keeps_scope_open_for_idempotent_retry() {
+    async fn transient_failure_retries_exact_turn_terminal_without_duplicate() {
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (persistence, mut persisted) =
             chat_state::MockTimelinePersistence::new_with_manual_timeline_ack();
@@ -672,34 +672,22 @@ mod tests {
             Some(CancellationCategory::MidTurnAbort),
             None,
         );
-        let reject_end = async {
+        let reject_then_accept_end = async {
             persisted
                 .next_timeline_ack()
                 .await
                 .unwrap()
                 .send(Err(std::io::Error::other("simulated disk failure")))
                 .unwrap();
-        };
-        let (failed, ()) = tokio::join!(first_end, reject_end);
-        assert!(matches!(failed, Err(TimelineWriteError::Persistence(_))));
-        assert!(handle.trajectory().await.unwrap().active_turn.is_some());
-
-        let retry_end = tracker.emit_turn_ended(
-            TurnOutcomeLabel::Cancelled,
-            terminal("cancelled", "cancelled"),
-            Some(CancellationCategory::MidTurnAbort),
-            None,
-        );
-        let accept_end = async {
             persisted
                 .next_timeline_ack()
                 .await
-                .unwrap()
+                .expect("exact terminal retry acknowledgement")
                 .send(Ok(()))
                 .unwrap();
         };
-        let (retried, ()) = tokio::join!(retry_end, accept_end);
-        retried.unwrap();
+        let (ended, ()) = tokio::join!(first_end, reject_then_accept_end);
+        ended.unwrap();
         let snapshot = handle.trajectory().await.unwrap();
         assert!(snapshot.active_turn.is_none());
         assert_eq!(

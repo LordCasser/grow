@@ -14,7 +14,6 @@ use super::types::{
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
 pub const MAX_COMPLETED_ENTRIES: usize = 1024;
-pub(super) const OUTPUT_UNAVAILABLE_PLACEHOLDER: &str = "[subagent output no longer available]";
 
 pub type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
 pub type SendBoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -604,10 +603,19 @@ pub(super) fn pending_inspection(child: &PendingChild) -> SubagentInspection {
 pub(super) fn completed_snapshot(
     child: &CompletedChild,
     persisted_output: Option<&str>,
+    persisted_output_unavailable: bool,
 ) -> SubagentSnapshot {
     let status = if child.result.cancelled {
         SubagentSnapshotStatus::Cancelled {
             reason: child.result.error.clone(),
+        }
+    } else if child.result.success && persisted_output_unavailable {
+        SubagentSnapshotStatus::CompletedOutputUnavailable {
+            error: "content-addressed subagent output is missing or invalid".into(),
+            tool_calls: child.result.tool_calls,
+            turns: child.result.turns,
+            tokens_used: child.result.total_tokens_used,
+            worktree_path: child.result.worktree_path.clone(),
         }
     } else if child.result.success {
         SubagentSnapshotStatus::Completed {
@@ -641,9 +649,10 @@ pub(super) fn completed_snapshot(
 pub(super) fn completed_inspection(
     child: &CompletedChild,
     persisted_output: Option<&str>,
+    persisted_output_unavailable: bool,
 ) -> SubagentInspection {
     SubagentInspection {
-        snapshot: completed_snapshot(child, persisted_output),
+        snapshot: completed_snapshot(child, persisted_output, persisted_output_unavailable),
         parent_session_id: child.request.parent_session_id.clone(),
         child_session_id: child.child_session_id.clone(),
         fork_parent_prompt_id: child.request.parent_prompt_id.clone(),

@@ -577,7 +577,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             persisted_output_ref,
             result: output.result.clone(),
         };
-        let snapshot = completed_snapshot(&completed, None);
+        let snapshot = completed_snapshot(&completed, None, false);
 
         let mut waiter_delivered = false;
         for waiter in self.waiters.remove(id).unwrap_or_default() {

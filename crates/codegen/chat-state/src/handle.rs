@@ -23,19 +23,36 @@ use crate::{TimelineEventKind, TrajectorySnapshot};
 #[derive(Clone)]
 pub struct ChatStateHandle {
     cmd_tx: mpsc::UnboundedSender<ChatStateCommand>,
+    _lifetime: std::sync::Arc<HandleLifetime>,
+}
+
+struct HandleLifetime {
+    cancellation_token: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for HandleLifetime {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
 }
 
 impl ChatStateHandle {
     /// Create a new handle with the given command sender.
-    pub(crate) fn new(cmd_tx: mpsc::UnboundedSender<ChatStateCommand>) -> Self {
-        Self { cmd_tx }
+    pub(crate) fn new(
+        cmd_tx: mpsc::UnboundedSender<ChatStateCommand>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            _lifetime: std::sync::Arc::new(HandleLifetime { cancellation_token }),
+        }
     }
 
     /// Create a no-op handle that discards all commands.
     /// Useful for tests and situations where chat state tracking is not needed.
     pub fn noop() -> Self {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        Self { cmd_tx }
+        Self::new(cmd_tx, tokio_util::sync::CancellationToken::new())
     }
 
     // ═══ Fire-and-forget mutations ═══

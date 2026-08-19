@@ -52,8 +52,8 @@ struct TestRunner {
 
 impl ChildRunner for TestRunner {
     type Control = TestControl;
-    type CompletionData = ();
-    type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
+    type CompletionData = String;
+    type RunFuture = SendBoxFuture<ChildRunOutput<String>>;
     type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
@@ -71,6 +71,7 @@ impl ChildRunner for TestRunner {
                 cancellation,
                 reporter,
             } = run;
+            let completion_data = request.id.clone();
             let _ = requests.send(request.clone());
             let _ = security_parents.send(security_parent);
             if wait_before_start {
@@ -81,7 +82,7 @@ impl ChildRunner for TestRunner {
                         }
                         return ChildRunOutput {
                             result: cancelled_result(&request),
-                            completion_data: (),
+                            completion_data: completion_data.clone(),
                         };
                     }
                     _ = start.recv() => {}
@@ -102,7 +103,7 @@ impl ChildRunner for TestRunner {
             {
                 return ChildRunOutput {
                     result: cancelled_result(&request),
-                    completion_data: (),
+                    completion_data: completion_data.clone(),
                 };
             }
             let _ = started.send(request.id.clone());
@@ -125,7 +126,7 @@ impl ChildRunner for TestRunner {
             };
             ChildRunOutput {
                 result,
-                completion_data: (),
+                completion_data,
             }
         })
     }
@@ -140,6 +141,10 @@ impl ChildRunner for TestRunner {
 
     fn on_completed(&self, completion: ChildCompletion<Self::CompletionData>) {
         let _ = self.completions.send(completion.disposition);
+    }
+
+    fn persisted_output_ref(&self, completion_data: &Self::CompletionData) -> Option<String> {
+        (completion_data == "missing-output").then(|| "artifact:missing".into())
     }
 }
 
@@ -1400,6 +1405,38 @@ async fn completion_buffer_caps_summary_without_mutating_result() {
         buffered[0].output.as_ref(),
         "a\n[output truncated: 1 of 4 bytes shown]"
     );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn missing_persisted_output_is_typed_as_unavailable() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("missing-output", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("missing-output")
+    );
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    let _ = harness.completions.recv().await;
+
+    let snapshot = harness
+        .backend
+        .query("missing-output", false, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        snapshot.status,
+        SubagentSnapshotStatus::CompletedOutputUnavailable { .. }
+    ));
+    let inspection = harness.backend.inspect("missing-output").await.unwrap();
+    assert!(matches!(
+        inspection.snapshot.status,
+        SubagentSnapshotStatus::CompletedOutputUnavailable { .. }
+    ));
     harness.actor.abort();
 }
 

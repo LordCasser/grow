@@ -23,6 +23,8 @@ pub enum TimelineWriteError {
     Persistence(#[source] std::io::Error),
     #[error("timeline persistence acknowledgement was lost")]
     AcknowledgementLost,
+    #[error("timeline persistence was cancelled before the pending event became durable")]
+    Cancelled,
     #[error("rewind target {target} is not before current prompt index {current}")]
     InvalidRewindTarget { target: usize, current: usize },
     #[error(

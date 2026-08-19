@@ -284,9 +284,9 @@ pub fn persist_user_images(
             .map_err(|e| std::io::Error::other(format!("base64 decode: {e}")))?;
         let ext = mime_to_extension(&img.mime_type);
         let filename = format!("image-{}.{ext}", uuid::Uuid::new_v4());
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         assets_dir.write_atomic(std::ffi::OsStr::new(&filename), &bytes, true, false)?;
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "handle-relative image storage is unsupported on this platform",

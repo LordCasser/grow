@@ -5,9 +5,9 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use super::super::coordinator_state::{
-    BlockingWaiter, CompletedChild, ListRequest, OUTPUT_UNAVAILABLE_PLACEHOLDER, ProgressFuture,
-    ProgressTarget, RunningSeed, completed_inspection, completed_snapshot, pending_inspection,
-    pending_snapshot, running_inspection, running_seed,
+    BlockingWaiter, CompletedChild, ListRequest, ProgressFuture, ProgressTarget, RunningSeed,
+    completed_inspection, completed_snapshot, pending_inspection, pending_snapshot,
+    running_inspection, running_seed,
 };
 use super::super::types::{SubagentInspection, SubagentSnapshot};
 use super::{ChildControl, ChildRunner, SubagentCoordinator, SubagentProgress, belongs_to_session};
@@ -103,22 +103,24 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
     }
 
-    fn persisted_output(&self, child: &CompletedChild) -> Option<Arc<str>> {
-        child.persisted_output_ref.as_deref().map(|reference| {
-            self.runner
-                .load_persisted_output(reference)
-                .unwrap_or_else(|| Arc::from(OUTPUT_UNAVAILABLE_PLACEHOLDER))
-        })
+    fn persisted_output(&self, child: &CompletedChild) -> (Option<Arc<str>>, bool) {
+        let Some(reference) = child.persisted_output_ref.as_deref() else {
+            return (None, false);
+        };
+        match self.runner.load_persisted_output(reference) {
+            Some(output) => (Some(output), false),
+            None => (None, true),
+        }
     }
 
     fn completed_snapshot_for_query(&self, child: &CompletedChild) -> SubagentSnapshot {
-        let output = self.persisted_output(child);
-        completed_snapshot(child, output.as_deref())
+        let (output, unavailable) = self.persisted_output(child);
+        completed_snapshot(child, output.as_deref(), unavailable)
     }
 
     fn completed_inspection_for_query(&self, child: &CompletedChild) -> SubagentInspection {
-        let output = self.persisted_output(child);
-        completed_inspection(child, output.as_deref())
+        let (output, unavailable) = self.persisted_output(child);
+        completed_inspection(child, output.as_deref(), unavailable)
     }
 
     pub(super) fn ready_snapshot(&self, id: &str) -> Option<SubagentSnapshot> {

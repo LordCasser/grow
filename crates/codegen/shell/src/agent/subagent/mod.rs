@@ -2268,6 +2268,9 @@ fn result_from_inspection(
                 *tokens_used,
                 (!output.is_empty()).then(|| output.clone()),
             ),
+            Some(SubagentSnapshotStatus::CompletedOutputUnavailable { .. }) => {
+                unreachable!("unverifiable completed outputs are filtered before recovery")
+            }
             Some(SubagentSnapshotStatus::Failed { error }) => (
                 chat_state::SubagentOutcome::Failed,
                 Some(error.clone()),
@@ -2535,6 +2538,34 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             continue;
         }
         let inspection = backend.inspect(&subagent_id).await;
+        if let Some(inspection) = &inspection
+            && (inspection.parent_session_id != parent_session_id
+                || inspection.child_session_id != spawn.child_session_id
+                || inspection.snapshot.subagent_id != subagent_id)
+        {
+            tracing::error!(
+                %subagent_id,
+                expected_parent_session_id = %parent_session_id,
+                actual_parent_session_id = %inspection.parent_session_id,
+                expected_child_session_id = %spawn.child_session_id,
+                actual_child_session_id = %inspection.child_session_id,
+                actual_subagent_id = %inspection.snapshot.subagent_id,
+                "backend inspection identity mismatch; leaving parent spawn open"
+            );
+            continue;
+        }
+        if inspection.as_ref().is_some_and(|inspection| {
+            matches!(
+                inspection.snapshot.status,
+                SubagentSnapshotStatus::CompletedOutputUnavailable { .. }
+            )
+        }) {
+            tracing::error!(
+                %subagent_id,
+                "completed backend output is unavailable or invalid; leaving parent spawn open"
+            );
+            continue;
+        }
         if inspection
             .as_ref()
             .is_some_and(|inspection| inspection.snapshot.is_running())

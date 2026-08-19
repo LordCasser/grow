@@ -108,6 +108,7 @@ base64 = "0.22"
 blake3 = "1"
 bytes = { version = "1", features = ["serde"] }
 camino = "1.1.10"
+cap-std = "4.0.2"
 chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = { version = "4" }

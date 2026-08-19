@@ -1081,6 +1081,9 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
             event_tx,
             tokio_util::sync::CancellationToken::new(),
         );
+        // Actor bootstrap is strictly serialized with later commands. Wait for
+        // a query to cross that boundary before draining the seed records.
+        assert_eq!(handle.get_conversation().await.len(), conversation.len());
         // Drain the seed records/events (initial history replacement etc.).
         let _ = recv.drain();
         while event_rx.try_recv().is_ok() {}

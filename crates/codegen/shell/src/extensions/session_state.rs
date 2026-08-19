@@ -329,9 +329,20 @@ fn read_entity_blobs(
                 "immutable blob path escapes session root",
             )
         })?;
-        st::require_contained_directory(dir, relative_parent, "session immutable blob directory")?;
-        let bytes = st::read_bounded_regular_file(
-            &path,
+        let directory = st::ContainedDirectory::open(
+            dir,
+            relative_parent,
+            "session immutable blob directory",
+            false,
+        )?;
+        let file_name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "immutable blob path has no file name",
+            )
+        })?;
+        let bytes = directory.read_bounded(
+            file_name,
             "session immutable blob",
             crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES,
         )?;
@@ -532,6 +543,12 @@ fn write_import_staging(
     state: &std::collections::HashMap<String, Value>,
     updates: &[Value],
 ) -> std::io::Result<()> {
+    let staging = st::ContainedDirectory::open(
+        dir,
+        Path::new(""),
+        "session/import staging directory",
+        false,
+    )?;
     let timeline = state
         .get(TIMELINE_COLUMN)
         .and_then(Value::as_array)
@@ -542,7 +559,12 @@ fn write_import_staging(
             )
         })?;
 
-    st::write_jsonl_atomic(&dir.join(st::TIMELINE_FILE), timeline)?;
+    staging.write_atomic(
+        std::ffi::OsStr::new(st::TIMELINE_FILE),
+        &st::to_jsonl_bytes(timeline)?,
+        false,
+        true,
+    )?;
     let sidebands = state
         .get(SIDEBANDS_COLUMN)
         .and_then(Value::as_object)
@@ -559,13 +581,17 @@ fn write_import_staging(
                 format!("sideband {sideband_id} ledger must be an array"),
             )
         })?;
-        let parent = st::create_contained_dir_all(
-            dir,
+        let sideband = staging.open_relative(
             &Path::new(st::SIDEBANDS_DIR).join(sideband_id),
             "session/import sideband directory",
+            true,
         )?;
-        let path = parent.join(st::TIMELINE_FILE);
-        st::write_jsonl_atomic(&path, events)?;
+        sideband.write_atomic(
+            std::ffi::OsStr::new(st::TIMELINE_FILE),
+            &st::to_jsonl_bytes(events)?,
+            false,
+            true,
+        )?;
     }
     let blobs: ImmutableBlobs =
         serde_json::from_value(state.get(BLOBS_COLUMN).cloned().ok_or_else(|| {
@@ -591,7 +617,12 @@ fn write_import_staging(
         crate::session::persistence::write_immutable_blob(dir, relative, content.as_bytes())?;
     }
     if !updates.is_empty() {
-        st::write_jsonl_atomic(&dir.join(st::UPDATES_FILE), updates)?;
+        staging.write_atomic(
+            std::ffi::OsStr::new(st::UPDATES_FILE),
+            &st::to_jsonl_bytes(updates)?,
+            false,
+            true,
+        )?;
     }
 
     let summary = state.get(SUMMARY_COLUMN).ok_or_else(|| {
@@ -600,14 +631,21 @@ fn write_import_staging(
             "session/import requires a summary column",
         )
     })?;
-    write_column(dir, st::SUMMARY_FILE, summary)?;
+    write_column(&staging, st::SUMMARY_FILE, summary)?;
     Ok(())
 }
 
-fn write_column(dir: &Path, rel: &str, value: &Value) -> std::io::Result<()> {
-    let path = dir.join(rel);
-    st::require_regular_directory(dir, "session/import staging directory")?;
-    st::write_bytes_atomic(&path, value.to_string().as_bytes())
+fn write_column(
+    directory: &st::ContainedDirectory,
+    rel: &str,
+    value: &Value,
+) -> std::io::Result<()> {
+    directory.write_atomic(
+        std::ffi::OsStr::new(rel),
+        value.to_string().as_bytes(),
+        false,
+        true,
+    )
 }
 
 /// The session's directory, or `None` when it isn't found on this host. Falls back to

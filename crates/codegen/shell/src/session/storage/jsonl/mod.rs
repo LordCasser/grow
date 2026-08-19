@@ -118,78 +118,43 @@ impl JsonlStorageAdapter {
         parent_timeline_id: &str,
         parent: &chat_state::Timeline,
     ) -> io::Result<super::SidebandLedgers> {
-        let directory = session_dir.join(super::SIDEBANDS_DIR);
         let mut ledgers = super::SidebandLedgers::new();
-        match std::fs::symlink_metadata(&directory) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "sidebands path is not a regular directory: {}",
-                        directory.display()
-                    ),
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                super::validate_sideband_ledgers(parent_timeline_id, parent, &ledgers)?;
-                return Ok(ledgers);
-            }
-            Err(error) => return Err(error),
-        }
-        let mut entries = std::fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            if !entry.file_type()?.is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "unsupported entry in sidebands directory: {}",
-                        entry.path().display()
-                    ),
-                ));
-            }
-            let sideband_id = entry.file_name().into_string().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "sideband id is not UTF-8")
-            })?;
+        let session = super::ContainedDirectory::open(
+            session_dir,
+            Path::new(""),
+            "sideband session directory",
+            false,
+        )?;
+        let sideband_ids = parent
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Sideband(spawn) => Some(spawn.sideband_id.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        for sideband_id in sideband_ids {
             chat_state::validate_sideband_id(&sideband_id)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let timeline_path = entry.path().join(super::TIMELINE_FILE);
-            let timeline_metadata = match std::fs::symlink_metadata(&timeline_path) {
-                Ok(metadata) => Some(metadata),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            let sideband = match session.open_relative(
+                &Path::new(super::SIDEBANDS_DIR).join(&sideband_id),
+                "sideband entity directory",
+                false,
+            ) {
+                Ok(sideband) => sideband,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error),
             };
-            if timeline_metadata.is_none() {
-                let children = std::fs::read_dir(entry.path())?.collect::<Result<Vec<_>, _>>()?;
-                if children.is_empty()
-                    || children.iter().all(|child| {
-                        child.file_name().to_string_lossy()
-                            == format!("{}.lock", super::TIMELINE_FILE)
-                    })
-                {
-                    continue;
-                }
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("sideband {sideband_id} directory has no Timeline ledger"),
-                ));
-            }
-            if timeline_metadata
-                .is_some_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "sideband Timeline ledger is not a regular file: {}",
-                        timeline_path.display()
-                    ),
-                ));
-            }
-            let events = super::read_committed_jsonl_file::<chat_state::SidebandEvent>(
-                &timeline_path,
+            let events = match super::read_committed_jsonl_from_directory::<chat_state::SidebandEvent>(
+                &sideband,
+                std::ffi::OsStr::new(super::TIMELINE_FILE),
                 "sideband Timeline ledger",
-            )?;
+                super::MAX_JSONL_ENTRY_BYTES,
+            ) {
+                Ok(events) => events,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             // A zero-length file can be left only before request seq 0 commits;
             // it is not a ledger fact and is therefore omitted from mirrors.
             if events.is_empty() {
@@ -240,7 +205,7 @@ impl JsonlStorageAdapter {
                 "session cwd exceeds the storage metadata limit",
             ));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         match directory.write_atomic(std::ffi::OsStr::new(".cwd"), cwd.as_bytes(), true, false) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -259,7 +224,7 @@ impl JsonlStorageAdapter {
             }
             Err(error) => Err(error),
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (directory, cwd);
             Err(io::Error::new(
@@ -582,7 +547,7 @@ impl JsonlStorageAdapter {
         })?;
         let directory =
             super::ContainedDirectory::open(parent, Path::new(""), "Timeline directory", false)?;
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (directory, name, line, event_seq, durability);
             return Err(io::Error::new(
@@ -590,9 +555,9 @@ impl JsonlStorageAdapter {
                 "handle-relative Timeline storage is unsupported on this platform",
             ));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let lock = Self::lock_append_contained(&directory, name, path)?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let result = (|| {
             let mut file = directory.open_read_write_create(name)?;
             let (complete_len, last_line) = Self::read_timeline_tail(&mut file)?;
@@ -655,7 +620,7 @@ impl JsonlStorageAdapter {
             }
             Ok(())
         })();
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let _ = lock.unlock();
             result
@@ -671,7 +636,7 @@ impl JsonlStorageAdapter {
     ) -> io::Result<()> {
         debug_assert!(line.ends_with(b"\n"));
         Self::validate_jsonl_line_size(&line, "sideband event")?;
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (directory, path, line, event_seq, durability);
             return Err(io::Error::new(
@@ -679,13 +644,13 @@ impl JsonlStorageAdapter {
                 "handle-relative sideband storage is unsupported on this platform",
             ));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let lock = Self::lock_append_contained(
             directory,
             std::ffi::OsStr::new(super::TIMELINE_FILE),
             path,
         )?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let result = (|| {
             let mut file =
                 directory.open_read_write_create(std::ffi::OsStr::new(super::TIMELINE_FILE))?;
@@ -754,7 +719,7 @@ impl JsonlStorageAdapter {
             }
             Ok(())
         })();
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let _ = lock.unlock();
             result
@@ -858,7 +823,7 @@ impl JsonlStorageAdapter {
                 .map_err(|error| {
                     io::Error::new(error.kind(), format!("open JSONL directory: {error}"))
                 })?;
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (directory, name, line, durability);
             return Err(io::Error::new(
@@ -866,10 +831,10 @@ impl JsonlStorageAdapter {
                 "handle-relative JSONL storage is unsupported on this platform",
             ));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let lock = Self::lock_append_contained(&directory, name, path)
             .map_err(|error| io::Error::new(error.kind(), format!("lock JSONL append: {error}")))?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let result = (|| {
             let mut file = directory.open_read_write_create(name).map_err(|error| {
                 io::Error::new(error.kind(), format!("open JSONL ledger: {error}"))
@@ -897,7 +862,7 @@ impl JsonlStorageAdapter {
             }
             Ok(())
         })();
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let _ = lock.unlock();
             result
@@ -1000,7 +965,7 @@ impl JsonlStorageAdapter {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn lock_append_contained(
         directory: &super::ContainedDirectory,
         target_name: &std::ffi::OsStr,
@@ -1139,17 +1104,62 @@ impl JsonlStorageAdapter {
         super::write_jsonl_atomic_async(&path, items).await
     }
     fn read_jsonl<T: serde::de::DeserializeOwned>(&self, path: PathBuf) -> io::Result<Vec<T>> {
-        match super::open_optional_regular_nofollow(&path, "JSONL ledger")? {
-            Some(_) => super::read_committed_jsonl_file(&path, "JSONL ledger"),
-            None => Ok(Vec::new()),
-        }
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "JSONL path has no parent")
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "JSONL path has no file name")
+        })?;
+        let directory =
+            super::ContainedDirectory::open(parent, Path::new(""), "JSONL directory", false)?;
+        let file = match directory.open_regular(name, "JSONL ledger") {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        super::read_committed_jsonl_from_file(
+            file,
+            path,
+            "JSONL ledger",
+            super::MAX_JSONL_ENTRY_BYTES,
+        )
     }
 
     /// Read every complete Timeline record. A final non-newline-terminated
     /// fragment was never committed and is ignored; every complete line is
     /// parsed strictly so interior corruption still fails closed.
     fn read_timeline(&self, path: PathBuf) -> io::Result<Vec<chat_state::TimelineEvent>> {
-        super::read_timeline_file(&path)
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Timeline path has no parent")
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Timeline path has no file name",
+            )
+        })?;
+        let directory = super::ContainedDirectory::open(
+            parent,
+            Path::new(""),
+            "Timeline session directory",
+            false,
+        )?;
+        super::read_committed_jsonl_from_directory(
+            &directory,
+            name,
+            "mandatory Timeline ledger",
+            super::MAX_JSONL_ENTRY_BYTES,
+        )
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "mandatory Timeline ledger is missing",
+                )
+            } else {
+                error
+            }
+        })
     }
     /// Append a session update to the updates.jsonl file, wrapping it in an envelope with timestamp.
     pub(super) async fn append_update_to_file(
@@ -1240,8 +1250,17 @@ impl JsonlStorageAdapter {
     }
     pub(crate) fn read_summary_sync(&self, info: &Info) -> io::Result<Summary> {
         let path = self.summary_file(info);
-        let bytes = super::read_bounded_regular_file(
-            &path,
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "summary path has no parent")
+        })?;
+        let directory = super::ContainedDirectory::open(
+            parent,
+            Path::new(""),
+            "session summary directory",
+            false,
+        )?;
+        let bytes = directory.read_bounded(
+            std::ffi::OsStr::new(super::SUMMARY_FILE),
             "session summary",
             super::MAX_SESSION_SUMMARY_BYTES,
         )?;
@@ -1288,18 +1307,6 @@ impl JsonlStorageAdapter {
     ) -> io::Result<Vec<crate::session::workflow::store::RestoredWorkflowRun>> {
         use crate::session::workflow::store::{
             MAX_RESTORED_WORKFLOW_RUNS, MAX_WORKFLOW_ARGS_BYTES, MAX_WORKFLOW_MANIFEST_BYTES,
-            read_bounded_nofollow,
-        };
-        let workflows_dir = self.workflows_dir(info);
-        match std::fs::symlink_metadata(&workflows_dir) {
-            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
-                return Ok(Vec::new());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(error) => return Err(error),
         };
         let mut run_ids = timeline
             .events()
@@ -1321,26 +1328,41 @@ impl JsonlStorageAdapter {
                 "workflow restore cap reached; restoring the most recent Timeline-owned runs"
             );
         }
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let session_dir = self.session_dir(info);
+        let session = super::ContainedDirectory::open(
+            &session_dir,
+            Path::new(""),
+            "Workflow session directory",
+            false,
+        )?;
         let mut restored = Vec::new();
         for run_id in run_ids {
-            let run_dir = workflows_dir.join(&run_id);
-            let Ok(run_meta) = std::fs::symlink_metadata(&run_dir) else {
-                continue;
-            };
-            if run_meta.file_type().is_symlink() || !run_meta.is_dir() {
-                continue;
-            }
-            match std::fs::symlink_metadata(run_dir.join("cleared")) {
-                Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => continue,
-                Ok(_) => {
-                    tracing::warn!(%run_id, "skipping Workflow with invalid cleared marker");
-                    continue;
-                }
+            let run_relative = Path::new("workflows").join(&run_id);
+            let run_dir =
+                match session.open_relative(&run_relative, "Workflow run directory", false) {
+                    Ok(run_dir) => run_dir,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+            match run_dir.read_bounded(
+                std::ffi::OsStr::new("cleared"),
+                "Workflow cleared marker",
+                0,
+            ) {
+                Ok(_) => continue,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
-            let manifest_path = run_dir.join("state.json");
-            let manifest = match read_bounded_nofollow(&manifest_path, MAX_WORKFLOW_MANIFEST_BYTES)
+            let manifest_path = run_dir.display_path().join("state.json");
+            let manifest = match run_dir
+                .read_bounded(
+                    std::ffi::OsStr::new("state.json"),
+                    "Workflow manifest",
+                    MAX_WORKFLOW_MANIFEST_BYTES,
+                )
                 .and_then(|bytes| {
                     serde_json::from_slice::<crate::session::workflow::store::WorkflowRunManifest>(
                         &bytes,
@@ -1361,31 +1383,46 @@ impl JsonlStorageAdapter {
                 tracing::warn!(path = %manifest_path.display(), "skipping unsupported or mismatched workflow manifest");
                 continue;
             }
-            let script_path = crate::session::workflow::store::script_revision_path(
-                &run_dir,
-                manifest.script_revision,
-            );
-            let script = match read_bounded_nofollow(
-                &script_path,
-                crate::session::workflow::registry::MAX_WORKFLOW_SOURCE_BYTES,
-            )
-            .and_then(|bytes| {
-                String::from_utf8(bytes)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-            }) {
+            let scripts = match run_dir.open_relative(
+                Path::new("scripts"),
+                "Workflow scripts directory",
+                false,
+            ) {
+                Ok(scripts) => scripts,
+                Err(error) => {
+                    tracing::warn!(%run_id, %error, "skipping workflow with missing scripts directory");
+                    continue;
+                }
+            };
+            let script_name = format!("{:04}.rhai", manifest.script_revision);
+            let script_path = scripts.display_path().join(&script_name);
+            let script = match scripts
+                .read_bounded(
+                    std::ffi::OsStr::new(&script_name),
+                    "Workflow immutable script",
+                    crate::session::workflow::registry::MAX_WORKFLOW_SOURCE_BYTES,
+                )
+                .and_then(|bytes| {
+                    String::from_utf8(bytes)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                }) {
                 Ok(script) => script,
                 Err(error) => {
                     tracing::warn!(path = %script_path.display(), %error, "skipping workflow with missing immutable script");
                     continue;
                 }
             };
-            let args_path = run_dir.join("args.json");
-            let args = match read_bounded_nofollow(&args_path, MAX_WORKFLOW_ARGS_BYTES).and_then(
-                |bytes| {
+            let args_path = run_dir.display_path().join("args.json");
+            let args = match run_dir
+                .read_bounded(
+                    std::ffi::OsStr::new("args.json"),
+                    "Workflow immutable args",
+                    MAX_WORKFLOW_ARGS_BYTES,
+                )
+                .and_then(|bytes| {
                     serde_json::from_slice(&bytes)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-                },
-            ) {
+                }) {
                 Ok(args) => args,
                 Err(error) => {
                     tracing::warn!(path = %args_path.display(), %error, "skipping workflow with missing immutable args");

@@ -636,6 +636,25 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 raw_output_bytes,
             })
         }
+        SubagentSnapshotStatus::CompletedOutputUnavailable { error, .. } => {
+            let raw_output_bytes = error.len();
+            TaskOutputOutput::Result(TaskOutputResult {
+                task_id: snap.subagent_id.clone(),
+                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
+                status: "output_unavailable".to_string(),
+                exit_code: Some(1),
+                started,
+                ended: Some(format_epoch_ms_as_rfc3339(
+                    snap.started_at_epoch_ms + snap.duration_ms,
+                )),
+                duration_secs: snap.duration_ms as f64 / 1000.0,
+                output: error.clone(),
+                output_file: String::new(),
+                truncated: false,
+                truncation_hint: String::new(),
+                raw_output_bytes,
+            })
+        }
         SubagentSnapshotStatus::Failed { error } => {
             let raw_output_bytes = error.len();
             TaskOutputOutput::Result(TaskOutputResult {

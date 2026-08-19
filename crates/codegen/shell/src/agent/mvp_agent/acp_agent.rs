@@ -1016,8 +1016,9 @@ impl acp::Agent for MvpAgent {
             crate::agent::subagent::reconcile_orphaned_subagents_with_backend(
                     &subagent_projections,
                     !no_replay,
-                    &tools::implementations::grow_build::task::backend::ChannelBackend::new(
+                    &tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
                         self.subagent_event_tx.clone(),
+                        session_id.0.clone(),
                     ),
                     &session_dir,
                     session_id.0.as_ref(),

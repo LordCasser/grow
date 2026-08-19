@@ -598,12 +598,22 @@ fn sideband_reader_rejects_symlinked_directory_roots() {
         session_dir.join(crate::session::storage::SIDEBANDS_DIR),
     )
     .unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    timeline
+        .record(chat_state::TimelineEventKind::Sideband(
+            chat_state::SidebandSpawnEvent {
+                sideband_id: uuid::Uuid::now_v7().to_string(),
+                purpose: chat_state::SidebandPurpose::CompactionSummary,
+                source_refs: Vec::new(),
+            },
+        ))
+        .unwrap();
 
     let error = adapter
-        .read_sideband_ledgers_sync(&info, &chat_state::Timeline::default())
+        .read_sideband_ledgers_sync(&info, &timeline)
         .expect_err("sideband discovery must not traverse a symlinked root");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("not a regular directory"));
+    assert!(error.to_string().contains("symlink"), "{error}");
 }
 
 #[cfg(unix)]

@@ -302,6 +302,19 @@ impl SubagentSnapshotDto {
                 dto.turns = Some(turns);
                 dto.worktree_path = worktree_path;
             }
+            SubagentSnapshotStatus::CompletedOutputUnavailable {
+                error,
+                tool_calls,
+                turns,
+                tokens_used: _,
+                worktree_path,
+            } => {
+                dto.status = "output_unavailable".into();
+                dto.failure_error = Some(error);
+                dto.tool_calls = Some(tool_calls);
+                dto.turns = Some(turns);
+                dto.worktree_path = worktree_path;
+            }
             SubagentSnapshotStatus::Failed { error } => {
                 dto.status = "failed".into();
                 dto.failure_error = Some(error);

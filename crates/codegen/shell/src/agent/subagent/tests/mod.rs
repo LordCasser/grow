@@ -730,6 +730,156 @@ async fn backend_running_inspection_keeps_parent_spawn_open() {
 }
 
 #[tokio::test]
+async fn foreign_backend_inspection_cannot_close_or_fill_a_parent_spawn() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let parent_id = format!("parent-bound-{}", uuid::Uuid::now_v7());
+    let spawn = recovery_spawn(
+        "sa-collision",
+        &format!("child-bound-{}", uuid::Uuid::now_v7()),
+    );
+    let (parent, mut persistence) = recovery_parent(parent_dir.path(), &parent_id, &spawn).await;
+    let (backend_tx, mut backend_rx) = mpsc::unbounded_channel();
+    let backend = tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+        backend_tx,
+        parent_id.clone(),
+    );
+    let inspection_spawn = spawn.clone();
+    let requested_parent = parent_id.clone();
+    let responder = tokio::spawn(async move {
+        let Some(tools::implementations::grow_build::task::types::SubagentEvent::Inspect(request)) =
+            backend_rx.recv().await
+        else {
+            panic!("expected backend inspection");
+        };
+        assert_eq!(
+            request.parent_session_id.as_deref(),
+            Some(requested_parent.as_str())
+        );
+        request
+            .respond_to
+            .send(Some(SubagentInspection {
+                snapshot: SubagentSnapshot {
+                    subagent_id: inspection_spawn.subagent_id.clone(),
+                    description: inspection_spawn.description.clone(),
+                    subagent_type: inspection_spawn.subagent_type.clone(),
+                    status: SubagentSnapshotStatus::Completed {
+                        output: "foreign secret".into(),
+                        tool_calls: 9,
+                        turns: 3,
+                        tokens_used: 777,
+                        worktree_path: None,
+                    },
+                    started_at_epoch_ms: 1,
+                    duration_ms: 20,
+                },
+                parent_session_id: "different-parent".into(),
+                child_session_id: "different-child".into(),
+                fork_parent_prompt_id: None,
+                resumed_from: None,
+            }))
+            .unwrap();
+    });
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    reconcile_orphaned_subagents_with_backend(
+        &crate::session::storage::SubagentProjectionState::default(),
+        false,
+        &backend,
+        parent_dir.path(),
+        &parent_id,
+        &parent,
+        &gateway,
+        None,
+    )
+    .await;
+    responder.await.unwrap();
+    assert!(
+        persistence.drain().iter().all(|record| !matches!(
+            record,
+            chat_state::PersistenceRecord::Timeline(chat_state::TimelineEvent {
+                kind: chat_state::TimelineEventKind::Subagent(
+                    chat_state::SubagentEvent::Ended(_)
+                ),
+                ..
+            })
+        )),
+        "a foreign inspection must leave the local spawn open"
+    );
+}
+
+#[tokio::test]
+async fn unavailable_completed_output_keeps_parent_spawn_open() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let parent_id = format!("parent-unavailable-{}", uuid::Uuid::now_v7());
+    let spawn = recovery_spawn(
+        "sa-unavailable",
+        &format!("child-unavailable-{}", uuid::Uuid::now_v7()),
+    );
+    let (parent, mut persistence) = recovery_parent(parent_dir.path(), &parent_id, &spawn).await;
+    let (backend_tx, mut backend_rx) = mpsc::unbounded_channel();
+    let backend = tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+        backend_tx,
+        parent_id.clone(),
+    );
+    let inspection_spawn = spawn.clone();
+    let inspection_parent = parent_id.clone();
+    let responder = tokio::spawn(async move {
+        let Some(tools::implementations::grow_build::task::types::SubagentEvent::Inspect(request)) =
+            backend_rx.recv().await
+        else {
+            panic!("expected backend inspection");
+        };
+        request
+            .respond_to
+            .send(Some(SubagentInspection {
+                snapshot: SubagentSnapshot {
+                    subagent_id: inspection_spawn.subagent_id.clone(),
+                    description: inspection_spawn.description.clone(),
+                    subagent_type: inspection_spawn.subagent_type.clone(),
+                    status: SubagentSnapshotStatus::CompletedOutputUnavailable {
+                        error: "artifact hash mismatch".into(),
+                        tool_calls: 4,
+                        turns: 2,
+                        tokens_used: 500,
+                        worktree_path: None,
+                    },
+                    started_at_epoch_ms: 1,
+                    duration_ms: 20,
+                },
+                parent_session_id: inspection_parent,
+                child_session_id: inspection_spawn.child_session_id.clone(),
+                fork_parent_prompt_id: None,
+                resumed_from: None,
+            }))
+            .unwrap();
+    });
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    reconcile_orphaned_subagents_with_backend(
+        &crate::session::storage::SubagentProjectionState::default(),
+        false,
+        &backend,
+        parent_dir.path(),
+        &parent_id,
+        &parent,
+        &gateway,
+        None,
+    )
+    .await;
+    responder.await.unwrap();
+    assert!(
+        persistence.drain().iter().all(|record| !matches!(
+            record,
+            chat_state::PersistenceRecord::Timeline(chat_state::TimelineEvent {
+                kind: chat_state::TimelineEventKind::Subagent(
+                    chat_state::SubagentEvent::Ended(_)
+                ),
+                ..
+            })
+        )),
+        "unverifiable completed output must not be laundered into a parent terminal"
+    );
+}
+
+#[tokio::test]
 async fn missing_unpublished_child_closes_without_forging_result_ref() {
     let parent_dir = tempfile::tempdir().unwrap();
     let parent_id = format!("parent-missing-{}", uuid::Uuid::now_v7());

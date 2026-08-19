@@ -593,6 +593,16 @@ pub enum SubagentSnapshotStatus {
         tokens_used: u64,
         worktree_path: Option<String>,
     },
+    /// The child completed, but its content-addressed output can no longer be
+    /// verified. Recovery must not convert this integrity failure into a new
+    /// canonical output artifact.
+    CompletedOutputUnavailable {
+        error: String,
+        tool_calls: u32,
+        turns: u32,
+        tokens_used: u64,
+        worktree_path: Option<String>,
+    },
     /// Child session failed or crashed.
     Failed { error: String },
     /// Child session was cancelled (by user or model).
@@ -604,7 +614,10 @@ impl SubagentSnapshotStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. }
+            Self::Completed { .. }
+                | Self::CompletedOutputUnavailable { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. }
         )
     }
 }
