@@ -1022,29 +1022,21 @@ pub(super) fn run_subagent_lifecycle_via_method(
     let finish = snapshot_after_subagent_finish(&app, child_sid);
     (spawn, finish)
 }
-/// Shared temp `GROW_HOME` for disk-replay tests. `grow_home()` uses a
-/// process-wide `OnceLock`, so parallel tests must not each set `GROW_HOME`
-/// to a different tempdir.
-pub(super) fn replay_disk_test_home() -> &'static std::path::Path {
-    use std::sync::OnceLock;
-    static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-    HOME.get_or_init(|| {
-            let tmp = tempfile::tempdir().expect("tempdir creation");
-            unsafe {
-                std::env::set_var("GROW_HOME", tmp.path());
-            }
-            tmp
-        })
-        .path()
+struct ReplayGrowHomeGuard;
+
+impl Drop for ReplayGrowHomeGuard {
+    fn drop(&mut self) {
+        crate::app::subagent::set_replay_grow_home_for_tests(None);
+    }
 }
-/// Runs `f` with a thread-local grow home override so disk replay tests do not
-/// depend on process-wide `grow_home()` cache order when the full suite runs.
+
+/// Runs `f` with an isolated grow home. The production resolver is overridden
+/// thread-locally, so every parallel test can own a distinct durable layout.
 pub(super) fn with_replay_disk_home<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
-    let home = replay_disk_test_home();
-    crate::app::subagent::set_replay_grow_home_for_tests(Some(home.to_path_buf()));
-    let out = f(home);
-    crate::app::subagent::set_replay_grow_home_for_tests(None);
-    out
+    let home = tempfile::tempdir().expect("tempdir creation");
+    crate::app::subagent::set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
+    let _guard = ReplayGrowHomeGuard;
+    f(home.path())
 }
 pub(super) fn write_child_updates_jsonl(
     grow_home: &std::path::Path,
@@ -1057,7 +1049,12 @@ pub(super) fn write_child_updates_jsonl(
         .join(child_sid);
     std::fs::create_dir_all(&sessions_dir).unwrap();
     std::fs::write(sessions_dir.join("summary.json"), "{}").unwrap();
-    std::fs::write(sessions_dir.join("updates.jsonl"), content).unwrap();
+    let committed = if content.ends_with('\n') {
+        content.to_owned()
+    } else {
+        format!("{content}\n")
+    };
+    std::fs::write(sessions_dir.join("updates.jsonl"), committed).unwrap();
 }
 pub(super) fn child_scrollback_tool_call_count(
     agent: &AgentView,
@@ -1152,12 +1149,13 @@ pub(super) fn child_scrollback_matching_prompt_count(
         .count()
 }
 pub(super) fn spawn_subagent_with_optional_updates(
+    grow_home: &std::path::Path,
     app: &mut AppView,
     child_sid: &str,
     updates: Option<&str>,
 ) {
     if let Some(content) = updates {
-        write_child_updates_jsonl(replay_disk_test_home(), child_sid, content);
+        write_child_updates_jsonl(grow_home, child_sid, content);
     }
     let _ = handle(
         make_ext_session_notification_with_method(

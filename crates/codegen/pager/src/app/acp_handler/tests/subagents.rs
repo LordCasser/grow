@@ -585,10 +585,11 @@
     /// updates.jsonl so fullscreen scrollback is not prompt-only.
     #[test]
     fn subagent_spawned_replays_child_updates_without_resumed_from() {
-        with_replay_disk_home(|_| {
+        with_replay_disk_home(|home| {
             let child_sid = "child-with-updates";
             let mut app = make_app_with_agent("sess-parent");
             spawn_subagent_with_optional_updates(
+                home,
                 &mut app,
                 child_sid,
                 Some(&(child_tool_line(child_sid) + "\n")),
@@ -614,7 +615,7 @@
     /// transcript load (the dominant large-session resume cost) to first open.
     #[test]
     fn subagent_spawned_during_resume_defers_child_replay_until_open() {
-        with_replay_disk_home(|_| {
+        with_replay_disk_home(|home| {
             let child_sid = "child-resume-defer";
             let mut app = make_app_with_agent("sess-parent");
             // Simulate resume: the parent agent is replaying its own session.
@@ -625,6 +626,7 @@
                 .loading_replay = true;
 
             spawn_subagent_with_optional_updates(
+                home,
                 &mut app,
                 child_sid,
                 Some(&(child_tool_line(child_sid) + "\n")),
@@ -668,7 +670,7 @@
     /// (`subagent_child_needs_replay`), leaving a permanently empty transcript.
     #[test]
     fn subagent_resume_finished_then_open_shows_full_transcript() {
-        with_replay_disk_home(|_| {
+        with_replay_disk_home(|home| {
             let child_sid = "child-resume-finished";
             let mut app = make_app_with_agent("sess-parent");
             app.agents
@@ -678,6 +680,7 @@
                 .loading_replay = true;
 
             spawn_subagent_with_optional_updates(
+                home,
                 &mut app,
                 child_sid,
                 Some(&(child_tool_line(child_sid) + "\n")),
@@ -755,7 +758,7 @@
                 child_user_message_line(child_sid, task),
                 child_tool_line(child_sid)
             );
-            spawn_subagent_with_optional_updates(&mut app, child_sid, Some(&updates));
+            spawn_subagent_with_optional_updates(home, &mut app, child_sid, Some(&updates));
 
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.open_subagent_fullscreen(child_sid.to_string());
@@ -783,7 +786,7 @@
                 child_user_message_line(child_sid, task),
                 child_tool_line(child_sid)
             );
-            spawn_subagent_with_optional_updates(&mut app, child_sid, Some(&updates));
+            spawn_subagent_with_optional_updates(home, &mut app, child_sid, Some(&updates));
 
             let agent = app.agents.get(&AgentId(0)).unwrap();
             assert_eq!(
@@ -797,10 +800,10 @@
 
     #[test]
     fn subagent_spawn_without_updates_jsonl_is_noop() {
-        with_replay_disk_home(|_| {
+        with_replay_disk_home(|home| {
             let child_sid = "child-no-updates";
             let mut app = make_app_with_agent("sess-parent");
-            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
+            spawn_subagent_with_optional_updates(home, &mut app, child_sid, None);
 
             let agent = app.agents.get(&AgentId(0)).unwrap();
             assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 0);
@@ -824,10 +827,11 @@
 
     #[test]
     fn subagent_spawn_and_open_replay_is_idempotent() {
-        with_replay_disk_home(|_| {
+        with_replay_disk_home(|home| {
             let child_sid = "child-idempotent";
             let mut app = make_app_with_agent("sess-parent");
             spawn_subagent_with_optional_updates(
+                home,
                 &mut app,
                 child_sid,
                 Some(&(child_tool_line(child_sid) + "\n")),
@@ -846,10 +850,11 @@
 
     #[test]
     fn open_subagent_fullscreen_replays_when_flag_false_and_prompt_only() {
-        with_replay_disk_home(|_| {
+        with_replay_disk_home(|home| {
             let child_sid = "child-open-replay";
             let mut app = make_app_with_agent("sess-parent");
             spawn_subagent_with_optional_updates(
+                home,
                 &mut app,
                 child_sid,
                 Some(&(child_tool_line(child_sid) + "\n")),
