@@ -17,17 +17,20 @@ use serde::{Deserialize, Serialize};
 struct AppState {
     session_id: String,
     actor_ref: String,
-    timeline_path: PathBuf,
-    sidebands_dir: PathBuf,
-    cache: Arc<Mutex<TrajectoryCache>>,
+    #[cfg(test)]
+    session_dir: PathBuf,
+    sessions_root: PathBuf,
+    cache: Arc<Mutex<SessionTrajectoryCache>>,
 }
 
 #[derive(Default)]
-struct TrajectoryCache {
+struct SessionTrajectoryCache {
+    session_dir: PathBuf,
     offset: u64,
     timeline: chat_state::Timeline,
     projector: chat_state::TrajectoryProjector,
     sidebands: BTreeMap<String, SidebandCache>,
+    children: BTreeMap<String, SessionTrajectoryCache>,
 }
 
 #[derive(Default)]
@@ -40,6 +43,7 @@ struct SidebandCache {
 struct TrajectoryQuery {
     after: Option<u64>,
     before: Option<u64>,
+    entry: Option<String>,
     layer: Option<String>,
     actor: Option<String>,
     class: Option<String>,
@@ -93,9 +97,10 @@ pub async fn serve(
     let state = AppState {
         session_id: session_id.to_owned(),
         actor_ref: session_actor_ref(&session_dir, session_id)?,
-        timeline_path,
-        sidebands_dir: session_dir.join("sidebands"),
-        cache: Arc::new(Mutex::new(TrajectoryCache::default())),
+        #[cfg(test)]
+        session_dir: session_dir.clone(),
+        sessions_root: crate::util::grow_home::grow_home().join("sessions"),
+        cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
     };
     let app = Router::new().nest(
         &format!("/{token}"),
@@ -121,10 +126,11 @@ async fn query_trajectory(
     headers: HeaderMap,
 ) -> Result<Json<TrajectoryResponse>, (StatusCode, String)> {
     require_local_host(&headers)?;
-    if query.after.is_some() && query.before.is_some() {
+    if query.after.is_some() as u8 + query.before.is_some() as u8 + query.entry.is_some() as u8 > 1
+    {
         return Err((
             StatusCode::BAD_REQUEST,
-            "after and before are mutually exclusive".into(),
+            "after, before, and entry are mutually exclusive".into(),
         ));
     }
     let response = tokio::task::spawn_blocking(move || query_cached(&state, query))
@@ -135,28 +141,54 @@ async fn query_trajectory(
 }
 
 fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<TrajectoryResponse> {
-    if query.after.is_some() && query.before.is_some() {
-        anyhow::bail!("after and before are mutually exclusive");
+    if query.after.is_some() as u8 + query.before.is_some() as u8 + query.entry.is_some() as u8 > 1
+    {
+        anyhow::bail!("after, before, and entry are mutually exclusive");
     }
     let mut cache = state
         .cache
         .lock()
         .map_err(|_| anyhow::anyhow!("Trajectory cache lock was poisoned"))?;
-    cache.refresh(&state.timeline_path)?;
-    cache.refresh_sidebands(&state.sidebands_dir)?;
-    let mut all_rows = cache.projector.rows().to_vec();
-    for row in &mut all_rows {
-        row.entry_id = format!("t:{}/{}", state.session_id, row.seq);
-        row.actor.clone_from(&state.actor_ref);
-    }
-    all_rows.extend(cache.sideband_rows(&state.session_id)?);
-    all_rows.sort_by_key(|row| {
-        (
-            row.parent_seq.unwrap_or(row.seq),
-            row.parent_seq.is_some(),
-            row.seq,
-        )
-    });
+    let resolver =
+        super::storage::relocation::RelocationView::load_for_sessions_root(&state.sessions_root)?;
+    let session_dir = match resolver.find_persisted_session_dir(&state.session_id)? {
+        Some(path) => path,
+        None => {
+            #[cfg(test)]
+            {
+                state.session_dir.clone()
+            }
+            #[cfg(not(test))]
+            {
+                anyhow::bail!(
+                    "session '{}' disappeared from local storage",
+                    state.session_id
+                )
+            }
+        }
+    };
+    let mut visited = BTreeSet::from([state.session_id.clone()]);
+    cache.refresh_tree(&session_dir, &state.session_id, &resolver, &mut visited)?;
+    let mut all_rows = Vec::new();
+    cache.collect_rows(
+        &state.session_id,
+        &state.actor_ref,
+        None,
+        &[],
+        &mut all_rows,
+    )?;
+    all_rows.sort_by(|left, right| left.nesting_path.cmp(&right.nesting_path));
+    let focus_root = query
+        .entry
+        .as_deref()
+        .map(|entry_id| {
+            all_rows
+                .iter()
+                .find(|row| row.entry_id == entry_id)
+                .map(root_seq)
+                .ok_or_else(|| anyhow::anyhow!("Trajectory entry '{entry_id}' was not found"))
+        })
+        .transpose()?;
     let search = query.search.as_deref().map(str::to_lowercase);
     let layer = query.layer.as_deref().filter(|value| !value.is_empty());
     let actor = query.actor.as_deref().filter(|value| !value.is_empty());
@@ -167,31 +199,21 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         .as_deref()
         .filter(|value| !value.is_empty());
     let limit = query.limit.unwrap_or(2_000).clamp(1, 10_000);
-    let matching = all_rows
-        .iter()
-        .filter(|row| {
-            query
-                .after
-                .is_none_or(|after| row.parent_seq.unwrap_or(row.seq) > after)
-        })
-        .filter(|row| {
-            query
-                .before
-                .is_none_or(|before| row.parent_seq.unwrap_or(row.seq) < before)
-        })
-        .filter(|row| layer.is_none_or(|value| dimension_matches(&row.layer, value)))
-        .filter(|row| actor.is_none_or(|value| dimension_matches(&row.actor, value)))
-        .filter(|row| class.is_none_or(|value| row.class == value))
-        .filter(|row| producer.is_none_or(|value| dimension_matches(&row.producer, value)))
-        .filter(|row| {
-            visibility.is_none_or(|visibility| visibility_name(row.visibility) == visibility)
-        })
-        .filter(|row| {
-            search.as_ref().is_none_or(|needle| {
+    let matches_query = |row: &chat_state::TrajectoryRow| {
+        query.after.is_none_or(|after| root_seq(row) > after)
+            && query.before.is_none_or(|before| root_seq(row) < before)
+            && layer.is_none_or(|value| dimension_matches(&row.layer, value))
+            && actor.is_none_or(|value| dimension_matches(&row.actor, value))
+            && class.is_none_or(|value| row.class == value)
+            && producer.is_none_or(|value| dimension_matches(&row.producer, value))
+            && visibility.is_none_or(|value| visibility_name(row.visibility) == value)
+            && search.as_ref().is_none_or(|needle| {
                 format!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                     row.seq,
                     row.entry_id,
+                    row.parent_entry_id.as_deref().unwrap_or_default(),
+                    serde_json::to_string(&row.nesting_path).unwrap_or_default(),
                     row.layer,
                     row.actor,
                     row.class,
@@ -206,12 +228,15 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
                 .to_lowercase()
                 .contains(needle)
             })
-        })
+    };
+    let matching = all_rows
+        .iter()
+        .filter(|row| focus_root.map_or_else(|| matches_query(row), |root| root_seq(row) == root))
         .collect::<Vec<_>>();
     let matching_count = matching.len();
     let root_sequences = matching
         .iter()
-        .map(|row| row.parent_seq.unwrap_or(row.seq))
+        .map(|row| root_seq(row))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -221,29 +246,27 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
     } else {
         (root_count.saturating_sub(limit), root_count)
     };
-    let has_earlier = query.after.is_none() && start > 0;
+    let has_earlier = focus_root.map_or_else(
+        || query.after.is_none() && start > 0,
+        |root| all_rows.iter().any(|row| root_seq(row) < root),
+    );
     let selected_roots = root_sequences[start..end]
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
     let rows = matching
         .into_iter()
-        .filter(|row| selected_roots.contains(&row.parent_seq.unwrap_or(row.seq)))
+        .filter(|row| selected_roots.contains(&root_seq(row)))
         .cloned()
         .collect::<Vec<_>>();
     let first_seq = root_sequences.get(start).copied();
     let last_seq = end
         .checked_sub(1)
         .and_then(|index| root_sequences.get(index).copied());
-    let sideband_event_count = cache
-        .sidebands
-        .values()
-        .map(|sideband| sideband.events.len())
-        .sum::<usize>();
     Ok(TrajectoryResponse {
         session_id: state.session_id.clone(),
-        schema_version: chat_state::TIMELINE_SCHEMA_VERSION,
-        event_count: cache.timeline.events().len() + sideband_event_count,
+        schema_version: chat_state::TRAJECTORY_SCHEMA_VERSION,
+        event_count: cache.event_count(),
         current_surface_items: cache.timeline.surface_len(),
         active_turn: cache.timeline.active_turn().map(|id| id.0.to_string()),
         active_step: cache.timeline.active_step().map(|id| id.index),
@@ -266,15 +289,20 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
 }
 
 fn session_actor_ref(session_dir: &Path, session_id: &str) -> anyhow::Result<String> {
-    let bytes = std::fs::read(session_dir.join(super::storage::SUMMARY_FILE))?;
-    let summary: super::persistence::Summary = serde_json::from_slice(&bytes)?;
-    summary.validate_current_format()?;
+    let summary = read_session_summary(session_dir)?;
     let actor = match summary.session_kind.as_deref() {
         Some(kind) if kind.starts_with("subagent") => format!("subagent:{session_id}"),
         Some(kind) if kind.starts_with("workflow") => format!("workflow:{session_id}"),
         _ => "main".into(),
     };
     Ok(actor)
+}
+
+fn read_session_summary(session_dir: &Path) -> anyhow::Result<super::persistence::Summary> {
+    let bytes = std::fs::read(session_dir.join(super::storage::SUMMARY_FILE))?;
+    let summary: super::persistence::Summary = serde_json::from_slice(&bytes)?;
+    summary.validate_current_format()?;
+    Ok(summary)
 }
 
 fn dimension_matches(actual: &str, filter: &str) -> bool {
@@ -284,11 +312,134 @@ fn dimension_matches(actual: &str, filter: &str) -> bool {
             .is_some_and(|suffix| matches!(suffix.as_bytes().first(), Some(b'.' | b':')))
 }
 
-impl TrajectoryCache {
+fn root_seq(row: &chat_state::TrajectoryRow) -> u64 {
+    *row.nesting_path
+        .first()
+        .expect("Trajectory rows always have a non-empty nesting path")
+}
+
+impl SessionTrajectoryCache {
+    fn refresh_tree(
+        &mut self,
+        session_dir: &Path,
+        timeline_id: &str,
+        resolver: &super::storage::relocation::RelocationView,
+        visited: &mut BTreeSet<String>,
+    ) -> anyhow::Result<()> {
+        if !self.session_dir.as_os_str().is_empty() && self.session_dir != session_dir {
+            *self = Self::default();
+        }
+        self.session_dir = session_dir.to_owned();
+        self.refresh(&session_dir.join(super::storage::TIMELINE_FILE))?;
+        self.refresh_sidebands(&session_dir.join("sidebands"))?;
+        for sideband_id in self.sidebands.keys() {
+            if !visited.insert(sideband_id.clone()) {
+                anyhow::bail!(
+                    "Timeline identity '{sideband_id}' is linked more than once in the Trajectory tree"
+                );
+            }
+        }
+
+        let terminals = self
+            .timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(end)) => {
+                    Some((end.subagent_id.clone(), end.clone()))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let spawns = self
+            .timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => Some((event.seq, spawn.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut seen = BTreeSet::new();
+        for (spawn_seq, spawn) in spawns {
+            if !visited.insert(spawn.child_session_id.clone()) {
+                anyhow::bail!(
+                    "child Timeline '{}' is linked more than once in the Trajectory tree",
+                    spawn.child_session_id
+                );
+            }
+            let terminal = terminals.get(&spawn.subagent_id);
+            let child_dir = resolver.find_persisted_session_dir(&spawn.child_session_id)?;
+            let Some(child_dir) = child_dir else {
+                if terminal.is_some_and(terminal_requires_child) {
+                    anyhow::bail!(
+                        "terminal subagent '{}' requires missing child Timeline '{}'",
+                        spawn.subagent_id,
+                        spawn.child_session_id
+                    );
+                }
+                continue;
+            };
+            let summary = read_session_summary(&child_dir)?;
+            if summary.info.id.to_string() != spawn.child_session_id
+                || summary.parent_session_id.as_deref() != Some(timeline_id)
+                || !summary
+                    .session_kind
+                    .as_deref()
+                    .is_some_and(|kind| kind.starts_with("subagent"))
+            {
+                anyhow::bail!(
+                    "child session '{}' summary does not match parent spawn t:{}/{}",
+                    spawn.child_session_id,
+                    timeline_id,
+                    spawn_seq.get()
+                );
+            }
+            let child_timeline_path = child_dir.join(super::storage::TIMELINE_FILE);
+            if !child_timeline_path.is_file() {
+                if terminal.is_some_and(terminal_requires_child) {
+                    anyhow::bail!(
+                        "terminal subagent '{}' requires a child Timeline ledger",
+                        spawn.subagent_id
+                    );
+                }
+                continue;
+            }
+            let child = self
+                .children
+                .entry(spawn.child_session_id.clone())
+                .or_default();
+            child.refresh_tree(&child_dir, &spawn.child_session_id, resolver, visited)?;
+            if child.timeline.events().is_empty() && terminal.is_none() {
+                seen.insert(spawn.child_session_id.clone());
+                continue;
+            }
+            child
+                .timeline
+                .validate_subagent_seed_link(timeline_id, spawn_seq, &spawn)?;
+            if let Some(terminal) = terminal {
+                child.timeline.validate_subagent_result_link(
+                    timeline_id,
+                    spawn_seq,
+                    &spawn,
+                    terminal,
+                )?;
+            }
+            seen.insert(spawn.child_session_id);
+        }
+        self.children.retain(|id, _| seen.contains(id));
+        self.validate_sidebands(timeline_id)?;
+        Ok(())
+    }
+
     fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
         let file_len = std::fs::metadata(path)?.len();
         if file_len < self.offset {
+            let session_dir = std::mem::take(&mut self.session_dir);
             *self = Self::default();
+            self.session_dir = session_dir;
         }
         let mut file = std::fs::File::open(path)?;
         file.seek(std::io::SeekFrom::Start(self.offset))?;
@@ -350,10 +501,7 @@ impl TrajectoryCache {
         Ok(())
     }
 
-    fn sideband_rows(
-        &self,
-        parent_timeline_id: &str,
-    ) -> anyhow::Result<Vec<chat_state::TrajectoryRow>> {
+    fn validate_sidebands(&self, parent_timeline_id: &str) -> anyhow::Result<()> {
         let parents = self
             .timeline
             .events()
@@ -365,7 +513,6 @@ impl TrajectoryCache {
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
-        let mut rows = Vec::new();
         for (sideband_id, sideband) in &self.sidebands {
             let (parent_seq, spawn) =
                 parents.get(sideband_id.as_str()).copied().ok_or_else(|| {
@@ -379,20 +526,104 @@ impl TrajectoryCache {
                 parent_seq,
                 spawn,
             )?;
-            let attempt_times = sideband
-                .events
+        }
+        Ok(())
+    }
+
+    fn collect_rows(
+        &self,
+        timeline_id: &str,
+        actor_ref: &str,
+        parent_entry_id: Option<&str>,
+        path_prefix: &[u64],
+        rows: &mut Vec<chat_state::TrajectoryRow>,
+    ) -> anyhow::Result<()> {
+        for projected in self.projector.rows() {
+            let mut row = projected.clone();
+            row.entry_id = format!("t:{timeline_id}/{}", row.seq);
+            row.actor = actor_ref.to_owned();
+            row.parent_entry_id = parent_entry_id.map(str::to_owned);
+            row.nesting_path = path_prefix
                 .iter()
-                .filter_map(|event| {
-                    matches!(event.kind, chat_state::SidebandEventKind::Attempt(_))
-                        .then_some((event.seq, event.at_ms))
-                })
-                .collect::<BTreeMap<_, _>>();
-            for event in &sideband.events {
-                rows.push(sideband_row(event, parent_seq, &attempt_times));
+                .copied()
+                .chain(std::iter::once(row.seq))
+                .collect();
+            let event_index = usize::try_from(row.seq)
+                .map_err(|_| anyhow::anyhow!("Timeline {timeline_id} seq exceeds usize"))?;
+            let event = self.timeline.events().get(event_index).ok_or_else(|| {
+                anyhow::anyhow!("Trajectory projector outran Timeline {timeline_id}")
+            })?;
+            rows.push(row.clone());
+            match &event.kind {
+                chat_state::TimelineEventKind::Sideband(spawn) => {
+                    self.collect_sideband_rows(
+                        &spawn.sideband_id,
+                        &row.entry_id,
+                        &row.nesting_path,
+                        rows,
+                    )?;
+                }
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => {
+                    if let Some(child) = self.children.get(&spawn.child_session_id) {
+                        child.collect_rows(
+                            &spawn.child_session_id,
+                            &format!("subagent:{}", spawn.child_session_id),
+                            Some(&row.entry_id),
+                            &row.nesting_path,
+                            rows,
+                        )?;
+                    }
+                }
+                _ => {}
             }
         }
-        Ok(rows)
+        Ok(())
     }
+
+    fn collect_sideband_rows(
+        &self,
+        sideband_id: &str,
+        parent_entry_id: &str,
+        path_prefix: &[u64],
+        rows: &mut Vec<chat_state::TrajectoryRow>,
+    ) -> anyhow::Result<()> {
+        let Some(sideband) = self.sidebands.get(sideband_id) else {
+            return Ok(());
+        };
+        let attempt_times = sideband
+            .events
+            .iter()
+            .filter_map(|event| {
+                matches!(event.kind, chat_state::SidebandEventKind::Attempt(_))
+                    .then_some((event.seq, event.at_ms))
+            })
+            .collect::<BTreeMap<_, _>>();
+        for event in &sideband.events {
+            rows.push(sideband_row(
+                event,
+                parent_entry_id,
+                path_prefix,
+                &attempt_times,
+            ));
+        }
+        Ok(())
+    }
+
+    fn event_count(&self) -> usize {
+        self.timeline.events().len()
+            + self
+                .sidebands
+                .values()
+                .map(|sideband| sideband.events.len())
+                .sum::<usize>()
+            + self.children.values().map(Self::event_count).sum::<usize>()
+    }
+}
+
+fn terminal_requires_child(terminal: &chat_state::SubagentTerminalEvent) -> bool {
+    terminal.outcome == chat_state::SubagentOutcome::Completed || terminal.result_ref.is_some()
 }
 
 impl SidebandCache {
@@ -432,7 +663,8 @@ impl SidebandCache {
 
 fn sideband_row(
     event: &chat_state::SidebandEvent,
-    parent_seq: u64,
+    parent_entry_id: &str,
+    path_prefix: &[u64],
     attempt_times: &BTreeMap<u64, i64>,
 ) -> chat_state::TrajectoryRow {
     let (kind, state, producer, summary, duration_ms) = match &event.kind {
@@ -490,9 +722,14 @@ fn sideband_row(
         ),
     };
     chat_state::TrajectoryRow {
-        entry_id: format!("t:sideband:{}/{}", event.sideband_id, event.seq),
+        entry_id: format!("t:{}/{}", event.sideband_id, event.seq),
         seq: event.seq,
-        parent_seq: Some(parent_seq),
+        parent_entry_id: Some(parent_entry_id.to_owned()),
+        nesting_path: path_prefix
+            .iter()
+            .copied()
+            .chain(std::iter::once(event.seq))
+            .collect(),
         at_ms: event.at_ms,
         layer: "meta".into(),
         actor: format!("sideband:{}", event.sideband_id),
@@ -553,7 +790,7 @@ header{height:58px;display:flex;align-items:center;gap:18px;padding:0 18px;borde
 .controls{min-height:88px;display:flex;align-content:center;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 18px;border-bottom:1px solid var(--line);background:var(--panel)}input,select,button{height:34px;background:#0b0e13;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:0 9px;font:inherit}input{width:min(340px,34vw)}button{cursor:pointer}button:hover{border-color:#4b5563}.follow.on{color:var(--green);border-color:#28623e}
 .overview{height:64px;display:grid;grid-template-columns:58px minmax(0,1fr);border-bottom:1px solid var(--line);background:#0e1116}.lane-labels{position:relative;border-right:1px solid var(--line);color:var(--muted);font-size:9px}.lane-labels span{position:absolute;right:5px}.lane-labels span:nth-child(1){top:8px}.lane-labels span:nth-child(2){top:27px}.lane-labels span:nth-child(3){top:46px}.track{position:relative;overflow:hidden}.track::before,.track::after{content:"";position:absolute;left:0;right:0;border-top:1px solid #191e26}.track::before{top:21px}.track::after{top:42px}.span{position:absolute;height:8px;top:calc(7px + var(--lane) * 20px);left:var(--left);width:max(2px,var(--width));min-width:2px;border:0;border-radius:2px;padding:0;background:var(--muted);opacity:.78;cursor:pointer}.span.input{background:var(--accent)}.span.model{background:#c4b5fd}.span.tools{background:var(--yellow)}.span.failed,.span.cancelled{background:var(--red)}.span.shadowed{opacity:.25}.span:hover,.span.selected{opacity:1;box-shadow:0 0 0 1px var(--bg),0 0 0 2px var(--accent)}.turn-mark{position:absolute;top:0;bottom:0;width:1px;background:#334155;pointer-events:none}
 main{height:calc(100vh - 210px);display:grid;grid-template-columns:minmax(0,1fr) 420px}.ledger{overflow:auto}.inspector{border-left:1px solid var(--line);background:#0e1116;overflow:auto;padding:16px}.inspector h3{margin:0 0 12px}.inspector pre{white-space:pre-wrap;word-break:break-word;color:#cbd5e1;line-height:1.5}.empty{color:var(--muted)}
-table{width:100%;min-width:1280px;border-collapse:collapse;table-layout:fixed}thead{position:sticky;top:0;background:#151920;z-index:2}th{text-align:left;color:var(--muted);font-weight:500;padding:9px 8px;border-bottom:1px solid var(--line)}td{padding:8px;border-bottom:1px solid #1b2028;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}tr{cursor:pointer}tbody tr:hover,tbody tr.selected{background:#151b24}.seq{width:62px;color:#657083}.time{width:92px}.class{width:92px}.layer{width:112px}.actor{width:124px}.kind{width:150px}.producer{width:116px}.state{width:88px}.turn{width:72px}.duration{width:82px;text-align:right}.summary{width:auto}.message .kind{color:var(--accent)}.audit .kind{color:var(--green)}.auxiliary .kind{color:#c4b5fd}.failed,.cancelled{color:var(--red)}.retrying{color:var(--yellow)}.shadowed{opacity:.48}.pill{padding:2px 6px;border:1px solid var(--line);border-radius:999px}
+table{width:100%;min-width:1280px;border-collapse:collapse;table-layout:fixed}thead{position:sticky;top:0;background:#151920;z-index:2}th{text-align:left;color:var(--muted);font-weight:500;padding:9px 8px;border-bottom:1px solid var(--line)}td{padding:8px;border-bottom:1px solid #1b2028;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}tr{cursor:pointer}tbody tr.event-row{height:34px}tbody tr.spacer{cursor:default}tbody tr.spacer td{padding:0;border:0}tbody tr:hover,tbody tr.selected{background:#151b24}.seq{width:108px;color:#657083}.time{width:92px}.class{width:92px}.layer{width:112px}.actor{width:154px}.kind{width:150px}.producer{width:116px}.state{width:88px}.turn{width:72px}.duration{width:82px;text-align:right}.summary{width:auto}.message .kind{color:var(--accent)}.audit .kind{color:var(--green)}.auxiliary .kind{color:#c4b5fd}.failed,.cancelled{color:var(--red)}.retrying{color:var(--yellow)}.shadowed{opacity:.48}.pill{padding:2px 6px;border:1px solid var(--line);border-radius:999px}
 @media(max-width:900px){main{grid-template-columns:1fr}.inspector{display:none}.stats{display:none}.turn{display:none}}
 </style></head><body>
 <header><span class="brand">GROW / TRAJECTORY</span><span class="session" id="session">loading…</span><div class="stats"><span id="counts"></span><span id="position"></span><span class="live" id="health">● live</span></div></header>
@@ -561,27 +798,116 @@ table{width:100%;min-width:1280px;border-collapse:collapse;table-layout:fixed}th
 <div class="overview"><div class="lane-labels"><span>INPUT</span><span>MODEL</span><span>TOOLS</span></div><div class="track" id="track"></div></div>
 <main><div class="ledger" id="ledger"><table><thead><tr><th class="seq">seq</th><th class="time">time</th><th class="class">class</th><th class="layer">layer</th><th class="actor">actor</th><th class="kind">kind</th><th class="producer">producer</th><th class="state">state</th><th class="turn">turn/step</th><th class="duration">duration</th><th class="summary">summary</th></tr></thead><tbody id="rows"></tbody></table></div><aside class="inspector"><h3>Event inspector</h3><div class="empty" id="hint">Select an event to inspect its canonical payload and four-dimensional identity.</div><pre id="details"></pre></aside></main>
 <script>
-const $=id=>document.getElementById(id), rows=$('rows'), ledger=$('ledger'), track=$('track');let follow=true,selected=null,timer,latestData=null,olderRows=[],hasEarlier=false;
+const $=id=>document.getElementById(id), rows=$('rows'), ledger=$('ledger'), track=$('track'),ROW_HEIGHT=34,OVERSCAN=20;function hashEntry(){if(!location.hash)return null;try{return decodeURIComponent(location.hash.slice(1))}catch{return null}}let follow=true,selected=hashEntry(),deepLinkPending=selected!=null,timer,latestData=null,olderRows=[],hasEarlier=false,displayRows=[],renderQueued=false;
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function time(ms){return new Date(ms).toLocaleTimeString([], {hour12:false})}function duration(ms){return ms==null?'—':ms<1000?ms+' ms':(ms/1000).toFixed(2)+' s'}
 function lane(r){if(r.layer.startsWith('tool'))return['tools',2];if(r.layer==='assistant'||r.producer.startsWith('model')||r.kind.startsWith('request.')||r.kind.startsWith('step.'))return['model',1];return['input',0]}
 function drawOverview(items){if(!items.length){track.innerHTML='';return}const starts=items.map(r=>r.at_ms-(r.duration_ms??0)),ends=items.map(r=>r.at_ms),min=Math.min(...starts),max=Math.max(...ends,min+1),domain=max-min;const marks=items.filter(r=>r.kind==='turn.started').map(r=>`<i class="turn-mark" style="left:${((r.at_ms-min)/domain)*100}%"></i>`).join('');const spans=items.map(r=>{const [laneKind,n]=lane(r),start=r.at_ms-(r.duration_ms??0),left=((start-min)/domain)*100,width=Math.max(.12,((Math.max(r.duration_ms??0,1))/domain)*100);return `<button class="span ${laneKind} ${esc(r.state)} ${esc(r.visibility)}" data-entry="${esc(r.entry_id)}" style="--lane:${n};--left:${left}%;--width:${width}%" title="${esc(r.entry_id)} ${esc(r.kind)} · ${esc(r.summary)}"></button>`}).join('');track.innerHTML=marks+spans;track.querySelectorAll('.span').forEach(span=>span.onclick=()=>focusEvent(span.dataset.entry))}
-function draw(data){$('session').textContent=data.sessionId;$('counts').textContent=`${data.eventCount} events · ${data.currentSurfaceItems} surface · ${data.matchingCount} matched`;$('position').textContent=data.activeTurn==null?'idle':`turn ${data.activeTurn} / step ${data.activeStep??'—'}`;$('older').disabled=!hasEarlier;rows.innerHTML=data.rows.map(r=>`<tr data-entry="${esc(r.entry_id)}" class="${esc(r.class)} ${esc(r.state)} ${esc(r.visibility)}"><td class="seq" title="${esc(r.entry_id)}">${r.parent_seq==null?r.seq:`${r.parent_seq}·${r.seq}`}</td><td class="time">${time(r.at_ms)}</td><td class="class"><span class="pill">${esc(r.class)}</span></td><td class="layer">${esc(r.layer)}</td><td class="actor">${esc(r.actor)}</td><td class="kind">${esc(r.kind)}</td><td class="producer">${esc(r.producer)}</td><td class="state">${esc(r.state)}</td><td class="turn">${r.turn_id??'—'}/${r.step_index??'—'}</td><td class="duration">${duration(r.duration_ms)}</td><td class="summary" title="${esc(r.summary)}">${esc(r.summary)}</td></tr>`).join('');
-window.__trajectory=data.rows;rows.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>inspect(tr.dataset.entry,tr));drawOverview(data.rows);if(selected!=null)focusEvent(selected,false);if(follow)ledger.scrollTop=ledger.scrollHeight}
-function selector(entry){return `[data-entry="${CSS.escape(entry)}"]`}function inspect(entry,tr){rows.querySelector('.selected')?.classList.remove('selected');track.querySelector('.selected')?.classList.remove('selected');tr?.classList.add('selected');track.querySelector(selector(entry))?.classList.add('selected');selected=entry;const r=window.__trajectory.find(x=>x.entry_id===entry);if(!r)return;$('hint').style.display='none';$('details').textContent=JSON.stringify(r,null,2)}
-function focusEvent(entry,scroll=true){const tr=rows.querySelector(selector(entry));if(!tr)return;follow=false;$('follow').classList.remove('on');$('follow').textContent='tail paused';inspect(entry,tr);if(scroll)tr.scrollIntoView({block:'center'})}
-function queryParams(){const p=new URLSearchParams({limit:'5000'});if($('search').value)p.set('search',$('search').value);for(const id of ['layer','actor','class','producer','visibility'])if($(id).value)p.set(id,$(id).value);return p}
-function rootSeq(r){return r.parent_seq??r.seq}function mergeRows(...groups){const byId=new Map;for(const group of groups)for(const row of group)byId.set(row.entry_id,row);return [...byId.values()].sort((a,b)=>rootSeq(a)-rootSeq(b)||(a.parent_seq!=null)-(b.parent_seq!=null)||a.seq-b.seq)}
+function rowMarkup(r){const depth=Math.max(0,r.nesting_path.length-1),parent=r.parent_entry_id==null?'':` ← ${esc(r.parent_entry_id)}`;return `<tr data-entry="${esc(r.entry_id)}" class="event-row ${esc(r.class)} ${esc(r.state)} ${esc(r.visibility)}"><td class="seq" title="${esc(r.entry_id)}${parent}"><span style="padding-left:${depth*12}px">${depth?'↳ ':''}${r.nesting_path.join('·')}</span></td><td class="time">${time(r.at_ms)}</td><td class="class"><span class="pill">${esc(r.class)}</span></td><td class="layer">${esc(r.layer)}</td><td class="actor">${esc(r.actor)}</td><td class="kind">${esc(r.kind)}</td><td class="producer">${esc(r.producer)}</td><td class="state">${esc(r.state)}</td><td class="turn">${r.turn_id??'—'}/${r.step_index??'—'}</td><td class="duration">${duration(r.duration_ms)}</td><td class="summary" title="${esc(r.summary)}">${esc(r.summary)}</td></tr>`}
+function renderLedger(){renderQueued=false;const viewport=Math.max(1,ledger.clientHeight),start=Math.max(0,Math.floor(ledger.scrollTop/ROW_HEIGHT)-OVERSCAN),end=Math.min(displayRows.length,Math.ceil((ledger.scrollTop+viewport)/ROW_HEIGHT)+OVERSCAN),top=start*ROW_HEIGHT,bottom=(displayRows.length-end)*ROW_HEIGHT;rows.innerHTML=`<tr class="spacer"><td colspan="11" style="height:${top}px"></td></tr>`+displayRows.slice(start,end).map(rowMarkup).join('')+`<tr class="spacer"><td colspan="11" style="height:${bottom}px"></td></tr>`;rows.querySelectorAll('tr.event-row').forEach(tr=>tr.onclick=()=>inspect(tr.dataset.entry,tr));if(selected!=null)rows.querySelector(selector(selected))?.classList.add('selected')}
+function queueRender(){if(!renderQueued){renderQueued=true;requestAnimationFrame(renderLedger)}}
+function draw(data){$('session').textContent=data.sessionId;$('counts').textContent=`${data.eventCount} events · ${data.currentSurfaceItems} surface · ${data.matchingCount} matched`;$('position').textContent=data.activeTurn==null?'idle':`turn ${data.activeTurn} / step ${data.activeStep??'—'}`;$('older').disabled=!hasEarlier;displayRows=data.rows;window.__trajectory=displayRows;renderLedger();drawOverview(displayRows);if(follow){ledger.scrollTop=Math.max(0,displayRows.length*ROW_HEIGHT-ledger.clientHeight);renderLedger()}if(selected!=null){focusEvent(selected,deepLinkPending);deepLinkPending=false}}
+function selector(entry){return `[data-entry="${CSS.escape(entry)}"]`}function inspect(entry,tr){rows.querySelector('.selected')?.classList.remove('selected');track.querySelector('.selected')?.classList.remove('selected');tr?.classList.add('selected');track.querySelector(selector(entry))?.classList.add('selected');selected=entry;history.replaceState(null,'',`#${encodeURIComponent(entry)}`);const r=displayRows.find(x=>x.entry_id===entry);if(!r)return;$('hint').style.display='none';$('details').textContent=JSON.stringify(r,null,2)}
+function focusEvent(entry,scroll=true){const index=displayRows.findIndex(row=>row.entry_id===entry);if(index<0)return;follow=false;$('follow').classList.remove('on');$('follow').textContent='tail paused';if(scroll){ledger.scrollTop=Math.max(0,index*ROW_HEIGHT-ledger.clientHeight/2);renderLedger()}inspect(entry,rows.querySelector(selector(entry)))}
+function queryParams(){const p=new URLSearchParams({limit:'5000'});if(deepLinkPending&&selected)p.set('entry',selected);if($('search').value)p.set('search',$('search').value);for(const id of ['layer','actor','class','producer','visibility'])if($(id).value)p.set(id,$(id).value);return p}
+function rootSeq(r){return r.nesting_path[0]}function comparePath(a,b){for(let i=0;i<Math.min(a.length,b.length);i++)if(a[i]!==b[i])return a[i]-b[i];return a.length-b.length}function mergeRows(...groups){const byId=new Map;for(const group of groups)for(const row of group)byId.set(row.entry_id,row);return [...byId.values()].sort((a,b)=>comparePath(a.nesting_path,b.nesting_path))}
 async function fetchPage(params){const endpoint=new URL('api/trajectory',window.location.href);endpoint.search=params;const res=await fetch(endpoint);if(!res.ok)throw Error(await res.text());return await res.json()}
-async function load(){clearTimeout(timer);try{const data=await fetchPage(queryParams());latestData=data;if(!olderRows.length)hasEarlier=data.hasEarlier;data.rows=mergeRows(olderRows,data.rows);draw(data);$('health').textContent='● live';$('health').style.color='var(--green)'}catch(e){$('health').textContent='● '+e.message;$('health').style.color='var(--red)'}timer=setTimeout(load,1000)}
+async function load(){clearTimeout(timer);try{const focusing=deepLinkPending&&selected!=null,data=await fetchPage(queryParams());if(focusing)olderRows=mergeRows(data.rows,olderRows);latestData=data;if(!olderRows.length||focusing)hasEarlier=data.hasEarlier;data.rows=mergeRows(olderRows,data.rows);draw(data);$('health').textContent='● live';$('health').style.color='var(--green)'}catch(e){$('health').textContent='● '+e.message;$('health').style.color='var(--red)'}timer=setTimeout(load,1000)}
 async function loadEarlier(){const visible=window.__trajectory??[];if(!visible.length||!hasEarlier)return;const oldHeight=ledger.scrollHeight,oldTop=ledger.scrollTop,p=queryParams();p.set('before',String(rootSeq(visible[0])));$('older').disabled=true;try{const page=await fetchPage(p);olderRows=mergeRows(page.rows,olderRows);hasEarlier=page.hasEarlier;if(latestData){latestData.rows=mergeRows(olderRows,latestData.rows);draw(latestData);ledger.scrollTop=oldTop+(ledger.scrollHeight-oldHeight)}}catch(e){$('health').textContent='● '+e.message;$('health').style.color='var(--red)'}$('older').disabled=!hasEarlier}
 function resetWindow(){olderRows=[];hasEarlier=false;load()}
-$('older').onclick=loadEarlier;$('follow').onclick=()=>{follow=!follow;$('follow').classList.toggle('on',follow);$('follow').textContent=follow?'tail follow':'tail paused'};$('refresh').onclick=load;for(const id of ['layer','actor','class','producer','visibility'])$(id).onchange=resetWindow;let debounce;$('search').oninput=()=>{clearTimeout(debounce);debounce=setTimeout(resetWindow,180)};ledger.onscroll=()=>{if(ledger.scrollHeight-ledger.scrollTop-ledger.clientHeight>80){follow=false;$('follow').classList.remove('on');$('follow').textContent='tail paused'}};load();
+$('older').onclick=loadEarlier;$('follow').onclick=()=>{follow=!follow;$('follow').classList.toggle('on',follow);$('follow').textContent=follow?'tail follow':'tail paused'};$('refresh').onclick=load;for(const id of ['layer','actor','class','producer','visibility'])$(id).onchange=resetWindow;let debounce;$('search').oninput=()=>{clearTimeout(debounce);debounce=setTimeout(resetWindow,180)};ledger.onscroll=()=>{queueRender();if(ledger.scrollHeight-ledger.scrollTop-ledger.clientHeight>80){follow=false;$('follow').classList.remove('on');$('follow').textContent='tail paused'}};window.onhashchange=()=>{const entry=hashEntry();if(entry){deepLinkPending=true;focusEvent(entry)}};load();
 </script></body></html>"#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_timeline(path: &Path, timeline: &chat_state::Timeline) {
+        let body = timeline
+            .events()
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn write_child_session(
+        sessions_root: &Path,
+        cwd: &str,
+        session_id: &str,
+        parent_session_id: &str,
+        timeline: &chat_state::Timeline,
+    ) -> PathBuf {
+        let session_dir = sessions_root
+            .join(crate::util::grow_home::encode_cwd_dirname(cwd))
+            .join(session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let info = client_support::session::Info {
+            id: agent_client_protocol::SessionId::new(session_id.to_owned()),
+            cwd: cwd.to_owned(),
+        };
+        let mut summary = super::super::persistence::Summary::new(
+            &info,
+            agent_client_protocol::ModelId::new("model"),
+        )
+        .unwrap();
+        summary.parent_session_id = Some(parent_session_id.to_owned());
+        summary.session_kind = Some("subagent".into());
+        std::fs::write(
+            session_dir.join(super::super::storage::SUMMARY_FILE),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
+        write_timeline(
+            &session_dir.join(super::super::storage::TIMELINE_FILE),
+            timeline,
+        );
+        session_dir
+    }
+
+    fn subagent_spawn(
+        subagent_id: &str,
+        child_session_id: &str,
+        child_cwd: &str,
+    ) -> chat_state::SubagentSpawnEvent {
+        chat_state::SubagentSpawnEvent {
+            subagent_id: subagent_id.into(),
+            child_session_id: child_session_id.into(),
+            subagent_type: "explore".into(),
+            description: "inspect architecture".into(),
+            prompt: "trace the canonical state".into(),
+            context_source: chat_state::SubagentContextSource::New,
+            source_ref: None,
+            context_normalized: false,
+            resumed_from: None,
+            parent_prompt_id: None,
+            capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
+            workflow_run_id: None,
+            goal_id: None,
+            child_cwd: child_cwd.into(),
+            worktree_path: None,
+            effective_model_id: "model".into(),
+        }
+    }
+
+    fn subagent_seed(
+        parent_timeline_id: &str,
+        parent_spawn_seq: u64,
+        subagent_id: &str,
+    ) -> chat_state::SubagentSeedEvent {
+        chat_state::SubagentSeedEvent {
+            parent_timeline_id: parent_timeline_id.into(),
+            parent_spawn_seq,
+            subagent_id: subagent_id.into(),
+            context_source: chat_state::SubagentContextSource::New,
+            source_ref: None,
+            normalized: false,
+        }
+    }
 
     #[test]
     fn cache_ignores_then_consumes_an_incomplete_tail() {
@@ -594,7 +920,7 @@ mod tests {
         let mut bytes = format!("{line}\n{{\"version\":").into_bytes();
         bytes.extend_from_slice(&[0xe2, 0x82]);
         std::fs::write(&path, bytes).unwrap();
-        let mut cache = TrajectoryCache::default();
+        let mut cache = SessionTrajectoryCache::default();
         cache.refresh(&path).unwrap();
         assert_eq!(cache.timeline.events().len(), 1);
 
@@ -625,7 +951,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let mut cache = TrajectoryCache::default();
+        let mut cache = SessionTrajectoryCache::default();
         cache.refresh(&path).unwrap();
         let committed_offset = cache.offset;
 
@@ -670,9 +996,9 @@ mod tests {
         let state = AppState {
             session_id: "session".into(),
             actor_ref: "main".into(),
-            timeline_path: path,
-            sidebands_dir: dir.path().join("sidebands"),
-            cache: Arc::new(Mutex::new(TrajectoryCache::default())),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
         };
 
         let response = query_cached(
@@ -710,9 +1036,9 @@ mod tests {
         let state = AppState {
             session_id: "session".into(),
             actor_ref: "main".into(),
-            timeline_path: path,
-            sidebands_dir: dir.path().join("sidebands"),
-            cache: Arc::new(Mutex::new(TrajectoryCache::default())),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
         };
 
         let response = query_cached(
@@ -737,9 +1063,9 @@ mod tests {
         let state = AppState {
             session_id: "session".into(),
             actor_ref: "main".into(),
-            timeline_path: path,
-            sidebands_dir: dir.path().join("sidebands"),
-            cache: Arc::new(Mutex::new(TrajectoryCache::default())),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
         };
         let error = query_cached(
             &state,
@@ -778,6 +1104,11 @@ mod tests {
         assert!(PAGE.contains("id=\"class\""));
         assert!(PAGE.contains("id=\"producer\""));
         assert!(PAGE.contains("<option>governance</option>"));
+        assert!(PAGE.contains("OVERSCAN=20"));
+        assert!(PAGE.contains("parent_entry_id"));
+        assert!(PAGE.contains("nesting_path"));
+        assert!(PAGE.contains("history.replaceState"));
+        assert!(PAGE.contains("p.set('entry',selected)"));
     }
 
     #[test]
@@ -800,9 +1131,9 @@ mod tests {
         let state = AppState {
             session_id: "child".into(),
             actor_ref: "subagent:child".into(),
-            timeline_path: path,
-            sidebands_dir: dir.path().join("sidebands"),
-            cache: Arc::new(Mutex::new(TrajectoryCache::default())),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
         };
 
         let response = query_cached(
@@ -924,9 +1255,9 @@ mod tests {
         let state = AppState {
             session_id: "session".into(),
             actor_ref: "main".into(),
-            timeline_path: path,
-            sidebands_dir: dir.path().join("sidebands"),
-            cache: Arc::new(Mutex::new(TrajectoryCache::default())),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
         };
         let response = query_cached(
             &state,
@@ -938,9 +1269,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.rows.len(), 4);
-        assert!(response.rows.iter().all(|row| row.parent_seq == Some(1)));
+        assert!(
+            response
+                .rows
+                .iter()
+                .all(|row| row.parent_entry_id.as_deref() == Some("t:session/1"))
+        );
+        assert!(
+            response
+                .rows
+                .iter()
+                .enumerate()
+                .all(|(seq, row)| row.nesting_path == [1, seq as u64])
+        );
         assert_eq!(response.first_seq, Some(1));
         assert_eq!(response.last_seq, Some(1));
+        assert_eq!(response.rows[0].entry_id, format!("t:{sideband_id}/0"));
         assert_eq!(response.rows[0].kind, "sideband.request");
         assert_eq!(response.rows[3].kind, "sideband.end");
 
@@ -959,15 +1303,337 @@ mod tests {
         let tampered_state = AppState {
             session_id: state.session_id.clone(),
             actor_ref: state.actor_ref.clone(),
-            timeline_path: state.timeline_path.clone(),
-            sidebands_dir: state.sidebands_dir.clone(),
-            cache: Arc::new(Mutex::new(TrajectoryCache::default())),
+            session_dir: state.session_dir.clone(),
+            sessions_root: state.sessions_root.clone(),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
         };
         let error = query_cached(&tampered_state, TrajectoryQuery::default()).unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("does not match its parent spawn")
+        );
+    }
+
+    #[test]
+    fn recursively_merges_child_ledgers_with_stable_causal_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_dir = dir.path().join("root");
+        let sessions_root = dir.path().join("sessions");
+        std::fs::create_dir_all(&root_dir).unwrap();
+
+        let mut root =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user(
+                "root prompt",
+            )])
+            .unwrap();
+        let child_spawn = root
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(subagent_spawn(
+                    "worker",
+                    "child-session",
+                    "/child",
+                )),
+            ))
+            .unwrap();
+        root.append(
+            sampling_types::ConversationItem::assistant("root continued"),
+            chat_state::MessageCause::Assistant,
+        )
+        .unwrap();
+        write_timeline(&root_dir.join(super::super::storage::TIMELINE_FILE), &root);
+
+        let mut child = chat_state::Timeline::default();
+        child
+            .record(chat_state::TimelineEventKind::SubagentSeed(subagent_seed(
+                "root-session",
+                child_spawn.seq.get(),
+                "worker",
+            )))
+            .unwrap();
+        child
+            .append(
+                sampling_types::ConversationItem::user("child prompt"),
+                chat_state::MessageCause::User,
+            )
+            .unwrap();
+        let grandchild_spawn = child
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(subagent_spawn(
+                    "nested-worker",
+                    "grandchild-session",
+                    "/grandchild",
+                )),
+            ))
+            .unwrap();
+        child
+            .append(
+                sampling_types::ConversationItem::assistant("child continued"),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        write_child_session(
+            &sessions_root,
+            "/child",
+            "child-session",
+            "root-session",
+            &child,
+        );
+
+        let mut grandchild = chat_state::Timeline::default();
+        grandchild
+            .record(chat_state::TimelineEventKind::SubagentSeed(subagent_seed(
+                "child-session",
+                grandchild_spawn.seq.get(),
+                "nested-worker",
+            )))
+            .unwrap();
+        grandchild
+            .append(
+                sampling_types::ConversationItem::assistant("nested result"),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        write_child_session(
+            &sessions_root,
+            "/grandchild",
+            "grandchild-session",
+            "child-session",
+            &grandchild,
+        );
+
+        let state = AppState {
+            session_id: "root-session".into(),
+            actor_ref: "main".into(),
+            session_dir: root_dir,
+            sessions_root,
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        let response = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        let identities = response
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.entry_id.as_str(),
+                    row.parent_entry_id.as_deref(),
+                    row.nesting_path.as_slice(),
+                    row.actor.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            vec![
+                ("t:root-session/0", None, &[0][..], "main"),
+                ("t:root-session/1", None, &[1][..], "main"),
+                (
+                    "t:child-session/0",
+                    Some("t:root-session/1"),
+                    &[1, 0][..],
+                    "subagent:child-session",
+                ),
+                (
+                    "t:child-session/1",
+                    Some("t:root-session/1"),
+                    &[1, 1][..],
+                    "subagent:child-session",
+                ),
+                (
+                    "t:child-session/2",
+                    Some("t:root-session/1"),
+                    &[1, 2][..],
+                    "subagent:child-session",
+                ),
+                (
+                    "t:grandchild-session/0",
+                    Some("t:child-session/2"),
+                    &[1, 2, 0][..],
+                    "subagent:grandchild-session",
+                ),
+                (
+                    "t:grandchild-session/1",
+                    Some("t:child-session/2"),
+                    &[1, 2, 1][..],
+                    "subagent:grandchild-session",
+                ),
+                (
+                    "t:child-session/3",
+                    Some("t:root-session/1"),
+                    &[1, 3][..],
+                    "subagent:child-session",
+                ),
+                ("t:root-session/2", None, &[2][..], "main"),
+            ]
+        );
+        assert_eq!(response.event_count, 9);
+
+        let filtered = query_cached(
+            &state,
+            TrajectoryQuery {
+                actor: Some("subagent:grandchild-session".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.rows.len(), 2);
+        assert_eq!(filtered.first_seq, Some(1));
+        assert_eq!(filtered.last_seq, Some(1));
+
+        let focused = query_cached(
+            &state,
+            TrajectoryQuery {
+                entry: Some("t:grandchild-session/1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(focused.rows.len(), 7);
+        assert_eq!(focused.first_seq, Some(1));
+        assert_eq!(focused.last_seq, Some(1));
+        assert!(
+            focused
+                .rows
+                .iter()
+                .any(|row| row.entry_id == "t:grandchild-session/1")
+        );
+    }
+
+    #[test]
+    fn rejects_child_ledger_whose_seed_does_not_match_parent_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_dir = dir.path().join("root");
+        let sessions_root = dir.path().join("sessions");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let mut root = chat_state::Timeline::default();
+        root.record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(subagent_spawn("worker", "child-session", "/child")),
+        ))
+        .unwrap();
+        write_timeline(&root_dir.join(super::super::storage::TIMELINE_FILE), &root);
+        let mut child = chat_state::Timeline::default();
+        child
+            .record(chat_state::TimelineEventKind::SubagentSeed(subagent_seed(
+                "another-parent",
+                99,
+                "worker",
+            )))
+            .unwrap();
+        write_child_session(
+            &sessions_root,
+            "/child",
+            "child-session",
+            "root-session",
+            &child,
+        );
+        let state = AppState {
+            session_id: "root-session".into(),
+            actor_ref: "main".into(),
+            session_dir: root_dir,
+            sessions_root,
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        let error = query_cached(&state, TrajectoryQuery::default()).unwrap_err();
+        assert!(error.to_string().contains("child seed-source"));
+    }
+
+    #[test]
+    fn missing_child_is_only_valid_for_unreferenced_failed_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_dir = dir.path().join("root");
+        let sessions_root = dir.path().join("sessions");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let mut failed = chat_state::Timeline::default();
+        failed
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(subagent_spawn(
+                    "worker",
+                    "missing-child",
+                    "/child",
+                )),
+            ))
+            .unwrap();
+        failed
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                    subagent_id: "worker".into(),
+                    child_session_id: "missing-child".into(),
+                    outcome: chat_state::SubagentOutcome::Failed,
+                    duration_ms: 1,
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 0,
+                    error: Some("child was never published".into()),
+                    result_ref: None,
+                    snapshot_ref: None,
+                }),
+            ))
+            .unwrap();
+        write_timeline(
+            &root_dir.join(super::super::storage::TIMELINE_FILE),
+            &failed,
+        );
+        let state = AppState {
+            session_id: "root-session".into(),
+            actor_ref: "main".into(),
+            session_dir: root_dir.clone(),
+            sessions_root: sessions_root.clone(),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        assert_eq!(
+            query_cached(&state, TrajectoryQuery::default())
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
+
+        let mut completed = chat_state::Timeline::default();
+        completed
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(subagent_spawn(
+                    "worker",
+                    "missing-child",
+                    "/child",
+                )),
+            ))
+            .unwrap();
+        completed
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                    subagent_id: "worker".into(),
+                    child_session_id: "missing-child".into(),
+                    outcome: chat_state::SubagentOutcome::Completed,
+                    duration_ms: 1,
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 0,
+                    error: None,
+                    result_ref: Some(chat_state::TimelineRangeRef {
+                        timeline_id: "missing-child".into(),
+                        first_seq: 1,
+                        last_seq: 1,
+                    }),
+                    snapshot_ref: None,
+                }),
+            ))
+            .unwrap();
+        write_timeline(
+            &root_dir.join(super::super::storage::TIMELINE_FILE),
+            &completed,
+        );
+        let completed_state = AppState {
+            session_id: state.session_id.clone(),
+            actor_ref: state.actor_ref.clone(),
+            session_dir: root_dir,
+            sessions_root,
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        let error = query_cached(&completed_state, TrajectoryQuery::default()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires missing child Timeline")
         );
     }
 

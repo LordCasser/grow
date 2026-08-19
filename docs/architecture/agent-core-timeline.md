@@ -150,12 +150,13 @@ Grow 不为旧的可变 Chat 快照格式或 Timeline schema v1 保留执行兼�
 
 `grow trajectory [session-id]` 在 `127.0.0.1` 启动独立页面。未指定 session 时选择当前目录最近活跃会话；端口默认由系统分配。服务只接受 loopback bind 与 localhost/loopback Host，并为每次启动生成不可猜的 URL token。页面与 API 只从 `timeline.jsonl` 构建 `TrajectorySnapshot`，不读取消息快照或 UI updates。
 
-- `GET /<token>/api/trajectory` 支持互斥的 `after` / `before` cursor，以及四维 `layer`、`actor`、`class`、`producer`、`visibility`、`search`、`limit` 交集过滤；
-- 主行身份为 `t:<session>/<seq>`；Sideband 行身份为 `t:sideband:<id>/<seq>`，并通过 `parent_seq` 嵌套在唯一 spawn 下；
+- `GET /<token>/api/trajectory` 支持互斥的 `after` / `before` cursor 或 exact `entry` 定位，以及四维 `layer`、`actor`、`class`、`producer`、`visibility`、`search`、`limit` 交集过滤；exact entry 返回它所属的完整因果 root group，使长账本中的稳定 ID 深链不依赖当前尾页窗口；
+- 任意实体行统一使用 `t:<timeline-id>/<seq>`；合并视图以 `parent_entry_id` 精确指向 direct spawn，以可递归的 `nesting_path` 给出确定性因果顺序，不保留只能表达一层关系的 `parent_seq`；
+- 服务从父 Timeline 的 `subagent/spawn` 出发递归解析 child session，逐层验证 summary lineage、spawn ↔ seed-source，并在父终态引用 child result 时验证 exact result；运行中 child 与无 result ref 的 Failed/Cancelled child 可以暂缺，Completed、任何携带 result ref 的终态或已发布但谱系被篡改的 child fail closed；
 - current / shadowed / log-only 由统一 Surface fold 计算；
 - request 展示 TTFT、总耗时、token/cache usage，tool/turn/compaction 展示真实终态耗时；
-- 服务按字节 offset 增量 fold 主 Timeline 与 Sideband Timelines；完整批次中任一坏行会让整批拒绝且不推进 cache，未换行尾片等待下一次刷新；
-- 进行中的事件不伪造 duration；页面以 Input / Model / Tools 三条时间泳道总览同一批事件，支持向前分页、每秒刷新、tail-follow 与 canonical JSON 检查。
+- 每次查询只构造一个 relocation-aware session storage view，主实体和全部递归 child 都从这一个权威目录快照解析；服务再按字节 offset 增量 fold 各 Session / Sideband Timeline，完整批次中任一坏行会让整批拒绝且不推进对应 cache，未换行尾片等待下一次刷新；
+- 进行中的事件不伪造 duration；页面以 Input / Model / Tools 三条时间泳道总览同一批事件，支持向前分页、每秒刷新、tail-follow、稳定 ID 深链与 canonical JSON 检查；账本表格只挂载 viewport + overscan 行，长会话刷新不再反复创建数千个 DOM 行。
 
 ## 模块所有权
 

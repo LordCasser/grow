@@ -67,6 +67,9 @@ pub use timeline::{
     SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent,
     TimelineEventKind, ToolEvent, TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal,
 };
-pub use trajectory::{SurfaceVisibility, TrajectoryProjector, TrajectoryRow, TrajectorySnapshot};
+pub use trajectory::{
+    SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryProjector, TrajectoryRow,
+    TrajectorySnapshot,
+};
 pub use types::*;
 pub use usage::{UsageLedger, UsageTotals};

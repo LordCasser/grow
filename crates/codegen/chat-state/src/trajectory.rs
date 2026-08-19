@@ -11,6 +11,12 @@ use crate::{
     TimelineEventKind, ToolEvent, TurnEvent,
 };
 
+/// Wire schema for the read-only Trajectory projection.
+///
+/// This is intentionally independent from the Timeline event schema: changing
+/// a debug projection must not pretend that the durable ledger format changed.
+pub const TRAJECTORY_SCHEMA_VERSION: u8 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SurfaceVisibility {
@@ -23,8 +29,18 @@ pub enum SurfaceVisibility {
 pub struct TrajectoryRow {
     pub entry_id: String,
     pub seq: u64,
+    /// Stable causal parent in a merged multi-ledger view.
+    ///
+    /// Root-ledger rows have no parent. Every row projected from a child or
+    /// Sideband ledger points at the exact spawn entry that owns its span.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_seq: Option<u64>,
+    pub parent_entry_id: Option<String>,
+    /// Lexicographic position in the merged causal tree.
+    ///
+    /// A root event at seq 7 has `[7]`; a child event at seq 3 spawned by it
+    /// has `[7, 3]`; recursively derived ledgers extend the path. This one
+    /// field is both the deterministic nesting order and the depth source.
+    pub nesting_path: Vec<u64>,
     pub at_ms: i64,
     pub layer: String,
     pub actor: String,
@@ -155,7 +171,7 @@ impl TrajectoryProjector {
 
     pub fn snapshot(&self, timeline: &Timeline) -> TrajectorySnapshot {
         TrajectorySnapshot {
-            schema_version: crate::TIMELINE_SCHEMA_VERSION,
+            schema_version: TRAJECTORY_SCHEMA_VERSION,
             event_count: timeline.events().len(),
             current_surface_items: timeline.surface_len(),
             active_turn: timeline.active_turn().map(|id| id.0.to_string()),
@@ -179,7 +195,8 @@ fn row(
     TrajectoryRow {
         entry_id: format!("t:local/{}", event.seq.get()),
         seq: event.seq.get(),
-        parent_seq: None,
+        parent_entry_id: None,
+        nesting_path: vec![event.seq.get()],
         at_ms: event.at_ms,
         layer,
         actor: "main".into(),
@@ -874,6 +891,9 @@ mod tests {
             )
             .unwrap();
         let snapshot = timeline.trajectory();
+        assert_eq!(snapshot.schema_version, TRAJECTORY_SCHEMA_VERSION);
+        assert_eq!(snapshot.rows[0].nesting_path, [0]);
+        assert!(snapshot.rows[0].parent_entry_id.is_none());
         assert_eq!(snapshot.rows[0].visibility, SurfaceVisibility::Shadowed);
         assert_eq!(snapshot.rows[1].visibility, SurfaceVisibility::Current);
     }
