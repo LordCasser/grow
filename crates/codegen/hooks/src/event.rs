@@ -249,7 +249,7 @@ pub enum StopFailureKind {
     AuthenticationFailed,
     InvalidRequest,
     ServerError,
-    MaxOutputTokens,
+    ContextWindowExceeded,
     Unknown,
 }
 
@@ -260,7 +260,7 @@ impl StopFailureKind {
             Self::AuthenticationFailed => "authentication_failed",
             Self::InvalidRequest => "invalid_request",
             Self::ServerError => "server_error",
-            Self::MaxOutputTokens => "max_output_tokens",
+            Self::ContextWindowExceeded => "context_window_exceeded",
             Self::Unknown => "unknown",
         }
     }
@@ -728,7 +728,7 @@ mod tests {
             StopFailureKind::AuthenticationFailed,
             StopFailureKind::InvalidRequest,
             StopFailureKind::ServerError,
-            StopFailureKind::MaxOutputTokens,
+            StopFailureKind::ContextWindowExceeded,
             StopFailureKind::Unknown,
         ] {
             assert_eq!(

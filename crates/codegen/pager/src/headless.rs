@@ -350,7 +350,7 @@ impl HeadlessEmitter {
         }
     }
 
-    /// Emit the terminal error; `stop_reason_override` stamps a Messages stop reason (e.g. `max_tokens`).
+    /// Emit the terminal error; `stop_reason_override` stamps a typed Messages stop reason.
     fn on_error(&mut self, message: &str, stop_reason_override: Option<&str>) {
         match self.format {
             OutputFormat::Plain => eprintln!("{message}"),
@@ -1183,9 +1183,9 @@ pub async fn run_single_turn(
                     ),
                 }
             }
-            let stop_reason_override = (shell::sampling::error::stop_reason_for_turn_error(&err)
-                == "MaxTokens")
-                .then_some("max_tokens");
+            let stop_reason_override =
+                shell::sampling::error::context_window_exceeded_for_turn_error(&err)
+                    .then_some("context_window_exceeded");
             emitter.on_error(&msg, stop_reason_override);
             Err(anyhow::anyhow!("{msg}"))
         }

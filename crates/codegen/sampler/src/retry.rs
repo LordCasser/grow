@@ -22,7 +22,6 @@
 //! - `Auth` / `InvalidConfiguration` (credential/config issues)
 //! - `IdleTimeout` (model stuck, retry would stall again)
 //! - `Serialization` (response parsing failure)
-//! - `MaxTokensTruncation` (by design)
 //!
 //! **Server hint** (`x-should-retry` header from CCP):
 //! - `false` → Fatal immediately, regardless of status code
@@ -342,9 +341,6 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 context.completion_tokens.unwrap_or(0),
             )
         }
-        SamplingError::MaxTokensTruncation => {
-            format!("{}Response truncated by max_tokens.", retry_prefix)
-        }
         SamplingError::DoomLoopDetected { triggers, .. } => {
             format!(
                 "{}Server detected a reasoning loop ({}); resampling the response.",
@@ -407,7 +403,6 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
         SamplingError::EmptyResponse { context } => SamplingError::EmptyResponse {
             context: context.clone(),
         },
-        SamplingError::MaxTokensTruncation => SamplingError::MaxTokensTruncation,
         SamplingError::DoomLoopDetected {
             triggers,
             aborted_at_chunk,

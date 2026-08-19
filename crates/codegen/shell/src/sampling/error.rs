@@ -109,13 +109,6 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             context.had_reasoning,
             context.finish_reason_str(),
         )),
-        SamplingError::MaxTokensTruncation => {
-            acp::Error::internal_error().data(terminal_error_data(
-                err.to_string(),
-                None,
-                sampler::SamplingErrorKind::MaxTokensTruncation,
-            ))
-        }
         SamplingError::IdleTimeout { elapsed_secs } => acp::Error::internal_error().data(format!(
             "No response from model for {elapsed_secs}s — the model may be stuck"
         )),
@@ -134,31 +127,27 @@ pub fn error_data_with_status(message: String, http_status: Option<u16>) -> serd
     }
 }
 
-/// Terminal-failure `acp::Error.data`: max-tokens truncation carries an `error_kind` marker (the kind's stable `as_str` name); other kinds keep the legacy shape.
+/// Typed terminal-failure payload. Every caller records the stable error kind;
+/// consumers never infer semantics from message text or a legacy shape.
 pub fn terminal_error_data(
     message: String,
     http_status: Option<u16>,
-    kind: sampler::SamplingErrorKind,
+    kind: &str,
 ) -> serde_json::Value {
-    if kind != sampler::SamplingErrorKind::MaxTokensTruncation {
-        return error_data_with_status(message, http_status);
-    }
-    let mut data = serde_json::json!({ "message": message, "error_kind": kind.as_str() });
+    let mut data = serde_json::json!({ "message": message, "error_kind": kind });
     if let Some(sc) = http_status {
         data["http_status"] = serde_json::json!(sc);
     }
     data
 }
 
-/// `turn_result.json` stop_reason for a failed turn: "MaxTokens" when the marker is present, else "Error" (matches the success path's `acp::StopReason` names).
-pub fn stop_reason_for_turn_error(err: &acp::Error) -> &'static str {
-    let is_max_tokens = err
-        .data
+/// Whether a terminal error is the explicit input-context exhaustion state.
+pub fn context_window_exceeded_for_turn_error(err: &acp::Error) -> bool {
+    err.data
         .as_ref()
         .and_then(|d| d.get("error_kind"))
         .and_then(|v| v.as_str())
-        .is_some_and(|k| k == sampler::SamplingErrorKind::MaxTokensTruncation.as_str());
-    if is_max_tokens { "MaxTokens" } else { "Error" }
+        .is_some_and(|kind| kind == ::hooks::event::StopFailureKind::ContextWindowExceeded.as_str())
 }
 
 fn error_message_from_data(data: &serde_json::Value) -> serde_json::Value {
@@ -282,13 +271,13 @@ mod tests {
         let usage = crate::extensions::notification::PromptUsage::from(&ledger);
         let err = attach_prompt_usage(
             acp::Error::internal_error().data(terminal_error_data(
-                "truncated".into(),
+                "context remains over window".into(),
                 None,
-                sampler::SamplingErrorKind::MaxTokensTruncation,
+                ::hooks::event::StopFailureKind::ContextWindowExceeded.as_str(),
             )),
             Some(usage.clone()),
         );
-        assert_eq!(stop_reason_for_turn_error(&err), "MaxTokens");
+        assert!(context_window_exceeded_for_turn_error(&err));
         let back = prompt_usage_from_error(&err).expect("usage attached");
         assert_eq!(back.totals.input_tokens, 3);
         assert_eq!(back.num_turns, 1);
@@ -539,15 +528,18 @@ mod tests {
         assert_eq!(http_status_from_error(&err), Some(401));
     }
 
-    /// The typed max-tokens kind round-trips through `acp::Error.data` to the serialized stop reason.
+    /// The typed context-window kind survives the terminal ACP boundary.
     #[test]
-    fn stop_reason_for_turn_error_distinguishes_max_tokens() {
-        let err = map_sampling_err_to_acp(SamplingError::MaxTokensTruncation);
-        assert_eq!(stop_reason_for_turn_error(&err), "MaxTokens");
-        assert_eq!(
-            stop_reason_for_turn_error(&acp::Error::internal_error()),
-            "Error"
-        );
+    fn terminal_error_distinguishes_context_window_exhaustion() {
+        let err = acp::Error::internal_error().data(terminal_error_data(
+            "context remains over window".into(),
+            None,
+            ::hooks::event::StopFailureKind::ContextWindowExceeded.as_str(),
+        ));
+        assert!(context_window_exceeded_for_turn_error(&err));
+        assert!(!context_window_exceeded_for_turn_error(
+            &acp::Error::internal_error()
+        ));
     }
 
     #[test]

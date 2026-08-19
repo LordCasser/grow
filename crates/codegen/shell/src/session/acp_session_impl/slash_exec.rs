@@ -513,13 +513,10 @@ impl SessionActor {
                 let ctx = &info.context;
                 let context_pct = token_estimation::usage_percentage(ctx.used, ctx.total);
 
-                let summary_path = self.session_dir.join("summary.json");
+                let session_dir = self.session_dir.clone();
                 let title = tokio::task::spawn_blocking(move || {
-                    std::fs::read_to_string(&summary_path)
+                    crate::session::persistence::read_summary_from_dir(&session_dir)
                         .ok()
-                        .and_then(|raw| {
-                            serde_json::from_str::<crate::session::persistence::Summary>(&raw).ok()
-                        })
                         .and_then(|s| s.display_title_opt())
                         .filter(|s| !s.is_empty())
                 })

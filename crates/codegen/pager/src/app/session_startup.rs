@@ -78,18 +78,14 @@ pub fn parent_session_is_worktree(session_id: &str, cwd: &Path) -> bool {
     let cwd_str = cwd.to_string_lossy();
     let sessions_root = shell::util::grow_home::grow_home().join("sessions");
     let encoded = shell::util::grow_home::encode_cwd_dirname(&cwd_str);
-    let summary_path = sessions_root
-        .join(encoded)
-        .join(session_id)
-        .join("summary.json");
-    if let Ok(bytes) = std::fs::read(&summary_path)
-        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
-    {
-        if v.get("session_kind").and_then(|k| k.as_str()) == Some("worktree") {
+    let session_dir = sessions_root.join(encoded).join(session_id);
+    if let Ok(summary) = shell::session::persistence::read_summary_in_session_dir(&session_dir) {
+        if summary.session_kind.as_deref() == Some("worktree") {
             return true;
         }
-        if v.get("source_workspace_dir")
-            .and_then(|k| k.as_str())
+        if summary
+            .source_workspace_dir
+            .as_deref()
             .is_some_and(|s| !s.is_empty())
         {
             return true;

@@ -1740,7 +1740,7 @@ impl SessionActor {
             acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
                 detailed_message,
                 error.status_code,
-                error.kind,
+                error.kind.as_str(),
             )),
         )
     }

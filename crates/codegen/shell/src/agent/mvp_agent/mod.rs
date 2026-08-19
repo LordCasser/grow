@@ -826,14 +826,24 @@ pub(crate) struct OrphanedTask {
 /// a partial UTF-8/JSON tail; delta replay must restart at that record's first
 /// byte after the writer flushes, rather than seek into its middle and lose it.
 fn read_complete_jsonl_snapshot(path: &std::path::Path) -> std::io::Result<(String, u64)> {
-    let bytes = std::fs::read(path)?;
-    let complete_end = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1);
-    let contents = String::from_utf8(bytes[..complete_end].to_vec())
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    Ok((contents, complete_end as u64))
+    let Some(mut lines) = crate::session::storage::CommittedJsonlLines::open(
+        path,
+        "session updates ledger",
+    )? else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("session updates ledger is missing: {}", path.display()),
+        ));
+    };
+    let mut contents = String::new();
+    while let Some(line) = lines.next() {
+        let line = String::from_utf8(line?)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        contents.push_str(&line);
+        contents.push('\n');
+    }
+    let committed_end = lines.stream_position()?;
+    Ok((contents, committed_end))
 }
 
 impl MvpAgent {
@@ -1087,22 +1097,35 @@ impl MvpAgent {
         target_client_id: Option<&serde_json::Value>,
         mark_replay: bool,
     ) -> Vec<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>> {
-        use std::io::{Read, Seek, SeekFrom};
         let Some(updates_path) = updates_file_path.clone() else {
             return Vec::new();
         };
-        let mut file = match std::fs::File::open(&updates_path) {
-            Ok(f) => f,
-            Err(_) => return Vec::new(),
+        let reader = match crate::session::storage::CommittedJsonlLines::open_at(
+            &updates_path,
+            "session updates ledger",
+            from_offset,
+        ) {
+            Ok(Some(reader)) => reader,
+            Ok(None) | Err(_) => return Vec::new(),
         };
-        if file.seek(SeekFrom::Start(from_offset)).is_err() {
+        let mut lines = Vec::new();
+        for line in reader {
+            let line = match line.and_then(|line| {
+                String::from_utf8(line)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            }) {
+                Ok(line) if !line.trim().is_empty() => line,
+                Ok(_) => continue,
+                Err(_) => return Vec::new(),
+            };
+            lines.push(line);
+        }
+        if lines.is_empty() {
             return Vec::new();
         }
-        let mut contents = String::new();
-        if file.read_to_string(&mut contents).is_err() || contents.is_empty() {
-            return Vec::new();
-        }
-        let live_lines = crate::session::storage::filter_delta_replay_lines(&contents);
+        let live_lines = crate::session::storage::filter_delta_replay_lines(
+            lines.iter().map(String::as_str).collect(),
+        );
         let delta_count = live_lines.len();
         let mut completions = Vec::with_capacity(live_lines.len());
         let mut pending_tool_calls = std::collections::HashMap::new();
@@ -1144,15 +1167,16 @@ impl MvpAgent {
         let Some(updates_path) = updates_file_path else {
             return Vec::new();
         };
-        let contents = match std::fs::read_to_string(updates_path) {
-            Ok(c) => c,
+        let lines = match crate::session::storage::read_committed_jsonl_text_lines(
+            updates_path,
+            "session updates ledger",
+        ) {
+            Ok(lines) => lines,
             Err(_) => return Vec::new(),
         };
-        let all_lines: Vec<&str> = contents
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
-        let live_lines = crate::session::storage::filter_rewind_lines(all_lines);
+        let live_lines = crate::session::storage::filter_rewind_lines(
+            lines.iter().map(String::as_str).collect(),
+        );
         let mut pending = std::collections::HashMap::<String, OrphanedTask>::new();
         for line in live_lines {
             if !line.contains(&*TASK_BACKGROUNDED) && !line.contains(&*TASK_COMPLETED) {

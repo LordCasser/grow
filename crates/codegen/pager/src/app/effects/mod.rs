@@ -3565,16 +3565,14 @@ pub(crate) fn execute(
                         id: session_id,
                         cwd: cwd.to_string_lossy().to_string(),
                     };
-                    let path = shell::session::persistence::session_dir(&info)
-                        .join("summary.json");
+                    let session_dir = shell::session::persistence::session_dir(&info);
                     let title = tokio::task::spawn_blocking(move || -> Option<
                             (String, bool),
                         > {
-                            let raw = std::fs::read_to_string(path).ok()?;
-                            let summary: shell::session::persistence::Summary = serde_json::from_str(
-                                    &raw,
-                                )
-                                .ok()?;
+                            let summary = shell::session::persistence::read_summary_in_session_dir(
+                                &session_dir,
+                            )
+                            .ok()?;
                             let manual = summary.manual_title_opt();
                             let is_manual = manual.is_some();
                             let title = manual.or_else(|| summary.display_title_opt())?;

@@ -235,12 +235,10 @@ async fn resume_local_session_in_worktree(
                 id: agent_client_protocol::SessionId::new(resolved_session_id.to_owned()),
                 cwd: resolved_source_cwd.to_owned(),
             };
-            let summary_path = crate::session::persistence::session_dir(&info).join("summary.json");
-            let head_commit = std::fs::read_to_string(&summary_path)
+            let session_dir = crate::session::persistence::session_dir(&info);
+            let summary_path = session_dir.join("summary.json");
+            let head_commit = crate::session::persistence::read_summary_from_dir(&session_dir)
                 .ok()
-                .and_then(|raw| {
-                    serde_json::from_str::<crate::session::persistence::Summary>(&raw).ok()
-                })
                 .and_then(|s| s.head_commit);
             tracing::info!(
                 target: WORKTREE_LOG,

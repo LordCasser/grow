@@ -2366,7 +2366,7 @@ impl SessionActor {
                                 crate::sampling::error::terminal_error_data(
                                     message,
                                     None,
-                                    sampler::SamplingErrorKind::MaxTokensTruncation,
+                                    ::hooks::event::StopFailureKind::ContextWindowExceeded.as_str(),
                                 ),
                             ));
                         }

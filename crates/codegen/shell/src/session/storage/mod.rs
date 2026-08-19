@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::collections::BTreeMap;
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::extensions::notification::SessionNotification;
@@ -28,6 +28,8 @@ pub(crate) const SUMMARY_FILE: &str = "summary.json";
 pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 pub(crate) const TIMELINE_FILE: &str = "timeline.jsonl";
 pub(crate) const SIDEBANDS_DIR: &str = "sidebands";
+pub(crate) const MAX_JSONL_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_SESSION_SUMMARY_BYTES: u64 = 1024 * 1024;
 
 pub(crate) type SidebandLedgers = BTreeMap<String, Vec<chat_state::SidebandEvent>>;
 
@@ -103,7 +105,15 @@ pub(crate) fn read_committed_jsonl_file<T: serde::de::DeserializeOwned>(
     path: &Path,
     description: &str,
 ) -> io::Result<Vec<T>> {
-    let bytes = std::fs::read(path).map_err(|error| {
+    read_committed_jsonl_file_with_limit(path, description, MAX_JSONL_ENTRY_BYTES)
+}
+
+fn read_committed_jsonl_file_with_limit<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    description: &str,
+    max_entry_bytes: u64,
+) -> io::Result<Vec<T>> {
+    let file = open_regular_nofollow(path, description).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -113,27 +123,259 @@ pub(crate) fn read_committed_jsonl_file<T: serde::de::DeserializeOwned>(
             error
         }
     })?;
-    let complete_len = if bytes.last().is_none_or(|byte| *byte == b'\n') {
-        bytes.len()
-    } else {
-        bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1)
-    };
-    bytes[..complete_len]
-        .split(|byte| *byte == b'\n')
-        .enumerate()
-        .filter(|(_, line)| !line.is_empty())
-        .map(|(index, line)| {
-            serde_json::from_slice(line).map_err(|error| {
-                io::Error::new(
+    let mut lines = CommittedJsonlLines::from_file(
+        file,
+        path.to_path_buf(),
+        description.to_owned(),
+        max_entry_bytes,
+    );
+    let mut items = Vec::new();
+    while let Some(line) = lines.next() {
+        let line = line?;
+        let line_number = lines.line_number();
+        let item = serde_json::from_slice(&line).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}:{line_number}: {error}", path.display()),
+            )
+        })?;
+        items.push(item);
+    }
+    Ok(items)
+}
+
+/// Streaming reader for newline-committed JSONL records.
+///
+/// The final non-newline fragment is never visible. Each committed record is
+/// bounded independently, and an oversized torn tail is scanned with the
+/// fixed `BufReader` buffer instead of being allocated.
+pub(crate) struct CommittedJsonlLines {
+    reader: BufReader<std::fs::File>,
+    line_buffer: Vec<u8>,
+    path: PathBuf,
+    description: String,
+    max_entry_bytes: u64,
+    line_number: u64,
+    committed_position: u64,
+}
+
+impl CommittedJsonlLines {
+    pub(crate) fn open(path: &Path, description: &str) -> io::Result<Option<Self>> {
+        let Some(file) = open_optional_regular_nofollow(path, description)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_file(
+            file,
+            path.to_path_buf(),
+            description.to_owned(),
+            MAX_JSONL_ENTRY_BYTES,
+        )))
+    }
+
+    pub(crate) fn open_at(path: &Path, description: &str, offset: u64) -> io::Result<Option<Self>> {
+        let Some(mut lines) = Self::open(path, description)? else {
+            return Ok(None);
+        };
+        lines.reader.seek(SeekFrom::Start(offset))?;
+        lines.committed_position = offset;
+        Ok(Some(lines))
+    }
+
+    fn from_file(
+        file: std::fs::File,
+        path: PathBuf,
+        description: String,
+        max_entry_bytes: u64,
+    ) -> Self {
+        Self {
+            reader: BufReader::new(file),
+            line_buffer: Vec::new(),
+            path,
+            description,
+            max_entry_bytes,
+            line_number: 0,
+            committed_position: 0,
+        }
+    }
+
+    pub(crate) fn stream_position(&mut self) -> io::Result<u64> {
+        Ok(self.committed_position)
+    }
+
+    pub(crate) fn line_number(&self) -> u64 {
+        self.line_number
+    }
+}
+
+impl Iterator for CommittedJsonlLines {
+    type Item = io::Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            self.line_buffer.clear();
+            let read = match (&mut self.reader)
+                .take(self.max_entry_bytes.saturating_add(1))
+                .read_until(b'\n', &mut self.line_buffer)
+            {
+                Ok(read) => read,
+                Err(error) => return Some(Err(error)),
+            };
+            if read == 0 {
+                return None;
+            }
+            self.line_number = self.line_number.saturating_add(1);
+            if self.line_buffer.len() as u64 > self.max_entry_bytes {
+                let mut committed = self.line_buffer.ends_with(b"\n");
+                while !committed {
+                    let buffered = match self.reader.fill_buf() {
+                        Ok(buffered) => buffered,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    if buffered.is_empty() {
+                        return None;
+                    }
+                    if let Some(index) = buffered.iter().position(|byte| *byte == b'\n') {
+                        self.reader.consume(index.saturating_add(1));
+                        committed = true;
+                    } else {
+                        let len = buffered.len();
+                        self.reader.consume(len);
+                    }
+                }
+                self.committed_position = match self.reader.stream_position() {
+                    Ok(position) => position,
+                    Err(error) => return Some(Err(error)),
+                };
+                return Some(Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}:{}: {error}", path.display(), index + 1),
-                )
-            })
-        })
-        .collect()
+                    format!(
+                        "{} entry exceeds {} bytes at {}:{}",
+                        self.description,
+                        self.max_entry_bytes,
+                        self.path.display(),
+                        self.line_number
+                    ),
+                )));
+            }
+            if !self.line_buffer.ends_with(b"\n") {
+                return None;
+            }
+            self.committed_position = match self.reader.stream_position() {
+                Ok(position) => position,
+                Err(error) => return Some(Err(error)),
+            };
+            self.line_buffer.pop();
+            if self.line_buffer.is_empty() {
+                continue;
+            }
+            return Some(Ok(std::mem::take(&mut self.line_buffer)));
+        }
+    }
+}
+
+pub(crate) fn open_regular_nofollow(path: &Path, description: &str) -> io::Result<std::fs::File> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{description} is not a regular file: {}", path.display()),
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{description} changed during open: {}", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
+pub(crate) fn open_optional_regular_nofollow(
+    path: &Path,
+    description: &str,
+) -> io::Result<Option<std::fs::File>> {
+    match open_regular_nofollow(path, description) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn open_read_write_create_nofollow(path: &Path) -> io::Result<std::fs::File> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("write target is not a regular file: {}", path.display()),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("write target changed during open: {}", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
+pub(crate) fn read_bounded_regular_file(
+    path: &Path,
+    description: &str,
+    max_bytes: u64,
+) -> io::Result<Vec<u8>> {
+    let mut file = open_regular_nofollow(path, description)?;
+    if file.metadata()?.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{description} exceeds {max_bytes} bytes: {}",
+                path.display()
+            ),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{description} changed during read: {}", path.display()),
+        ));
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn serialize_summary(summary: &Summary) -> io::Result<Vec<u8>> {
+    summary.validate_current_format()?;
+    let bytes = serde_json::to_vec_pretty(summary)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if bytes.len() as u64 > MAX_SESSION_SUMMARY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("session summary exceeds {MAX_SESSION_SUMMARY_BYTES} bytes"),
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Validate every persisted independent ledger against its parent Timeline,
@@ -482,9 +724,16 @@ pub(crate) async fn write_bytes_atomic_durable_async(
 fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec<u8>> {
     let mut content = Vec::new();
     for item in items {
+        let start = content.len();
         serde_json::to_writer(&mut content, item)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         content.push(b'\n');
+        if content.len().saturating_sub(start) as u64 > MAX_JSONL_ENTRY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("JSONL entry exceeds {MAX_JSONL_ENTRY_BYTES} bytes"),
+            ));
+        }
     }
     Ok(content)
 }
@@ -513,38 +762,28 @@ fn temp_sibling(path: &Path) -> PathBuf {
 /// Iterator that streams session updates from a JSONL file without loading all into memory.
 /// Each call to `next()` reads and parses one line.
 pub struct UpdatesIterator {
-    reader: BufReader<std::fs::File>,
-    line_buffer: String,
+    lines: CommittedJsonlLines,
 }
 
 impl UpdatesIterator {
     /// Create a new iterator over updates in the given file.
     /// Returns None if the file doesn't exist.
     pub fn open(path: &Path) -> io::Result<Option<Self>> {
-        if !path.exists() {
+        let Some(lines) = CommittedJsonlLines::open(path, "session updates ledger")? else {
             return Ok(None);
-        }
-        let file = std::fs::File::open(path)?;
-        Ok(Some(Self {
-            reader: BufReader::new(file),
-            line_buffer: String::new(),
-        }))
+        };
+        Ok(Some(Self { lines }))
     }
 
     /// Create a new iterator starting at the given byte offset.
     /// Returns None if the file doesn't exist.
     /// Used for delta replay: read only updates appended after a known offset.
     pub fn open_at(path: &Path, offset: u64) -> io::Result<Option<Self>> {
-        if !path.exists() {
+        let Some(lines) = CommittedJsonlLines::open_at(path, "session updates ledger", offset)?
+        else {
             return Ok(None);
-        }
-        let file = std::fs::File::open(path)?;
-        let mut reader = BufReader::new(file);
-        reader.seek(SeekFrom::Start(offset))?;
-        Ok(Some(Self {
-            reader,
-            line_buffer: String::new(),
-        }))
+        };
+        Ok(Some(Self { lines }))
     }
 
     /// Returns the current byte position in the underlying file.
@@ -552,7 +791,7 @@ impl UpdatesIterator {
     /// if all updates were consumed). Used to record the replay end offset for
     /// subsequent delta replay.
     pub fn stream_position(&mut self) -> io::Result<u64> {
-        self.reader.stream_position()
+        self.lines.stream_position()
     }
 }
 
@@ -560,20 +799,22 @@ impl Iterator for UpdatesIterator {
     type Item = io::Result<SessionUpdate>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.line_buffer.clear();
-        match self.reader.read_line(&mut self.line_buffer) {
-            Ok(0) => None, // EOF
-            Ok(_) => {
-                let line = self.line_buffer.trim();
-                if line.is_empty() {
-                    return self.next();
+        loop {
+            let line = match self.lines.next()? {
+                Ok(line) => line,
+                Err(error) => return Some(Err(error)),
+            };
+            let line = match std::str::from_utf8(line.trim_ascii()) {
+                Ok("") => continue,
+                Ok(line) => line,
+                Err(error) => {
+                    return Some(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
                 }
-                match SessionUpdateEnvelope::from_str(line) {
-                    Ok(update) => Some(Ok(update)),
-                    Err(e) => Some(Err(io::Error::new(io::ErrorKind::InvalidData, e))),
-                }
-            }
-            Err(e) => Some(Err(e)),
+            };
+            return Some(
+                SessionUpdateEnvelope::from_str(line)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+            );
         }
     }
 }
@@ -1487,13 +1728,8 @@ pub fn stream_replay_grow_notifications_in_dir<
     let Some(updates_path) = replay_updates_path_in_dir(session_dir) else {
         return Ok(ReplayEmission::Empty);
     };
-    let raw_contents = std::fs::read_to_string(updates_path)?;
-    let live = filter_rewind_lines(
-        raw_contents
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect(),
-    );
+    let lines = read_committed_jsonl_text_lines(&updates_path, "session updates ledger")?;
+    let live = filter_rewind_lines(lines.iter().map(String::as_str).collect());
     let mut emitted = false;
     for line in live {
         match SessionUpdateEnvelope::from_str(line) {
@@ -1515,20 +1751,15 @@ pub fn stream_replay_grow_notifications_in_dir<
 }
 
 // Rewind can drop earlier lines, so surviving lines are held until the end of
-// the file; one `String` plus `&str` slices keeps that minimal. Output matches
-// the typed load. Returns whether any ACP update was forwarded.
+// the file. The reader allocates at most one bounded record at a time, while
+// this projection retains only decoded lines needed for branch filtering.
+// Output matches the typed load. Returns whether any ACP update was forwarded.
 fn for_each_replay_update_in_file<F: FnMut(acp::SessionUpdate)>(
     updates_path: &std::path::Path,
     mut f: F,
 ) -> std::io::Result<bool> {
-    // Whole-file read is bounded by file size; only the forwarding is streamed.
-    let raw_contents = std::fs::read_to_string(updates_path)?;
-    let live: Vec<&str> = filter_rewind_lines(
-        raw_contents
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect(),
-    );
+    let lines = read_committed_jsonl_text_lines(updates_path, "session updates ledger")?;
+    let live = filter_rewind_lines(lines.iter().map(String::as_str).collect());
     let mut forwarded = false;
     for line in live {
         match SessionUpdateEnvelope::from_str(line) {
@@ -1547,6 +1778,25 @@ fn for_each_replay_update_in_file<F: FnMut(acp::SessionUpdate)>(
         }
     }
     Ok(forwarded)
+}
+
+pub(crate) fn read_committed_jsonl_text_lines(
+    path: &Path,
+    description: &str,
+) -> io::Result<Vec<String>> {
+    let Some(lines) = CommittedJsonlLines::open(path, description)? else {
+        return Ok(Vec::new());
+    };
+    let mut decoded = Vec::new();
+    for line in lines {
+        let line = line?;
+        let line = String::from_utf8(line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if !line.trim().is_empty() {
+            decoded.push(line);
+        }
+    }
+    Ok(decoded)
 }
 
 #[doc(hidden)]
@@ -1765,9 +2015,9 @@ pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> Prep
 /// `updates.jsonl` segment. Shared by the delta-replay path (which has no
 /// reconnect cursor); the initial replay path is [`prepare_replay_lines`], which
 /// additionally resolves a cursor (and so must see ACUs) before dropping them.
-pub(crate) fn filter_delta_replay_lines(contents: &str) -> Vec<&str> {
-    let live: Vec<&str> = contents
-        .lines()
+pub(crate) fn filter_delta_replay_lines(lines: Vec<&str>) -> Vec<&str> {
+    let live: Vec<&str> = lines
+        .into_iter()
         .filter(|l| !l.trim().is_empty() && !line_is_available_commands_update(l))
         .collect();
     filter_rewind_lines(live)
@@ -1780,6 +2030,89 @@ pub(crate) fn filter_delta_replay_lines(contents: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_jsonl_reader_ignores_only_the_torn_tail_and_bounds_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        std::fs::write(&path, b"1\n2\n333333333").unwrap();
+        assert_eq!(
+            read_committed_jsonl_file_with_limit::<u64>(&path, "test ledger", 8).unwrap(),
+            vec![1, 2]
+        );
+
+        std::fs::write(&path, b"123456789\n").unwrap();
+        let error = read_committed_jsonl_file_with_limit::<u64>(&path, "test ledger", 8)
+            .expect_err("an oversized complete entry must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds 8 bytes"));
+    }
+
+    #[test]
+    fn committed_jsonl_reader_reports_only_the_durable_offset() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        std::fs::write(&path, b"one\ntw").unwrap();
+
+        let mut lines = CommittedJsonlLines::open(&path, "test ledger")
+            .unwrap()
+            .unwrap();
+        assert_eq!(lines.next().unwrap().unwrap(), b"one");
+        assert_eq!(lines.stream_position().unwrap(), 4);
+        assert!(lines.next().is_none());
+        assert_eq!(
+            lines.stream_position().unwrap(),
+            4,
+            "a torn tail must not advance the replay cursor"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"o\n")
+            .unwrap();
+        let mut resumed = CommittedJsonlLines::open_at(&path, "test ledger", 4)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.next().unwrap().unwrap(), b"two");
+        assert_eq!(resumed.stream_position().unwrap(), 8);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_jsonl_reader_rejects_symlinked_ledgers() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.jsonl");
+        let link = dir.path().join("ledger.jsonl");
+        std::fs::write(&target, b"1\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = read_committed_jsonl_file::<u64>(&link, "test ledger")
+            .expect_err("canonical ledgers must not follow symlinks");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("not a regular file"));
+    }
+
+    #[test]
+    fn summary_serialization_enforces_the_same_bound_as_readers() {
+        let info = Info {
+            id: acp::SessionId::new("oversized-summary"),
+            cwd: "/test".into(),
+        };
+        let mut summary =
+            Summary::new(&info, crate::session::persistence::default_model_id()).unwrap();
+        summary.info.cwd = "x".repeat(MAX_SESSION_SUMMARY_BYTES as usize);
+
+        let error = serialize_summary(&summary)
+            .expect_err("runtime summary writers must reject unreadable projections");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("session summary exceeds"));
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -2824,7 +3157,7 @@ mod tests {
         );
         let raw = format!("{u1}\n\n{acu}\n{a1}\n{u2}\n{a2}\n{rw}\n");
 
-        let live = filter_delta_replay_lines(&raw);
+        let live = filter_delta_replay_lines(raw.lines().collect());
         // Blank + ACU dropped; the rewind to prompt 1 truncates the dead branch
         // (u2/a2) and consumes the marker, leaving only p1/a1.
         assert_eq!(live.len(), 2);

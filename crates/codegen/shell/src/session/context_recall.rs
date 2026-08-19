@@ -51,20 +51,40 @@ impl ContextRecallBackend for ShellContextRecallBackend {
         query: &str,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        if cancellation.is_cancelled() {
+            return Err(
+                std::io::Error::other("context recall was cancelled before queueing").into(),
+            );
+        }
         let (reply, result) = oneshot::channel();
-        self.sender
-            .send(ContextRecallRequest {
-                call_id: call_id.to_owned(),
-                query: query.to_owned(),
-                cancellation,
-                reply,
-            })
-            .await
-            .map_err(|_| std::io::Error::other("context recall service is unavailable"))?;
-        result
-            .await
-            .map_err(|_| std::io::Error::other("context recall service stopped"))?
-            .map_err(|error| std::io::Error::other(error).into())
+        let permit = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(std::io::Error::other("context recall was cancelled while queueing").into());
+            }
+            permit = self.sender.reserve() => permit
+                .map_err(|_| std::io::Error::other("context recall service is unavailable"))?,
+        };
+        if cancellation.is_cancelled() {
+            return Err(
+                std::io::Error::other("context recall was cancelled while queueing").into(),
+            );
+        }
+        permit.send(ContextRecallRequest {
+            call_id: call_id.to_owned(),
+            query: query.to_owned(),
+            cancellation: cancellation.clone(),
+            reply,
+        });
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                Err(std::io::Error::other("context recall was cancelled while awaiting execution").into())
+            }
+            result = result => result
+                .map_err(|_| std::io::Error::other("context recall service stopped"))?
+                .map_err(|error| std::io::Error::other(error).into()),
+        }
     }
 }
 
@@ -725,9 +745,9 @@ fn build_recall_units(
     let mut closure_surface_ids = Vec::new();
     let mut rendered = Vec::<(chat_state::SurfaceId, String)>::new();
     let mut contains_recall_derivative = false;
+    let mut in_tool_exchange = false;
     for (surface_id, item) in entries {
-        let starts_unit = matches!(item, ConversationItem::User(_))
-            || matches!(&item, ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty());
+        let starts_unit = starts_recall_unit(&item, &mut in_tool_exchange);
         if starts_unit
             && !closure_surface_ids.is_empty()
             && let Some(unit) = finish_recall_unit(
@@ -741,16 +761,7 @@ fn build_recall_units(
         if !matches!(item, ConversationItem::System(_)) {
             closure_surface_ids.push(surface_id);
         }
-        contains_recall_derivative |= match &item {
-            ConversationItem::Assistant(assistant) => assistant
-                .tool_calls
-                .iter()
-                .any(|call| recall_call_ids.contains(call.id.as_ref())),
-            ConversationItem::ToolResult(result) => {
-                recall_call_ids.contains(result.tool_call_id.as_str())
-            }
-            _ => false,
-        };
+        contains_recall_derivative |= item_contains_recall_derivative(&item, recall_call_ids);
         if let Some(content) = render_archive_item(surface_id, &item) {
             rendered.push((surface_id, content));
         }
@@ -761,6 +772,46 @@ fn build_recall_units(
         units.push(unit);
     }
     units
+}
+
+fn starts_recall_unit(item: &ConversationItem, in_tool_exchange: &mut bool) -> bool {
+    let starts_prompt = matches!(
+        item,
+        ConversationItem::User(user)
+            if user.prompt_index.is_some()
+                || user
+                    .synthetic_reason
+                    .as_ref()
+                    .is_none_or(sampling_types::SyntheticReason::starts_prompt_turn)
+    );
+    let starts_tool_exchange = !*in_tool_exchange
+        && matches!(
+            item,
+            ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty()
+        );
+    if starts_prompt {
+        *in_tool_exchange = false;
+    }
+    if starts_tool_exchange {
+        *in_tool_exchange = true;
+    }
+    starts_prompt || starts_tool_exchange
+}
+
+fn item_contains_recall_derivative(
+    item: &ConversationItem,
+    recall_call_ids: &BTreeSet<String>,
+) -> bool {
+    match item {
+        ConversationItem::Assistant(assistant) => assistant
+            .tool_calls
+            .iter()
+            .any(|call| recall_call_ids.contains(call.id.as_ref())),
+        ConversationItem::ToolResult(result) => {
+            recall_call_ids.contains(result.tool_call_id.as_str())
+        }
+        _ => false,
+    }
 }
 
 fn finish_recall_unit(
@@ -918,24 +969,26 @@ pub(crate) fn strip_context_recall_derivatives(
     registered_tool_name: Option<&str>,
 ) -> Vec<ConversationItem> {
     let call_ids = recall_call_ids(&transcript, active_call_id, registered_tool_name);
-    transcript
-        .into_iter()
-        .filter_map(|item| match item {
-            ConversationItem::Assistant(mut assistant) => {
-                assistant
-                    .tool_calls
-                    .retain(|call| !call_ids.contains(call.id.as_ref()));
-                (!assistant.content.trim().is_empty() || !assistant.tool_calls.is_empty())
-                    .then_some(ConversationItem::Assistant(assistant))
+    let mut filtered = Vec::new();
+    let mut unit = Vec::new();
+    let mut unit_is_derivative = false;
+    let mut in_tool_exchange = false;
+    for item in transcript {
+        if starts_recall_unit(&item, &mut in_tool_exchange) && !unit.is_empty() {
+            if !unit_is_derivative {
+                filtered.append(&mut unit);
+            } else {
+                unit.clear();
             }
-            ConversationItem::ToolResult(result)
-                if call_ids.contains(result.tool_call_id.as_str()) =>
-            {
-                None
-            }
-            item => Some(item),
-        })
-        .collect()
+            unit_is_derivative = false;
+        }
+        unit_is_derivative |= item_contains_recall_derivative(&item, &call_ids);
+        unit.push(item);
+    }
+    if !unit_is_derivative {
+        filtered.append(&mut unit);
+    }
+    filtered
 }
 
 fn render_archive_item(
@@ -1148,6 +1201,39 @@ mod tests {
     }
 
     #[test]
+    fn recall_units_keep_multistep_tool_exchanges_and_mid_turn_injections_closed() {
+        let mut auto_continue = ConversationItem::user("continue the same turn");
+        let ConversationItem::User(user) = &mut auto_continue else {
+            unreachable!()
+        };
+        user.synthetic_reason = Some(sampling_types::SyntheticReason::AutoContinue);
+        let transcript = vec![
+            ConversationItem::user("inspect the migration implementation"),
+            ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                id: "read-migration".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"migration.rs"}"#.into(),
+            }]),
+            ConversationItem::tool_result("read-migration", "uses a shadow table"),
+            auto_continue,
+            ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                id: "run-migration-test".into(),
+                name: "run_terminal_cmd".into(),
+                arguments: r#"{"command":"cargo test migration"}"#.into(),
+            }]),
+            ConversationItem::tool_result("run-migration-test", "all migration tests passed"),
+            ConversationItem::assistant("The atomic swap is verified."),
+            ConversationItem::user("start another prompt"),
+        ];
+
+        let units = units_for_test(&transcript);
+        assert_eq!(units.len(), 3);
+        assert_eq!(units[0].surface_ids, surface_ids(1));
+        assert_eq!(units[1].surface_ids, surface_ids(7)[1..].to_vec());
+        assert_eq!(units[2].surface_ids, surface_ids(8)[7..].to_vec());
+    }
+
+    #[test]
     fn recall_selection_cannot_read_the_live_tail() {
         let transcript = vec![
             ConversationItem::user("archived database decision"),
@@ -1253,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn derivative_filter_preserves_other_calls_and_assistant_text() {
+    fn derivative_filter_drops_the_entire_causal_tool_exchange() {
         let transcript = vec![
             ConversationItem::assistant("keep this conclusion"),
             ConversationItem::assistant_tool_calls(vec![
@@ -1270,6 +1356,8 @@ mod tests {
             ]),
             ConversationItem::tool_result("recall", "derived recollection"),
             ConversationItem::tool_result("read", "primary evidence"),
+            ConversationItem::assistant("continuation derived from both tool results"),
+            ConversationItem::user("next independent prompt"),
         ];
 
         let filtered = strip_context_recall_derivatives(transcript, None, None);
@@ -1279,13 +1367,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("keep this conclusion"));
-        assert!(rendered.contains("primary evidence"));
+        assert!(rendered.contains("next independent prompt"));
         assert!(!rendered.contains("derived recollection"));
-        assert!(matches!(
-            &filtered[1],
-            ConversationItem::Assistant(assistant)
-                if assistant.tool_calls.len() == 1 && assistant.tool_calls[0].name == "read_file"
-        ));
+        assert!(!rendered.contains("primary evidence"));
+        assert!(!rendered.contains("continuation derived"));
     }
 
     #[test]
@@ -1457,5 +1542,45 @@ mod tests {
         .to_string();
 
         assert!(parse_recall_synthesis(&raw, &archive, 32).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_recall_does_not_wait_for_a_full_session_queue() {
+        let (backend, receiver) = context_recall_channel();
+        let first_backend = backend.clone();
+        let first = tokio::spawn(async move {
+            first_backend
+                .recall(
+                    "first",
+                    "occupy the queue",
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+        });
+        while receiver.len() == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let second_cancellation = cancellation.clone();
+        let second_backend = backend.clone();
+        let second = tokio::spawn(async move {
+            second_backend
+                .recall("second", "cancel me", second_cancellation)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!second.is_finished(), "the second request should be queued");
+
+        cancellation.cancel();
+        let error = tokio::time::timeout(Duration::from_millis(250), second)
+            .await
+            .expect("queue cancellation must return promptly")
+            .expect("recall task must not panic")
+            .expect_err("cancelled recall must fail");
+        assert!(error.to_string().contains("cancelled while queueing"));
+
+        first.abort();
+        drop(receiver);
     }
 }

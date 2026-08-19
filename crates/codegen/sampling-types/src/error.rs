@@ -176,8 +176,6 @@ pub enum SamplingError {
     IdleTimeout { elapsed_secs: u64 },
     #[error("empty response from model ({})", context.reason)]
     EmptyResponse { context: EmptyResponseContext },
-    #[error("response truncated by max_tokens")]
-    MaxTokensTruncation,
     /// A confident server-reported doom loop on the attempt (mid-stream or
     /// on the completed response). Retryable on the recovery loop's own
     /// budget, separate from the transport budget. Carries the raw trigger
@@ -367,7 +365,6 @@ impl SamplingError {
             SamplingError::EventStreamError(_) => true,
             SamplingError::IdleTimeout { .. } => false,
             SamplingError::EmptyResponse { .. } => true,
-            SamplingError::MaxTokensTruncation => false,
             SamplingError::DoomLoopDetected { .. } => true,
         }
     }

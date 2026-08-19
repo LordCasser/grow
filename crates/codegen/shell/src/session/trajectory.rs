@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Html;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+
+const LEDGER_PREFIX_PROBE_BYTES: u64 = 4096;
 
 #[derive(Clone)]
 struct AppState {
@@ -27,6 +29,7 @@ struct AppState {
 struct SessionTrajectoryCache {
     session_dir: PathBuf,
     offset: u64,
+    prefix_probe: Vec<u8>,
     timeline: chat_state::Timeline,
     projector: chat_state::TrajectoryProjector,
     sidebands: BTreeMap<String, SidebandCache>,
@@ -37,6 +40,7 @@ struct SessionTrajectoryCache {
 #[derive(Default)]
 struct SidebandCache {
     offset: u64,
+    prefix_probe: Vec<u8>,
     events: Vec<chat_state::SidebandEvent>,
 }
 
@@ -92,13 +96,15 @@ pub async fn serve(
     let session_dir = super::persistence::find_session_dir_by_id(session_id)
         .ok_or_else(|| anyhow::anyhow!("session '{session_id}' was not found"))?;
     let timeline_path = session_dir.join(super::storage::TIMELINE_FILE);
-    if !timeline_path.is_file() {
-        anyhow::bail!(
-            "session '{}' has no Timeline v7 ledger at {}",
-            session_id,
-            timeline_path.display()
-        );
-    }
+    super::storage::open_regular_nofollow(&timeline_path, "Trajectory Timeline ledger").map_err(
+        |error| {
+            anyhow::anyhow!(
+                "session '{}' has no readable Timeline v7 ledger at {}: {error}",
+                session_id,
+                timeline_path.display()
+            )
+        },
+    )?;
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let local = listener.local_addr()?;
@@ -124,16 +130,18 @@ pub async fn serve(
     Ok(())
 }
 
-async fn index(headers: HeaderMap) -> Result<Html<&'static str>, (StatusCode, String)> {
+async fn index(
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Html<&'static str>), (StatusCode, String)> {
     require_local_host(&headers)?;
-    Ok(Html(PAGE))
+    Ok((response_security_headers(), Html(PAGE)))
 }
 
 async fn query_trajectory(
     State(state): State<AppState>,
     Query(query): Query<TrajectoryQuery>,
     headers: HeaderMap,
-) -> Result<Json<TrajectoryResponse>, (StatusCode, String)> {
+) -> Result<(HeaderMap, Json<TrajectoryResponse>), (StatusCode, String)> {
     require_local_host(&headers)?;
     if query.after.is_some() as u8 + query.before.is_some() as u8 + query.entry.is_some() as u8 > 1
     {
@@ -146,7 +154,7 @@ async fn query_trajectory(
         .await
         .map_err(internal_error)?
         .map_err(internal_error)?;
-    Ok(Json(response))
+    Ok((response_security_headers(), Json(response)))
 }
 
 fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<TrajectoryResponse> {
@@ -314,19 +322,12 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
 }
 
 fn session_actor_ref(session_dir: &Path, session_id: &str) -> anyhow::Result<String> {
-    let summary = read_session_summary(session_dir)?;
+    let summary = super::persistence::read_summary_in_session_dir(session_dir)?;
     let actor = match summary.session_kind.as_deref() {
         Some(kind) if kind.starts_with("subagent") => format!("subagent:{session_id}"),
         _ => "main".into(),
     };
     Ok(actor)
-}
-
-fn read_session_summary(session_dir: &Path) -> anyhow::Result<super::persistence::Summary> {
-    let bytes = std::fs::read(session_dir.join(super::storage::SUMMARY_FILE))?;
-    let summary: super::persistence::Summary = serde_json::from_slice(&bytes)?;
-    summary.validate_current_format()?;
-    Ok(summary)
 }
 
 fn dimension_matches(actual: &str, filter: &str) -> bool {
@@ -407,7 +408,7 @@ impl SessionTrajectoryCache {
                 }
                 continue;
             };
-            let summary = read_session_summary(&child_dir)?;
+            let summary = super::persistence::read_summary_in_session_dir(&child_dir)?;
             if summary.info.id.to_string() != spawn.child_session_id
                 || summary.parent_session_id.as_deref() != Some(timeline_id)
                 || !summary
@@ -423,14 +424,24 @@ impl SessionTrajectoryCache {
                 );
             }
             let child_timeline_path = child_dir.join(super::storage::TIMELINE_FILE);
-            if !child_timeline_path.is_file() {
-                if terminal.is_some_and(terminal_requires_child) {
+            match std::fs::symlink_metadata(&child_timeline_path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                     anyhow::bail!(
-                        "terminal subagent '{}' requires a child Timeline ledger",
-                        spawn.subagent_id
+                        "child Timeline is not a regular file: {}",
+                        child_timeline_path.display()
                     );
                 }
-                continue;
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if terminal.is_some_and(terminal_requires_child) {
+                        anyhow::bail!(
+                            "terminal subagent '{}' requires a child Timeline ledger",
+                            spawn.subagent_id
+                        );
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
             }
             let child = self
                 .children
@@ -460,20 +471,16 @@ impl SessionTrajectoryCache {
     }
 
     fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
-        let file_len = std::fs::metadata(path)?.len();
-        if file_len < self.offset {
+        let mut file = super::storage::open_regular_nofollow(path, "Trajectory Timeline ledger")?;
+        let file_len = file.metadata()?.len();
+        if file_len < self.offset
+            || !ledger_prefix_matches(self.offset, &self.prefix_probe, &mut file)?
+        {
             let session_dir = std::mem::take(&mut self.session_dir);
             *self = Self::default();
             self.session_dir = session_dir;
         }
-        let mut file = std::fs::File::open(path)?;
-        file.seek(std::io::SeekFrom::Start(self.offset))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let complete_len = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
+        let (bytes, complete_len) = read_ledger_batch(&mut file, self.offset, path)?;
         if complete_len == 0 {
             return Ok(());
         }
@@ -495,26 +502,65 @@ impl SessionTrajectoryCache {
         }
         self.timeline = timeline;
         self.offset += complete_len as u64;
+        refresh_ledger_prefix_probe(self.offset, &mut self.prefix_probe, &mut file)?;
         Ok(())
     }
 
     fn refresh_sidebands(&mut self, directory: &Path) -> anyhow::Result<()> {
-        if !directory.exists() {
-            self.sidebands.clear();
-            return Ok(());
+        match std::fs::symlink_metadata(directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                anyhow::bail!(
+                    "Trajectory sidebands path is not a regular directory: {}",
+                    directory.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.sidebands.clear();
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
         }
         let mut entries = std::fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(std::fs::DirEntry::file_name);
         let mut seen = BTreeSet::new();
         for entry in entries {
             if !entry.file_type()?.is_dir() {
-                continue;
+                anyhow::bail!(
+                    "unsupported entry in Trajectory sidebands directory: {}",
+                    entry.path().display()
+                );
             }
-            let sideband_id = entry.file_name().to_string_lossy().into_owned();
+            let sideband_id = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("Trajectory sideband id is not valid UTF-8"))?;
             chat_state::validate_sideband_id(&sideband_id)?;
             let path = entry.path().join(super::storage::TIMELINE_FILE);
-            if !path.is_file() {
-                continue;
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    anyhow::bail!(
+                        "Trajectory sideband ledger is not a regular file: {}",
+                        path.display()
+                    );
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let children =
+                        std::fs::read_dir(entry.path())?.collect::<Result<Vec<_>, _>>()?;
+                    if children.is_empty()
+                        || children.iter().all(|child| {
+                            child.file_name().to_string_lossy()
+                                == format!("{}.lock", super::storage::TIMELINE_FILE)
+                        })
+                    {
+                        continue;
+                    }
+                    anyhow::bail!(
+                        "Trajectory sideband {sideband_id} directory has no Timeline ledger"
+                    );
+                }
+                Err(error) => return Err(error.into()),
             }
             let sideband = self.sidebands.entry(sideband_id.clone()).or_default();
             sideband.refresh(&path)?;
@@ -550,6 +596,15 @@ impl SessionTrajectoryCache {
             })
             .collect::<BTreeMap<_, _>>();
         let directory = self.session_dir.join("workflows");
+        if !spawns.is_empty() {
+            let metadata = std::fs::symlink_metadata(&directory)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!(
+                    "Trajectory workflows path is not a regular directory: {}",
+                    directory.display()
+                );
+            }
+        }
         let mut seen = BTreeSet::new();
         for (run_id, (spawn_seq, name, objective, private)) in &spawns {
             if !visited.insert(run_id.clone()) {
@@ -978,18 +1033,14 @@ fn validate_workflow_journal_links(
 
 impl SidebandCache {
     fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
-        let file_len = std::fs::metadata(path)?.len();
-        if file_len < self.offset {
+        let mut file = super::storage::open_regular_nofollow(path, "Trajectory sideband ledger")?;
+        let file_len = file.metadata()?.len();
+        if file_len < self.offset
+            || !ledger_prefix_matches(self.offset, &self.prefix_probe, &mut file)?
+        {
             *self = Self::default();
         }
-        let mut file = std::fs::File::open(path)?;
-        file.seek(std::io::SeekFrom::Start(self.offset))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let complete_len = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
+        let (bytes, complete_len) = read_ledger_batch(&mut file, self.offset, path)?;
         if complete_len == 0 {
             return Ok(());
         }
@@ -1007,6 +1058,7 @@ impl SidebandCache {
         chat_state::SidebandTimeline::from_events(events.clone())?;
         self.events = events;
         self.offset += complete_len as u64;
+        refresh_ledger_prefix_probe(self.offset, &mut self.prefix_probe, &mut file)?;
         Ok(())
     }
 }
@@ -1215,6 +1267,117 @@ fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
+fn response_security_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+        ),
+    );
+    headers.insert(
+        header::HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers
+}
+
+fn read_ledger_batch(
+    file: &mut std::fs::File,
+    offset: u64,
+    path: &Path,
+) -> anyhow::Result<(Vec<u8>, usize)> {
+    file.seek(std::io::SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.take(super::storage::MAX_JSONL_ENTRY_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let complete_len = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    if complete_len == 0 && bytes.len() as u64 > super::storage::MAX_JSONL_ENTRY_BYTES {
+        let mut buffer = [0_u8; 8 * 1024];
+        let mut committed = false;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            if buffer[..read].contains(&b'\n') {
+                committed = true;
+                break;
+            }
+        }
+        if committed {
+            anyhow::bail!(
+                "Trajectory ledger entry exceeds {} bytes at {} byte {}",
+                super::storage::MAX_JSONL_ENTRY_BYTES,
+                path.display(),
+                offset
+            );
+        }
+        return Ok((Vec::new(), 0));
+    }
+    if bytes[..complete_len]
+        .split(|byte| *byte == b'\n')
+        .any(|line| {
+            !line.is_empty()
+                && (line.len() as u64).saturating_add(1) > super::storage::MAX_JSONL_ENTRY_BYTES
+        })
+    {
+        anyhow::bail!(
+            "Trajectory ledger entry exceeds {} bytes at {} byte {}",
+            super::storage::MAX_JSONL_ENTRY_BYTES,
+            path.display(),
+            offset
+        );
+    }
+    Ok((bytes, complete_len))
+}
+
+fn ledger_prefix_matches(
+    offset: u64,
+    expected: &[u8],
+    file: &mut std::fs::File,
+) -> anyhow::Result<bool> {
+    if expected.is_empty() {
+        return Ok(true);
+    }
+    let Some(start) = offset.checked_sub(expected.len() as u64) else {
+        return Ok(false);
+    };
+    file.seek(std::io::SeekFrom::Start(start))?;
+    let mut actual = vec![0; expected.len()];
+    match file.read_exact(&mut actual) {
+        Ok(()) => Ok(actual == expected),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn refresh_ledger_prefix_probe(
+    offset: u64,
+    probe: &mut Vec<u8>,
+    file: &mut std::fs::File,
+) -> anyhow::Result<()> {
+    let start = offset.saturating_sub(LEDGER_PREFIX_PROBE_BYTES);
+    file.seek(std::io::SeekFrom::Start(start))?;
+    let mut next = Vec::new();
+    file.take(offset.saturating_sub(start))
+        .read_to_end(&mut next)?;
+    *probe = next;
+    Ok(())
+}
+
 const PAGE: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Grow Trajectory</title><style>
@@ -1255,6 +1418,18 @@ $('older').onclick=loadEarlier;$('follow').onclick=()=>{follow=!follow;$('follow
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trajectory_responses_are_private_and_non_embeddable() {
+        let headers = response_security_headers();
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("connect-src 'self'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+    }
 
     fn write_timeline(path: &Path, timeline: &chat_state::Timeline) {
         let body = timeline
@@ -1368,6 +1543,50 @@ mod tests {
             cache.refresh(&path).is_err(),
             "completed malformed tail is rejected"
         );
+    }
+
+    #[test]
+    fn timeline_cache_detects_same_length_ledger_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let first =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("alpha")])
+                .unwrap();
+        let second =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("bravo")])
+                .unwrap();
+        write_timeline(&path, &first);
+        let first_len = std::fs::metadata(&path).unwrap().len();
+
+        let mut cache = SessionTrajectoryCache::default();
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.timeline.surface()[0].text_content(), "alpha");
+
+        write_timeline(&path, &second);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), first_len);
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.timeline.events().len(), 1);
+        assert_eq!(cache.timeline.surface()[0].text_content(), "bravo");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeline_cache_rejects_symlinked_ledgers() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.jsonl");
+        let link = dir.path().join("timeline.jsonl");
+        let timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("secret")])
+                .unwrap();
+        write_timeline(&target, &timeline);
+        symlink(&target, &link).unwrap();
+
+        let error = SessionTrajectoryCache::default()
+            .refresh(&link)
+            .expect_err("Trajectory must not follow ledger symlinks");
+        assert!(error.to_string().contains("not a regular file"));
     }
 
     #[test]

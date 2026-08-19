@@ -412,7 +412,7 @@ impl SidebandTimeline {
             .into_iter()
             .collect::<BTreeSet<_>>();
         let unloaded = frozen
-            .completed_compaction_shadowed_ids()
+            .completed_compaction_unloaded_branch_ids()
             .into_iter()
             .collect::<BTreeSet<_>>();
         let readable = branch_ids

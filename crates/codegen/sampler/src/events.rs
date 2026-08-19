@@ -159,11 +159,9 @@ pub struct SamplingErrorInfo {
 
 /// Coarse-grained classification of a sampling failure.
 ///
-/// Intentionally narrow — context-window-exceeded does NOT have its own
-/// variant because the sampler cannot reliably detect it (it lacks
-/// tracked token counts). Context-window errors arrive as
-/// `Api { status: 400, .. }` with model metadata; the session inspects
-/// the metadata and decides whether to compact.
+/// Provider context-window errors remain `Api` here because the sampler does
+/// not own token-accounting or compaction policy. The session layer assigns
+/// its own terminal context-exhaustion classification only after recovery.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SamplingErrorKind {
     Auth,
@@ -173,7 +171,6 @@ pub enum SamplingErrorKind {
     IdleTimeout,
     RateLimited,
     EmptyResponse,
-    MaxTokensTruncation,
     DoomLoopDetected,
 }
 
@@ -192,7 +189,6 @@ impl SamplingErrorKind {
             SamplingErrorKind::IdleTimeout => "idle_timeout",
             SamplingErrorKind::RateLimited => "rate_limited",
             SamplingErrorKind::EmptyResponse => "empty_response",
-            SamplingErrorKind::MaxTokensTruncation => "max_tokens_truncation",
             SamplingErrorKind::DoomLoopDetected => "doom_loop_detected",
         }
     }
@@ -230,9 +226,6 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::IdleTimeout { .. } => (SamplingErrorKind::IdleTimeout, None, None, None),
             SamplingError::EmptyResponse { .. } => {
                 (SamplingErrorKind::EmptyResponse, None, None, None)
-            }
-            SamplingError::MaxTokensTruncation => {
-                (SamplingErrorKind::MaxTokensTruncation, None, None, None)
             }
             SamplingError::DoomLoopDetected { .. } => {
                 (SamplingErrorKind::DoomLoopDetected, None, None, None)
@@ -303,7 +296,6 @@ pub(crate) fn sampling_error_from_info(info: &SamplingErrorInfo) -> SamplingErro
             || SamplingError::EventStreamError(info.message.clone()),
             |context| SamplingError::EmptyResponse { context },
         ),
-        SamplingErrorKind::MaxTokensTruncation => SamplingError::MaxTokensTruncation,
         SamplingErrorKind::DoomLoopDetected => SamplingError::DoomLoopDetected {
             triggers: info.doom_loop_triggers.clone().unwrap_or_default(),
             aborted_at_chunk: info.doom_loop_aborted_at_chunk,

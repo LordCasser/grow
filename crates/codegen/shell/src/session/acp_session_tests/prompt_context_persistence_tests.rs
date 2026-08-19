@@ -396,6 +396,30 @@ fn prompt_blob_is_immutable_and_idempotent() {
     assert_eq!(std::fs::read(&path).unwrap(), b"canonical prompt");
 }
 
+#[cfg(unix)]
+#[test]
+fn prompt_blob_read_and_write_reject_symlink_targets() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let content = b"canonical prompt";
+    let hash = blake3::hash(content).to_hex().to_string();
+    let target = dir.path().join("outside.txt");
+    let prompts = dir.path().join("prompts");
+    let link = prompts.join(format!("{hash}.txt"));
+    std::fs::create_dir(&prompts).unwrap();
+    std::fs::write(&target, content).unwrap();
+    symlink(&target, &link).unwrap();
+
+    let write_error = write_immutable_blob(&link, content)
+        .expect_err("immutable writes must not accept an existing symlink");
+    assert_eq!(write_error.kind(), std::io::ErrorKind::InvalidData);
+    let read_error = crate::session::persistence::verified_prompt_blob_bytes(dir.path(), &hash)
+        .expect_err("immutable reads must not follow a symlink");
+    assert_eq!(read_error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&target).unwrap(), content);
+}
+
 #[test]
 fn prompt_blob_reference_is_host_independent_until_request_projection() {
     let dir = tempfile::tempdir().unwrap();

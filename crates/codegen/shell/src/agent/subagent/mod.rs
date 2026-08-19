@@ -2095,12 +2095,17 @@ pub(crate) fn read_subagent_output(path: &Path) -> Option<String> {
         schema_version: u32,
         output: String,
     }
-    let data = std::fs::read_to_string(path).ok()?;
+    let data = crate::session::storage::read_bounded_regular_file(
+        path,
+        "subagent output artifact",
+        crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES,
+    )
+    .ok()?;
     let expected_hash = path.file_stem()?.to_str()?;
-    if blake3::hash(data.as_bytes()).to_hex().as_str() != expected_hash {
+    if blake3::hash(&data).to_hex().as_str() != expected_hash {
         return None;
     }
-    let file: OutputFile = serde_json::from_str(&data).ok()?;
+    let file: OutputFile = serde_json::from_slice(&data).ok()?;
     (file.schema_version == SUBAGENT_OUTPUT_SCHEMA_VERSION).then_some(file.output)
 }
 #[must_use]

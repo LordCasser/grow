@@ -12,7 +12,7 @@
 //! spans the entire read-modify-write). All writers funnel through it, so the
 //! read-modify-writes serialize across actors and processes.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -172,16 +172,15 @@ fn read_modify_write(summary_path: &Path, patch: &SummaryPatch) -> io::Result<bo
 }
 
 fn open_lock_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    super::open_read_write_create_nofollow(path)
 }
 
 fn read_summary(path: &Path) -> io::Result<Summary> {
-    let bytes = std::fs::read(path)?;
+    let bytes = super::read_bounded_regular_file(
+        path,
+        "session summary",
+        super::MAX_SESSION_SUMMARY_BYTES,
+    )?;
     if bytes.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -195,8 +194,7 @@ fn read_summary(path: &Path) -> io::Result<Summary> {
 }
 
 fn write_summary_atomic(summary_path: &Path, summary: &Summary) -> io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(summary)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let bytes = super::serialize_summary(summary)?;
     crate::session::storage::write_bytes_atomic(summary_path, &bytes)
 }
 
@@ -307,6 +305,35 @@ mod tests {
             .await
             .unwrap();
         (adapter, info, session_dir.join("summary.json"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn summary_patch_rejects_symlinked_summary_and_lock_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let (_adapter, _info, summary_path) = new_session(&dir).await;
+        let lock_path = summary_path.with_extension("json.lock");
+        let target = dir.path().join("outside-summary.json");
+        let original = std::fs::read(&summary_path).unwrap();
+        std::fs::write(&target, &original).unwrap();
+        std::fs::remove_file(&summary_path).unwrap();
+        symlink(&target, &summary_path).unwrap();
+
+        let error = apply_patch_locked(&summary_path, &lock_path, &SummaryPatch::default())
+            .expect_err("summary patch must not follow a summary symlink");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+
+        std::fs::remove_file(&summary_path).unwrap();
+        std::fs::write(&summary_path, &original).unwrap();
+        std::fs::remove_file(&lock_path).unwrap();
+        symlink(&target, &lock_path).unwrap();
+        let error = apply_patch_locked(&summary_path, &lock_path, &SummaryPatch::default())
+            .expect_err("summary patch must not follow a lock symlink");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&target).unwrap(), original);
     }
 
     #[tokio::test]

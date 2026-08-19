@@ -369,7 +369,7 @@ impl SessionActor {
             K::AuthenticationFailed => "auth",
             K::InvalidRequest => "invalid_request",
             K::ServerError => "internal",
-            K::MaxOutputTokens => "max_tokens",
+            K::ContextWindowExceeded => "context_window_exceeded",
             K::Unknown => "unknown",
         }
         .to_string()
@@ -380,8 +380,8 @@ impl SessionActor {
     /// runtime cannot distinguish stays `Unknown`.
     pub(super) fn stop_failure_error_type(err: &acp::Error) -> ::hooks::event::StopFailureKind {
         use ::hooks::event::StopFailureKind as K;
-        if crate::sampling::error::stop_reason_for_turn_error(err) == "MaxTokens" {
-            return K::MaxOutputTokens;
+        if crate::sampling::error::context_window_exceeded_for_turn_error(err) {
+            return K::ContextWindowExceeded;
         }
         // The data-carried HTTP status discriminates over the JSON-RPC code. 403
         // is content-safety, not auth: it folds into `invalid_request` on the turn

@@ -65,8 +65,7 @@ pub(crate) fn is_compact_converged_over_window(err: &acp::Error) -> bool {
 /// The convergence failure error: compaction succeeded (the history was
 /// replaced) but the conversation still exceeds the window, so resampling
 /// would overflow again. Carries the `error_kind` marker so turn-end
-/// classifies it `MaxOutputTokens` (the closest existing classification, per
-/// `docs/architecture/truncation-recovery.md` §8.3).
+/// classifies it as explicit input-context exhaustion.
 fn compact_converged_over_window_error(context_window: u64) -> acp::Error {
     acp::Error::internal_error().data(serde_json::json!({
         "message": format!(
@@ -75,7 +74,7 @@ fn compact_converged_over_window_error(context_window: u64) -> acp::Error {
              point, switch to a model with a larger window, or start a new \
              session"
         ),
-        "error_kind": sampler::SamplingErrorKind::MaxTokensTruncation.as_str(),
+        "error_kind": ::hooks::event::StopFailureKind::ContextWindowExceeded.as_str(),
         "compact_error": COMPACT_CONVERGED_OVER_WINDOW,
     }))
 }
@@ -118,14 +117,15 @@ impl SessionActor {
     /// Path to the canonical `timeline.jsonl` ledger if it exists, else `None`.
     /// Hook envelopes use this to expose the durable audit source.
     ///
-    /// The `path.exists()` guard keeps the pointer safe when a session (e.g. a
-    /// nested sub-agent) never wrote one -- the hint is simply omitted rather
-    /// than dangling.
+    /// Missing or non-regular paths are omitted rather than exposing a
+    /// dangling or redirected audit pointer.
     pub(crate) fn get_transcript_path(&self) -> Option<String> {
         let path = self
             .session_dir
             .join(crate::session::storage::TIMELINE_FILE);
-        if path.exists() {
+        if std::fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
             Some(path.to_string_lossy().into_owned())
         } else {
             None
@@ -392,7 +392,7 @@ impl SessionActor {
         let data = crate::sampling::error::terminal_error_data(
             message,
             Some(401),
-            sampler::SamplingErrorKind::Auth,
+            sampler::SamplingErrorKind::Auth.as_str(),
         );
         acp::Error::internal_error().data(data)
     }

@@ -128,6 +128,12 @@ lives on `CompactionConfig` as `Cell<bool>` / `Cell<Option<u64>>` (the `!Send`
   pruned content (head + marker + tail).
 - **No second conversation file**: the replacement event is the complete
   durable mutation; no snapshot cache is written alongside it.
+- **Recall-derived content is not summarized back into itself**: before the
+  Sideband request is assembled, the complete causal tool exchange containing
+  any `context_recall` call is removed from the summary source. This includes
+  parallel tool results and the assistant continuation that consumed them;
+  filtering only the recall result would let derived text recursively harden
+  into later summaries.
 - **`updates.jsonl`**: untouched by pruning and remains UI/diagnostic replay
   only. Rewind constructs its new Surface from Timeline.
 - **Suppress state**: a prune whose strict gate passes stores
@@ -150,16 +156,15 @@ lives on `CompactionConfig` as `Cell<bool>` / `Cell<Option<u64>>` (the `!Send`
 
 `run_compact_inner` now runs a **unified** post-replace convergence check on
 every path (previously fork-scenario-only): after
-`replace_conversation_for_compaction`, if `get_total_tokens()` still exceeds
+the Timeline range replacement, if `get_total_tokens()` still exceeds
 the context window itself, the outcome is:
 
 - `SUPPRESS_STICKY` on `auto_compact_suppressed` (reusing the existing state;
   no new suppress value),
 - a `warn` log,
 - `Err(acp::Error)` carrying `data.compact_error =
-  "compact_converged_over_window"` (plus an `error_kind: max_tokens_truncation`
-  marker so turn-end classifies it `MaxOutputTokens`, per
-  `docs/architecture/truncation-recovery.md` §8.3).
+  "compact_converged_over_window"` plus the typed
+  `error_kind: context_window_exceeded` marker.
 
 The fork-scenario threshold check (sticky-suppress when a released inherited
 prefix still lands over the *trigger threshold*) is unchanged. The convergence

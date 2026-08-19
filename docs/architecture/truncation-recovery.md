@@ -21,13 +21,12 @@ Grow currently:
 
 1. **Streams partial content to the UI** -- the user sees partial text/reasoning/tool-call
    deltas during generation.
-2. **Discards the partial response** -- `request_task.rs:622-626` converts
-   `StopReason::Length` to `AttemptOutcome::Failed { error: SamplingError::MaxTokensTruncation }`,
-   discarding the `ConversationResponse`. The messages backend (`messages.rs:456-462`)
+2. **Discards the partial response** -- the old request path converted
+   `StopReason::Length` to a terminal failure and discarded the
+   `ConversationResponse`. The messages backend
    emits `SamplingEvent::Failed` before constructing the final response at all.
-3. **Marks the turn as fatally failed** -- `MaxTokensTruncation` is non-retryable
-   (`is_retryable() => false`), classified as `Fatal` in the retry loop. The turn ends
-   with `StopFailureKind::MaxOutputTokens`.
+3. **Marks the turn as fatally failed** -- the old error was non-retryable and
+   ended the turn instead of continuing it.
 4. **Does not persist the partial output** -- the assistant content never enters
    conversation history. The next turn's model cannot see what was already generated.
 
@@ -58,7 +57,7 @@ All three are funneled into `Failed`, losing the partial response and preventing
 | D2 | **Default on, no limits** -- auto-continue is always enabled, no max-continue-count or condition gates | User wants the system to be as transparent as possible; if the model needs more turns, let it |
 | D3 | **Fix ModelContextWindowExceeded** -- split from `StopReason::Length`, trigger compaction instead of continue | Input overflow cannot be solved by more output; compacting is the correct recovery |
 | D4 | **Fix PauseTurn** -- resend assistant content to continue, per Anthropic spec | Current `-> Stop` is wrong; Anthropic expects resend-to-continue |
-| D5 | **ACP StopFailure behavior change** -- successful continue does not emit `StopFailure`; `MaxOutputTokens` StopFailureKind retained for unrecoverable cases | A successfully continued turn is not a failure; documented as public contract change |
+| D5 | **ACP StopFailure behavior change** -- successful continue does not emit `StopFailure`; input exhaustion has its own typed failure | A successfully continued turn is not a failure |
 | D6 | **Thinking blocks: discard incomplete** -- truncated thinking blocks cannot be recovered (Anthropic API constraint: signature must be complete and unmodified) | API-level hard constraint; cannot be worked around |
 | D7 | **Tool-call truncation: discard incomplete** -- incomplete `tool_use` blocks are dropped; only complete blocks are persisted | Anthropic: "incomplete tool use blocks cannot be used"; model re-generates on continue |
 | D8 | **Crate identity: `chat-state`, version 1.0.0** -- the state layer uses a functional package name and the workspace version | Keeps package identity aligned with its responsibility and the rest of the first-party workspace |
@@ -85,8 +84,7 @@ sampler (sampling layer)
   │                          ContextWindowExceeded / PauseTurn instead of Failed;
   │                          run_request_task emits Completed + sends Ok(partial)
   │                          (no retry -- truncation is deterministic)
-  ├── retry.rs:              unchanged (MaxTokensTruncation no longer produced
-  │                          for Length; variant retained for unrecoverable cases)
+  ├── retry.rs:              unchanged (Length no longer enters terminal retry classification)
   └── events.rs:             unchanged (reuse SamplingEvent::Completed; the
                              session layer distinguishes via response.stop_reason)
 
@@ -186,14 +184,12 @@ pub enum StopReason {
 | OpenAI chat_completions | `finish_reason=length` | `Length` | Auto-continue |
 | OpenAI (all) | `finish_reason=stop` / `status=completed` | `Stop` | None |
 
-### 4.3 Deprecation of MaxTokensTruncation Error
+### 4.3 Removal of MaxTokensTruncation Error
 
-`SamplingError::MaxTokensTruncation` is **no longer produced** for `StopReason::Length`.
-The truncation path produces `AttemptOutcome::Truncated` instead.
-
-`MaxTokensTruncation` is retained as an error variant for:
-- Unrecoverable truncation where compaction also fails (context window exhausted after compaction).
-- Test backward compatibility during migration.
+`SamplingError::MaxTokensTruncation` has been removed. Output truncation is a
+recoverable `AttemptOutcome::Truncated`, while a compaction that still cannot
+fit the input is the distinct terminal kind `context_window_exceeded`. The two
+conditions do not share an error marker or Hook classification.
 
 ## 5. AttemptOutcome Changes
 
@@ -425,7 +421,7 @@ open to the summary path.
 ### 8.3 Fallback (fail-safe, implemented)
 
 `run_compact_inner` checks, on **every** path after
-`replace_conversation_for_compaction`, whether `get_total_tokens()` still
+the Timeline range replacement, whether `get_total_tokens()` still
 exceeds the context window (the fork-scenario trigger-threshold check is
 unchanged and orthogonal). If it does:
 
@@ -433,23 +429,21 @@ unchanged and orthogonal). If it does:
 - a `warn` is logged,
 - `run_compact_only` returns `Err` with the marker
   `data.compact_error = "compact_converged_over_window"` and
-  `error_kind = max_tokens_truncation`.
+  `error_kind = context_window_exceeded`.
 
 The `ModelContextWindowExceeded` turn branch matches that marker and **fails the
 turn** with a diagnostic message (`unified_log` event
 `shell.turn.compact_converged_over_window`) instead of resampling — the previous
 behavior looped forever (sample → overflow → compact → still over window →
-sample …). Sampling is therefore bounded. The error classification reuses
-`MaxOutputTokens` (the closest existing `StopFailureKind`, per this section's
-original design). Other compaction errors keep their existing handling.
+sample …). Sampling is therefore bounded. The error classification is
+`ContextWindowExceeded`; it is not mislabeled as an output-token cutoff.
 
 When compaction succeeds and the conversation lands back under the window, the
 resample continues as before (regression-locked by
 `context_window_exceeded_triggers_compaction`).
 
-If compaction itself fails for other reasons:
-- Emit `StopFailure` with `MaxOutputTokens` kind (the closest existing classification).
-- Turn fails with diagnostic message.
+If compaction itself fails for another reason, its own typed terminal kind is
+preserved and the turn fails with that diagnostic.
 
 ## 9. PauseTurn Recovery
 
@@ -482,29 +476,28 @@ the same conversation state -- no special prompt injection.
 
 ### 10.1 StopFailure Behavior Change
 
-**Before**: Every `max_tokens` truncation emits `StopFailure { error: "max_output_tokens" }`
+**Before**: Every `max_tokens` truncation emitted `StopFailure { error: "max_output_tokens" }`
 to external hook scripts.
 
 **After**: 
 - Successful auto-continue: **no StopFailure emitted**. The turn completes normally.
-- Unrecoverable truncation (compaction fails, context window exhausted after compaction):
-  `StopFailure { error: "max_output_tokens" }` emitted.
+- A compacted input that still exceeds the context window emits
+  `StopFailure { error: "context_window_exceeded" }`.
 
 This is a **public contract change**. External hook scripts that relied on receiving
 `StopFailure` for every truncation will no longer receive it when auto-continue succeeds.
 
-### 10.2 Migration Note
+### 10.2 Contract
 
-This change is intentional and correct: a successfully continued turn is not a failure.
-Hook scripts should only observe `StopFailure` when the turn genuinely fails. The
-`MaxOutputTokens` StopFailureKind variant is retained for the unrecoverable case.
+A successfully continued turn is not a failure. Hook scripts observe
+`StopFailure` only when the turn genuinely fails, using the current typed kind.
 
 ### 10.3 ACP Error Mapping
 
-`map_sampling_err_to_acp` (`shell/src/sampling/error.rs`):
-- `MaxTokensTruncation` -> `acp::Error::internal_error()` with `error_kind: "max_tokens_truncation"`
-- This mapping is retained but only triggered when truncation is truly unrecoverable.
-- During auto-continue, no ACP error is produced.
+Terminal sampling failures emitted by the session carry `data.error_kind`;
+ACP-native authentication/configuration failures still use their protocol code
+and HTTP status. During output auto-continue no ACP error is produced; an
+unrecoverable input-size failure uses `context_window_exceeded`.
 
 ## 11. Invariants and Constraints
 
@@ -559,7 +552,7 @@ Hook scripts should only observe `StopFailure` when the turn genuinely fails. Th
 | `pause_turn_outcome` | sampler | `drive_l2` returns `PauseTurn` with complete response |
 | `incomplete_thinking_discarded` | sampler | Partial response sanitization discards thinking blocks without signature_delta |
 | `incomplete_tool_use_discarded` | sampler | Partial response sanitization discards tool_use blocks with invalid JSON |
-| `max_tokens_truncation_not_produced_for_length` | sampler | `SamplingError::MaxTokensTruncation` is not produced for Length stop reason |
+| `truncation_is_not_a_sampling_error` | sampler | Length returns the typed recoverable outcome and never constructs a terminal sampling error |
 | `synthetic_reason_truncation_continue` | sampling-types | New variant serializes/deserializes correctly; excluded from real-user-query extraction |
 
 ### 12.2 Integration Tests
@@ -575,7 +568,7 @@ Hook scripts should only observe `StopFailure` when the turn genuinely fails. Th
 | `cross_backend_consistency` | shell | Messages and chat_completions produce the same continue behavior (chat_completions e2e: partial persisted, continue prompt injected, concatenated output, 2 sampling cycles; responses backend pinned at the stream layer by Task 2) — DONE |
 | `stop_failure_not_emitted_on_success` | shell | Successful continue: no StopFailure hook event emitted — DONE |
 | `stop_failure_emitted_on_unrecoverable` | shell | Unrecoverable recovery failure (compaction HTTP 500): turn fails, StopFailure hook event emitted — DONE |
-| `model_context_window_exceeded_test_update` | sampler | Update `messages_tests.rs:378` test to assert new ContextWindowExceeded outcome, not MaxTokensTruncation — DONE (Task 2, renamed `model_context_window_exceeded_completes_with_context_window_stop_reason`) |
+| `model_context_window_exceeded_test_update` | sampler | Assert the typed ContextWindowExceeded outcome (`model_context_window_exceeded_completes_with_context_window_stop_reason`) |
 
 ### 12.3 Regression Tests
 
@@ -722,13 +715,9 @@ execution — tool_use wins, per Task 2 decision):
 - Any other stop reason (including `None`, `Stop`, `ToolCalls`, `ContentFilter`) ->
   existing turn-end path untouched.
 
-**MaxTokensTruncation after Task 2**: no production code constructs it anymore (sampler
-stream/actor paths are clean; shell `OaiCompatClient` never produced it). The
-`map_sampling_err_to_acp` branch (`sampling/error.rs:94-100`), `stop_reason_for_turn_error`
-(`:136-144`), `StopFailureKind::MaxOutputTokens` classification (`turn_end.rs:348-352`) and
-`classify_sampling_error` (`session_compact.rs:73`) are retained as defensive dead code —
-they stay, unchanged, so a future unrecoverable-truncation path can reuse the hook contract
-(Q5 decision). No new code should route to them.
+The obsolete `MaxTokensTruncation` error and `MaxOutputTokens` Hook path are
+absent. Output truncation stays in the recoverable outcome state machine;
+input exhaustion uses the explicit `ContextWindowExceeded` terminal path.
 
 **Dependencies**: Task 0, Task 1, Task 2.
 **Tests**: All integration tests from section 12.2; all regression tests from 12.3.
@@ -798,8 +787,8 @@ version; verify workspace metadata and the baseline build pass.
 is excluded from `is_synthetic_extracted_query`; verify no changes to existing
 `AutoContinue`/`AutoRecovery` semantics; verify no prompt constants added (Task 3 owns them).
 
-**Task 2**: Verify all three backends map correctly; verify `MaxTokensTruncation` is
-no longer produced for `Length`; verify `ModelContextWindowExceeded` is mapped correctly;
+**Task 2**: Verify all three backends map correctly; verify `Length` is a
+recoverable outcome rather than a sampling error; verify `ModelContextWindowExceeded` is mapped correctly;
 verify `PauseTurn` is mapped to new variant (not `Stop`); verify partial response is
 constructed with sanitized thinking/tool_use blocks.
 

@@ -83,6 +83,72 @@ fn timeline_append_retries_are_idempotent_and_truncate_only_an_incomplete_tail()
     assert_eq!(events[1].seq.get(), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn timeline_append_rejects_symlinked_ledger_and_lock_targets() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.jsonl");
+    let path = dir.path().join("timeline.jsonl");
+    std::fs::write(&target, b"").unwrap();
+    symlink(&target, &path).unwrap();
+
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline_event("must-not-follow", &mut timeline);
+    let mut line = serde_json::to_vec(&event).unwrap();
+    line.push(b'\n');
+    let error = JsonlStorageAdapter::append_timeline_line_sync(
+        &path,
+        line.clone(),
+        event.seq.get(),
+        AppendDurability::Buffered,
+    )
+    .expect_err("Timeline append must not follow a ledger symlink");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(std::fs::read(&target).unwrap().is_empty());
+
+    std::fs::remove_file(&path).unwrap();
+    let lock_path = path.with_extension("jsonl.lock");
+    std::fs::remove_file(&lock_path).unwrap();
+    symlink(&target, &lock_path).unwrap();
+    let error = JsonlStorageAdapter::append_timeline_line_sync(
+        &path,
+        line,
+        event.seq.get(),
+        AppendDurability::Buffered,
+    )
+    .expect_err("Timeline append must not follow a lock symlink");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(std::fs::read(&target).unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn update_append_and_replay_reject_symlinked_ledgers() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("outside.jsonl");
+    let path = dir.path().join("updates.jsonl");
+    std::fs::write(&target, b"outside\n").unwrap();
+    symlink(&target, &path).unwrap();
+
+    let error = JsonlStorageAdapter::append_jsonl_line_sync(
+        &path,
+        b"{\"record\":1}\n".to_vec(),
+        AppendDurability::Buffered,
+    )
+    .expect_err("updates append must not follow a ledger symlink");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&target).unwrap(), b"outside\n");
+
+    let Err(error) = crate::session::storage::UpdatesIterator::open(&path) else {
+        panic!("updates replay must not follow a ledger symlink");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
 #[test]
 fn timeline_reader_ignores_only_the_uncommitted_final_fragment() {
     let dir = tempfile::tempdir().unwrap();

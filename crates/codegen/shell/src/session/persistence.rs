@@ -109,8 +109,9 @@ pub fn session_exists_for_cwd(session_id: &str, cwd: &str) -> bool {
 
 /// A directory is a session only if it has a `summary.json`; this skips
 /// `images/`-only stubs that would otherwise hijack ID-based resolution.
-fn is_persisted_session_dir(session_path: &Path) -> bool {
-    session_path.join("summary.json").is_file()
+pub(crate) fn is_persisted_session_dir(session_path: &Path) -> bool {
+    std::fs::symlink_metadata(session_path.join("summary.json"))
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
 /// Inner implementation of `session_exists_for_cwd` with an injectable root.
@@ -264,9 +265,14 @@ pub(crate) fn find_summary_by_session_id_in_root(
     read_summary_from_dir(&path).ok()
 }
 
-fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
+pub(crate) fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
     let path = session_dir.join("summary.json");
-    let bytes = std::fs::read(&path).map_err(|error| RelocationError::Io {
+    let bytes = crate::session::storage::read_bounded_regular_file(
+        &path,
+        "session summary",
+        crate::session::storage::MAX_SESSION_SUMMARY_BYTES,
+    )
+    .map_err(|error| RelocationError::Io {
         operation: "read",
         path: path.clone(),
         source: error,
@@ -280,6 +286,16 @@ fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
         .validate_current_format()
         .map_err(|error| RelocationError::Inconsistent(format!("{}: {error}", path.display())))?;
     Ok(summary)
+}
+
+/// Read and validate the canonical bounded summary projection for a session.
+///
+/// Cross-crate consumers must use this entry point instead of opening
+/// `summary.json` directly, so UI projections share the same no-follow and
+/// size boundary as session restore.
+pub fn read_summary_in_session_dir(session_dir: &Path) -> io::Result<Summary> {
+    read_summary_from_dir(session_dir)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 
 /// The most recently updated local session summary for `cwd` (by
@@ -395,6 +411,7 @@ pub fn get_prompt_blob_path(session_dir: &Path, content: &str) -> PathBuf {
 }
 
 pub const PROMPT_BLOB_REF_PREFIX: &str = "artifact:prompt:blake3:";
+pub(crate) const MAX_IMMUTABLE_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Host-independent identity persisted in Timeline text. The absolute file
 /// path is materialized only in a request clone immediately before sampling.
@@ -439,7 +456,12 @@ pub(crate) fn referenced_prompt_blob_hashes(
 
 pub(crate) fn verified_prompt_blob_bytes(session_dir: &Path, hash: &str) -> io::Result<Vec<u8>> {
     let path = session_dir.join("prompts").join(format!("{hash}.txt"));
-    let bytes = std::fs::read(&path).map_err(|error| {
+    let bytes = crate::session::storage::read_bounded_regular_file(
+        &path,
+        "immutable prompt blob",
+        MAX_IMMUTABLE_BLOB_BYTES,
+    )
+    .map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -583,6 +605,16 @@ fn create_dir_all_durable(path: &Path) -> io::Result<()> {
 /// content. This makes hash collision, corruption, and accidental overwrite
 /// fail closed while allowing concurrent writers of the same blob.
 pub fn write_immutable_blob(path: &Path, content: &[u8]) -> io::Result<()> {
+    if content.len() as u64 > MAX_IMMUTABLE_BLOB_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "immutable blob exceeds {} bytes: {}",
+                MAX_IMMUTABLE_BLOB_BYTES,
+                path.display()
+            ),
+        ));
+    }
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -605,7 +637,11 @@ pub fn write_immutable_blob(path: &Path, content: &[u8]) -> io::Result<()> {
             sync_directory(parent)
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let existing = std::fs::read(path)?;
+            let existing = crate::session::storage::read_bounded_regular_file(
+                path,
+                "immutable blob",
+                MAX_IMMUTABLE_BLOB_BYTES,
+            )?;
             if existing != content {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

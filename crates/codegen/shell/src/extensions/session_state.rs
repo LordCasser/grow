@@ -114,11 +114,17 @@ pub async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
     // summary not yet written) is recreated on retry rather than skipped forever.
     let has_local_session = resolve_session_dir(&request.session_id, &request.cwd).is_some();
     if !has_local_session {
-        if dir.exists() {
-            return Err(acp::Error::invalid_params().data(format!(
-                "session/import target already exists but is not a valid session: {}",
-                dir.display()
-            )));
+        match std::fs::symlink_metadata(&dir) {
+            Ok(_) => {
+                return Err(acp::Error::invalid_params().data(format!(
+                    "session/import target already exists but is not a valid session: {}",
+                    dir.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(acp::Error::internal_error().data(error.to_string()));
+            }
         }
         validate_import_state_columns(&request.state)?;
         validate_import_updates(&request.updates)?;
@@ -143,6 +149,14 @@ pub async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
         summary
             .validate_current_format()
             .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+        let summary_bytes = serde_json::to_vec(&summary)
+            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+        if summary_bytes.len() as u64 > st::MAX_SESSION_SUMMARY_BYTES {
+            return Err(acp::Error::invalid_params().data(format!(
+                "session/import summary exceeds {} bytes",
+                st::MAX_SESSION_SUMMARY_BYTES
+            )));
+        }
         let timeline = validate_timeline_column(&request.state)?;
         let sidebands = validate_sidebands_column(&request.state)?;
         validate_blobs_column(&request.state, &timeline)?;
@@ -187,6 +201,7 @@ fn validate_import_state_columns(
 
 fn validate_import_updates(updates: &[Value]) -> Result<(), acp::Error> {
     for (index, update) in updates.iter().enumerate() {
+        validate_jsonl_entry_size(update, &format!("update {index}"))?;
         crate::session::storage::SessionUpdateEnvelope::from_value(update.clone()).map_err(
             |error| {
                 acp::Error::invalid_params()
@@ -205,6 +220,9 @@ fn validate_timeline_column(
     })?;
     let events = serde_json::from_value::<Vec<chat_state::TimelineEvent>>(value.clone())
         .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    for (index, event) in events.iter().enumerate() {
+        validate_jsonl_entry_size(event, &format!("Timeline event {index}"))?;
+    }
     chat_state::Timeline::from_events(events)
         .map_err(|error| acp::Error::invalid_params().data(error.to_string()))
 }
@@ -215,8 +233,29 @@ fn validate_sidebands_column(
     let value = state.get(SIDEBANDS_COLUMN).ok_or_else(|| {
         acp::Error::invalid_params().data("session/import requires a sidebands object")
     })?;
-    serde_json::from_value(value.clone())
-        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))
+    let ledgers: st::SidebandLedgers = serde_json::from_value(value.clone())
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    for (sideband_id, events) in &ledgers {
+        for (index, event) in events.iter().enumerate() {
+            validate_jsonl_entry_size(event, &format!("sideband {sideband_id} event {index}"))?;
+        }
+    }
+    Ok(ledgers)
+}
+
+fn validate_jsonl_entry_size(
+    value: &impl serde::Serialize,
+    description: &str,
+) -> Result<(), acp::Error> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    if (bytes.len() as u64).saturating_add(1) > st::MAX_JSONL_ENTRY_BYTES {
+        return Err(acp::Error::invalid_params().data(format!(
+            "session/import {description} exceeds {} bytes",
+            st::MAX_JSONL_ENTRY_BYTES
+        )));
+    }
+    Ok(())
 }
 
 fn referenced_blob_keys(
@@ -277,7 +316,11 @@ fn read_entity_blobs(
                 "invalid immutable blob key",
             )
         })?;
-        let bytes = std::fs::read(&path)?;
+        let bytes = st::read_bounded_regular_file(
+            &path,
+            "session immutable blob",
+            crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES,
+        )?;
         let hash = key
             .rsplit_once('/')
             .map(|(_, hash)| hash)
@@ -327,6 +370,12 @@ fn validate_blobs_column(
             .rsplit_once('/')
             .map(|(_, hash)| hash)
             .unwrap_or_default();
+        if content.len() as u64 > crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES {
+            return Err(acp::Error::invalid_params().data(format!(
+                "blob {key} exceeds {} bytes",
+                crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES
+            )));
+        }
         if blake3::hash(content.as_bytes()).to_hex().as_str() != hash {
             return Err(acp::Error::invalid_params()
                 .data(format!("blob {key} does not match its content hash")));
@@ -544,11 +593,11 @@ fn resolve_session_dir(session_id: &str, cwd: &str) -> Option<PathBuf> {
         cwd: cwd.to_string(),
     };
     let dir = crate::session::persistence::session_dir(&info);
-    if dir.join(st::SUMMARY_FILE).is_file() {
+    if crate::session::persistence::is_persisted_session_dir(&dir) {
         return Some(dir);
     }
     crate::session::persistence::find_session_dir_by_id(session_id)
-        .filter(|found| found.join(st::SUMMARY_FILE).is_file())
+        .filter(|found| crate::session::persistence::is_persisted_session_dir(found))
 }
 
 #[cfg(test)]
@@ -840,5 +889,31 @@ mod tests {
             published_summary,
             "a duplicate import must not alter the published session"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_import_cannot_publish_through_a_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let target = tmp.path().join("target-session");
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, &target).unwrap();
+        let state = std::collections::HashMap::from([
+            (
+                SUMMARY_COLUMN.to_string(),
+                json!({ "info": { "id": "s1", "cwd": "/work" } }),
+            ),
+            (TIMELINE_COLUMN.to_string(), json!([])),
+            (SIDEBANDS_COLUMN.to_string(), json!({})),
+            (BLOBS_COLUMN.to_string(), json!({})),
+        ]);
+
+        let error = write_import(&target, &state, &[])
+            .expect_err("session import must not traverse a symlinked target");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
     }
 }

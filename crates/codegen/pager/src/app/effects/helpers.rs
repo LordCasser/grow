@@ -286,23 +286,10 @@ pub(super) fn count_timeline_stats(info: &shell::session::info::Info) -> (usize,
 }
 
 fn load_timeline(info: &shell::session::info::Info) -> Option<chat_state::Timeline> {
-    let path = shell::session::persistence::session_dir(info).join("timeline.jsonl");
-    let bytes = std::fs::read(path).ok()?;
-    let complete_len = if bytes.last().is_none_or(|byte| *byte == b'\n') {
-        bytes.len()
-    } else {
-        bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1)
-    };
-    let events = bytes[..complete_len]
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<chat_state::TimelineEvent>)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    chat_state::Timeline::from_events(events).ok()
+    shell::session::storage::read_timeline_in_session_dir(
+        &shell::session::persistence::session_dir(info),
+    )
+    .ok()
 }
 /// Reads `_meta["grow/listScope"]` from a session-list payload.
 pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {

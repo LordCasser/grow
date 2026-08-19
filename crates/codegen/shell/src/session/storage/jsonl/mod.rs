@@ -8,7 +8,6 @@ use agent_client_protocol as acp;
 use async_trait::async_trait;
 use chat_state::Timeline;
 use fs2::FileExt;
-use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use workspace::session::file_state::RewindPoint;
@@ -121,9 +120,22 @@ impl JsonlStorageAdapter {
     ) -> io::Result<super::SidebandLedgers> {
         let directory = session_dir.join(super::SIDEBANDS_DIR);
         let mut ledgers = super::SidebandLedgers::new();
-        if !directory.exists() {
-            super::validate_sideband_ledgers(parent_timeline_id, parent, &ledgers)?;
-            return Ok(ledgers);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "sidebands path is not a regular directory: {}",
+                        directory.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                super::validate_sideband_ledgers(parent_timeline_id, parent, &ledgers)?;
+                return Ok(ledgers);
+            }
+            Err(error) => return Err(error),
         }
         let mut entries = std::fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -143,7 +155,12 @@ impl JsonlStorageAdapter {
             chat_state::validate_sideband_id(&sideband_id)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             let timeline_path = entry.path().join(super::TIMELINE_FILE);
-            if !timeline_path.exists() {
+            let timeline_metadata = match std::fs::symlink_metadata(&timeline_path) {
+                Ok(metadata) => Some(metadata),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            if timeline_metadata.is_none() {
                 let children = std::fs::read_dir(entry.path())?.collect::<Result<Vec<_>, _>>()?;
                 if children.is_empty()
                     || children.iter().all(|child| {
@@ -156,6 +173,17 @@ impl JsonlStorageAdapter {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("sideband {sideband_id} directory has no Timeline ledger"),
+                ));
+            }
+            if timeline_metadata
+                .is_some_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "sideband Timeline ledger is not a regular file: {}",
+                        timeline_path.display()
+                    ),
                 ));
             }
             let events = super::read_committed_jsonl_file::<chat_state::SidebandEvent>(
@@ -259,7 +287,11 @@ impl JsonlStorageAdapter {
         let mut summaries = Vec::new();
         for session_dir in session_dirs {
             let summary_path = session_dir.join(super::SUMMARY_FILE);
-            match std::fs::read(&summary_path) {
+            match super::read_bounded_regular_file(
+                &summary_path,
+                "session summary",
+                super::MAX_SESSION_SUMMARY_BYTES,
+            ) {
                 Ok(bytes) => {
                     if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
                         && summary.validate_current_format().is_ok()
@@ -293,7 +325,9 @@ impl JsonlStorageAdapter {
             Vec::with_capacity(session_dirs.len());
         for session_dir in session_dirs {
             let summary_path = session_dir.join(super::SUMMARY_FILE);
-            if let Ok(meta) = std::fs::metadata(&summary_path)
+            if let Ok(meta) = std::fs::symlink_metadata(&summary_path)
+                && meta.is_file()
+                && !meta.file_type().is_symlink()
                 && let Ok(mtime) = meta.modified()
             {
                 candidates.push((summary_path, mtime));
@@ -303,7 +337,11 @@ impl JsonlStorageAdapter {
         candidates.truncate(limit);
         let mut summaries = Vec::with_capacity(candidates.len());
         for (summary_path, _) in candidates {
-            match std::fs::read(&summary_path) {
+            match super::read_bounded_regular_file(
+                &summary_path,
+                "session summary",
+                super::MAX_SESSION_SUMMARY_BYTES,
+            ) {
                 Ok(bytes) => {
                     if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
                         && summary.validate_current_format().is_ok()
@@ -443,14 +481,10 @@ impl JsonlStorageAdapter {
         durability: AppendDurability,
     ) -> io::Result<()> {
         debug_assert!(line.ends_with(b"\n"));
+        Self::validate_jsonl_line_size(&line, "Timeline event")?;
         let lock = Self::lock_append(path)?;
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(path)?;
+            let mut file = super::open_read_write_create_nofollow(path)?;
             let (complete_len, last_line) = Self::read_timeline_tail(&mut file)?;
             let original_len = file.metadata()?.len();
             if complete_len != original_len {
@@ -522,6 +556,7 @@ impl JsonlStorageAdapter {
         durability: AppendDurability,
     ) -> io::Result<()> {
         debug_assert!(line.ends_with(b"\n"));
+        Self::validate_jsonl_line_size(&line, "sideband event")?;
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -531,12 +566,7 @@ impl JsonlStorageAdapter {
         std::fs::create_dir_all(parent)?;
         let lock = Self::lock_append(path)?;
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(path)?;
+            let mut file = super::open_read_write_create_nofollow(path)?;
             let (complete_len, last_line) = Self::read_timeline_tail(&mut file)?;
             let original_len = file.metadata()?.len();
             if complete_len != original_len {
@@ -640,7 +670,17 @@ impl JsonlStorageAdapter {
         let line_end = complete_len - 1;
         let line_start =
             Self::find_previous_newline(file, line_end)?.map_or(0, |position| position + 1);
-        let line_len = usize::try_from(line_end - line_start).map_err(|_| {
+        let line_len_u64 = line_end - line_start;
+        if line_len_u64.saturating_add(1) > super::MAX_JSONL_ENTRY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Timeline tail record exceeds {} bytes",
+                    super::MAX_JSONL_ENTRY_BYTES
+                ),
+            ));
+        }
+        let line_len = usize::try_from(line_len_u64).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Timeline tail record is too large",
@@ -688,7 +728,7 @@ impl JsonlStorageAdapter {
     /// canonical Timeline reader remains fail-closed and never reads this cache.
     async fn sync_file_path_durable(path: PathBuf) -> io::Result<()> {
         tokio::task::spawn_blocking(move || {
-            let file = OpenOptions::new().read(true).open(&path)?;
+            let file = super::open_regular_nofollow(&path, "JSONL ledger")?;
             Self::sync_file_durable(&file)
         })
         .await
@@ -711,13 +751,10 @@ impl JsonlStorageAdapter {
         mut sync_parent: impl FnMut() -> io::Result<()>,
     ) -> io::Result<()> {
         debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
+        Self::validate_jsonl_line_size(&line, "session update")?;
         let lock = Self::lock_append(path)?;
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .read(true)
-                .create(true)
-                .append(true)
-                .open(path)?;
+            let mut file = super::open_read_write_create_nofollow(path)?;
             let len = file.metadata()?.len();
             if len > 0 {
                 file.seek(io::SeekFrom::Start(len - 1))?;
@@ -731,6 +768,7 @@ impl JsonlStorageAdapter {
                     line.insert(0, b'\n');
                 }
             }
+            file.seek(io::SeekFrom::End(0))?;
             file.write_all(&line)?;
             file.flush()?;
             if matches!(durability, AppendDurability::Durable) {
@@ -745,6 +783,19 @@ impl JsonlStorageAdapter {
         let _ = lock.unlock();
         result
     }
+
+    fn validate_jsonl_line_size(line: &[u8], description: &str) -> io::Result<()> {
+        if line.len() as u64 > super::MAX_JSONL_ENTRY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{description} exceeds {} bytes",
+                    super::MAX_JSONL_ENTRY_BYTES
+                ),
+            ));
+        }
+        Ok(())
+    }
     /// Lock tail healing, append, and barriers through `<target>.jsonl.lock`.
     /// Full-file [`Self::write_jsonl`] atomic-rename rewrites bypass this append-only lock.
     fn lock_append(path: &Path) -> io::Result<std::fs::File> {
@@ -755,12 +806,8 @@ impl JsonlStorageAdapter {
         path: &Path,
         timeout: std::time::Duration,
     ) -> io::Result<std::fs::File> {
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("jsonl.lock"))?;
+        let lock_path = path.with_extension("jsonl.lock");
+        let lock = super::open_read_write_create_nofollow(&lock_path)?;
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match lock.try_lock_exclusive() {
@@ -781,6 +828,7 @@ impl JsonlStorageAdapter {
             }
         }
     }
+
     fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
         super::sync_file_durable(file)
     }
@@ -890,22 +938,10 @@ impl JsonlStorageAdapter {
         super::write_jsonl_atomic_async(&path, items).await
     }
     fn read_jsonl<T: serde::de::DeserializeOwned>(&self, path: PathBuf) -> io::Result<Vec<T>> {
-        if !path.exists() {
-            return Ok(Vec::new());
+        match super::open_optional_regular_nofollow(&path, "JSONL ledger")? {
+            Some(_) => super::read_committed_jsonl_file(&path, "JSONL ledger"),
+            None => Ok(Vec::new()),
         }
-        let mut file = OpenOptions::new().read(true).open(&path)?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-        let mut items = Vec::new();
-        for line in contents.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let item: T = serde_json::from_str(line)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            items.push(item);
-        }
-        Ok(items)
     }
 
     /// Read every complete Timeline record. A final non-newline-terminated
@@ -962,20 +998,12 @@ impl JsonlStorageAdapter {
     /// (session load, fork copy). The live replay path is already lenient;
     /// this keeps the fork path from bricking on the same corruption.
     fn read_updates_jsonl(&self, path: PathBuf) -> io::Result<Vec<super::SessionUpdate>> {
-        if !path.exists() {
+        let Some(iterator) = super::UpdatesIterator::open(&path)? else {
             return Ok(Vec::new());
-        }
-        let contents = std::fs::read(&path)?;
+        };
         let mut skipped_lines: usize = 0;
         let mut updates = Vec::new();
-        for line in contents.split(|b| *b == b'\n') {
-            let line = line.trim_ascii();
-            if line.is_empty() {
-                continue;
-            }
-            let parsed = std::str::from_utf8(line)
-                .map_err(|e| e.to_string())
-                .and_then(|s| SessionUpdateEnvelope::from_str(s).map_err(|e| e.to_string()));
+        for parsed in iterator {
             match parsed {
                 Ok(update) => updates.push(update),
                 Err(error) => {
@@ -1006,13 +1034,16 @@ impl JsonlStorageAdapter {
     /// may see an empty file. Temp-file + rename avoids this.
     fn write_summary_sync(&self, info: &Info, summary: &Summary) -> io::Result<()> {
         let summary_path = self.summary_file(info);
-        let bytes = serde_json::to_vec_pretty(summary)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let bytes = super::serialize_summary(summary)?;
         super::write_bytes_atomic(&summary_path, &bytes)
     }
     pub(crate) fn read_summary_sync(&self, info: &Info) -> io::Result<Summary> {
         let path = self.summary_file(info);
-        let bytes = std::fs::read(&path)?;
+        let bytes = super::read_bounded_regular_file(
+            &path,
+            "session summary",
+            super::MAX_SESSION_SUMMARY_BYTES,
+        )?;
         if bytes.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1224,13 +1255,7 @@ impl JsonlStorageAdapter {
                     .record(fact)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
-            let mut timeline_bytes = Vec::new();
-            for event in timeline.events() {
-                serde_json::to_writer(&mut timeline_bytes, event)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                timeline_bytes.push(b'\n');
-            }
-            super::write_bytes_atomic(&staging.timeline_file(info), &timeline_bytes)?;
+            super::write_jsonl_atomic(&staging.timeline_file(info), timeline.events())?;
             staging.write_summary_sync(info, &summary)?;
             Ok((summary, timeline.events().to_vec()))
         })();
@@ -1432,9 +1457,8 @@ fn copy_referenced_prompt_blobs(
 
 impl JsonlStorageAdapter {
     /// Fully synchronous version of `copy_session_data` for use inside
-    /// `spawn_blocking`. Identical logic but uses `std::fs::write` instead
-    /// of `tokio::fs::write`, so the entire copy runs on a blocking thread
-    /// without nesting `spawn_blocking` calls.
+    /// `spawn_blocking`. The entire staged copy uses synchronous bounded
+    /// storage primitives, without nesting `spawn_blocking` calls.
     pub fn copy_session_data_sync(
         &self,
         source_info: &Info,
@@ -1546,9 +1570,7 @@ impl JsonlStorageAdapter {
                 sandbox_profile: source_summary.sandbox_profile,
                 reasoning_effort: source_summary.reasoning_effort,
             };
-            let summary_bytes = serde_json::to_vec_pretty(&target_summary)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            std::fs::write(target_storage.summary_file(target_info), summary_bytes)?;
+            target_storage.write_summary_sync(target_info, &target_summary)?;
             // A fork starts a new event lineage from the inherited surface. Source
             // replacement identities cannot be copied after truncation, filtering,
             // cwd transformation, or reasoning stripping.
@@ -1593,28 +1615,23 @@ impl JsonlStorageAdapter {
                     .record(announcement_state.timeline_kind()?)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
-            let mut timeline_content = Vec::new();
-            for event in fork_timeline.events() {
-                let mut line = serde_json::to_vec(event)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                line.push(b'\n');
-                timeline_content.extend(line);
-            }
-            std::fs::write(target_storage.timeline_file(target_info), timeline_content)?;
+            super::write_jsonl_atomic(
+                &target_storage.timeline_file(target_info),
+                fork_timeline.events(),
+            )?;
             let transformed_updates: Vec<super::SessionUpdate> = updates_to_copy
                 .into_iter()
                 .map(|u| transform_session_id_in_update(u, &target_info.id))
                 .collect();
-            let mut updates_content = Vec::new();
-            for update in &transformed_updates {
-                let envelope = SessionUpdateEnvelope::from_update(update)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let mut line = serde_json::to_vec(&envelope)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                line.push(b'\n');
-                updates_content.extend(line);
-            }
-            std::fs::write(target_storage.updates_file(target_info), updates_content)?;
+            let update_envelopes = transformed_updates
+                .iter()
+                .map(SessionUpdateEnvelope::from_update)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            super::write_jsonl_atomic(
+                &target_storage.updates_file(target_info),
+                &update_envelopes,
+            )?;
             Ok(super::CopySessionResult {
                 surface_items_copied,
                 updates_copied: num_messages,

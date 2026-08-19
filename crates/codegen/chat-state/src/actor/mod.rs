@@ -462,7 +462,7 @@ impl ChatStateActor {
                         unloaded_surface_ids: self
                             .state
                             .timeline
-                            .completed_compaction_shadowed_ids(),
+                            .completed_compaction_unloaded_branch_ids(),
                     }
                 });
                 let _ = reply.send(materialized);

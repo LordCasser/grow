@@ -500,6 +500,32 @@ async fn timeline_round_trip_folds_the_current_surface() {
     )
     .is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn sideband_reader_rejects_symlinked_directory_roots() {
+    use std::os::unix::fs::symlink;
+
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let session_dir = adapter.session_dir(&info);
+    let outside = temp_dir.path().join("outside-sidebands");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    symlink(
+        &outside,
+        session_dir.join(crate::session::storage::SIDEBANDS_DIR),
+    )
+    .unwrap();
+
+    let error = adapter
+        .read_sideband_ledgers_sync(&info, &chat_state::Timeline::default())
+        .expect_err("sideband discovery must not traverse a symlinked root");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("not a regular directory"));
+}
+
 /// UI updates cannot synthesize conversation facts. Without Timeline events,
 /// the restart Surface is empty even when updates contain transcript-looking
 /// chunks.

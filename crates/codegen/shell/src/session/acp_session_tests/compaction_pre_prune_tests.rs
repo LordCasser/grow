@@ -669,6 +669,13 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
                 message.contains("still exceeds"),
                 "diagnostic message must explain the overflow, got {message:?}"
             );
+            assert_eq!(
+                err.data
+                    .as_ref()
+                    .and_then(|data| data.get("error_kind"))
+                    .and_then(|value| value.as_str()),
+                Some(::hooks::event::StopFailureKind::ContextWindowExceeded.as_str()),
+            );
 
             // Bounded sampling: the overflow sample + one summary call, no loop.
             assert_eq!(

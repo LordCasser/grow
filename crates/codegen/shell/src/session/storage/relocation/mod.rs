@@ -713,7 +713,12 @@ fn rewrite_staged_summary(
     pending: PendingCwdSwitchReminder,
 ) -> Result<()> {
     let path = staging.join(super::SUMMARY_FILE);
-    let bytes = std_fs::read(&path).map_err(|e| fs::io_error("read", &path, e))?;
+    let bytes = super::read_bounded_regular_file(
+        &path,
+        "staged session summary",
+        super::MAX_SESSION_SUMMARY_BYTES,
+    )
+    .map_err(|e| fs::io_error("read", &path, e))?;
     let source: Summary =
         serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json {
             path: path.clone(),
@@ -776,7 +781,9 @@ fn require_regular_file(path: &Path) -> Result<()> {
 }
 
 fn read_summary(path: &Path) -> Result<Summary> {
-    let bytes = std_fs::read(path).map_err(|e| fs::io_error("read", path, e))?;
+    let bytes =
+        super::read_bounded_regular_file(path, "session summary", super::MAX_SESSION_SUMMARY_BYTES)
+            .map_err(|e| fs::io_error("read", path, e))?;
     let summary: Summary =
         serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json {
             path: path.to_path_buf(),

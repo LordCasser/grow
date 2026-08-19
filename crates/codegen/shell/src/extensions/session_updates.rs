@@ -35,7 +35,7 @@
 //!
 //! Metadata columns and cross-host import live in [`crate::extensions::session_state`].
 
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::path::Path;
 
 use agent_client_protocol as acp;
@@ -128,8 +128,16 @@ fn try_stream_tail_page(request: &Request, updates_path: &Path) -> io::Result<Op
         return Ok(None);
     }
 
-    let file = std::fs::File::open(updates_path)?;
-    let reader = BufReader::new(file);
+    let Some(reader) =
+        crate::session::storage::CommittedJsonlLines::open(updates_path, "session updates ledger")?
+    else {
+        return Ok(Some(TailPage {
+            lines: Vec::new(),
+            total_count: 0,
+            has_more: false,
+            prompt_starts: Vec::new(),
+        }));
+    };
 
     if is_turn_index {
         // Single-pass scan: read lines, detect rewinds, and compute prompt
@@ -139,8 +147,9 @@ fn try_stream_tail_page(request: &Request, updates_path: &Path) -> io::Result<Op
         let mut prompt_starts = Vec::new();
         let mut in_user = false;
 
-        for line in reader.lines() {
-            let line = line?;
+        for line in reader {
+            let line = String::from_utf8(line?)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             if line.trim().is_empty() {
                 continue;
             }
@@ -191,8 +200,9 @@ fn try_stream_tail_page(request: &Request, updates_path: &Path) -> io::Result<Op
         let mut has_rewinds = false;
         let mut tail = std::collections::VecDeque::new();
 
-        for line in reader.lines() {
-            let line = line?;
+        for line in reader {
+            let line = String::from_utf8(line?)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             if line.trim().is_empty() {
                 continue;
             }
@@ -400,14 +410,13 @@ pub async fn handle(
         );
     }
 
-    let raw_contents = std::fs::read_to_string(&updates_path)
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-
-    let lines: Vec<&str> = raw_contents
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    let live_lines = crate::session::storage::filter_rewind_lines(lines);
+    let lines = crate::session::storage::read_committed_jsonl_text_lines(
+        &updates_path,
+        "session updates ledger",
+    )
+    .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+    let live_lines =
+        crate::session::storage::filter_rewind_lines(lines.iter().map(String::as_str).collect());
     let total_count = live_lines.len();
     let prompt_starts = compute_prompt_starts(&live_lines);
 
