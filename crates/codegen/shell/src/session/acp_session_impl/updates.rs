@@ -841,7 +841,11 @@ fn acking_persistence_channel() -> (
         while let Some(message) = rx.recv().await {
             match message {
                 PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
-                    let _ = observed_tx.send(PersistenceMsg::Timeline(event));
+                    let (observed_reply, _observed_ack) = tokio::sync::oneshot::channel();
+                    let _ = observed_tx.send(PersistenceMsg::TimelineDurablyAndAck {
+                        event,
+                        respond_to: observed_reply,
+                    });
                     let _ = respond_to.send(Ok(()));
                 }
                 other => {

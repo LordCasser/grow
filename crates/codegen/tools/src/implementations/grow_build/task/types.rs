@@ -589,6 +589,8 @@ pub enum SubagentSnapshotStatus {
         output: String,
         tool_calls: u32,
         turns: u32,
+        /// Canonical total usage accumulated by the completed child.
+        tokens_used: u64,
         worktree_path: Option<String>,
     },
     /// Child session failed or crashed.
@@ -1332,6 +1334,7 @@ mod tests {
             output: "done".into(),
             tool_calls: 1,
             turns: 1,
+            tokens_used: 1,
             worktree_path: None,
         };
         assert!(status.is_terminal());

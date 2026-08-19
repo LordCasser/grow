@@ -95,6 +95,13 @@ pub enum PruneError {
     Timeline(#[from] TimelineWriteError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalToolResultOutcome {
+    Accepted,
+    RejectedSurfaceChanged,
+    RejectedHeadroom,
+}
+
 /// Failure modes for an explicit Surface integrity repair.
 #[derive(Debug, thiserror::Error)]
 pub enum RepairHistoryError {
@@ -121,6 +128,12 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
 
+    /// Re-run deterministic local recovery after external entities have been
+    /// reconciled, then durably append every newly admissible terminal fact.
+    RecoverInterruptedDurably {
+        reply: oneshot::Sender<Result<Vec<crate::TimelineEvent>, TimelineWriteError>>,
+    },
+
     /// Persist the exact user-message event, then accept it into Timeline.
     PushUserMessageDurably {
         item: ConversationItem,
@@ -138,6 +151,18 @@ pub enum ChatStateCommand {
 
     /// Record a tool result.
     PushToolResult { item: ConversationItem },
+
+    /// Atomically validate frozen context coordinates and append either the
+    /// proposed tool result or a bounded rejection result that still closes
+    /// the provider tool call.
+    PushToolResultConditionally {
+        item: ConversationItem,
+        rejection_item: ConversationItem,
+        expected_surface_revision: u64,
+        max_estimated_total_tokens: u64,
+        max_result_tokens: u64,
+        reply: oneshot::Sender<Result<ConditionalToolResultOutcome, TimelineWriteError>>,
+    },
 
     /// Record accumulated token usage from a streaming response.
     RecordTokenUsage { total_tokens: u64 },

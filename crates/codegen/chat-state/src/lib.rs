@@ -44,8 +44,8 @@ pub use actor::state::{
     estimate_tool_definitions_tokens, estimate_tool_specs_tokens,
 };
 pub use commands::{
-    ImageRewrite, ImageRewriteReport, ModelMetadata, PruneError, PruneReport, RepairHistoryError,
-    TimelineWriteError,
+    ConditionalToolResultOutcome, ImageRewrite, ImageRewriteReport, ModelMetadata, PruneError,
+    PruneReport, RepairHistoryError, TimelineWriteError,
 };
 pub use events::ChatStateEvent;
 pub use handle::ChatStateHandle;

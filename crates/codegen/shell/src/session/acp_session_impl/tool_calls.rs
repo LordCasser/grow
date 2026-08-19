@@ -2887,6 +2887,12 @@ impl SessionActor {
             self.send_update(acp::SessionUpdate::Plan(acp_plan), None)
                 .await;
         }
+        let context_recall_coordinates = match &result.output {
+            ToolsToolOutput::ContextRecall(output) => {
+                Some((output.frozen_surface_revision, output.context_window))
+            }
+            _ => None,
+        };
         let mut prompt_text = if concatenated_json_count > 0 {
             let remaining = concatenated_json_count - 1;
             format!(
@@ -2963,7 +2969,34 @@ impl SessionActor {
                 inline_images,
             )
         };
-        self.chat_state_handle.push_tool_result(tool_chat);
+        if let Some((expected_surface_revision, context_window)) = context_recall_coordinates {
+            let rejection_item = ConversationItem::tool_result(
+                call_id.to_string(),
+                "Context recall was not inserted because the active context changed or no longer has safe headroom. Re-run context_recall if the evidence is still needed.",
+            );
+            let (max_estimated_total_tokens, max_result_tokens) =
+                crate::session::context_recall::context_recall_admission_limits(context_window);
+            let outcome = self
+                .chat_state_handle
+                .push_tool_result_conditionally(
+                    tool_chat,
+                    rejection_item,
+                    expected_surface_revision,
+                    max_estimated_total_tokens,
+                    max_result_tokens,
+                )
+                .await
+                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+            if outcome != chat_state::ConditionalToolResultOutcome::Accepted {
+                tracing::info!(
+                    session_id = %self.session_info.id,
+                    ?outcome,
+                    "context recall result rejected at the canonical Surface commit point"
+                );
+            }
+        } else {
+            self.chat_state_handle.push_tool_result(tool_chat);
+        }
         let mut deferred_followups = Vec::new();
         if !extracted_images.is_empty() {
             let count = extracted_images.len();

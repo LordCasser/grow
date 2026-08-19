@@ -9,8 +9,8 @@ use sampling_types::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::{
-    ChatStateCommand, ImageRewrite, ImageRewriteReport, PruneError, PruneReport,
-    RepairHistoryError, TimelineWriteError,
+    ChatStateCommand, ConditionalToolResultOutcome, ImageRewrite, ImageRewriteReport, PruneError,
+    PruneReport, RepairHistoryError, TimelineWriteError,
 };
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
@@ -62,6 +62,16 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
+    pub async fn recover_interrupted_durably(
+        &self,
+    ) -> Result<Vec<crate::TimelineEvent>, TimelineWriteError> {
+        self.query("RecoverInterruptedDurably", |reply| {
+            ChatStateCommand::RecoverInterruptedDurably { reply }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
     /// Push a user message and return only after its Timeline event is durable.
     pub async fn push_user_message_durably(
         &self,
@@ -95,6 +105,28 @@ impl ChatStateHandle {
     /// Record a tool result.
     pub fn push_tool_result(&self, item: ConversationItem) {
         let _ = self.cmd_tx.send(ChatStateCommand::PushToolResult { item });
+    }
+
+    pub async fn push_tool_result_conditionally(
+        &self,
+        item: ConversationItem,
+        rejection_item: ConversationItem,
+        expected_surface_revision: u64,
+        max_estimated_total_tokens: u64,
+        max_result_tokens: u64,
+    ) -> Result<ConditionalToolResultOutcome, TimelineWriteError> {
+        self.query("PushToolResultConditionally", |reply| {
+            ChatStateCommand::PushToolResultConditionally {
+                item,
+                rejection_item,
+                expected_surface_revision,
+                max_estimated_total_tokens,
+                max_result_tokens,
+                reply,
+            }
+        })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
     /// Record accumulated token usage.

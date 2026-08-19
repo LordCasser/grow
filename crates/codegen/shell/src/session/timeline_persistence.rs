@@ -25,10 +25,6 @@ impl ChannelTimelinePersistence {
 }
 
 impl TimelinePersistence for ChannelTimelinePersistence {
-    fn persist_timeline_event(&mut self, event: &TimelineEvent) {
-        let _ = self.tx.send(PersistenceMsg::Timeline(event.clone()));
-    }
-
     fn persist_timeline_event_and_ack(
         &mut self,
         event: &TimelineEvent,
@@ -62,17 +58,18 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn channel_persistence_sends_timeline_events() {
+    async fn channel_persistence_sends_acknowledged_timeline_events() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut persistence = ChannelTimelinePersistence::new(tx);
         let timeline =
             chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user("test")])
                 .unwrap();
-        persistence.persist_timeline_event(&timeline.events()[0]);
+        let acknowledgement = persistence.persist_timeline_event_and_ack(&timeline.events()[0]);
         assert!(matches!(
             rx.recv().await.unwrap(),
-            PersistenceMsg::Timeline(_)
+            PersistenceMsg::TimelineDurablyAndAck { .. }
         ));
+        drop(acknowledgement);
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use bm25::{Language, SearchEngineBuilder};
 use sampling_types::{ConversationItem, ConversationRequest};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
-use tools::implementations::context_recall::ContextRecallBackend;
+use tools::implementations::context_recall::{ContextRecallBackend, ContextRecallOutput};
 
 use crate::session::SessionActor;
 use crate::session::sideband::{SidebandSource, sideband_backend, sideband_finish, sideband_usage};
@@ -27,7 +27,7 @@ pub(crate) struct ContextRecallRequest {
     call_id: String,
     query: String,
     cancellation: tokio_util::sync::CancellationToken,
-    reply: oneshot::Sender<Result<String, String>>,
+    reply: oneshot::Sender<Result<ContextRecallOutput, String>>,
 }
 
 pub(crate) type ContextRecallReceiver = mpsc::Receiver<ContextRecallRequest>;
@@ -50,7 +50,7 @@ impl ContextRecallBackend for ShellContextRecallBackend {
         call_id: &str,
         query: &str,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ContextRecallOutput, Box<dyn std::error::Error + Send + Sync>> {
         if cancellation.is_cancelled() {
             return Err(
                 std::io::Error::other("context recall was cancelled before queueing").into(),
@@ -124,7 +124,7 @@ impl SessionActor {
         call_id: &str,
         query: &str,
         cancellation: &tokio_util::sync::CancellationToken,
-    ) -> Result<String, String> {
+    ) -> Result<ContextRecallOutput, String> {
         if cancellation.is_cancelled() {
             return Err("context recall was cancelled before execution".into());
         }
@@ -189,20 +189,11 @@ impl SessionActor {
             let result = format!(
                 "Recalled topic: {query}\n\nRecalled content:\nNo relevant archived evidence was found."
             );
-            if !self
-                .context_recall_result_is_safe(
-                    result.as_str(),
-                    materialized.surface_revision,
-                    context_window,
-                )
-                .await?
-            {
-                return Err(
-                    "context changed while recall was running; no recall result was inserted"
-                        .into(),
-                );
-            }
-            return Ok(result);
+            return Ok(ContextRecallOutput {
+                text: result,
+                frozen_surface_revision: materialized.surface_revision,
+                context_window,
+            });
         }
 
         if cancellation.is_cancelled() {
@@ -386,20 +377,11 @@ impl SessionActor {
                 .await
                 .map_err(|error| error.to_string())?;
 
-            if !self
-                .context_recall_result_is_safe(
-                    result.as_str(),
-                    materialized.surface_revision,
-                    context_window,
-                )
-                .await?
-            {
-                return Err(
-                    "context changed while recall was running; the archived result was kept but cannot be inserted safely"
-                        .into(),
-                );
-            }
-            return Ok(result);
+            return Ok(ContextRecallOutput {
+                text: result,
+                frozen_surface_revision: materialized.surface_revision,
+                context_window,
+            });
         }
 
         let message = "context recall exhausted its bounded synthesis attempts".to_string();
@@ -409,25 +391,6 @@ impl SessionActor {
             .map_err(|record_error| record_error.to_string())?;
         Err(message)
     }
-
-    async fn context_recall_result_is_safe(
-        &self,
-        result: &str,
-        frozen_revision: u64,
-        context_window: u64,
-    ) -> Result<bool, String> {
-        let current_revision = self
-            .chat_state_handle
-            .get_surface_revision()
-            .await
-            .ok_or_else(|| "chat-state actor is unavailable after context recall".to_string())?;
-        let current_parent_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-        let safe_return_budget =
-            context_recall_output_budget(context_window, current_parent_tokens, 0);
-        let result_tokens = chat_state::estimate_item_tokens(&ConversationItem::user(result));
-        Ok(current_revision == frozen_revision
-            && safe_return_budget.is_some_and(|budget| result_tokens <= u64::from(budget)))
-    }
 }
 
 fn context_recall_output_budget(
@@ -435,13 +398,25 @@ fn context_recall_output_budget(
     parent_tokens: u64,
     wrapper_tokens: u64,
 ) -> Option<u32> {
-    let next_turn_reserve = context_window.saturating_div(20).clamp(2_048, 16_384);
+    let (max_estimated_total_tokens, max_result_tokens) =
+        context_recall_admission_limits(context_window);
     let budget = context_window
+        .min(max_estimated_total_tokens)
         .saturating_sub(parent_tokens)
-        .saturating_sub(next_turn_reserve)
         .saturating_sub(wrapper_tokens)
-        .min(MAX_RECALL_OUTPUT_TOKENS);
+        .min(max_result_tokens);
     (budget >= MIN_RECALL_OUTPUT_TOKENS).then_some(budget as u32)
+}
+
+/// The same coordinates are used both while synthesizing recall and at the
+/// actor-owned conditional commit point. Keeping the policy here prevents the
+/// shell from admitting a result under a looser budget than the sampler used.
+pub(crate) fn context_recall_admission_limits(context_window: u64) -> (u64, u64) {
+    let next_turn_reserve = context_window.saturating_div(20).clamp(2_048, 16_384);
+    (
+        context_window.saturating_sub(next_turn_reserve),
+        MAX_RECALL_OUTPUT_TOKENS,
+    )
 }
 
 fn context_recall_archive_budget(

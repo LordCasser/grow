@@ -293,6 +293,7 @@ impl SubagentSnapshotDto {
                 output,
                 tool_calls,
                 turns,
+                tokens_used: _,
                 worktree_path,
             } => {
                 dto.status = "completed".into();
@@ -594,6 +595,7 @@ mod tests {
                 output: "Done, refactored 3 files.".into(),
                 tool_calls: 8,
                 turns: 2,
+                tokens_used: 0,
                 worktree_path: None,
             },
         };
@@ -721,6 +723,7 @@ mod tests {
                 output: "Refactored 3 files.".into(),
                 tool_calls: 7,
                 turns: 2,
+                tokens_used: 0,
                 worktree_path: None,
             },
         };

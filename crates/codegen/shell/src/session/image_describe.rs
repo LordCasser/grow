@@ -271,10 +271,11 @@ pub fn persist_user_images(
     if images.is_empty() {
         return Ok(Vec::new());
     }
-    let assets_dir = crate::session::storage::create_contained_dir_all(
+    let assets_dir = crate::session::storage::ContainedDirectory::open(
         session_dir,
         Path::new("assets"),
         "session image asset directory",
+        true,
     )?;
     let mut out = Vec::with_capacity(images.len());
     for img in images {
@@ -283,17 +284,14 @@ pub fn persist_user_images(
             .map_err(|e| std::io::Error::other(format!("base64 decode: {e}")))?;
         let ext = mime_to_extension(&img.mime_type);
         let filename = format!("image-{}.{ext}", uuid::Uuid::new_v4());
-        let path = assets_dir.join(&filename);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
-        }
-        let mut file = options.open(&path)?;
-        std::io::Write::write_all(&mut file, &bytes)?;
-        out.push(path);
+        assets_dir.write_atomic(std::ffi::OsStr::new(&filename), &bytes, true, false)?;
+        #[cfg(not(unix))]
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "handle-relative image storage is unsupported on this platform",
+        ));
+        out.push(session_dir.join("assets").join(filename));
     }
     Ok(out)
 }

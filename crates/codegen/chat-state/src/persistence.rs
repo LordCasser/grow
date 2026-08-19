@@ -20,9 +20,6 @@ use crate::TimelineEvent;
 /// (which only needs `&self` to send, but `&mut self` is still correct
 /// because the actor is the sole owner).
 pub trait TimelinePersistence: Send + 'static {
-    /// Append one immutable conversation fact to the durable timeline.
-    fn persist_timeline_event(&mut self, event: &TimelineEvent);
-
     /// Durably append one immutable fact and acknowledge its commit.
     fn persist_timeline_event_and_ack(
         &mut self,
@@ -52,6 +49,7 @@ pub enum PersistenceRecord {
 pub struct MockTimelinePersistence {
     tx: mpsc::UnboundedSender<PersistenceRecord>,
     timeline_ack_tx: Option<mpsc::UnboundedSender<oneshot::Sender<io::Result<()>>>>,
+    automatic_acks_remaining: usize,
 }
 
 /// Receiver side of the mock. Held by the test to drain and inspect records.
@@ -69,6 +67,7 @@ impl MockTimelinePersistence {
             Self {
                 tx,
                 timeline_ack_tx: None,
+                automatic_acks_remaining: 0,
             },
             MockPersistenceReceiver {
                 rx,
@@ -79,12 +78,22 @@ impl MockTimelinePersistence {
 
     /// Create a mock whose durable Timeline acknowledgement is test-controlled.
     pub fn new_with_manual_timeline_ack() -> (Self, MockPersistenceReceiver) {
+        Self::new_with_manual_timeline_ack_after(0)
+    }
+
+    /// Create a manual-ack mock while automatically acknowledging an initial
+    /// bootstrap prefix. This lets actor tests control the first live write
+    /// without weakening the durability of seed events.
+    pub fn new_with_manual_timeline_ack_after(
+        automatic_acks: usize,
+    ) -> (Self, MockPersistenceReceiver) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (timeline_ack_tx, timeline_ack_rx) = mpsc::unbounded_channel();
         (
             Self {
                 tx,
                 timeline_ack_tx: Some(timeline_ack_tx),
+                automatic_acks_remaining: automatic_acks,
             },
             MockPersistenceReceiver {
                 rx,
@@ -116,10 +125,6 @@ impl MockPersistenceReceiver {
 }
 
 impl TimelinePersistence for MockTimelinePersistence {
-    fn persist_timeline_event(&mut self, event: &TimelineEvent) {
-        let _ = self.tx.send(PersistenceRecord::Timeline(event.clone()));
-    }
-
     fn persist_timeline_event_and_ack(
         &mut self,
         event: &TimelineEvent,
@@ -131,6 +136,9 @@ impl TimelinePersistence for MockTimelinePersistence {
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mock persistence closed"));
         if let Err(error) = result {
             let _ = reply.send(Err(error));
+        } else if self.automatic_acks_remaining > 0 {
+            self.automatic_acks_remaining -= 1;
+            let _ = reply.send(Ok(()));
         } else if let Some(ack_tx) = &self.timeline_ack_tx {
             let _ = ack_tx.send(reply);
         } else {
@@ -152,8 +160,6 @@ impl TimelinePersistence for MockTimelinePersistence {
 pub struct NullTimelinePersistence;
 
 impl TimelinePersistence for NullTimelinePersistence {
-    fn persist_timeline_event(&mut self, _event: &TimelineEvent) {}
-
     fn persist_timeline_event_and_ack(
         &mut self,
         _event: &TimelineEvent,

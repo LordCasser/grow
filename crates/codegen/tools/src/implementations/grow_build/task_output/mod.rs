@@ -602,6 +602,7 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             output,
             tool_calls,
             turns,
+            tokens_used: _,
             worktree_path,
         } => {
             let mut output = format!(
@@ -2002,6 +2003,7 @@ mod tests {
                         output: "Found 3 files".to_string(),
                         tool_calls: 5,
                         turns: 2,
+                        tokens_used: 0,
                         worktree_path: None,
                     },
                     started_at_epoch_ms: 1_700_000_000_000,

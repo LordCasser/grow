@@ -233,43 +233,39 @@ impl JsonlStorageAdapter {
             SessionDirMode::Explicit(dir) => dir.clone(),
         }
     }
-    fn ensure_cwd_marker(directory: &Path, cwd: &str) -> io::Result<()> {
+    fn ensure_cwd_marker(directory: &super::ContainedDirectory, cwd: &str) -> io::Result<()> {
         if cwd.len() as u64 > super::MAX_SESSION_SUMMARY_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "session cwd exceeds the storage metadata limit",
             ));
         }
-        let path = directory.join(".cwd");
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
-        }
-        match options.open(&path) {
-            Ok(mut file) => {
-                file.write_all(cwd.as_bytes())?;
-                file.sync_all()?;
-                crate::util::secure_file::ensure_owner_only_permissions(&path)?;
-                super::sync_directory(directory)
-            }
+        match directory.write_atomic(std::ffi::OsStr::new(".cwd"), cwd.as_bytes(), true, false) {
+            Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let existing = super::read_bounded_regular_file(
-                    &path,
+                let existing = directory.read_bounded(
+                    std::ffi::OsStr::new(".cwd"),
                     "session cwd marker",
                     super::MAX_SESSION_SUMMARY_BYTES,
                 )?;
                 if existing != cwd.as_bytes() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("session cwd marker conflicts with {}", path.display()),
+                        "session cwd marker conflicts with the requested cwd",
                     ));
                 }
                 Ok(())
             }
             Err(error) => Err(error),
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (directory, cwd);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "handle-relative session metadata is unsupported on this platform",
+            ))
         }
     }
     fn ensure_storage_root(root: &Path) -> io::Result<()> {
@@ -293,15 +289,16 @@ impl JsonlStorageAdapter {
             SessionDirMode::FromRoot(root) => {
                 Self::ensure_storage_root(root)?;
                 let encoded = crate::util::grow_home::encode_cwd_dirname(&info.cwd);
-                let directory = super::create_contained_dir_all(
+                let directory = super::ContainedDirectory::open(
                     root,
                     &Path::new("sessions").join(&encoded),
                     "session storage directory",
+                    true,
                 )?;
                 if encoded != urlencoding::encode(&info.cwd).as_ref() {
                     Self::ensure_cwd_marker(&directory, &info.cwd)?;
                 }
-                Ok(directory)
+                Ok(root.join("sessions").join(encoded))
             }
             SessionDirMode::Explicit(dir) => {
                 let parent = dir.parent().ok_or_else(|| {
@@ -494,13 +491,17 @@ impl JsonlStorageAdapter {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         line.push(b'\n');
         tokio::task::spawn_blocking(move || {
-            let parent = super::create_contained_dir_all(
+            let parent = super::ContainedDirectory::open(
                 &session_dir,
-                &Path::new(super::SIDEBANDS_DIR).join(sideband_id),
+                &Path::new(super::SIDEBANDS_DIR).join(&sideband_id),
                 "sideband Timeline directory",
+                true,
             )?;
-            let path = parent.join(super::TIMELINE_FILE);
-            Self::append_sideband_line_sync(&path, line, event_seq, durability)
+            let path = session_dir
+                .join(super::SIDEBANDS_DIR)
+                .join(&sideband_id)
+                .join(super::TIMELINE_FILE);
+            Self::append_sideband_line_sync(&parent, &path, line, event_seq, durability)
         })
         .await
         .map_err(io::Error::other)?
@@ -573,10 +574,27 @@ impl JsonlStorageAdapter {
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "Timeline path has no parent")
         })?;
-        super::require_regular_directory(parent, "Timeline directory")?;
-        let lock = Self::lock_append(path)?;
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Timeline path has no file name",
+            )
+        })?;
+        let directory =
+            super::ContainedDirectory::open(parent, Path::new(""), "Timeline directory", false)?;
+        #[cfg(not(unix))]
+        {
+            let _ = (directory, name, line, event_seq, durability);
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "handle-relative Timeline storage is unsupported on this platform",
+            ));
+        }
+        #[cfg(unix)]
+        let lock = Self::lock_append_contained(&directory, name, path)?;
+        #[cfg(unix)]
         let result = (|| {
-            let mut file = super::open_read_write_create_nofollow(path)?;
+            let mut file = directory.open_read_write_create(name)?;
             let (complete_len, last_line) = Self::read_timeline_tail(&mut file)?;
             let original_len = file.metadata()?.len();
             if complete_len != original_len {
@@ -602,7 +620,7 @@ impl JsonlStorageAdapter {
                         if matches!(durability, AppendDurability::Durable) {
                             Self::sync_file_durable(&file)?;
                             drop(file);
-                            Self::sync_parent_directory(path)?;
+                            directory.sync()?;
                         }
                         return Ok(());
                     }
@@ -633,15 +651,19 @@ impl JsonlStorageAdapter {
             if matches!(durability, AppendDurability::Durable) {
                 Self::sync_file_durable(&file)?;
                 drop(file);
-                Self::sync_parent_directory(path)?;
+                directory.sync()?;
             }
             Ok(())
         })();
-        let _ = lock.unlock();
-        result
+        #[cfg(unix)]
+        {
+            let _ = lock.unlock();
+            result
+        }
     }
 
     fn append_sideband_line_sync(
+        directory: &super::ContainedDirectory,
         path: &Path,
         line: Vec<u8>,
         event_seq: u64,
@@ -649,16 +671,24 @@ impl JsonlStorageAdapter {
     ) -> io::Result<()> {
         debug_assert!(line.ends_with(b"\n"));
         Self::validate_jsonl_line_size(&line, "sideband event")?;
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "sideband Timeline has no parent",
-            )
-        })?;
-        super::require_regular_directory(parent, "sideband Timeline directory")?;
-        let lock = Self::lock_append(path)?;
+        #[cfg(not(unix))]
+        {
+            let _ = (directory, path, line, event_seq, durability);
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "handle-relative sideband storage is unsupported on this platform",
+            ));
+        }
+        #[cfg(unix)]
+        let lock = Self::lock_append_contained(
+            directory,
+            std::ffi::OsStr::new(super::TIMELINE_FILE),
+            path,
+        )?;
+        #[cfg(unix)]
         let result = (|| {
-            let mut file = super::open_read_write_create_nofollow(path)?;
+            let mut file =
+                directory.open_read_write_create(std::ffi::OsStr::new(super::TIMELINE_FILE))?;
             let (complete_len, last_line) = Self::read_timeline_tail(&mut file)?;
             let original_len = file.metadata()?.len();
             if complete_len != original_len {
@@ -686,7 +716,7 @@ impl JsonlStorageAdapter {
                         if matches!(durability, AppendDurability::Durable) {
                             Self::sync_file_durable(&file)?;
                             drop(file);
-                            Self::sync_parent_directory(path)?;
+                            directory.sync()?;
                         }
                         return Ok(());
                     }
@@ -720,23 +750,15 @@ impl JsonlStorageAdapter {
             if matches!(durability, AppendDurability::Durable) {
                 Self::sync_file_durable(&file)?;
                 drop(file);
-                Self::sync_parent_directory(path)?;
+                directory.sync()?;
             }
             Ok(())
         })();
-        let _ = lock.unlock();
-        result?;
-        if matches!(durability, AppendDurability::Durable) && event_seq == 0 {
-            // `create_dir_all` may have created both `sidebands/` and the UUID
-            // directory. Persist each new directory entry outward so an
-            // acknowledged request survives a power loss, not only the file
-            // contents inside the innermost directory.
-            Self::sync_parent_directory(parent)?;
-            if let Some(sidebands_dir) = parent.parent() {
-                Self::sync_parent_directory(sidebands_dir)?;
-            }
+        #[cfg(unix)]
+        {
+            let _ = lock.unlock();
+            result
         }
-        Ok(())
     }
 
     /// Return the committed byte length and final complete JSONL record without
@@ -818,23 +840,70 @@ impl JsonlStorageAdapter {
     /// the torn record is terminated as its own (single) corrupt line. This
     /// bounds the damage of any torn write to exactly one cache record. The
     /// canonical Timeline reader remains fail-closed and never reads this cache.
-    async fn sync_file_path_durable(path: PathBuf) -> io::Result<()> {
-        tokio::task::spawn_blocking(move || {
-            let file = super::open_regular_nofollow(&path, "JSONL ledger")?;
-            Self::sync_file_durable(&file)
-        })
-        .await
-        .map_err(io::Error::other)?
-    }
     fn append_jsonl_line_sync(
         path: &Path,
-        line: Vec<u8>,
+        mut line: Vec<u8>,
         durability: AppendDurability,
     ) -> io::Result<()> {
-        Self::append_jsonl_line_sync_with(path, line, durability, Self::sync_file_durable, || {
-            Self::sync_parent_directory(path)
-        })
+        debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
+        Self::validate_jsonl_line_size(&line, "session update")?;
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "JSONL path has no parent")
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "JSONL path has no file name")
+        })?;
+        let directory =
+            super::ContainedDirectory::open(parent, Path::new(""), "JSONL directory", false)
+                .map_err(|error| {
+                    io::Error::new(error.kind(), format!("open JSONL directory: {error}"))
+                })?;
+        #[cfg(not(unix))]
+        {
+            let _ = (directory, name, line, durability);
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "handle-relative JSONL storage is unsupported on this platform",
+            ));
+        }
+        #[cfg(unix)]
+        let lock = Self::lock_append_contained(&directory, name, path)
+            .map_err(|error| io::Error::new(error.kind(), format!("lock JSONL append: {error}")))?;
+        #[cfg(unix)]
+        let result = (|| {
+            let mut file = directory.open_read_write_create(name).map_err(|error| {
+                io::Error::new(error.kind(), format!("open JSONL ledger: {error}"))
+            })?;
+            let len = file.metadata()?.len();
+            if len > 0 {
+                file.seek(io::SeekFrom::Start(len - 1))?;
+                let mut last = [0u8; 1];
+                file.read_exact(&mut last)?;
+                if last[0] != b'\n' {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "jsonl file has a torn trailing line (previous append crashed mid-write?); terminating it before appending"
+                    );
+                    line.insert(0, b'\n');
+                }
+            }
+            file.seek(io::SeekFrom::End(0))?;
+            file.write_all(&line)?;
+            file.flush()?;
+            if matches!(durability, AppendDurability::Durable) {
+                Self::sync_file_durable(&file)?;
+                drop(file);
+                directory.sync()?;
+            }
+            Ok(())
+        })();
+        #[cfg(unix)]
+        {
+            let _ = lock.unlock();
+            result
+        }
     }
+    #[cfg(test)]
     fn append_jsonl_line_sync_with(
         path: &Path,
         mut line: Vec<u8>,
@@ -894,10 +963,12 @@ impl JsonlStorageAdapter {
     }
     /// Lock tail healing, append, and barriers through `<target>.jsonl.lock`.
     /// Full-file [`Self::write_jsonl`] atomic-rename rewrites bypass this append-only lock.
+    #[cfg(test)]
     fn lock_append(path: &Path) -> io::Result<std::fs::File> {
         Self::lock_append_with_timeout(path, std::time::Duration::from_secs(5))
     }
 
+    #[cfg(test)]
     fn lock_append_with_timeout(
         path: &Path,
         timeout: std::time::Duration,
@@ -919,6 +990,36 @@ impl JsonlStorageAdapter {
                             format!(
                                 "timed out waiting for JSONL append lock: {}",
                                 path.with_extension("jsonl.lock").display()
+                            ),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn lock_append_contained(
+        directory: &super::ContainedDirectory,
+        target_name: &std::ffi::OsStr,
+        display_path: &Path,
+    ) -> io::Result<std::fs::File> {
+        let mut lock_name = target_name.to_os_string();
+        lock_name.push(".lock");
+        let lock = directory.open_read_write_create(&lock_name)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match lock.try_lock_exclusive() {
+                Ok(()) => return Ok(lock),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "timed out waiting for JSONL append lock: {}",
+                                display_path.display()
                             ),
                         ));
                     }

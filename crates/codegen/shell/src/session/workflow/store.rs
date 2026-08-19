@@ -176,11 +176,12 @@ impl WorkflowRunStore {
         }
 
         if let Some(session_dir) = self.session_dir.as_deref() {
-            let run_dir = create_workflow_run_dir(session_dir, run_id)?;
-            crate::session::storage::create_contained_dir_all(
-                &run_dir,
-                Path::new("scripts"),
+            let run_relative = Path::new("workflows").join(run_id);
+            crate::session::storage::ContainedDirectory::open(
+                session_dir,
+                &run_relative.join("scripts"),
                 "Workflow scripts directory",
+                true,
             )?;
             let args_json = serde_json::to_vec_pretty(args).map_err(io::Error::other)?;
             if args_json.len() as u64 > MAX_WORKFLOW_ARGS_BYTES {
@@ -198,9 +199,21 @@ impl WorkflowRunStore {
                     ),
                 ));
             }
-            atomic_write_new(&run_dir.join("args.json"), &args_json)?;
-            atomic_write_new(&script_revision_path(&run_dir, 0), script.as_bytes())?;
-            atomic_write_replace(&run_dir.join("script.rhai"), script.as_bytes())?;
+            crate::session::storage::write_contained_new_durable(
+                session_dir,
+                &run_relative.join("args.json"),
+                &args_json,
+            )?;
+            crate::session::storage::write_contained_new_durable(
+                session_dir,
+                &run_relative.join("scripts/0000.rhai"),
+                script.as_bytes(),
+            )?;
+            crate::session::storage::write_contained_atomic_durable(
+                session_dir,
+                &run_relative.join("script.rhai"),
+                script.as_bytes(),
+            )?;
         }
 
         self.sources.lock().insert(
@@ -234,11 +247,10 @@ impl WorkflowRunStore {
                 "workflow state has no registered resume source",
             ));
         };
-        let Some(run_dir) = self.run_dir(&state.run_id) else {
+        let Some(session_dir) = self.session_dir.as_deref() else {
             return Ok(());
         };
-        let json = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
-        atomic_write_replace(&run_dir.join("state.json"), &json)
+        write_workflow_run_manifest(session_dir, &manifest)
     }
 
     pub(crate) fn persist(&self, state: &WorkflowRunState) -> io::Result<()> {
@@ -347,44 +359,40 @@ pub(crate) fn script_revision_path(run_dir: &Path, revision: u32) -> PathBuf {
     run_dir.join("scripts").join(format!("{revision:04}.rhai"))
 }
 
-fn create_workflow_run_dir(session_dir: &Path, run_id: &str) -> io::Result<PathBuf> {
-    validate_run_id(run_id)?;
-    crate::session::storage::create_contained_dir_all(
-        session_dir,
-        &Path::new("workflows").join(run_id),
-        "Workflow run directory",
-    )
-}
-
-fn cleared_marker_exists(run_dir: &Path) -> io::Result<bool> {
-    let path = run_dir.join("cleared");
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Workflow cleared marker is not a regular file: {}",
-                    path.display()
-                ),
-            ))
-        }
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
 pub(crate) fn write_workflow_run_manifest(
     session_dir: &Path,
     manifest: &WorkflowRunManifest,
 ) -> io::Result<()> {
     let run_id = &manifest.state.run_id;
-    let run_dir = create_workflow_run_dir(session_dir, run_id)?;
-    if cleared_marker_exists(&run_dir)? {
+    validate_run_id(run_id)?;
+    let run_relative = Path::new("workflows").join(run_id);
+    let run_dir = crate::session::storage::ContainedDirectory::open(
+        session_dir,
+        &run_relative,
+        "Workflow run directory",
+        true,
+    )?;
+    #[cfg(unix)]
+    let cleared = match run_dir.read_bounded(
+        std::ffi::OsStr::new("cleared"),
+        "Workflow cleared marker",
+        0,
+    ) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    #[cfg(not(unix))]
+    let cleared = false;
+    if cleared {
         return Ok(());
     }
-    let target = run_dir.join("state.json");
-    match read_bounded_nofollow(&target, MAX_WORKFLOW_MANIFEST_BYTES) {
+    #[cfg(unix)]
+    match run_dir.read_bounded(
+        std::ffi::OsStr::new("state.json"),
+        "Workflow manifest",
+        MAX_WORKFLOW_MANIFEST_BYTES,
+    ) {
         Ok(existing) => {
             let on_disk: WorkflowRunManifest = serde_json::from_slice(&existing)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -414,27 +422,30 @@ pub(crate) fn write_workflow_run_manifest(
             format!("Workflow manifest exceeds {MAX_WORKFLOW_MANIFEST_BYTES} bytes"),
         ));
     }
-    atomic_write_replace(&target, &json)
+    crate::session::storage::write_contained_atomic_durable(
+        session_dir,
+        &run_relative.join("state.json"),
+        &json,
+    )
 }
 
 pub(crate) fn tombstone_workflow_run(session_dir: &Path, run_id: &str) -> io::Result<()> {
-    let run_dir = create_workflow_run_dir(session_dir, run_id)?;
-    atomic_write_replace(&run_dir.join("cleared"), b"")?;
-    let manifest = run_dir.join("state.json");
-    match std::fs::symlink_metadata(&manifest) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Workflow manifest is not a regular file: {}",
-                    manifest.display()
-                ),
-            ));
-        }
-        Ok(_) => {
-            std::fs::remove_file(&manifest)?;
-            crate::session::storage::sync_directory(&run_dir)?;
-        }
+    validate_run_id(run_id)?;
+    let run_relative = Path::new("workflows").join(run_id);
+    crate::session::storage::write_contained_atomic_durable(
+        session_dir,
+        &run_relative.join("cleared"),
+        b"",
+    )?;
+    let run_dir = crate::session::storage::ContainedDirectory::open(
+        session_dir,
+        &run_relative,
+        "Workflow run directory",
+        false,
+    )?;
+    #[cfg(unix)]
+    match run_dir.remove_file(std::ffi::OsStr::new("state.json"), true) {
+        Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -495,55 +506,6 @@ pub(crate) fn read_bounded_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u
         ));
     }
     Ok(bytes)
-}
-
-fn atomic_write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("immutable workflow file already exists: {}", path.display()),
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "Workflow path has no parent")
-    })?;
-    crate::session::storage::require_regular_directory(parent, "Workflow artifact directory")?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Workflow path is not UTF-8"))?;
-    let tmp = parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        uuid::Uuid::now_v7().simple()
-    ));
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&tmp)?;
-        file.write_all(bytes)?;
-        crate::session::storage::sync_file_durable(&file)?;
-        drop(file);
-        crate::session::storage::rename_no_replace(&tmp, path)?;
-        crate::session::storage::sync_directory(parent)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
-fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    crate::session::storage::write_bytes_atomic_durable(path, bytes)
 }
 
 #[cfg(test)]

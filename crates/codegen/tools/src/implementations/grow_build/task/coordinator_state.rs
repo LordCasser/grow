@@ -616,6 +616,7 @@ pub(super) fn completed_snapshot(
                 .unwrap_or_else(|| child.result.output.to_string()),
             tool_calls: child.result.tool_calls,
             turns: child.result.turns,
+            tokens_used: child.result.total_tokens_used,
             worktree_path: child.result.worktree_path.clone(),
         }
     } else {

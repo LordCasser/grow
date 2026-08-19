@@ -7,8 +7,8 @@ use sampling_types::{
 
 use super::ChatStateActor;
 use super::request_builder::HARD_CLEAR_PLACEHOLDER;
+use crate::MessageCause;
 use crate::events::ChatStateEvent;
-use crate::{MessageCause, TimelineEvent};
 
 /// Static string label for tracing on `ConversationItem` (avoids pulling
 /// the `Role` enum into the format string).
@@ -45,18 +45,13 @@ fn message_cause(item: &ConversationItem) -> MessageCause {
 pub(super) const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
 
 impl ChatStateActor {
-    fn persist_timeline_event(&mut self, event: TimelineEvent) {
-        self.persistence.persist_timeline_event(&event);
-    }
-
-    fn append_message_fact(&mut self, item: ConversationItem) {
+    async fn append_message_fact(&mut self, item: ConversationItem) -> bool {
         let cause = message_cause(&item);
-        let event = self
-            .state
-            .timeline
+        let mut candidate = self.state.timeline.clone();
+        let event = candidate
             .append(item.clone(), cause)
             .expect("an assembled conversation item must append to the timeline");
-        self.persist_timeline_event(event);
+        self.commit_buffered_timeline_event(event).await
     }
 
     /// Repair any dangling tool calls in the conversation and persist the fix.
@@ -76,7 +71,7 @@ impl ChatStateActor {
     /// Do NOT call from read handlers — background tasks run concurrently with
     /// tool execution and would misidentify in-flight calls as dangling.
     /// Repair dangling/duplicate tool results through the buffered append path.
-    pub(super) fn ensure_conversation_integrity_with_reason(
+    pub(super) async fn ensure_conversation_integrity_with_reason(
         &mut self,
         reason: DanglingToolCallReason,
     ) {
@@ -94,7 +89,8 @@ impl ChatStateActor {
                 repaired_count = repaired,
                 "Repaired dangling tool calls in conversation"
             );
-            self.install_conversation_buffered(conversation, MessageCause::IntegrityRepair);
+            self.install_conversation_buffered(conversation, MessageCause::IntegrityRepair)
+                .await;
         }
     }
 
@@ -121,10 +117,11 @@ impl ChatStateActor {
     }
 
     /// Repair dangling tool calls after a harness-initiated halt.
-    pub(super) fn repair_dangling_after_harness_halt(&mut self, class: &'static str) {
+    pub(super) async fn repair_dangling_after_harness_halt(&mut self, class: &'static str) {
         self.ensure_conversation_integrity_with_reason(DanglingToolCallReason::HarnessHalted {
             class,
-        });
+        })
+        .await;
     }
 
     /// Out-of-band history repair (`grow/session/repair`): run
@@ -161,8 +158,11 @@ impl ChatStateActor {
     }
 
     /// Push any conversation item (user, assistant, or tool result) and persist it.
-    pub(super) fn push_message(&mut self, item: ConversationItem) {
+    pub(super) async fn push_message(&mut self, item: ConversationItem) {
         let count_in_delta = !matches!(item, ConversationItem::Assistant(_));
+        if !self.append_message_fact(item.clone()).await {
+            return;
+        }
         if count_in_delta {
             let estimated_tokens = super::state::estimate_item_tokens(&item);
             self.state.estimated_tokens_since_model += estimated_tokens;
@@ -174,7 +174,42 @@ impl ChatStateActor {
                 "ChatState: push_message updated estimated_tokens_since_model"
             );
         }
-        self.append_message_fact(item);
+    }
+
+    pub(super) async fn push_tool_result_conditionally(
+        &mut self,
+        item: ConversationItem,
+        rejection_item: ConversationItem,
+        expected_surface_revision: u64,
+        max_estimated_total_tokens: u64,
+        max_result_tokens: u64,
+    ) -> Result<crate::commands::ConditionalToolResultOutcome, crate::commands::TimelineWriteError>
+    {
+        use crate::commands::ConditionalToolResultOutcome;
+
+        let actual_revision = self.state.timeline.surface_revision();
+        let current_tokens = self.state.total_tokens + self.state.estimated_tokens_since_model;
+        let item_tokens = super::state::estimate_item_tokens(&item);
+        let outcome = if actual_revision != expected_surface_revision {
+            ConditionalToolResultOutcome::RejectedSurfaceChanged
+        } else if item_tokens > max_result_tokens
+            || current_tokens.saturating_add(item_tokens) > max_estimated_total_tokens
+        {
+            ConditionalToolResultOutcome::RejectedHeadroom
+        } else {
+            ConditionalToolResultOutcome::Accepted
+        };
+        let selected = if outcome == ConditionalToolResultOutcome::Accepted {
+            item
+        } else {
+            rejection_item
+        };
+        let selected_tokens = super::state::estimate_item_tokens(&selected);
+        let mut candidate = self.state.timeline.clone();
+        let event = candidate.append(selected, MessageCause::ToolResult)?;
+        self.commit_timeline_event(event).await?;
+        self.state.estimated_tokens_since_model += selected_tokens;
+        Ok(outcome)
     }
 
     /// Push a user message, ensuring conversation integrity first.
@@ -187,8 +222,9 @@ impl ChatStateActor {
     /// Also runs [`prune_retained_conversation`] to eagerly hard-clear very
     /// old tool results from the in-memory state, bounding long-session
     /// retained memory without waiting for the context-window threshold.
-    pub(super) fn push_user_message(&mut self, item: ConversationItem) {
-        self.push_user_message_with_repair_reason(item, DanglingToolCallReason::UserCancelled);
+    pub(super) async fn push_user_message(&mut self, item: ConversationItem) {
+        self.push_user_message_with_repair_reason(item, DanglingToolCallReason::UserCancelled)
+            .await;
     }
 
     /// Commit the user-message fact before exposing it through Surface.
@@ -212,17 +248,20 @@ impl ChatStateActor {
             model_reported_total = self.state.total_tokens,
             "ChatState: durable user message updated estimated_tokens_since_model"
         );
-        self.prune_retained_conversation();
+        self.prune_retained_conversation().await;
         Ok(())
     }
 
     /// Like [`Self::push_user_message`] but takes an explicit repair reason.
-    pub(super) fn push_user_message_with_repair_reason(
+    pub(super) async fn push_user_message_with_repair_reason(
         &mut self,
         item: ConversationItem,
         reason: DanglingToolCallReason,
     ) {
-        self.ensure_conversation_integrity_with_reason(reason);
+        self.ensure_conversation_integrity_with_reason(reason).await;
+        if !self.append_message_fact(item.clone()).await {
+            return;
+        }
         let estimated_tokens = super::state::estimate_item_tokens(&item);
         self.state.estimated_tokens_since_model += estimated_tokens;
         tracing::debug!(
@@ -232,8 +271,7 @@ impl ChatStateActor {
             model_reported_total = self.state.total_tokens,
             "ChatState: push_user_message updated estimated_tokens_since_model"
         );
-        self.append_message_fact(item);
-        self.prune_retained_conversation();
+        self.prune_retained_conversation().await;
     }
 
     /// Eagerly hard-clear tool results from very old turns in the retained
@@ -276,7 +314,7 @@ impl ChatStateActor {
     /// The original node remains in Timeline and only the Surface projection
     /// changes, so rewind can expand the unpruned branch without consulting a
     /// second replay log.
-    pub(super) fn prune_retained_conversation(&mut self) -> usize {
+    pub(super) async fn prune_retained_conversation(&mut self) -> usize {
         if !self.pruning_config.enabled {
             return 0;
         }
@@ -340,12 +378,13 @@ impl ChatStateActor {
         }
 
         if cleared > 0 {
-            let event = self
-                .state
-                .timeline
+            let mut candidate = self.state.timeline.clone();
+            let event = candidate
                 .replace_all(conversation, MessageCause::ToolResultPrune)
                 .expect("retained tool-result identities must remain stable");
-            self.persist_timeline_event(event);
+            if !self.commit_buffered_timeline_event(event).await {
+                return 0;
+            }
             let after_bytes = self.conversation_content_bytes();
             tracing::debug!(
                 hard_cleared = cleared,
@@ -664,18 +703,23 @@ impl ChatStateActor {
     /// Install one complete Surface through the buffered Timeline append path.
     /// This is reserved for buffered turn writes; acknowledged boundaries use
     /// [`Self::replace_conversation_durably`].
-    fn install_conversation_buffered(&mut self, items: Vec<ConversationItem>, cause: MessageCause) {
+    async fn install_conversation_buffered(
+        &mut self,
+        items: Vec<ConversationItem>,
+        cause: MessageCause,
+    ) {
         let pre_replace_total = self.state.total_tokens;
         let surface_changed = serde_json::to_value(self.state.timeline.surface())
             .expect("conversation surface must serialize")
             != serde_json::to_value(&items).expect("replacement surface must serialize");
         if surface_changed {
-            let event = self
-                .state
-                .timeline
+            let mut candidate = self.state.timeline.clone();
+            let event = candidate
                 .replace_all(items, cause)
                 .expect("a current surface must accept a complete replacement");
-            self.persist_timeline_event(event);
+            if !self.commit_buffered_timeline_event(event).await {
+                return;
+            }
         }
         self.refresh_surface_projection(false, pre_replace_total);
     }

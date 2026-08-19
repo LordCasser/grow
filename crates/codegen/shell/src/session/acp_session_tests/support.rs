@@ -248,7 +248,11 @@ pub(crate) async fn create_test_actor_ex(
                     let _ = respond_to.send(Ok(()));
                 }
                 PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
-                    let _ = persistence_tx.send(PersistenceMsg::Timeline(event));
+                    let (observed_reply, _observed_ack) = tokio::sync::oneshot::channel();
+                    let _ = persistence_tx.send(PersistenceMsg::TimelineDurablyAndAck {
+                        event,
+                        respond_to: observed_reply,
+                    });
                     let _ = respond_to.send(Ok(()));
                 }
                 other => {

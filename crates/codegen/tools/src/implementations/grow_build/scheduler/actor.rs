@@ -1968,6 +1968,7 @@ mod tests {
             output: "ci green".into(),
             tool_calls: 3,
             turns: 1,
+            tokens_used: 0,
             worktree_path: None,
         };
         query2
@@ -2090,6 +2091,7 @@ mod tests {
                     output: "old task output".into(),
                     tool_calls: 1,
                     turns: 1,
+                    tokens_used: 0,
                     worktree_path: None,
                 },
                 started_at_epoch_ms: 0,
@@ -2239,6 +2241,7 @@ mod tests {
                 output: "ci checked".into(),
                 tool_calls: 1,
                 turns: 1,
+                tokens_used: 0,
                 worktree_path: None,
             },
         )

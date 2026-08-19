@@ -19,6 +19,10 @@ pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub struct EventSeq(u64);
 
 impl EventSeq {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
     pub fn get(self) -> u64 {
         self.0
     }
@@ -642,7 +646,6 @@ pub struct WorkflowLifecycle {
 
 #[derive(Debug, Clone)]
 struct OpenSubagent {
-    child_session_id: String,
     workflow_run_id: Option<String>,
 }
 
@@ -1376,16 +1379,20 @@ impl Timeline {
     /// Append deterministic terminal facts for work left open by an interrupted
     /// process. Physical history is never truncated or rewritten.
     pub fn recover_interrupted(&mut self) -> Result<Vec<TimelineEvent>, TimelineError> {
-        let subagents = self
+        // Subagents are independently durable entities whose backend may
+        // still be running after this process restarts. Only the backend-aware
+        // reconciler may close them. Workflows that own an open child must
+        // remain open for the same reason.
+        let workflows = self
             .lifecycle
-            .open_subagents
+            .workflows
             .iter()
-            .map(|(subagent_id, open)| {
-                (
-                    subagent_id.clone(),
-                    open.child_session_id.clone(),
-                    self.subagent_started_at(subagent_id),
-                )
+            .filter_map(|(run_id, lifecycle)| {
+                (lifecycle.open
+                    && !self.lifecycle.open_subagents.values().any(|subagent| {
+                        subagent.workflow_run_id.as_deref() == Some(run_id.as_str())
+                    }))
+                .then_some((run_id.clone(), lifecycle.execution_epoch))
             })
             .collect::<Vec<_>>();
         if self.lifecycle.active_turn.is_none()
@@ -1393,8 +1400,7 @@ impl Timeline {
             && self.lifecycle.open_requests.is_empty()
             && self.lifecycle.open_tools.is_empty()
             && self.lifecycle.open_compaction.is_none()
-            && self.open_workflow_run_ids().next().is_none()
-            && subagents.is_empty()
+            && workflows.is_empty()
         {
             return Ok(Vec::new());
         }
@@ -1413,16 +1419,6 @@ impl Timeline {
             .map(|(call_id, (_, _, name))| (call_id.clone(), name.clone()))
             .collect::<Vec<_>>();
         let compaction = self.lifecycle.open_compaction.clone();
-        let workflows = self
-            .lifecycle
-            .workflows
-            .iter()
-            .filter_map(|(run_id, lifecycle)| {
-                lifecycle
-                    .open
-                    .then_some((run_id.clone(), lifecycle.execution_epoch))
-            })
-            .collect::<Vec<_>>();
         self.record(TimelineEventKind::Recovery(RecoveryEvent {
             action: "close_interrupted_work".into(),
             correlation_id: self.lifecycle.active_turn.map(|turn| turn.0.to_string()),
@@ -1432,7 +1428,6 @@ impl Timeline {
                 "tools": tools.iter().map(|(id, _)| id).collect::<Vec<_>>(),
                 "compaction": compaction.as_ref().map(|open| &open.id),
                 "workflows": workflows.iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                "subagents": subagents.iter().map(|(id, _, _)| id).collect::<Vec<_>>(),
             })),
         }))?;
         for id in requests {
@@ -1470,22 +1465,6 @@ impl Timeline {
                 }
             };
             self.record(TimelineEventKind::Compaction(terminal))?;
-        }
-        for (subagent_id, child_session_id, started_at_ms) in subagents {
-            self.record(TimelineEventKind::Subagent(SubagentEvent::Ended(
-                SubagentTerminalEvent {
-                    subagent_id,
-                    child_session_id,
-                    outcome: SubagentOutcome::Cancelled,
-                    duration_ms: duration_since(started_at_ms, now),
-                    tool_calls: 0,
-                    turns: 0,
-                    tokens_used: 0,
-                    error: Some("process_interrupted".into()),
-                    result_ref: None,
-                    snapshot_ref: None,
-                },
-            )))?;
         }
         for (run_id, execution_epoch) in workflows {
             let duration_ms =
@@ -1634,20 +1613,6 @@ impl Timeline {
                     run_id: candidate,
                     execution_epoch: epoch,
                 }) if candidate == run_id && *epoch == execution_epoch => Some(event.at_ms),
-                _ => None,
-            })
-    }
-
-    fn subagent_started_at(&self, subagent_id: &str) -> Option<i64> {
-        self.events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn))
-                    if spawn.subagent_id == subagent_id =>
-                {
-                    Some(event.at_ms)
-                }
                 _ => None,
             })
     }
@@ -2458,7 +2423,6 @@ impl LifecycleFold {
                 self.open_subagents.insert(
                     spawn.subagent_id.clone(),
                     OpenSubagent {
-                        child_session_id: spawn.child_session_id.clone(),
                         workflow_run_id: spawn.workflow_run_id.clone(),
                     },
                 );
@@ -3298,7 +3262,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_subagent_is_closed_by_recovery() {
+    fn interrupted_subagent_is_left_open_for_backend_reconciliation() {
         let mut timeline = Timeline::default();
         timeline
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
@@ -3307,17 +3271,23 @@ mod tests {
             .unwrap();
 
         let repairs = timeline.recover_interrupted().unwrap();
-        assert_eq!(repairs.len(), 2);
-        assert!(matches!(
-            repairs.last().map(|event| &event.kind),
-            Some(TimelineEventKind::Subagent(SubagentEvent::Ended(
+        assert!(repairs.is_empty());
+        timeline
+            .record(TimelineEventKind::Subagent(SubagentEvent::Ended(
                 SubagentTerminalEvent {
+                    subagent_id: "sa-recover".into(),
+                    child_session_id: "child-recover".into(),
                     outcome: SubagentOutcome::Cancelled,
-                    error: Some(error),
-                    ..
-                }
-            ))) if error == "process_interrupted"
-        ));
+                    duration_ms: 1,
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 0,
+                    error: Some("backend reconciliation".into()),
+                    result_ref: None,
+                    snapshot_ref: None,
+                },
+            )))
+            .expect("backend reconciliation remains authoritative");
     }
 
     #[test]

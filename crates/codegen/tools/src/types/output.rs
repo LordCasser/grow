@@ -503,6 +503,7 @@ pub enum ToolOutput {
     ),
     FinalizeGoalPlan(crate::implementations::grow_build::update_goal::FinalizeGoalPlanOutput),
     Workflow(crate::implementations::grow_build::workflow::WorkflowToolOutput),
+    ContextRecall(crate::implementations::context_recall::ContextRecallOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
     /// Generic text output for tools that produce simple formatted text
@@ -737,6 +738,7 @@ impl ToolOutput {
             ToolOutput::Workflow(o) => {
                 serde_json::to_string_pretty(o).unwrap_or_else(|_| o.message().to_string())
             }
+            ToolOutput::ContextRecall(output) => output.text.clone(),
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
         }

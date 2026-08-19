@@ -2103,18 +2103,21 @@ pub(crate) fn read_subagent_output(path: &Path) -> Option<String> {
     if artifact_dir.file_name()? != "subagent-output" || artifacts_dir.file_name()? != "artifacts" {
         return None;
     }
-    crate::session::storage::require_contained_directory(
+    let directory = crate::session::storage::ContainedDirectory::open(
         session_dir,
         Path::new("artifacts/subagent-output"),
         "subagent output artifact directory",
+        false,
     )
     .ok()?;
-    let data = crate::session::storage::read_bounded_regular_file(
-        path,
-        "subagent output artifact",
-        crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES,
-    )
-    .ok()?;
+    let file_name = path.file_name()?;
+    let data = directory
+        .read_bounded(
+            file_name,
+            "subagent output artifact",
+            crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES,
+        )
+        .ok()?;
     let expected_hash = path.file_stem()?.to_str()?;
     if blake3::hash(&data).to_hex().as_str() != expected_hash {
         return None;
@@ -2134,7 +2137,10 @@ fn persist_subagent_output(
 }
 const ORPHAN_RECONCILE_REASON: &str = "interrupted by process restart";
 
-fn finish_from_terminal(terminal: &chat_state::SubagentTerminalEvent) -> SessionUpdate {
+fn finish_from_terminal(
+    terminal: &chat_state::SubagentTerminalEvent,
+    output: Option<String>,
+) -> SessionUpdate {
     let status = match terminal.outcome {
         chat_state::SubagentOutcome::Completed => "completed",
         chat_state::SubagentOutcome::Failed => "failed",
@@ -2149,8 +2155,59 @@ fn finish_from_terminal(terminal: &chat_state::SubagentTerminalEvent) -> Session
         turns: terminal.turns,
         duration_ms: terminal.duration_ms,
         tokens_used: terminal.tokens_used,
-        output: None,
+        output,
     }
+}
+
+fn load_subagent_output_ref(child_dir: &Path, output_ref: &str) -> Result<String, String> {
+    const PREFIX: &str = "artifact:subagent-output:blake3:";
+    let hash = output_ref
+        .strip_prefix(PREFIX)
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| format!("invalid subagent output reference: {output_ref}"))?;
+    let path = child_dir
+        .join("artifacts")
+        .join("subagent-output")
+        .join(format!("{hash}.json"));
+    read_subagent_output(&path)
+        .ok_or_else(|| format!("subagent output artifact is missing or corrupt: {output_ref}"))
+}
+
+fn finish_from_durable_facts(
+    parent_timeline_id: &str,
+    spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+    terminal: &chat_state::SubagentTerminalEvent,
+) -> Result<SessionUpdate, String> {
+    if terminal.result_ref.is_none() {
+        return Ok(finish_from_terminal(terminal, None));
+    }
+    let child_dir = crate::session::persistence::find_persisted_session_dir_by_id_result(
+        &spawn.child_session_id,
+    )
+    .map_err(|error| format!("cannot resolve child session: {error}"))?
+    .ok_or_else(|| format!("child session is missing: {}", spawn.child_session_id))?;
+    finish_from_durable_facts_in_dir(parent_timeline_id, spawn_seq, spawn, terminal, &child_dir)
+}
+
+fn finish_from_durable_facts_in_dir(
+    parent_timeline_id: &str,
+    spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+    terminal: &chat_state::SubagentTerminalEvent,
+    child_dir: &Path,
+) -> Result<SessionUpdate, String> {
+    let child = crate::session::storage::read_timeline_in_session_dir(&child_dir)
+        .map_err(|error| format!("cannot validate child Timeline: {error}"))?;
+    let result = child
+        .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
+        .map_err(|error| format!("invalid child result link: {error}"))?;
+    let output = result
+        .output_ref
+        .as_deref()
+        .map(|output_ref| load_subagent_output_ref(&child_dir, output_ref))
+        .transpose()?;
+    Ok(finish_from_terminal(terminal, output))
 }
 
 fn spawn_from_fact(
@@ -2181,86 +2238,158 @@ fn spawn_from_fact(
     }
 }
 
+#[derive(Debug, Clone)]
+struct RecoveredInspectionResult {
+    event: chat_state::SubagentResultEvent,
+    output: Option<String>,
+}
+
 fn result_from_inspection(
     spawn: &chat_state::SubagentSpawnEvent,
     inspection: Option<&SubagentInspection>,
     duration_ms: u64,
-) -> chat_state::SubagentResultEvent {
-    let (outcome, error, tool_calls, turns) = match inspection.map(|value| &value.snapshot.status) {
-        Some(SubagentSnapshotStatus::Completed {
-            tool_calls, turns, ..
-        }) => (
-            chat_state::SubagentOutcome::Completed,
-            None,
-            *tool_calls,
-            *turns,
-        ),
-        Some(SubagentSnapshotStatus::Failed { error }) => (
-            chat_state::SubagentOutcome::Failed,
-            Some(error.clone()),
-            0,
-            0,
-        ),
-        Some(SubagentSnapshotStatus::Cancelled { reason }) => (
-            chat_state::SubagentOutcome::Cancelled,
-            Some(
-                reason
-                    .clone()
-                    .unwrap_or_else(|| ORPHAN_RECONCILE_REASON.to_string()),
+) -> RecoveredInspectionResult {
+    let observed_duration_ms = inspection
+        .map(|inspection| inspection.snapshot.duration_ms)
+        .unwrap_or(duration_ms);
+    let (outcome, error, tool_calls, turns, tokens_used, output) =
+        match inspection.map(|value| &value.snapshot.status) {
+            Some(SubagentSnapshotStatus::Completed {
+                output,
+                tool_calls,
+                turns,
+                tokens_used,
+                ..
+            }) => (
+                chat_state::SubagentOutcome::Completed,
+                None,
+                *tool_calls,
+                *turns,
+                *tokens_used,
+                (!output.is_empty()).then(|| output.clone()),
             ),
-            0,
-            0,
-        ),
-        Some(SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. }) => {
-            unreachable!("running inspections are filtered before recovery")
-        }
-        None => (
-            chat_state::SubagentOutcome::Cancelled,
-            Some(ORPHAN_RECONCILE_REASON.to_string()),
-            0,
-            0,
-        ),
-    };
-    chat_state::SubagentResultEvent {
-        subagent_id: spawn.subagent_id.clone(),
-        outcome,
-        duration_ms,
-        tool_calls,
-        turns,
-        tokens_used: 0,
-        error,
-        output_ref: None,
+            Some(SubagentSnapshotStatus::Failed { error }) => (
+                chat_state::SubagentOutcome::Failed,
+                Some(error.clone()),
+                0,
+                0,
+                0,
+                None,
+            ),
+            Some(SubagentSnapshotStatus::Cancelled { reason }) => (
+                chat_state::SubagentOutcome::Cancelled,
+                Some(
+                    reason
+                        .clone()
+                        .unwrap_or_else(|| ORPHAN_RECONCILE_REASON.to_string()),
+                ),
+                0,
+                0,
+                0,
+                None,
+            ),
+            Some(SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. }) => {
+                unreachable!("running inspections are filtered before recovery")
+            }
+            None => (
+                chat_state::SubagentOutcome::Cancelled,
+                Some(ORPHAN_RECONCILE_REASON.to_string()),
+                0,
+                0,
+                0,
+                None,
+            ),
+        };
+    RecoveredInspectionResult {
+        event: chat_state::SubagentResultEvent {
+            subagent_id: spawn.subagent_id.clone(),
+            outcome,
+            duration_ms: observed_duration_ms,
+            tool_calls,
+            turns,
+            tokens_used,
+            error,
+            output_ref: None,
+        },
+        output,
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ChildResultRecoveryError {
+    #[error("child result was never published: {0}")]
+    Unpublished(String),
+    #[error("child result cannot be trusted: {0}")]
+    Invalid(String),
 }
 
 async fn ensure_recovered_child_result(
     parent_timeline_id: &str,
     parent_spawn_seq: chat_state::EventSeq,
     spawn: &chat_state::SubagentSpawnEvent,
-    fallback: chat_state::SubagentResultEvent,
+    fallback: RecoveredInspectionResult,
 ) -> Result<
     (
         chat_state::TimelineRangeRef,
         chat_state::SubagentResultEvent,
+        Option<String>,
     ),
-    String,
+    ChildResultRecoveryError,
+> {
+    let child_dir = crate::session::persistence::find_persisted_session_dir_by_id_result(
+        &spawn.child_session_id,
+    )
+    .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?
+    .ok_or_else(|| {
+        ChildResultRecoveryError::Unpublished(format!(
+            "child session {} does not exist",
+            spawn.child_session_id
+        ))
+    })?;
+    ensure_recovered_child_result_in_dir(
+        parent_timeline_id,
+        parent_spawn_seq,
+        spawn,
+        fallback,
+        &child_dir,
+    )
+    .await
+}
+
+async fn ensure_recovered_child_result_in_dir(
+    parent_timeline_id: &str,
+    parent_spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+    fallback: RecoveredInspectionResult,
+    child_dir: &Path,
+) -> Result<
+    (
+        chat_state::TimelineRangeRef,
+        chat_state::SubagentResultEvent,
+        Option<String>,
+    ),
+    ChildResultRecoveryError,
 > {
     let child_info = SessionInfo {
         id: acp::SessionId::new(spawn.child_session_id.clone()),
         cwd: spawn.child_cwd.clone(),
     };
-    let child_dir = crate::session::persistence::find_session_dir_by_id(&spawn.child_session_id)
-        .unwrap_or_else(|| session::persistence::session_dir(&child_info));
-    let storage =
-        crate::session::storage::jsonl::JsonlStorageAdapter::with_explicit_session_dir(child_dir);
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_explicit_session_dir(
+        child_dir.to_path_buf(),
+    );
     let events = storage
         .read_timeline_events_sync(&child_info)
-        .map_err(|error| format!("cannot read child Timeline: {error}"))?;
-    let mut timeline = chat_state::Timeline::from_events(events)
-        .map_err(|error| format!("invalid child Timeline: {error}"))?;
+        .map_err(|error| {
+            ChildResultRecoveryError::Invalid(format!("cannot read child Timeline: {error}"))
+        })?;
+    let mut timeline = chat_state::Timeline::from_events(events).map_err(|error| {
+        ChildResultRecoveryError::Invalid(format!("invalid child Timeline: {error}"))
+    })?;
     timeline
         .validate_subagent_seed_link(parent_timeline_id, parent_spawn_seq, spawn)
-        .map_err(|error| format!("invalid child seed link: {error}"))?;
+        .map_err(|error| {
+            ChildResultRecoveryError::Invalid(format!("invalid child seed link: {error}"))
+        })?;
     if let Some((event, result)) = timeline
         .events()
         .iter()
@@ -2269,6 +2398,12 @@ async fn ensure_recovered_child_result(
             _ => None,
         })
     {
+        let output = result
+            .output_ref
+            .as_deref()
+            .map(|output_ref| load_subagent_output_ref(&child_dir, output_ref))
+            .transpose()
+            .map_err(ChildResultRecoveryError::Invalid)?;
         return Ok((
             chat_state::TimelineRangeRef {
                 timeline_id: spawn.child_session_id.clone(),
@@ -2276,27 +2411,41 @@ async fn ensure_recovered_child_result(
                 last_seq: event.seq.get(),
             },
             result.clone(),
+            output,
         ));
+    }
+    let mut fallback_event = fallback.event;
+    if fallback_event.outcome == chat_state::SubagentOutcome::Completed
+        && let Some(output) = fallback.output.as_deref()
+    {
+        let artifact =
+            write_subagent_output(&child_dir, output).map_err(ChildResultRecoveryError::Invalid)?;
+        fallback_event.output_ref = Some(artifact.timeline_ref);
     }
     let event = timeline
         .record(chat_state::TimelineEventKind::SubagentResult(
-            fallback.clone(),
+            fallback_event.clone(),
         ))
-        .map_err(|error| format!("invalid recovered child result: {error}"))?;
+        .map_err(|error| {
+            ChildResultRecoveryError::Invalid(format!("invalid recovered child result: {error}"))
+        })?;
     crate::session::storage::StorageAdapter::append_timeline_event_durable(
         &storage,
         &child_info,
         &event,
     )
     .await
-    .map_err(|error| format!("cannot persist recovered child result: {error}"))?;
+    .map_err(|error| {
+        ChildResultRecoveryError::Invalid(format!("cannot persist recovered child result: {error}"))
+    })?;
     Ok((
         chat_state::TimelineRangeRef {
             timeline_id: spawn.child_session_id.clone(),
             first_seq: event.seq.get(),
             last_seq: event.seq.get(),
         },
-        fallback,
+        fallback_event,
+        fallback.output,
     ))
 }
 
@@ -2358,14 +2507,25 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 );
             }
         }
-        for terminal in terminals.values() {
+        for (subagent_id, terminal) in &terminals {
             if !projections.finished.contains(&terminal.subagent_id) {
-                emit_subagent_notification(
-                    gateway,
-                    parent_session_id,
-                    finish_from_terminal(terminal),
-                    parent_cmd_tx,
-                );
+                let Some((spawn_seq, _, spawn)) = spawns.get(subagent_id) else {
+                    tracing::error!(%subagent_id, "parent terminal has no spawn fact");
+                    continue;
+                };
+                match finish_from_durable_facts(parent_session_id, *spawn_seq, spawn, terminal) {
+                    Ok(update) => emit_subagent_notification(
+                        gateway,
+                        parent_session_id,
+                        update,
+                        parent_cmd_tx,
+                    ),
+                    Err(error) => tracing::error!(
+                        %subagent_id,
+                        %error,
+                        "refusing to replay an unverified subagent result"
+                    ),
+                }
             }
         }
     }
@@ -2389,23 +2549,21 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         let recovered =
             ensure_recovered_child_result(parent_session_id, spawn_seq, &spawn, fallback.clone())
                 .await;
-        let (result_ref, result) = match recovered {
-            Ok((result_ref, result)) => (Some(result_ref), result),
+        let (result_ref, result, output) = match recovered {
+            Ok((result_ref, result, output)) => (Some(result_ref), result, output),
+            Err(ChildResultRecoveryError::Unpublished(error))
+                if fallback.event.outcome != chat_state::SubagentOutcome::Completed =>
+            {
+                tracing::warn!(%subagent_id, %error, "closing an unpublished child without a result reference");
+                (None, fallback.event, None)
+            }
             Err(error) => {
-                tracing::warn!(%subagent_id, %error, "child result recovery failed");
-                (
-                    None,
-                    chat_state::SubagentResultEvent {
-                        subagent_id: subagent_id.clone(),
-                        outcome: chat_state::SubagentOutcome::Failed,
-                        duration_ms,
-                        tool_calls: 0,
-                        turns: 0,
-                        tokens_used: 0,
-                        error: Some(error),
-                        output_ref: None,
-                    },
-                )
+                tracing::error!(
+                    %subagent_id,
+                    %error,
+                    "child result cannot be proven; leaving parent spawn open"
+                );
+                continue;
             }
         };
         let terminal = chat_state::SubagentTerminalEvent {
@@ -2429,7 +2587,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             Ok(_) if emit_replay_projections => emit_subagent_notification(
                 gateway,
                 parent_session_id,
-                finish_from_terminal(&terminal),
+                finish_from_terminal(&terminal, output),
                 parent_cmd_tx,
             ),
             Ok(_) => {}
@@ -2439,6 +2597,12 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 "failed to commit recovered parent subagent terminal"
             ),
         }
+    }
+    if let Err(error) = parent_chat_state.recover_interrupted_durably().await {
+        tracing::error!(
+            %error,
+            "failed to close local recovery scopes after subagent reconciliation"
+        );
     }
 }
 #[cfg(test)]

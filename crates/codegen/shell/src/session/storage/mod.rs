@@ -3,6 +3,13 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+
 use crate::extensions::notification::SessionNotification;
 use crate::sampling::ConversationItem;
 use crate::session::info::Info;
@@ -84,43 +91,476 @@ fn contained_directory(
     description: &str,
     create_missing: bool,
 ) -> io::Result<PathBuf> {
-    require_regular_directory(root, description)?;
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
+    #[cfg(unix)]
+    {
+        return ContainedDirectory::open(root, relative, description, create_missing)
+            .map(|directory| directory.path);
+    }
+    #[cfg(not(unix))]
+    {
+        require_regular_directory(root, description)?;
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{description} path must be relative and contained"),
+                ));
+            };
+            current.push(name);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{description} is not a regular directory: {}",
+                            current.display()
+                        ),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound && create_missing => {
+                    match std::fs::create_dir(&current) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error),
+                    }
+                    require_regular_directory(&current, description)?;
+                    sync_directory(&current)?;
+                    if let Some(parent) = current.parent() {
+                        sync_directory(parent)?;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(current)
+    }
+}
+
+/// A directory capability pinned to one inode. All descendants and final
+/// filesystem operations are resolved relative to its fd, so renaming a
+/// previously validated path and replacing it with a symlink cannot redirect
+/// a canonical write outside the authority root.
+#[cfg(unix)]
+pub(crate) struct ContainedDirectory {
+    path: PathBuf,
+    handle: std::fs::File,
+}
+
+#[cfg(unix)]
+impl ContainedDirectory {
+    pub(crate) fn open(
+        root: &Path,
+        relative: &Path,
+        description: &str,
+        create_missing: bool,
+    ) -> io::Result<Self> {
+        let root_c = CString::new(root.as_os_str().as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "authority root contains NUL")
+        })?;
+        let root_fd = unsafe {
+            libc::open(
+                root_c.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+        };
+        if root_fd == -1 {
+            let error = io::Error::last_os_error();
+            return Err(
+                if error
+                    .raw_os_error()
+                    .is_some_and(|code| code == libc::ELOOP || code == libc::ENOTDIR)
+                {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{description} authority is not a regular directory"),
+                    )
+                } else {
+                    error
+                },
+            );
+        }
+        let mut handle = unsafe { std::fs::File::from_raw_fd(root_fd) };
+        if !handle.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} authority is not a regular directory"),
+            ));
+        }
+        let mut path = root.to_path_buf();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{description} path must be relative and contained"),
+                ));
+            };
+            handle = Self::open_child_directory(&handle, name, description, create_missing)?;
+            path.push(name);
+        }
+        Ok(Self { path, handle })
+    }
+
+    fn open_child_directory(
+        parent: &std::fs::File,
+        name: &std::ffi::OsStr,
+        description: &str,
+        create_missing: bool,
+    ) -> io::Result<std::fs::File> {
+        let name = Self::component(name)?;
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+        let mut fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd == -1
+            && create_missing
+            && io::Error::last_os_error().kind() == io::ErrorKind::NotFound
+        {
+            let created = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+            if created == -1 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            } else {
+                parent.sync_all()?;
+            }
+            fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        }
+        if fd == -1 {
+            let error = io::Error::last_os_error();
+            return Err(
+                if error
+                    .raw_os_error()
+                    .is_some_and(|code| code == libc::ELOOP || code == libc::ENOTDIR)
+                {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{description} contains a symlink"),
+                    )
+                } else {
+                    error
+                },
+            );
+        }
+        let directory = unsafe { std::fs::File::from_raw_fd(fd) };
+        if !directory.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is not a regular directory"),
+            ));
+        }
+        if create_missing {
+            directory.sync_all()?;
+        }
+        Ok(directory)
+    }
+
+    fn component(name: &std::ffi::OsStr) -> io::Result<CString> {
+        if Path::new(name).components().count() != 1
+            || !matches!(
+                Path::new(name).components().next(),
+                Some(Component::Normal(_))
+            )
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("{description} path must be relative and contained"),
+                "contained file name must be one normal component",
             ));
+        }
+        CString::new(name.as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "file name contains NUL"))
+    }
+
+    pub(crate) fn open_read_write_create(
+        &self,
+        name: &std::ffi::OsStr,
+    ) -> io::Result<std::fs::File> {
+        let name = Self::component(name)?;
+        let mut fd = -1;
+        let mut last_error = None;
+        // Darwin can transiently return ENOENT when two threads race to
+        // O_CREAT the same dirfd-relative name. The winner has already made
+        // the lock/ledger visible, so a bounded reopen is the correct result.
+        for attempt in 0..8 {
+            fd = unsafe {
+                libc::openat(
+                    self.handle.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    0o600,
+                )
+            };
+            if fd != -1 {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::NotFound && attempt < 7 {
+                last_error = Some(error);
+                std::thread::yield_now();
+                continue;
+            }
+            last_error = Some(error);
+            break;
+        }
+        if fd == -1 {
+            let error = last_error.expect("failed openat records its OS error");
+            return Err(if error.raw_os_error() == Some(libc::ELOOP) {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "contained write target is a symlink",
+                )
+            } else {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot open {} relative to pinned directory {}: {error}",
+                        name.to_string_lossy(),
+                        self.path.display()
+                    ),
+                )
+            });
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "contained write target is not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+
+    pub(crate) fn read_bounded(
+        &self,
+        name: &std::ffi::OsStr,
+        description: &str,
+        max_bytes: u64,
+    ) -> io::Result<Vec<u8>> {
+        let name = Self::component(name)?;
+        let fd = unsafe {
+            libc::openat(
+                self.handle.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
         };
-        current.push(name);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+        if fd == -1 {
+            let error = io::Error::last_os_error();
+            return Err(if error.raw_os_error() == Some(libc::ELOOP) {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{description} is a symlink"),
+                )
+            } else {
+                error
+            });
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is not a bounded regular file"),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} grew while reading"),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn sync(&self) -> io::Result<()> {
+        self.handle.sync_all()
+    }
+
+    pub(crate) fn remove_file(&self, name: &std::ffi::OsStr, durable: bool) -> io::Result<()> {
+        let name = Self::component(name)?;
+        if unsafe { libc::unlinkat(self.handle.as_raw_fd(), name.as_ptr(), 0) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if durable {
+            self.sync()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn write_atomic(
+        &self,
+        name: &std::ffi::OsStr,
+        bytes: &[u8],
+        durable: bool,
+        replace: bool,
+    ) -> io::Result<()> {
+        let target = Self::component(name)?;
+        let existing_fd = unsafe {
+            libc::openat(
+                self.handle.as_raw_fd(),
+                target.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if existing_fd != -1 {
+            let existing = unsafe { std::fs::File::from_raw_fd(existing_fd) };
+            if !existing.metadata()?.is_file() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!(
-                        "{description} is not a regular directory: {}",
-                        current.display()
-                    ),
+                    "contained write target is not a regular file",
                 ));
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound && create_missing => {
-                match std::fs::create_dir(&current) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(error) => return Err(error),
-                }
-                require_regular_directory(&current, description)?;
-                sync_directory(&current)?;
-                if let Some(parent) = current.parent() {
-                    sync_directory(parent)?;
-                }
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(if error.raw_os_error() == Some(libc::ELOOP) {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "contained write target is a symlink",
+                    )
+                } else {
+                    error
+                });
             }
-            Err(error) => return Err(error),
         }
+        let tmp_name = format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        );
+        let tmp = CString::new(tmp_name).expect("generated temp name has no NUL");
+        let fd = unsafe {
+            libc::openat(
+                self.handle.as_raw_fd(),
+                tmp.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
+            )
+        };
+        if fd == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let result = (|| {
+            file.write_all(bytes)?;
+            if durable {
+                sync_file_durable(&file)?;
+            }
+            drop(file);
+            let published = if replace {
+                unsafe {
+                    libc::renameat(
+                        self.handle.as_raw_fd(),
+                        tmp.as_ptr(),
+                        self.handle.as_raw_fd(),
+                        target.as_ptr(),
+                    )
+                }
+            } else {
+                let linked = unsafe {
+                    libc::linkat(
+                        self.handle.as_raw_fd(),
+                        tmp.as_ptr(),
+                        self.handle.as_raw_fd(),
+                        target.as_ptr(),
+                        0,
+                    )
+                };
+                if linked == 0 {
+                    unsafe {
+                        libc::unlinkat(self.handle.as_raw_fd(), tmp.as_ptr(), 0);
+                    }
+                    0
+                } else {
+                    linked
+                }
+            };
+            if published == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if durable {
+                self.sync()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            unsafe {
+                libc::unlinkat(self.handle.as_raw_fd(), tmp.as_ptr(), 0);
+            }
+        }
+        result
     }
-    Ok(current)
+}
+
+#[cfg(not(unix))]
+pub(crate) struct ContainedDirectory;
+
+#[cfg(not(unix))]
+impl ContainedDirectory {
+    pub(crate) fn open(
+        _root: &Path,
+        _relative: &Path,
+        _description: &str,
+        _create_missing: bool,
+    ) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative contained storage is unsupported on this platform",
+        ))
+    }
+}
+
+pub(crate) fn write_contained_atomic_durable(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
+    write_contained_atomic_inner(root, relative, bytes, true, true)
+}
+
+pub(crate) fn write_contained_new_durable(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
+    write_contained_atomic_inner(root, relative, bytes, true, false)
+}
+
+fn write_contained_atomic_inner(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    durable: bool,
+    replace: bool,
+) -> io::Result<()> {
+    let parent = relative.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "contained target has no parent",
+        )
+    })?;
+    let name = relative.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "contained target has no file name",
+        )
+    })?;
+    let directory = ContainedDirectory::open(root, parent, "contained write directory", true)?;
+    #[cfg(unix)]
+    {
+        directory.write_atomic(name, bytes, durable, replace)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (directory, name, bytes, durable, replace);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative contained storage is unsupported on this platform",
+        ))
+    }
 }
 
 fn completed_sideband_result<'a>(
@@ -630,95 +1070,26 @@ fn write_bytes_atomic_inner(path: &Path, bytes: &[u8], durable: bool) -> io::Res
             "atomic write path has no parent",
         )
     })?;
-    require_regular_directory(parent, "atomic write directory")?;
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "atomic write target is not a regular file: {}",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic write path has no file name",
+        )
+    })?;
+    let directory =
+        ContainedDirectory::open(parent, Path::new(""), "atomic write directory", false)?;
+    #[cfg(unix)]
+    {
+        directory.write_atomic(name, bytes, durable, true)
     }
-    let tmp = temp_sibling(path);
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&tmp)?;
-        file.write_all(bytes)?;
-        if durable {
-            sync_file_durable(&file)?;
-        }
-        drop(file);
-        replace_file(&tmp, path, durable)?;
-        #[cfg(unix)]
-        if durable {
-            std::fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
+    #[cfg(not(unix))]
+    {
+        let _ = (directory, name, bytes, durable);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative atomic writes are unsupported on this platform",
+        ))
     }
-}
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, target: &Path, _durable: bool) -> io::Result<()> {
-    std::fs::rename(source, target)
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, target: &Path, durable: bool) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-
-    fn extended_path(path: &Path) -> io::Result<Vec<u16>> {
-        let path = std::path::absolute(path)?;
-        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        if wide.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path contains NUL",
-            ));
-        }
-        let unc = wide.starts_with(&[b'\\' as u16, b'\\' as u16]);
-        let mut result = if unc { r"\\?\UNC\" } else { r"\\?\" }
-            .encode_utf16()
-            .collect::<Vec<_>>();
-        if unc {
-            wide.drain(..2);
-        }
-        result.extend(wide);
-        result.push(0);
-        Ok(result)
-    }
-
-    let source = extended_path(source)?;
-    let target = extended_path(target)?;
-    let flags = if durable {
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-    } else {
-        MOVEFILE_REPLACE_EXISTING
-    };
-    unsafe { MoveFileExW(PCWSTR(source.as_ptr()), PCWSTR(target.as_ptr()), flags) }
-        .map_err(io::Error::other)
 }
 
 #[cfg(target_os = "macos")]
@@ -874,13 +1245,6 @@ pub(crate) async fn write_jsonl_atomic_async<T: serde::Serialize>(
     items: &[T],
 ) -> io::Result<()> {
     write_bytes_atomic_async(path, to_jsonl_bytes(items)?).await
-}
-
-/// A unique sibling temp path, e.g. `summary.json` -> `summary.json.<uuid>.tmp`.
-fn temp_sibling(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(format!(".{}.tmp", uuid::Uuid::now_v7()));
-    PathBuf::from(name)
 }
 
 /// Iterator that streams session updates from a JSONL file without loading all into memory.
@@ -2154,6 +2518,60 @@ pub(crate) fn filter_delta_replay_lines(lines: Vec<&str>) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_contained_directory_resists_post_validation_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("sidebands/id")).unwrap();
+        std::fs::write(outside.path().join("timeline.jsonl"), b"outside").unwrap();
+        std::fs::write(outside.path().join("state.json"), b"outside-state").unwrap();
+
+        let pinned = ContainedDirectory::open(
+            root.path(),
+            Path::new("sidebands/id"),
+            "race fixture",
+            false,
+        )
+        .unwrap();
+        let detached = root.path().join("sidebands/id-detached");
+        std::fs::rename(root.path().join("sidebands/id"), &detached).unwrap();
+        symlink(outside.path(), root.path().join("sidebands/id")).unwrap();
+
+        let mut append = pinned
+            .open_read_write_create(std::ffi::OsStr::new("timeline.jsonl"))
+            .unwrap();
+        append.write_all(b"inside").unwrap();
+        append.sync_all().unwrap();
+        pinned
+            .write_atomic(
+                std::ffi::OsStr::new("state.json"),
+                b"inside-state",
+                true,
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(outside.path().join("timeline.jsonl")).unwrap(),
+            b"outside"
+        );
+        assert_eq!(
+            std::fs::read(outside.path().join("state.json")).unwrap(),
+            b"outside-state"
+        );
+        assert_eq!(
+            std::fs::read(detached.join("timeline.jsonl")).unwrap(),
+            b"inside"
+        );
+        assert_eq!(
+            std::fs::read(detached.join("state.json")).unwrap(),
+            b"inside-state"
+        );
+    }
 
     #[test]
     fn committed_jsonl_reader_ignores_only_the_torn_tail_and_bounds_entries() {

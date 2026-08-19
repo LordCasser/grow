@@ -35,6 +35,13 @@ pub struct ChatStateActor {
     pruning_config: PruningConfig,
     /// Persistence implementation — owned exclusively, called with `&mut self`.
     persistence: Box<dyn TimelinePersistence>,
+    /// Seed facts already present in `state` whose acknowledged writes were
+    /// dispatched before the actor was launched. Live commands are not
+    /// admitted until this prefix is durable.
+    bootstrap_events: Vec<(
+        TimelineEvent,
+        tokio::sync::oneshot::Receiver<std::io::Result<()>>,
+    )>,
     /// Channel to receive commands from handles.
     cmd_rx: mpsc::UnboundedReceiver<ChatStateCommand>,
     /// Channel to send events to the session main loop.
@@ -62,6 +69,61 @@ impl ChatStateActor {
             .map_err(crate::commands::TimelineWriteError::Invalid)?;
         self.refresh_prompt_projection(previous_prompt_index);
         Ok(committed)
+    }
+
+    /// Persist a fire-and-forget command with actor-level backpressure. The
+    /// same immutable event is retried until it commits or the actor is
+    /// cancelled, so a transient ENOSPC/lock/I/O failure cannot create a
+    /// missing sequence and poison every later append.
+    async fn persist_buffered_timeline_event(
+        &mut self,
+        event: &TimelineEvent,
+        initial_ack: Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
+    ) -> bool {
+        let mut initial_ack = initial_ack;
+        let mut retry_delay = std::time::Duration::from_millis(25);
+        loop {
+            let result = if let Some(ack) = initial_ack.take() {
+                match ack.await {
+                    Ok(result) => result.map_err(crate::commands::TimelineWriteError::Persistence),
+                    Err(_) => Err(crate::commands::TimelineWriteError::AcknowledgementLost),
+                }
+            } else {
+                persist_timeline_event_durably(self.persistence.as_mut(), event).await
+            };
+            match result {
+                Ok(()) => return true,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        seq = event.seq.get(),
+                        retry_delay_ms = retry_delay.as_millis(),
+                        "buffered Timeline commit failed; applying backpressure and retrying exact event"
+                    );
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = self.cancellation_token.cancelled() => return false,
+                _ = tokio::time::sleep(retry_delay) => {}
+            }
+            retry_delay = retry_delay
+                .saturating_mul(2)
+                .min(std::time::Duration::from_secs(1));
+        }
+    }
+
+    async fn commit_buffered_timeline_event(&mut self, event: TimelineEvent) -> bool {
+        if !self.persist_buffered_timeline_event(&event, None).await {
+            return false;
+        }
+        let previous_prompt_index = self.state.timeline.next_prompt_index();
+        self.state
+            .timeline
+            .accept(event)
+            .expect("an actor-serialized prepared event must remain admissible after persistence");
+        self.refresh_prompt_projection(previous_prompt_index);
+        true
     }
 
     fn refresh_prompt_projection(&mut self, previous_prompt_index: usize) {
@@ -109,13 +171,21 @@ impl ChatStateActor {
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
         let state = ChatState::new(initial_conversation, sampling_config);
-        for event in state.timeline.events() {
-            persistence.persist_timeline_event(event);
-        }
+        let bootstrap_events = state
+            .timeline
+            .events()
+            .iter()
+            .cloned()
+            .map(|event| {
+                let acknowledgement = persistence.persist_timeline_event_and_ack(&event);
+                (event, acknowledgement)
+            })
+            .collect();
         Self::launch(
             state,
             pruning_config,
             persistence,
+            bootstrap_events,
             event_tx,
             cancellation_token,
         )
@@ -164,6 +234,7 @@ impl ChatStateActor {
             state,
             pruning_config,
             persistence,
+            Vec::new(),
             event_tx,
             cancellation_token,
         ))
@@ -173,6 +244,10 @@ impl ChatStateActor {
         state: ChatState,
         pruning_config: PruningConfig,
         persistence: Box<dyn TimelinePersistence>,
+        bootstrap_events: Vec<(
+            TimelineEvent,
+            tokio::sync::oneshot::Receiver<std::io::Result<()>>,
+        )>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
@@ -182,6 +257,7 @@ impl ChatStateActor {
             state,
             pruning_config,
             persistence,
+            bootstrap_events,
             cmd_rx,
             event_tx,
             cancellation_token,
@@ -194,6 +270,15 @@ impl ChatStateActor {
 
     /// Main actor loop — processes commands until shutdown or cancellation.
     async fn run(mut self) {
+        for (event, acknowledgement) in std::mem::take(&mut self.bootstrap_events) {
+            if !self
+                .persist_buffered_timeline_event(&event, Some(acknowledgement))
+                .await
+            {
+                debug!("ChatStateActor cancelled before bootstrap Timeline became durable");
+                return;
+            }
+        }
         loop {
             tokio::select! {
                 biased;
@@ -217,14 +302,12 @@ impl ChatStateActor {
         match cmd {
             // ═══ Mutations ═══
             ChatStateCommand::PushUserMessage { item } => {
-                self.push_user_message(item);
+                self.push_user_message(item).await;
             }
             ChatStateCommand::RecordTimelineEvent { kind } => {
-                let previous_prompt_index = self.state.timeline.next_prompt_index();
-                match self.state.timeline.record(kind) {
+                match self.state.timeline.prepare(kind) {
                     Ok(event) => {
-                        self.persistence.persist_timeline_event(&event);
-                        self.refresh_prompt_projection(previous_prompt_index);
+                        self.commit_buffered_timeline_event(event).await;
                     }
                     Err(error) => tracing::error!(%error, "rejected invalid timeline event"),
                 }
@@ -236,18 +319,61 @@ impl ChatStateActor {
                 };
                 let _ = reply.send(result);
             }
+            ChatStateCommand::RecoverInterruptedDurably { reply } => {
+                let result = match (|| {
+                    let mut candidate = self.state.timeline.clone();
+                    candidate.recover_interrupted()
+                })() {
+                    Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                    Ok(events) => {
+                        let mut committed = Vec::with_capacity(events.len());
+                        let mut error = None;
+                        for event in events {
+                            match self.commit_timeline_event(event).await {
+                                Ok(event) => committed.push(event),
+                                Err(write_error) => {
+                                    error = Some(write_error);
+                                    break;
+                                }
+                            }
+                        }
+                        error.map_or(Ok(committed), Err)
+                    }
+                };
+                let _ = reply.send(result);
+            }
             ChatStateCommand::PushUserMessageDurably { item, reply } => {
                 let result = self.push_user_message_durably(item).await;
                 let _ = reply.send(result);
             }
             ChatStateCommand::PushUserMessageWithRepairReason { item, reason } => {
-                self.push_user_message_with_repair_reason(item, reason);
+                self.push_user_message_with_repair_reason(item, reason)
+                    .await;
             }
             ChatStateCommand::PushAssistantResponse { item } => {
-                self.push_message(item);
+                self.push_message(item).await;
             }
             ChatStateCommand::PushToolResult { item } => {
-                self.push_message(item);
+                self.push_message(item).await;
+            }
+            ChatStateCommand::PushToolResultConditionally {
+                item,
+                rejection_item,
+                expected_surface_revision,
+                max_estimated_total_tokens,
+                max_result_tokens,
+                reply,
+            } => {
+                let result = self
+                    .push_tool_result_conditionally(
+                        item,
+                        rejection_item,
+                        expected_surface_revision,
+                        max_estimated_total_tokens,
+                        max_result_tokens,
+                    )
+                    .await;
+                let _ = reply.send(result);
             }
             ChatStateCommand::RecordTokenUsage { total_tokens } => {
                 self.record_token_usage(total_tokens);
@@ -390,7 +516,7 @@ impl ChatStateActor {
                 });
             }
             ChatStateCommand::RepairDanglingAfterHarnessHalt { class } => {
-                self.repair_dangling_after_harness_halt(class);
+                self.repair_dangling_after_harness_halt(class).await;
             }
 
             // ═══ Queries ═══

@@ -40,7 +40,6 @@ pub enum PersistenceMsg {
         respond_to:
             tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
     },
-    Timeline(chat_state::TimelineEvent),
     TimelineDurablyAndAck {
         event: chat_state::TimelineEvent,
         respond_to: tokio::sync::oneshot::Sender<std::io::Result<()>>,
@@ -595,46 +594,38 @@ pub fn write_immutable_blob(root: &Path, relative: &Path, content: &[u8]) -> io:
             "immutable blob path has no file name",
         )
     })?;
-    let parent = crate::session::storage::create_contained_dir_all(
+    let parent = crate::session::storage::ContainedDirectory::open(
         root,
         parent_relative,
         "immutable blob directory",
+        true,
     )?;
-    let path = parent.join(file_name);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW);
-        options.mode(0o600);
-    }
-    match options.open(&path) {
-        Ok(mut file) => {
-            file.write_all(content)?;
-            file.sync_all()?;
-            crate::util::secure_file::ensure_owner_only_permissions(&path)?;
-            crate::session::storage::sync_directory(&parent)
-        }
+    match parent.write_atomic(file_name, content, true, false) {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let existing = crate::session::storage::read_bounded_regular_file(
-                &path,
-                "immutable blob",
-                MAX_IMMUTABLE_BLOB_BYTES,
-            )?;
+            let existing =
+                parent.read_bounded(file_name, "immutable blob", MAX_IMMUTABLE_BLOB_BYTES)?;
             if existing != content {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
                         "immutable blob hash collision or corruption at {}",
-                        path.display()
+                        relative.display()
                     ),
                 ));
             }
-            crate::util::secure_file::ensure_owner_only_permissions(&path)?;
-            crate::session::storage::sync_directory(&parent)
+            parent.sync()
         }
         Err(error) => Err(error),
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (parent, file_name, content);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative immutable storage is unsupported on this platform",
+        ))
     }
 }
 
@@ -1583,40 +1574,6 @@ impl SessionPersistence {
                 PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to } => {
                     let result = self.handle_durable_append(update).await;
                     let _ = respond_to.send(result);
-                }
-                PersistenceMsg::Timeline(event) => {
-                    let refreshes_session_index = matches!(
-                        &event.kind,
-                        chat_state::TimelineEventKind::Messages(_)
-                            | chat_state::TimelineEventKind::Turn(
-                                chat_state::TurnEvent::Started { .. }
-                            )
-                            | chat_state::TimelineEventKind::SessionTitle(_)
-                            | chat_state::TimelineEventKind::Subagent(_)
-                            | chat_state::TimelineEventKind::SubagentResult(_)
-                    );
-                    match self.storage.append_timeline_event(&self.info, &event).await {
-                        Ok(()) => {
-                            if refreshes_session_index {
-                                crate::session::storage::search::notify_session_updated(
-                                    &self.info.id.to_string(),
-                                    &self.info.cwd,
-                                );
-                            }
-                            if let chat_state::TimelineEventKind::SessionTitle(title) = &event.kind
-                            {
-                                crate::session::summary::notify_client(
-                                    &self.gateway,
-                                    &self.info,
-                                    event.seq.get(),
-                                    title,
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, seq = event.seq.get(), "failed to append timeline event");
-                        }
-                    }
                 }
                 PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
                     let refreshes_session_index = matches!(

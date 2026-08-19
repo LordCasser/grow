@@ -12,7 +12,6 @@
 //! spans the entire read-modify-write). All writers funnel through it, so the
 //! read-modify-writes serialize across actors and processes.
 
-use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -157,34 +156,79 @@ pub(crate) fn apply_patch_locked(
     lock_path: &Path,
     patch: &SummaryPatch,
 ) -> io::Result<bool> {
-    let lock = open_lock_file(lock_path)?;
-    lock.lock_exclusive()?;
-    let result = read_modify_write(summary_path, patch);
-    let _ = lock.unlock();
-    result
+    let parent = summary_path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "summary path has no parent"))?;
+    if lock_path.parent() != Some(parent) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "summary and lock must share one directory capability",
+        ));
+    }
+    let summary_name = summary_path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "summary path has no file name")
+    })?;
+    let lock_name = lock_path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "summary lock path has no file name",
+        )
+    })?;
+    let directory =
+        super::ContainedDirectory::open(parent, Path::new(""), "session summary directory", false)
+            .map_err(|error| {
+                io::Error::new(error.kind(), format!("open summary directory: {error}"))
+            })?;
+    #[cfg(not(unix))]
+    {
+        let _ = (directory, summary_name, lock_name, patch);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-relative summary storage is unsupported on this platform",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let lock = directory
+            .open_read_write_create(lock_name)
+            .map_err(|error| io::Error::new(error.kind(), format!("open summary lock: {error}")))?;
+        lock.lock_exclusive().map_err(|error| {
+            io::Error::new(error.kind(), format!("acquire summary lock: {error}"))
+        })?;
+        let result = read_modify_write(&directory, summary_name, patch);
+        let _ = lock.unlock();
+        result
+    }
 }
 
-fn read_modify_write(summary_path: &Path, patch: &SummaryPatch) -> io::Result<bool> {
-    let mut summary = read_summary(summary_path)?;
+#[cfg(unix)]
+fn read_modify_write(
+    directory: &super::ContainedDirectory,
+    summary_name: &std::ffi::OsStr,
+    patch: &SummaryPatch,
+) -> io::Result<bool> {
+    let mut summary = read_summary_contained(directory, summary_name)
+        .map_err(|error| io::Error::new(error.kind(), format!("read summary: {error}")))?;
     let title_applied = summary.apply_patch(patch, Utc::now());
-    write_summary_atomic(summary_path, &summary)?;
+    write_summary_atomic(directory, summary_name, &summary)
+        .map_err(|error| io::Error::new(error.kind(), format!("publish summary: {error}")))?;
     Ok(title_applied)
 }
 
-fn open_lock_file(path: &Path) -> io::Result<File> {
-    super::open_read_write_create_nofollow(path)
-}
-
-fn read_summary(path: &Path) -> io::Result<Summary> {
-    let bytes = super::read_bounded_regular_file(
-        path,
+#[cfg(unix)]
+fn read_summary_contained(
+    directory: &super::ContainedDirectory,
+    summary_name: &std::ffi::OsStr,
+) -> io::Result<Summary> {
+    let bytes = directory.read_bounded(
+        summary_name,
         "session summary",
         super::MAX_SESSION_SUMMARY_BYTES,
     )?;
     if bytes.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("summary.json is empty (0 bytes): {}", path.display()),
+            "summary.json is empty (0 bytes)",
         ));
     }
     let summary = serde_json::from_slice::<Summary>(&bytes)
@@ -193,9 +237,27 @@ fn read_summary(path: &Path) -> io::Result<Summary> {
     Ok(summary)
 }
 
-fn write_summary_atomic(summary_path: &Path, summary: &Summary) -> io::Result<()> {
+#[cfg(all(test, unix))]
+fn read_summary(path: &Path) -> io::Result<Summary> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "summary path has no parent"))?;
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "summary path has no file name")
+    })?;
+    let directory =
+        super::ContainedDirectory::open(parent, Path::new(""), "session summary directory", false)?;
+    read_summary_contained(&directory, name)
+}
+
+#[cfg(unix)]
+fn write_summary_atomic(
+    directory: &super::ContainedDirectory,
+    summary_name: &std::ffi::OsStr,
+    summary: &Summary,
+) -> io::Result<()> {
     let bytes = super::serialize_summary(summary)?;
-    crate::session::storage::write_bytes_atomic(summary_path, &bytes)
+    directory.write_atomic(summary_name, &bytes, false, true)
 }
 
 #[cfg(test)]

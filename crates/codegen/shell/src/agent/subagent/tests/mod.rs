@@ -421,6 +421,365 @@ fn subagent_output_roundtrips_through_immutable_artifact() {
     std::fs::write(&corrupt, "not json").expect("corrupt fixture");
     assert_eq!(read_subagent_output(&corrupt), None);
 }
+
+fn recovery_spawn(subagent_id: &str, child_session_id: &str) -> chat_state::SubagentSpawnEvent {
+    chat_state::SubagentSpawnEvent {
+        subagent_id: subagent_id.into(),
+        child_session_id: child_session_id.into(),
+        subagent_type: "review".into(),
+        description: "recover child".into(),
+        prompt: "finish".into(),
+        context_source: chat_state::SubagentContextSource::Forked,
+        source_ref: None,
+        context_normalized: false,
+        resumed_from: None,
+        parent_prompt_id: None,
+        capability_mode: None,
+        permission_mode: None,
+        effective_permission_mode: None,
+        workflow_run_id: None,
+        goal_id: None,
+        child_cwd: "/workspace".into(),
+        worktree_path: None,
+        effective_model_id: "model".into(),
+    }
+}
+
+fn write_recovery_child(
+    dir: &Path,
+    parent_timeline_id: &str,
+    spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+) {
+    let mut child = chat_state::Timeline::default();
+    child
+        .record(chat_state::TimelineEventKind::SubagentSeed(
+            chat_state::SubagentSeedEvent {
+                parent_timeline_id: parent_timeline_id.into(),
+                parent_spawn_seq: spawn_seq.get(),
+                subagent_id: spawn.subagent_id.clone(),
+                context_source: spawn.context_source,
+                source_ref: spawn.source_ref.clone(),
+                normalized: spawn.context_normalized,
+            },
+        ))
+        .unwrap();
+    crate::session::storage::write_jsonl_atomic(
+        &dir.join(crate::session::storage::TIMELINE_FILE),
+        child.events(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn completed_recovery_publishes_artifact_before_exact_child_result() {
+    let child_dir = tempfile::tempdir().unwrap();
+    let spawn = recovery_spawn("sa-recovery", "child-recovery");
+    let spawn_seq = chat_state::EventSeq::new(7);
+    write_recovery_child(child_dir.path(), "parent-recovery", spawn_seq, &spawn);
+    let inspection = SubagentInspection {
+        snapshot: SubagentSnapshot {
+            subagent_id: spawn.subagent_id.clone(),
+            description: spawn.description.clone(),
+            subagent_type: spawn.subagent_type.clone(),
+            status: SubagentSnapshotStatus::Completed {
+                output: "canonical recovered output".into(),
+                tool_calls: 4,
+                turns: 3,
+                tokens_used: 912,
+                worktree_path: None,
+            },
+            started_at_epoch_ms: 1,
+            duration_ms: 88,
+        },
+        parent_session_id: "parent-recovery".into(),
+        child_session_id: spawn.child_session_id.clone(),
+        fork_parent_prompt_id: None,
+        resumed_from: None,
+    };
+    let fallback = result_from_inspection(&spawn, Some(&inspection), 999);
+    let (result_ref, result, output) = ensure_recovered_child_result_in_dir(
+        "parent-recovery",
+        spawn_seq,
+        &spawn,
+        fallback,
+        child_dir.path(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output.as_deref(), Some("canonical recovered output"));
+    assert_eq!(result.duration_ms, 88);
+    assert_eq!(result.tool_calls, 4);
+    assert_eq!(result.turns, 3);
+    assert_eq!(result.tokens_used, 912);
+    let output_ref = result.output_ref.as_deref().expect("artifact reference");
+    assert_eq!(
+        load_subagent_output_ref(child_dir.path(), output_ref).unwrap(),
+        "canonical recovered output"
+    );
+
+    let terminal = chat_state::SubagentTerminalEvent {
+        subagent_id: spawn.subagent_id.clone(),
+        child_session_id: spawn.child_session_id.clone(),
+        outcome: result.outcome,
+        duration_ms: result.duration_ms,
+        tool_calls: result.tool_calls,
+        turns: result.turns,
+        tokens_used: result.tokens_used,
+        error: result.error.clone(),
+        result_ref: Some(result_ref.clone()),
+        snapshot_ref: None,
+    };
+    let SessionUpdate::SubagentFinished { output, .. } = finish_from_durable_facts_in_dir(
+        "parent-recovery",
+        spawn_seq,
+        &spawn,
+        &terminal,
+        child_dir.path(),
+    )
+    .unwrap() else {
+        panic!("expected finished projection");
+    };
+    assert_eq!(output.as_deref(), Some("canonical recovered output"));
+
+    let different = RecoveredInspectionResult {
+        event: chat_state::SubagentResultEvent {
+            subagent_id: spawn.subagent_id.clone(),
+            outcome: chat_state::SubagentOutcome::Failed,
+            duration_ms: 1,
+            tool_calls: 0,
+            turns: 0,
+            tokens_used: 0,
+            error: Some("must not replace existing result".into()),
+            output_ref: None,
+        },
+        output: None,
+    };
+    let (reused_ref, reused_result, reused_output) = ensure_recovered_child_result_in_dir(
+        "parent-recovery",
+        spawn_seq,
+        &spawn,
+        different,
+        child_dir.path(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reused_ref, result_ref);
+    assert_eq!(reused_result, result);
+    assert_eq!(reused_output.as_deref(), Some("canonical recovered output"));
+
+    let hash = output_ref.rsplit(':').next().unwrap();
+    std::fs::write(
+        child_dir
+            .path()
+            .join("artifacts/subagent-output")
+            .join(format!("{hash}.json")),
+        "corrupt",
+    )
+    .unwrap();
+    assert!(finish_from_durable_facts_in_dir(
+        "parent-recovery",
+        spawn_seq,
+        &spawn,
+        &terminal,
+        child_dir.path(),
+    )
+    .is_err());
+}
+
+#[tokio::test]
+async fn invalid_child_seed_does_not_publish_a_result() {
+    let child_dir = tempfile::tempdir().unwrap();
+    let spawn = recovery_spawn("sa-invalid", "child-invalid");
+    let spawn_seq = chat_state::EventSeq::new(3);
+    write_recovery_child(child_dir.path(), "wrong-parent", spawn_seq, &spawn);
+    let timeline_path = child_dir.path().join(crate::session::storage::TIMELINE_FILE);
+    let before = std::fs::read(&timeline_path).unwrap();
+    let error = ensure_recovered_child_result_in_dir(
+        "parent",
+        spawn_seq,
+        &spawn,
+        RecoveredInspectionResult {
+            event: chat_state::SubagentResultEvent {
+                subagent_id: spawn.subagent_id.clone(),
+                outcome: chat_state::SubagentOutcome::Cancelled,
+                duration_ms: 1,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                error: Some("restart".into()),
+                output_ref: None,
+            },
+            output: None,
+        },
+        child_dir.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, ChildResultRecoveryError::Invalid(_)));
+    assert_eq!(std::fs::read(&timeline_path).unwrap(), before);
+}
+
+async fn recovery_parent(
+    session_dir: &Path,
+    parent_session_id: &str,
+    spawn: &chat_state::SubagentSpawnEvent,
+) -> (
+    chat_state::ChatStateHandle,
+    chat_state::MockPersistenceReceiver,
+) {
+    let mut timeline = chat_state::Timeline::default();
+    timeline
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(spawn.clone()),
+        ))
+        .unwrap();
+    crate::session::storage::write_jsonl_atomic(
+        &session_dir.join(crate::session::storage::TIMELINE_FILE),
+        timeline.events(),
+    )
+    .unwrap();
+    let (persistence, receiver) = chat_state::MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = chat_state::ChatStateActor::spawn_from_timeline_with_pruning(
+        timeline.events().to_vec(),
+        test_sampling_config("model"),
+        chat_state::PruningConfig::default(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    (handle, receiver)
+}
+
+#[tokio::test]
+async fn backend_running_inspection_keeps_parent_spawn_open() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let parent_id = format!("parent-running-{}", uuid::Uuid::now_v7());
+    let spawn = recovery_spawn(
+        "sa-running",
+        &format!("child-running-{}", uuid::Uuid::now_v7()),
+    );
+    let (parent, mut persistence) = recovery_parent(parent_dir.path(), &parent_id, &spawn).await;
+    let (backend_tx, mut backend_rx) = mpsc::unbounded_channel();
+    let backend = tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+        backend_tx,
+        parent_id.clone(),
+    );
+    let inspection_spawn = spawn.clone();
+    let inspection_parent = parent_id.clone();
+    let responder = tokio::spawn(async move {
+        let Some(tools::implementations::grow_build::task::types::SubagentEvent::Inspect(request)) =
+            backend_rx.recv().await
+        else {
+            panic!("expected backend inspection");
+        };
+        request
+            .respond_to
+            .send(Some(SubagentInspection {
+                snapshot: SubagentSnapshot {
+                    subagent_id: inspection_spawn.subagent_id.clone(),
+                    description: inspection_spawn.description.clone(),
+                    subagent_type: inspection_spawn.subagent_type.clone(),
+                    status: SubagentSnapshotStatus::Running {
+                        turn_count: 1,
+                        tool_call_count: 2,
+                        tokens_used: 300,
+                        context_window_tokens: 10_000,
+                        context_usage_pct: 3,
+                        tools_used: vec!["read_file".into()],
+                        error_count: 0,
+                    },
+                    started_at_epoch_ms: 1,
+                    duration_ms: 20,
+                },
+                parent_session_id: inspection_parent,
+                child_session_id: inspection_spawn.child_session_id.clone(),
+                fork_parent_prompt_id: None,
+                resumed_from: None,
+            }))
+            .unwrap();
+    });
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    reconcile_orphaned_subagents_with_backend(
+        &crate::session::storage::SubagentProjectionState::default(),
+        false,
+        &backend,
+        parent_dir.path(),
+        &parent_id,
+        &parent,
+        &gateway,
+        None,
+    )
+    .await;
+    responder.await.unwrap();
+    assert!(
+        persistence.drain().iter().all(|record| !matches!(
+            record,
+            chat_state::PersistenceRecord::Timeline(chat_state::TimelineEvent {
+                kind: chat_state::TimelineEventKind::Subagent(
+                    chat_state::SubagentEvent::Ended(_)
+                ),
+                ..
+            })
+        )),
+        "a live backend child must remain reconnectable"
+    );
+}
+
+#[tokio::test]
+async fn missing_unpublished_child_closes_without_forging_result_ref() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let parent_id = format!("parent-missing-{}", uuid::Uuid::now_v7());
+    let spawn = recovery_spawn(
+        "sa-missing",
+        &format!("child-missing-{}", uuid::Uuid::now_v7()),
+    );
+    let (parent, mut persistence) = recovery_parent(parent_dir.path(), &parent_id, &spawn).await;
+    let (backend_tx, mut backend_rx) = mpsc::unbounded_channel();
+    let backend = tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+        backend_tx,
+        parent_id.clone(),
+    );
+    let responder = tokio::spawn(async move {
+        let Some(tools::implementations::grow_build::task::types::SubagentEvent::Inspect(request)) =
+            backend_rx.recv().await
+        else {
+            panic!("expected backend inspection");
+        };
+        request.respond_to.send(None).unwrap();
+    });
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    reconcile_orphaned_subagents_with_backend(
+        &crate::session::storage::SubagentProjectionState::default(),
+        false,
+        &backend,
+        parent_dir.path(),
+        &parent_id,
+        &parent,
+        &gateway,
+        None,
+    )
+    .await;
+    responder.await.unwrap();
+    let terminal = persistence
+        .drain()
+        .into_iter()
+        .find_map(|record| match record {
+            chat_state::PersistenceRecord::Timeline(chat_state::TimelineEvent {
+                kind: chat_state::TimelineEventKind::Subagent(
+                    chat_state::SubagentEvent::Ended(terminal),
+                ),
+                ..
+            }) => Some(terminal),
+            _ => None,
+        })
+        .expect("missing child should close the parent spawn");
+    assert_eq!(terminal.outcome, chat_state::SubagentOutcome::Cancelled);
+    assert!(terminal.result_ref.is_none());
+}
 #[cfg(unix)]
 #[test]
 fn subagent_output_reader_rejects_symlinked_artifact_root() {

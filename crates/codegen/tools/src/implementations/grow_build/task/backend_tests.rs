@@ -126,6 +126,7 @@ async fn channel_backend_query_found() {
                     output: "result".to_string(),
                     tool_calls: 2,
                     turns: 1,
+                    tokens_used: 42,
                     worktree_path: None,
                 },
                 started_at_epoch_ms: 1000,
@@ -146,11 +147,13 @@ async fn channel_backend_query_found() {
             output,
             tool_calls,
             turns,
+            tokens_used,
             worktree_path,
         } => {
             assert_eq!(output, "result");
             assert_eq!(*tool_calls, 2);
             assert_eq!(*turns, 1);
+            assert_eq!(*tokens_used, 42);
             assert!(worktree_path.is_none());
         }
         other => panic!("Expected Completed, got {:?}", other),

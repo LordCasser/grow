@@ -18,6 +18,15 @@ pub struct ContextRecallInput {
     pub query: String,
 }
 
+/// Recall content plus the frozen admission coordinates that must be checked
+/// atomically when the shell commits the eventual ToolResult.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextRecallOutput {
+    pub text: String,
+    pub frozen_surface_revision: u64,
+    pub context_window: u64,
+}
+
 impl ContextRecallInput {
     fn validate(&self) -> Result<(), String> {
         let query = self.query.trim();
@@ -42,7 +51,7 @@ pub trait ContextRecallBackend: Send + Sync {
         call_id: &str,
         query: &str,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<ContextRecallOutput, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 #[derive(Debug, Default)]
@@ -129,7 +138,7 @@ impl tool_runtime::Tool for ContextRecallImpl {
                     format!("context recall failed: {error}"),
                 )
             })?;
-        Ok(ToolOutput::Text(output.into()))
+        Ok(ToolOutput::ContextRecall(output))
     }
 }
 

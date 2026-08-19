@@ -162,8 +162,22 @@ impl TestHarness {
     }
 
     fn with_manual_timeline_ack(items: Vec<ConversationItem>) -> Self {
-        let (mock, persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
-        Self::with_persistence(items, test_config(), mock, persistence_rx)
+        Self::with_manual_timeline_ack_after(items, 0)
+    }
+
+    fn with_manual_timeline_ack_after(
+        items: Vec<ConversationItem>,
+        automatic_live_acks: usize,
+    ) -> Self {
+        let config = test_config();
+        let bootstrap_events = crate::actor::state::ChatState::new(items.clone(), config.clone())
+            .timeline
+            .events()
+            .len();
+        let (mock, persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack_after(
+            bootstrap_events + automatic_live_acks,
+        );
+        Self::with_persistence(items, config, mock, persistence_rx)
     }
 
     fn with_persistence(
@@ -175,8 +189,8 @@ impl TestHarness {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let token = tokio_util::sync::CancellationToken::new();
         let handle = ChatStateActor::spawn(items, config, Box::new(mock), event_tx, token.clone());
-        // Seed events are persisted at actor creation so later sequence numbers
-        // can be replayed from the Timeline alone.
+        // Seed durable writes are dispatched before actor creation returns, so
+        // later sequence numbers can be replayed from the Timeline alone.
         persistence_rx.drain();
         Self {
             handle,
@@ -1052,7 +1066,7 @@ async fn failed_image_rewrite_persistence_leaves_memory_unchanged() {
 #[tokio::test]
 async fn failed_durable_rewind_leaves_surface_unchanged() {
     let original = marked_user("original", 0);
-    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    let mut h = TestHarness::with_manual_timeline_ack_after(vec![], 3);
     h.handle.push_user_message(original.clone());
     record_prompt(&h.handle, "original").await;
     let handle = h.handle.clone();
@@ -1146,6 +1160,169 @@ async fn lost_timeline_ack_retries_the_exact_event_once() {
         serde_json::to_value(&events[1]).unwrap(),
     );
     assert_eq!(h.handle.get_conversation().await.len(), 1);
+}
+
+#[tokio::test]
+async fn buffered_append_recovers_from_io_failure_without_breaking_sequence() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("first"));
+    let first_sync = {
+        let handle = h.handle.clone();
+        async move { handle.get_conversation().await }
+    };
+    let recover_first = async {
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("first buffered attempt")
+            .send(Err(std::io::Error::other("simulated ENOSPC")))
+            .unwrap();
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("exact buffered retry")
+            .send(Ok(()))
+            .unwrap();
+    };
+    let (surface, ()) = tokio::join!(first_sync, recover_first);
+    assert_eq!(surface.len(), 1);
+
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("second"));
+    let second_sync = {
+        let handle = h.handle.clone();
+        async move { handle.get_conversation().await }
+    };
+    let commit_second = async {
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("next buffered append")
+            .send(Ok(()))
+            .unwrap();
+    };
+    let (surface, ()) = tokio::join!(second_sync, commit_second);
+    assert_eq!(surface.len(), 2);
+
+    let events = h
+        .drain_persistence()
+        .into_iter()
+        .filter_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].seq.get(), 0);
+    assert_eq!(events[1].seq.get(), 0);
+    assert_eq!(events[2].seq.get(), 1);
+    assert_eq!(
+        serde_json::to_vec(&events[0]).unwrap(),
+        serde_json::to_vec(&events[1]).unwrap(),
+        "the failed append must retry the identical immutable fact"
+    );
+}
+
+#[tokio::test]
+async fn conditional_tool_result_rejects_stale_recall_and_closes_the_call() {
+    use sampling_types::ToolCall;
+
+    let h = TestHarness::new();
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            ToolCall {
+                id: "recall".into(),
+                name: "context_recall".into(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "sibling".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        ]));
+    let frozen_revision = h.handle.get_surface_revision().await.unwrap();
+
+    h.handle.push_tool_result(ConversationItem::tool_result(
+        "sibling",
+        "the competing result",
+    ));
+    let _ = h.handle.get_conversation().await;
+
+    let outcome = h
+        .handle
+        .push_tool_result_conditionally(
+            ConversationItem::tool_result("recall", "stale secret evidence"),
+            ConversationItem::tool_result("recall", "recall rejected; retry"),
+            frozen_revision,
+            128_000,
+            2_048,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        crate::ConditionalToolResultOutcome::RejectedSurfaceChanged
+    );
+
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
+    let recall_results = request
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::ToolResult(result) if result.tool_call_id == "recall" => {
+                Some(result.content.as_ref())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(recall_results, ["recall rejected; retry"]);
+}
+
+#[tokio::test]
+async fn conditional_tool_result_rechecks_headroom_at_commit() {
+    use sampling_types::ToolCall;
+
+    let h = TestHarness::with_context_window(10_000);
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "recall".into(),
+            name: "context_recall".into(),
+            arguments: "{}".into(),
+        }]));
+    let frozen_revision = h.handle.get_surface_revision().await.unwrap();
+
+    // Provider accounting can advance without changing Surface revision while
+    // recall synthesis is in flight.
+    h.handle.record_token_usage(7_900);
+    assert_eq!(h.handle.get_total_tokens().await, 7_900);
+    let outcome = h
+        .handle
+        .push_tool_result_conditionally(
+            ConversationItem::tool_result("recall", "x".repeat(1_000)),
+            ConversationItem::tool_result("recall", "recall rejected; retry"),
+            frozen_revision,
+            7_952,
+            2_048,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        crate::ConditionalToolResultOutcome::RejectedHeadroom
+    );
+
+    let request = h.handle.build_request(vec![], None, false).await.unwrap();
+    let result = request
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .expect("rejection must close the tool call");
+    assert_eq!(result.content.as_ref(), "recall rejected; retry");
 }
 
 #[tokio::test]

@@ -13,8 +13,6 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-const LEDGER_PREFIX_PROBE_BYTES: u64 = 4096;
-
 #[derive(Clone)]
 struct AppState {
     session_id: String,
@@ -29,7 +27,7 @@ struct AppState {
 struct SessionTrajectoryCache {
     session_dir: PathBuf,
     offset: u64,
-    prefix_probe: Vec<u8>,
+    prefix_hash: Option<[u8; 32]>,
     timeline: chat_state::Timeline,
     projector: chat_state::TrajectoryProjector,
     sidebands: BTreeMap<String, SidebandCache>,
@@ -40,7 +38,7 @@ struct SessionTrajectoryCache {
 #[derive(Default)]
 struct SidebandCache {
     offset: u64,
-    prefix_probe: Vec<u8>,
+    prefix_hash: Option<[u8; 32]>,
     events: Vec<chat_state::SidebandEvent>,
 }
 
@@ -48,7 +46,7 @@ struct SidebandCache {
 struct WorkflowJournalCache {
     offset: u64,
     entries: Vec<workflow::JournalEntry>,
-    prefix_probe: Vec<u8>,
+    prefix_hash: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -474,7 +472,7 @@ impl SessionTrajectoryCache {
         let mut file = super::storage::open_regular_nofollow(path, "Trajectory Timeline ledger")?;
         let file_len = file.metadata()?.len();
         if file_len < self.offset
-            || !ledger_prefix_matches(self.offset, &self.prefix_probe, &mut file)?
+            || !ledger_prefix_matches(self.offset, self.prefix_hash, &mut file)?
         {
             let session_dir = std::mem::take(&mut self.session_dir);
             *self = Self::default();
@@ -502,7 +500,7 @@ impl SessionTrajectoryCache {
         }
         self.timeline = timeline;
         self.offset += complete_len as u64;
-        refresh_ledger_prefix_probe(self.offset, &mut self.prefix_probe, &mut file)?;
+        refresh_ledger_prefix_hash(self.offset, &mut self.prefix_hash, &mut file)?;
         Ok(())
     }
 
@@ -1036,7 +1034,7 @@ impl SidebandCache {
         let mut file = super::storage::open_regular_nofollow(path, "Trajectory sideband ledger")?;
         let file_len = file.metadata()?.len();
         if file_len < self.offset
-            || !ledger_prefix_matches(self.offset, &self.prefix_probe, &mut file)?
+            || !ledger_prefix_matches(self.offset, self.prefix_hash, &mut file)?
         {
             *self = Self::default();
         }
@@ -1058,7 +1056,7 @@ impl SidebandCache {
         chat_state::SidebandTimeline::from_events(events.clone())?;
         self.events = events;
         self.offset += complete_len as u64;
-        refresh_ledger_prefix_probe(self.offset, &mut self.prefix_probe, &mut file)?;
+        refresh_ledger_prefix_hash(self.offset, &mut self.prefix_hash, &mut file)?;
         Ok(())
     }
 }
@@ -1121,29 +1119,12 @@ impl WorkflowJournalCache {
         }
         self.entries = entries;
         self.offset = self.offset.saturating_add(complete_len as u64);
-        self.refresh_prefix_probe(&mut file)?;
+        refresh_ledger_prefix_hash(self.offset, &mut self.prefix_hash, &mut file)?;
         Ok(())
     }
 
     fn prefix_matches(&self, file: &mut std::fs::File) -> anyhow::Result<bool> {
-        if self.prefix_probe.is_empty() {
-            return Ok(true);
-        }
-        let start = self.offset.saturating_sub(self.prefix_probe.len() as u64);
-        file.seek(std::io::SeekFrom::Start(start))?;
-        let mut actual = vec![0; self.prefix_probe.len()];
-        file.read_exact(&mut actual)?;
-        Ok(actual == self.prefix_probe)
-    }
-
-    fn refresh_prefix_probe(&mut self, file: &mut std::fs::File) -> anyhow::Result<()> {
-        const PROBE_BYTES: u64 = 4096;
-        let start = self.offset.saturating_sub(PROBE_BYTES);
-        file.seek(std::io::SeekFrom::Start(start))?;
-        self.prefix_probe.clear();
-        file.take(self.offset.saturating_sub(start))
-            .read_to_end(&mut self.prefix_probe)?;
-        Ok(())
+        ledger_prefix_matches(self.offset, self.prefix_hash, file)
     }
 }
 
@@ -1346,36 +1327,46 @@ fn read_ledger_batch(
 
 fn ledger_prefix_matches(
     offset: u64,
-    expected: &[u8],
+    expected: Option<[u8; 32]>,
     file: &mut std::fs::File,
 ) -> anyhow::Result<bool> {
-    if expected.is_empty() {
-        return Ok(true);
+    if offset == 0 {
+        return Ok(expected.is_none());
     }
-    let Some(start) = offset.checked_sub(expected.len() as u64) else {
+    let Some(expected) = expected else {
         return Ok(false);
     };
-    file.seek(std::io::SeekFrom::Start(start))?;
-    let mut actual = vec![0; expected.len()];
-    match file.read_exact(&mut actual) {
-        Ok(()) => Ok(actual == expected),
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
-        Err(error) => Err(error.into()),
-    }
+    Ok(hash_ledger_prefix(offset, file)?.is_some_and(|actual| actual == expected))
 }
 
-fn refresh_ledger_prefix_probe(
+fn refresh_ledger_prefix_hash(
     offset: u64,
-    probe: &mut Vec<u8>,
+    hash: &mut Option<[u8; 32]>,
     file: &mut std::fs::File,
 ) -> anyhow::Result<()> {
-    let start = offset.saturating_sub(LEDGER_PREFIX_PROBE_BYTES);
-    file.seek(std::io::SeekFrom::Start(start))?;
-    let mut next = Vec::new();
-    file.take(offset.saturating_sub(start))
-        .read_to_end(&mut next)?;
-    *probe = next;
+    *hash = if offset == 0 {
+        None
+    } else {
+        hash_ledger_prefix(offset, file)?
+    };
     Ok(())
+}
+
+fn hash_ledger_prefix(offset: u64, file: &mut std::fs::File) -> anyhow::Result<Option<[u8; 32]>> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut remaining = offset;
+    let mut buffer = [0_u8; 16 * 1024];
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64))?;
+        let read = file.read(&mut buffer[..wanted])?;
+        if read == 0 {
+            return Ok(None);
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(Some(*hasher.finalize().as_bytes()))
 }
 
 const PAGE: &str = r#"<!doctype html>
@@ -1569,6 +1560,101 @@ mod tests {
         assert_eq!(cache.timeline.surface()[0].text_content(), "bravo");
     }
 
+    #[test]
+    fn timeline_cache_hashes_the_entire_large_consumed_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let large = |byte: char| {
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::user(
+                byte.to_string().repeat(10_000),
+            )])
+            .unwrap()
+        };
+        let first = large('a');
+        write_timeline(&path, &first);
+        assert!(std::fs::metadata(&path).unwrap().len() > 8192);
+        let mut cache = SessionTrajectoryCache::default();
+        cache.refresh(&path).unwrap();
+
+        let second = large('b');
+        write_timeline(&path, &second);
+        cache.refresh(&path).unwrap();
+        assert!(cache.timeline.surface()[0].text_content().starts_with('b'));
+
+        let mut third = large('c');
+        third
+            .append(
+                sampling_types::ConversationItem::assistant("new tail"),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        write_timeline(&path, &third);
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.timeline.events().len(), 2);
+        assert!(cache.timeline.surface()[0].text_content().starts_with('c'));
+    }
+
+    #[test]
+    fn sideband_cache_hashes_the_entire_large_consumed_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let sideband_id = "018f0000-0000-7000-8000-000000000099";
+        let event = |byte: char| chat_state::SidebandEvent {
+            version: chat_state::SIDEBAND_SCHEMA_VERSION,
+            sideband_id: sideband_id.into(),
+            seq: 0,
+            at_ms: 1,
+            kind: chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
+                purpose: chat_state::SidebandPurpose::ContextRecall,
+                prompt: byte.to_string().repeat(10_000),
+                source_refs: Vec::new(),
+                route: chat_state::SidebandRoute {
+                    model: "model".into(),
+                    backend: "backend".into(),
+                },
+                initiator_ref: "parent/1".into(),
+                executor: "executor".into(),
+                output_schema: None,
+            }),
+        };
+        let write = |events: &[chat_state::SidebandEvent]| {
+            let bytes = events
+                .iter()
+                .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+                .collect::<String>();
+            std::fs::write(&path, bytes).unwrap();
+        };
+        write(&[event('a')]);
+        assert!(std::fs::metadata(&path).unwrap().len() > 8192);
+        let mut cache = SidebandCache::default();
+        cache.refresh(&path).unwrap();
+        write(&[event('b')]);
+        cache.refresh(&path).unwrap();
+        let chat_state::SidebandEventKind::Request(request) = &cache.events[0].kind else {
+            panic!("expected request");
+        };
+        assert!(request.prompt.starts_with('b'));
+
+        let third = event('c');
+        let terminal = chat_state::SidebandEvent {
+            version: chat_state::SIDEBAND_SCHEMA_VERSION,
+            sideband_id: sideband_id.into(),
+            seq: 1,
+            at_ms: 2,
+            kind: chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                outcome: chat_state::SidebandOutcome::Failed,
+                error: Some("stopped".into()),
+            }),
+        };
+        write(&[third, terminal]);
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.events.len(), 2);
+        let chat_state::SidebandEventKind::Request(request) = &cache.events[0].kind else {
+            panic!("expected request");
+        };
+        assert!(request.prompt.starts_with('c'));
+    }
+
     #[cfg(unix)]
     #[test]
     fn timeline_cache_rejects_symlinked_ledgers() {
@@ -1655,6 +1741,44 @@ mod tests {
         cache.refresh(&path).unwrap();
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.entries[0].result, serde_json::json!("bb"));
+    }
+
+    #[test]
+    fn workflow_cache_hashes_the_entire_large_consumed_prefix_and_rebuilds_before_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let entry = |seq, byte: char| workflow::JournalEntry {
+            seq,
+            kind: "log".into(),
+            req_hash: format!("hash-{seq}"),
+            result: serde_json::Value::String(byte.to_string().repeat(10_000)),
+            at_ms: seq,
+        };
+        let write = |entries: &[workflow::JournalEntry]| {
+            let bytes = entries
+                .iter()
+                .map(|entry| format!("{}\n", serde_json::to_string(entry).unwrap()))
+                .collect::<String>();
+            std::fs::write(&path, bytes).unwrap();
+        };
+        write(&[entry(0, 'a')]);
+        assert!(std::fs::metadata(&path).unwrap().len() > 8192);
+        let mut cache = WorkflowJournalCache::default();
+        cache.refresh(&path).unwrap();
+        write(&[entry(0, 'b')]);
+        cache.refresh(&path).unwrap();
+        assert_eq!(
+            cache.entries[0].result.as_str().unwrap().as_bytes()[0],
+            b'b'
+        );
+
+        write(&[entry(0, 'c'), entry(1, 'd')]);
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(
+            cache.entries[0].result.as_str().unwrap().as_bytes()[0],
+            b'c'
+        );
     }
 
     #[test]
