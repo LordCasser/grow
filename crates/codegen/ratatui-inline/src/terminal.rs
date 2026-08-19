@@ -620,6 +620,22 @@ where
     ///     fn flush(&mut self) -> Result<(), Self::Error> {
     ///         Ok(())
     ///     }
+    ///     #[cfg(feature = "scrolling-regions")]
+    ///     fn scroll_region_up(
+    ///         &mut self,
+    ///         _region: std::ops::Range<u16>,
+    ///         _line_count: u16,
+    ///     ) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
+    ///     #[cfg(feature = "scrolling-regions")]
+    ///     fn scroll_region_down(
+    ///         &mut self,
+    ///         _region: std::ops::Range<u16>,
+    ///         _line_count: u16,
+    ///     ) -> Result<(), Self::Error> {
+    ///         Ok(())
+    ///     }
     /// }
     ///
     /// let mut terminal = Terminal::new(BoomBackend).unwrap();
