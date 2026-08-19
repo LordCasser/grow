@@ -38,7 +38,7 @@ TimelineEvent { version, seq, at_ms, kind }
 SurfaceOp = Append | Replace { start, end, shadowed }
 ```
 
-消息类事件携带一个或多个完整 `ConversationItem` 与 `SurfaceOp`。普通用户、assistant 与工具结果使用 `Append`；压缩和内容重写使用 `Replace`。非消息事件不能携带 `SurfaceOp`。schema v6 的闭合事件族为：
+消息类事件携带一个或多个完整 `ConversationItem` 与 `SurfaceOp`。普通用户、assistant 与工具结果使用 `Append`；压缩和内容重写使用 `Replace`。非消息事件不能携带 `SurfaceOp`。schema v7 的闭合事件族为：
 
 | 事件族 | 结构约束 |
 | --- | --- |
@@ -46,6 +46,7 @@ SurfaceOp = Append | Replace { start, end, shadowed }
 | `step` | 从属于 active turn；关闭前 request/tool 必须闭合 |
 | `request` | request id 唯一；started 后才能 first-token/retry/terminal |
 | `tool` | call id 唯一；started 后才能 completed，名称必须一致 |
+| `workflow` | run id 唯一；spawn 从 epoch 0 开始，resume 严格递增；每个 execution 只有一个 end，暂停/失败可恢复，完成/取消/中断永久关闭；无 active execution 时只能显式 close |
 | `compaction` | started、唯一 summary 与 completed/failed 构成事务；成功路径的唯一 replacement 位于 summary 与 completed 之间 |
 | `recovery` | 只追加中断修复意图和依据，不改写物理尾部 |
 | `observation` | 治理、权限、MCP 等 log-only 事实，不参与 Surface |
@@ -140,22 +141,23 @@ Subagent 不是父会话目录中的 metadata sidecar，也不是 coordinator co
 
 ## 持久化格式
 
-Timeline 使用独立的 append-only `timeline.jsonl` 流，每个事件携带 schema 版本。`summary.json.session_format_version` 必须精确等于当前 v5；缺失、旧版本以及没有 Timeline 的已发布会话全部拒绝加载，导入也不能改写版本号来伪装升级。Timeline 事件 schema 为 v6，其 envelope、事件 enum 和每个 typed payload 都拒绝未知字段，不能悄悄吞掉旧字段形成半升级状态。session v5 将超大 prompt 的本地绝对路径替换为 `artifact:prompt:blake3:<hash>`；只有 provider request 副本在采样前把它解析为当前 session 实体目录下的本地路径，fork/import 不再改写不可变 Timeline 文本。实体目录是运行时的显式不可变身份输入，不能由 `cwd + id` 二次推导；因此独立 child 的 prompt blob、compaction、workflow 和其他副产物始终归属 child 自己。加载时先校验版本、seq 连续性、事件结构与全部逻辑 artifact，再构建 Surface；坏事件或缺失 artifact 不能降级成“尽量恢复”的消息数组。唯一可丢弃的是没有换行终止的最终碎片，因为它从未形成已提交事件。Timeline writer 以 `seq` 做幂等 compare-and-append：丢失 acknowledgement 后重试同一事件只会重新执行 durability barrier，同序不同内容、序号缺口和内部坏行全部 fail closed。模型请求、工具执行、step/turn 终态和 compaction 边界使用 durable append acknowledgement；持久化失败阻止边界继续。
+Timeline 使用独立的 append-only `timeline.jsonl` 流，每个事件携带 schema 版本。`summary.json.session_format_version` 必须精确等于当前 v6；缺失、旧版本以及没有 Timeline 的已发布会话全部拒绝加载，导入也不能改写版本号来伪装升级。Timeline 事件 schema 为 v7，其 envelope、事件 enum 和每个 typed payload 都拒绝未知字段，不能悄悄吞掉旧字段形成半升级状态。session v6 将超大 prompt 的本地绝对路径替换为 `artifact:prompt:blake3:<hash>`，并要求每个 Workflow actor 在主 Timeline 拥有严格的 spawn/resume/end/close 生命周期；只有 provider request 副本在采样前把逻辑 artifact 解析为当前 session 实体目录下的本地路径，fork/import 不再改写不可变 Timeline 文本。实体目录是运行时的显式不可变身份输入，不能由 `cwd + id` 二次推导；因此独立 child 的 prompt blob、compaction、workflow 和其他副产物始终归属 child 自己。加载时先校验版本、seq 连续性、事件结构与全部逻辑 artifact，再构建 Surface；坏事件或缺失 artifact 不能降级成“尽量恢复”的消息数组。唯一可丢弃的是没有换行终止的最终碎片，因为它从未形成已提交事件；Workflow journal 同样把 newline 作为提交边界，不再把碰巧完整的无换行 JSON 尾片升级成事实。Timeline writer 以 `seq` 做幂等 compare-and-append：丢失 acknowledgement 后重试同一事件只会重新执行 durability barrier，同序不同内容、序号缺口和内部坏行全部 fail closed。模型请求、工具执行、step/turn、Workflow 终态和 compaction 边界使用 durable append acknowledgement；持久化失败阻止边界继续。进程恢复会显式关闭遗留的 request/tool/compaction、subagent、Workflow 与 step/turn，不能在因果树中保留幽灵 execution。
 
-Grow 不为旧的可变 Chat 快照格式或 Timeline schema v1 保留执行兼容层。新格式加载只认 Timeline，Behavior/Goal 同样只从 Timeline `control` 事件恢复，不存在 `session-control.json` sidecar。分叉先在同级 staging 目录完整构造新摘要、Seed Timeline 和附属状态，递归同步 staged 文件与目录后再通过原子 rename 发布；目标已存在时直接拒绝，任何失败都不得暴露目标目录或遗留 staging。分叉后的 prompt/compaction 坐标从新 Timeline 重新派生，不继承父会话的可变标记；若显式继承 control，则在 child Timeline 中追加清除 Goal/Deep Research ownership的新 Control 事实。回退追加 `Rewind` replacement 事件并保留旧事实。
+Grow 不为旧的可变 Chat 快照格式或 Timeline schema v1 保留执行兼容层。新格式加载只认 Timeline，Behavior/Goal 同样只从 Timeline `control` 事件恢复，不存在 `session-control.json` sidecar。Workflow 恢复也不扫描目录来发现实体，而是只枚举已验证 Timeline 中最近的有限 `workflow/spawn`，再按 run id 精确读取对应 manifest/script/args；没有 spawn 的孤儿目录不是候选事实。Workflow 的 metadata、epoch、execution 终态与永久关闭状态只从 Timeline 自己维护的 `workflow_lifecycle` fold 读取，shell 不再二次扫描原始事件重建另一份生命周期。分叉先在同级 staging 目录完整构造新摘要、Seed Timeline 和附属状态，递归同步 staged 文件与目录后再通过原子 rename 发布；目标已存在时直接拒绝，任何失败都不得暴露目标目录或遗留 staging。分叉后的 prompt/compaction 坐标从新 Timeline 重新派生，不继承父会话的可变标记；若显式继承 control，则在 child Timeline 中追加清除 Goal/Deep Research ownership的新 Control 事实。回退追加 `Rewind` replacement 事件并保留旧事实。
 
 旧事件流和 Chat 快照均已删除。`updates.jsonl` 只保存客户端 replay / display stream，`TurnCompleted` 不再承担 durable terminal 语义。它可以重复、丢失或重建，不能参与 agent 恢复决策；prompt 文本、压缩位置和跨压缩 rewind 同样禁止从它或 compaction checkpoint 恢复。
 
 ## Trajectory 调试面
 
-`grow trajectory [session-id]` 在 `127.0.0.1` 启动独立页面。未指定 session 时选择当前目录最近活跃会话；端口默认由系统分配。服务只接受 loopback bind 与 localhost/loopback Host，并为每次启动生成不可猜的 URL token。页面与 API 只从 `timeline.jsonl` 构建 `TrajectorySnapshot`，不读取消息快照或 UI updates。
+`grow trajectory [session-id]` 在 `127.0.0.1` 启动独立页面。未指定 session 时选择当前目录最近活跃会话；端口默认由系统分配。服务只接受 loopback bind 与 localhost/loopback Host，并为每次启动生成不可猜的 URL token。页面与 API 从主/child/Sideband Timeline 以及被主 Timeline `workflow/spawn` 精确拥有的 Workflow journal 构建 `TrajectorySnapshot`，不读取消息快照或 UI updates。Workflow manifest 只保存当前运行投影，不再携带第二份 mutable history；`execution_epoch` 恢复时必须按 Timeline 的最新 lifecycle 纠偏，run 的存在、顺序、恢复和终态仍以主 Timeline 为唯一权威，host-call 历史只存在于 Workflow journal。
 
 - `GET /<token>/api/trajectory` 支持互斥的 `after` / `before` cursor 或 exact `entry` 定位，以及四维 `layer`、`actor`、`class`、`producer`、`visibility`、`search`、`limit` 交集过滤；exact entry 返回它所属的完整因果 root group，使长账本中的稳定 ID 深链不依赖当前尾页窗口；
 - 任意实体行统一使用 `t:<timeline-id>/<seq>`；合并视图以 `parent_entry_id` 精确指向 direct spawn，以可递归的 `nesting_path` 给出确定性因果顺序，不保留只能表达一层关系的 `parent_seq`；
 - 服务从父 Timeline 的 `subagent/spawn` 出发递归解析 child session，逐层验证 summary lineage、spawn ↔ seed-source，并在父终态引用 child result 时验证 exact result；运行中 child 与无 result ref 的 Failed/Cancelled child 可以暂缺，Completed、任何携带 result ref 的终态或已发布但谱系被篡改的 child fail closed；
+- 服务从 `workflow/spawn` 加载 `workflows/<run-id>/journal.jsonl`，journal 行使用独立身份 `t:<run-id>/<seq>` 并挂在 exact spawn 下；同一 spawn 下以固定 path namespace 区分 journal 与尚未链接的父 Timeline lifecycle，并强制所有合并行的 `nesting_path` 唯一。Workflow 发起的 subagent 先挂在 run spawn，journal 已记录且能反向验证对应 owned `spawn_agent.result.agent_id` 后再精确挂到该 host-call 行，child Timeline 继续递归嵌套；
 - current / shadowed / log-only 由统一 Surface fold 计算；
 - request 展示 TTFT、总耗时、token/cache usage，tool/turn/compaction 展示真实终态耗时；
-- 每次查询只构造一个 relocation-aware session storage view，主实体和全部递归 child 都从这一个权威目录快照解析；服务再按字节 offset 增量 fold 各 Session / Sideband Timeline，完整批次中任一坏行会让整批拒绝且不推进对应 cache，未换行尾片等待下一次刷新；
+- 每次查询只构造一个 relocation-aware session storage view，主实体和全部递归 child 都从这一个权威目录快照解析；服务再按字节 offset 增量 fold 各 Session / Sideband Timeline 与 Workflow journal，完整批次中任一坏行会让整批拒绝且不推进对应 cache，未换行尾片等待下一次刷新；Workflow journal 允许恢复时删除唯一 trailing host-error sentinel，因此 cache 额外验证已读前缀探针，检测到 truncate/同长度替换就丢弃旧 fold 并从 seq 0 重建；
 - 进行中的事件不伪造 duration；页面以 Input / Model / Tools 三条时间泳道总览同一批事件，支持向前分页、每秒刷新、tail-follow、稳定 ID 深链与 canonical JSON 检查；账本表格只挂载 viewport + overscan 行，长会话刷新不再反复创建数千个 DOM 行。
 
 ## 模块所有权

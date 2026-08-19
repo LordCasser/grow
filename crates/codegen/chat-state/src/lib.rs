@@ -60,12 +60,13 @@ pub use sideband::{
     SidebandUsage, TimelineMaterialization, TimelineRangeRef, validate_sideband_id,
 };
 pub use timeline::{
-    CompactionEvent, ControlEvent, EventSeq, MessageCause, MessageEvent, ObservationEvent,
-    PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, SessionTitleEvent, SessionTitleSource,
-    StepEvent, StepId, SubagentContextSource, SubagentEvent, SubagentOutcome, SubagentResultEvent,
-    SubagentSeedEvent, SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId, SurfaceOp,
-    SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent,
+    CompactionEvent, ControlEvent, EventSeq, MAX_WORKFLOW_RUN_ID_BYTES, MessageCause, MessageEvent,
+    ObservationEvent, PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, SessionTitleEvent,
+    SessionTitleSource, StepEvent, StepId, SubagentContextSource, SubagentEvent, SubagentOutcome,
+    SubagentResultEvent, SubagentSeedEvent, SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId,
+    SurfaceOp, SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent,
     TimelineEventKind, ToolEvent, TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal,
+    WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle,
 };
 pub use trajectory::{
     SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryProjector, TrajectoryRow,

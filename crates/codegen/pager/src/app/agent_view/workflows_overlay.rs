@@ -441,7 +441,6 @@ mod workflows_overlay_key_tests {
             agents: Vec::new(),
             agent_budget: None,
             agents_used: 0,
-            agents_reserved: 0,
             agents_remaining: None,
             agent_usage_incomplete: false,
             active_agents: 0,

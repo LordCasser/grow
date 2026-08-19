@@ -245,16 +245,6 @@ impl HostService {
                 }
                 if !replayed {
                     tracing::info!(run_id = %self.params.run_id, "workflow log: {message}");
-                    let state = self
-                        .params
-                        .tracker
-                        .lock()
-                        .log_message(&self.params.run_id, &message);
-                    if let Some(state) = state {
-                        let elapsed = self.elapsed_ms();
-                        let agents = self.active_agents.load(Ordering::Relaxed);
-                        self.params.notify.emit_ephemeral(&state, elapsed, agents);
-                    }
                 }
             }
             WorkflowHostRequest::Diagnostic {
@@ -585,7 +575,7 @@ impl HostService {
         self.tick();
 
         Ok(AgentResult {
-            agent_id: id,
+            agent_id: result.subagent_id.clone(),
             success: result.success,
             output,
             cancelled: result.cancelled,

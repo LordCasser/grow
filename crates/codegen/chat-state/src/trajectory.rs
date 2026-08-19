@@ -8,14 +8,14 @@ use crate::{
     CompactionEvent, ControlEvent, MessageEvent, ObservationEvent, RecoveryEvent, RequestEvent,
     SessionTitleEvent, SessionTitleSource, SidebandSpawnEvent, StepEvent, SubagentEvent,
     SubagentResultEvent, SubagentSeedEvent, SurfaceId, SurfaceOp, Timeline, TimelineEvent,
-    TimelineEventKind, ToolEvent, TurnEvent,
+    TimelineEventKind, ToolEvent, TurnEvent, WorkflowEvent,
 };
 
 /// Wire schema for the read-only Trajectory projection.
 ///
 /// This is intentionally independent from the Timeline event schema: changing
 /// a debug projection must not pretend that the durable ledger format changed.
-pub const TRAJECTORY_SCHEMA_VERSION: u8 = 1;
+pub const TRAJECTORY_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +72,7 @@ pub struct TrajectorySnapshot {
     pub active_step: Option<u32>,
     pub open_requests: Vec<String>,
     pub open_tools: Vec<String>,
+    pub open_workflows: Vec<String>,
     pub rows: Vec<TrajectoryRow>,
 }
 
@@ -178,6 +179,10 @@ impl TrajectoryProjector {
             active_step: timeline.active_step().map(|id| id.index),
             open_requests: timeline.open_request_ids().map(str::to_owned).collect(),
             open_tools: timeline.open_tool_call_ids().map(str::to_owned).collect(),
+            open_workflows: timeline
+                .open_workflow_run_ids()
+                .map(str::to_owned)
+                .collect(),
             rows: self.rows.clone(),
         }
     }
@@ -199,7 +204,7 @@ fn row(
         nesting_path: vec![event.seq.get()],
         at_ms: event.at_ms,
         layer,
-        actor: "main".into(),
+        actor: actor(&event.kind),
         class,
         producer,
         kind,
@@ -233,6 +238,9 @@ fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String
                 ToolEvent::Completed { .. } => "tool.result",
             };
             (kind.into(), "message".into(), producer, kind.into())
+        }
+        TimelineEventKind::Workflow(_) => {
+            coordinates("meta", "lifecycle", "core", "workflow", state)
         }
         TimelineEventKind::Compaction(_) => {
             coordinates("meta", "governance", "core", "compaction", state)
@@ -276,6 +284,18 @@ fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String
         TimelineEventKind::SubagentResult(_) => {
             coordinates("meta", "lifecycle", "core", "subagent.result", state)
         }
+    }
+}
+
+fn actor(event: &TimelineEventKind) -> String {
+    match event {
+        TimelineEventKind::Workflow(WorkflowEvent::Spawned { run_id, .. })
+        | TimelineEventKind::Workflow(WorkflowEvent::Resumed { run_id, .. })
+        | TimelineEventKind::Workflow(WorkflowEvent::Ended { run_id, .. })
+        | TimelineEventKind::Workflow(WorkflowEvent::Closed { run_id, .. }) => {
+            format!("workflow:{run_id}")
+        }
+        _ => "main".into(),
     }
 }
 
@@ -432,6 +452,79 @@ fn describe(
         },
         TimelineEventKind::Request(event) => describe_request(event, request_scopes),
         TimelineEventKind::Tool(event) => describe_tool(event, tool_scopes),
+        TimelineEventKind::Workflow(event) => match event {
+            WorkflowEvent::Spawned {
+                run_id,
+                execution_epoch,
+                name,
+                objective,
+                ..
+            } => tuple(
+                "workflow",
+                "spawn",
+                "running",
+                None,
+                None,
+                Some(run_id.clone()),
+                None,
+                format!(
+                    "{name} · epoch {execution_epoch} · {}",
+                    truncate(objective, 180)
+                ),
+            ),
+            WorkflowEvent::Resumed {
+                run_id,
+                execution_epoch,
+            } => tuple(
+                "workflow",
+                "resume",
+                "running",
+                None,
+                None,
+                Some(run_id.clone()),
+                None,
+                format!("execution epoch {execution_epoch}"),
+            ),
+            WorkflowEvent::Ended {
+                run_id,
+                execution_epoch,
+                status,
+                duration_ms,
+                message,
+            } => tuple(
+                "workflow",
+                "end",
+                status.as_str(),
+                None,
+                None,
+                Some(run_id.clone()),
+                Some(*duration_ms),
+                message.clone().unwrap_or_else(|| {
+                    format!("execution epoch {execution_epoch} {}", status.as_str())
+                }),
+            ),
+            WorkflowEvent::Closed {
+                run_id,
+                execution_epoch,
+                status,
+                duration_ms,
+                message,
+            } => tuple(
+                "workflow",
+                "close",
+                status.as_str(),
+                None,
+                None,
+                Some(run_id.clone()),
+                Some(*duration_ms),
+                message.clone().unwrap_or_else(|| {
+                    format!(
+                        "run closed after epoch {execution_epoch}: {}",
+                        status.as_str()
+                    )
+                }),
+            ),
+        },
         TimelineEventKind::Compaction(event) => describe_compaction(event),
         TimelineEventKind::Recovery(RecoveryEvent {
             action,

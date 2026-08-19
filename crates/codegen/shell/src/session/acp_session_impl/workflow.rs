@@ -87,20 +87,21 @@ impl SessionActor {
             .lock()
             .await
             .launch(resolved, spec)
+            .await
             .map_err(|error| format!("Could not start Deep Research: {error}"))?;
         if !self
             .behavior
             .lock()
             .attach_deep_research_run(run_id.clone())
         {
-            self.workflow_manager.lock().await.cancel(&run_id);
+            self.workflow_manager.lock().await.cancel(&run_id).await;
             return Err("Deep Research behavior changed before the run could start.".to_string());
         }
         let behavior = self.behavior.lock().snapshot();
         let goal = self.goal_tracker.lock().snapshot().cloned();
         if let Err(error) = self.persist_control_snapshot_durably(behavior, goal).await {
             self.behavior.lock().clear_deep_research_run();
-            self.workflow_manager.lock().await.cancel(&run_id);
+            self.workflow_manager.lock().await.cancel(&run_id).await;
             return Err(format!(
                 "Deep Research was cancelled because its ownership could not be persisted: {error}"
             ));
@@ -183,7 +184,7 @@ impl SessionActor {
             .get(run_id)
             .map(|run| run.objective.clone())
             .unwrap_or_default();
-        self.workflow_manager.lock().await.cancel(run_id);
+        self.workflow_manager.lock().await.cancel(run_id).await;
         self.behavior.lock().clear_deep_research_run();
         let report =
             deep_research_terminal_report(&query, &workflow::WorkflowOutcome::Cancelled, None);
@@ -302,7 +303,7 @@ impl SessionActor {
             max_concurrency: None,
             resume_run_id: None,
         };
-        let launched = manager.launch(resolved, spec);
+        let launched = manager.launch(resolved, spec).await;
         match launched {
             Ok((run_id, outcome_rx)) => {
                 let (display, objective) = manager
@@ -411,7 +412,7 @@ impl SessionActor {
                 }
                 // Private Deep Research runs were filtered out above and are
                 // controlled only by the Deep Research Behavior owner.
-                if !manager.cancel(&full_id) {
+                if !manager.cancel(&full_id).await {
                     return format!("Run '{name}' is already finished.");
                 }
                 format!("Stopped {name}.")
@@ -489,7 +490,7 @@ impl SessionActor {
                     max_concurrency: None,
                     resume_run_id: Some(full_id.clone()),
                 };
-                match manager.launch(resolved, spec) {
+                match manager.launch(resolved, spec).await {
                     Ok((rid, outcome_rx)) => {
                         tokio::spawn(async move {
                             if let Ok(outcome) = outcome_rx.await {

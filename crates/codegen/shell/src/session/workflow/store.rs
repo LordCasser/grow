@@ -10,12 +10,13 @@ use crate::session::persistence::PersistenceMsg;
 
 use super::tracker::WorkflowRunState;
 
-pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 4;
+pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 5;
 pub(crate) const MAX_RESTORED_WORKFLOW_RUNS: usize = 128;
 pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 = 512 * 1024;
 pub(crate) const MAX_WORKFLOW_ARGS_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowRunManifest {
     pub version: u8,
     pub state: WorkflowRunState,
@@ -59,38 +60,41 @@ impl WorkflowRunStore {
         session_dir: Option<PathBuf>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
         restored: Vec<RestoredWorkflowRun>,
+        timeline: Option<&chat_state::Timeline>,
     ) -> (Self, Vec<WorkflowRunState>) {
         let store = Self::new(session_dir, persistence_tx);
         let mut states = Vec::with_capacity(restored.len());
-        let mut restored: Vec<(RestoredWorkflowRun, usize)> = restored
-            .into_iter()
-            .enumerate()
-            .map(|(i, run)| (run, i))
-            .collect();
-        restored.sort_by(|(a, ai), (b, bi)| {
-            let at = a
-                .manifest
-                .state
-                .history
-                .first()
-                .map(|event| event.at.as_str())
-                .unwrap_or("");
-            let bt = b
-                .manifest
-                .state
-                .history
-                .first()
-                .map(|event| event.at.as_str())
-                .unwrap_or("");
-            at.cmp(bt).then(ai.cmp(bi))
-        });
         let mut repaired = Vec::new();
         {
             let mut sources = store.sources.lock();
-            for (run, _) in restored {
+            // Storage enumerates these in canonical Timeline spawn order.
+            for run in restored {
+                if run.manifest.version != WORKFLOW_RUN_MANIFEST_VERSION {
+                    tracing::warn!(
+                        version = run.manifest.version,
+                        expected = WORKFLOW_RUN_MANIFEST_VERSION,
+                        "ignoring unsupported Workflow manifest"
+                    );
+                    continue;
+                }
                 let run_id = run.manifest.state.run_id.clone();
+                let Some(lifecycle) =
+                    timeline.and_then(|timeline| timeline.workflow_lifecycle(&run_id))
+                else {
+                    tracing::warn!(%run_id, "ignoring Workflow manifest without a Timeline spawn fact");
+                    continue;
+                };
+                let expected_journal = format!("workflows/{run_id}/journal.jsonl");
+                if run.manifest.state.name != lifecycle.name
+                    || run.manifest.state.objective != lifecycle.objective
+                    || run.manifest.state.private != lifecycle.private
+                    || run.manifest.state.journal_path.as_deref() != Some(expected_journal.as_str())
+                {
+                    tracing::warn!(%run_id, "ignoring Workflow manifest that does not match its Timeline spawn fact");
+                    continue;
+                }
                 sources.insert(
-                    run_id,
+                    run_id.clone(),
                     RunSource {
                         script: run.script,
                         args: run.args,
@@ -98,21 +102,28 @@ impl WorkflowRunStore {
                     },
                 );
                 let mut state = run.manifest.state;
-                if run.manifest.version < WORKFLOW_RUN_MANIFEST_VERSION
-                    || state.agent_budget.is_none()
-                {
-                    state.status = super::tracker::WorkflowRunStatus::Interrupted;
-                    state.pause_message = Some(
-                        "this workflow predates agent-count accounting and cannot be resumed; start a new run"
-                            .to_string(),
-                    );
-                    state.agent_budget = None;
-                    state.agents_used = 0;
-                    state.token_leases.clear();
-                    state.agent_usage_incomplete = true;
-                    repaired.push(state.clone());
-                } else if state.status == super::tracker::WorkflowRunStatus::Active {
-                    state.interrupt_after_restore();
+                let (status, message, execution_was_open) = if lifecycle.open {
+                    (
+                        super::tracker::WorkflowRunStatus::Interrupted,
+                        Some("process_interrupted".into()),
+                        true,
+                    )
+                } else {
+                    let status = lifecycle
+                        .status
+                        .expect("a closed Workflow execution has a terminal status");
+                    (
+                        super::tracker::WorkflowRunStatus::from_timeline(status),
+                        lifecycle.message.clone(),
+                        false,
+                    )
+                };
+                if state.reconcile_lifecycle_after_restore(
+                    lifecycle.execution_epoch,
+                    status,
+                    message,
+                    execution_was_open,
+                ) {
                     repaired.push(state.clone());
                 }
                 states.push(state);
@@ -128,6 +139,26 @@ impl WorkflowRunStore {
             }
         }
         (store, states)
+    }
+
+    pub(crate) fn manifest_matches_timeline_spawn(
+        manifest: &WorkflowRunManifest,
+        timeline: Option<&chat_state::Timeline>,
+    ) -> bool {
+        if manifest.version != WORKFLOW_RUN_MANIFEST_VERSION {
+            return false;
+        }
+        let state = &manifest.state;
+        let Some(lifecycle) =
+            timeline.and_then(|timeline| timeline.workflow_lifecycle(&state.run_id))
+        else {
+            return false;
+        };
+        let expected_journal = format!("workflows/{}/journal.jsonl", state.run_id);
+        state.name == lifecycle.name
+            && state.objective == lifecycle.objective
+            && state.private == lifecycle.private
+            && state.journal_path.as_deref() == Some(expected_journal.as_str())
     }
 
     pub(crate) fn register(
@@ -285,6 +316,7 @@ impl WorkflowRunStore {
 
 pub(crate) fn validate_run_id(run_id: &str) -> io::Result<()> {
     if run_id.is_empty()
+        || run_id.len() > chat_state::MAX_WORKFLOW_RUN_ID_BYTES
         || !run_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
@@ -413,6 +445,22 @@ mod tests {
     use super::*;
     use crate::session::workflow::tracker::WorkflowTracker;
 
+    fn timeline_with_workflow(run_id: &str, name: &str, objective: &str) -> chat_state::Timeline {
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: run_id.into(),
+                    execution_epoch: 0,
+                    name: name.into(),
+                    objective: objective.into(),
+                    private: false,
+                },
+            ))
+            .unwrap();
+        timeline
+    }
+
     #[test]
     fn script_and_args_are_immutable() {
         let dir = tempfile::tempdir().unwrap();
@@ -476,7 +524,7 @@ mod tests {
             "objective".into(),
             Vec::new(),
             Some(8),
-            None,
+            Some("workflows/wf_active/journal.jsonl".into()),
         );
         let original_revision = state.revision;
         let restored = RestoredWorkflowRun {
@@ -489,7 +537,9 @@ mod tests {
             args: serde_json::json!({}),
         };
 
-        let (_store, states) = WorkflowRunStore::from_restored(None, tx, vec![restored]);
+        let timeline = timeline_with_workflow("wf_active", "deep-research", "objective");
+        let (_store, states) =
+            WorkflowRunStore::from_restored(None, tx, vec![restored], Some(&timeline));
         let state = &states[0];
         assert_eq!(
             state.status,
@@ -501,12 +551,62 @@ mod tests {
             state
                 .pause_message
                 .as_deref()
-                .is_some_and(|message| message.contains("execution ownership was lost"))
+                .is_some_and(|message| message == "process_interrupted")
         );
     }
 
     #[test]
-    fn output_budget_manifest_is_interrupted_after_total_budget_upgrade() {
+    fn restore_uses_timeline_epoch_instead_of_stale_manifest_epoch() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let state = WorkflowTracker::default().start_run(
+            "wf_resume".into(),
+            "demo".into(),
+            "objective".into(),
+            Vec::new(),
+            Some(8),
+            Some("workflows/wf_resume/journal.jsonl".into()),
+        );
+        let restored = RestoredWorkflowRun {
+            manifest: WorkflowRunManifest {
+                version: WORKFLOW_RUN_MANIFEST_VERSION,
+                state,
+                script_revision: 0,
+            },
+            script: "complete(1);".into(),
+            args: serde_json::json!({}),
+        };
+        let mut timeline = timeline_with_workflow("wf_resume", "demo", "objective");
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Ended {
+                    run_id: "wf_resume".into(),
+                    execution_epoch: 0,
+                    status: chat_state::WorkflowExecutionStatus::Failed,
+                    duration_ms: 1,
+                    message: Some("retry".into()),
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Resumed {
+                    run_id: "wf_resume".into(),
+                    execution_epoch: 1,
+                },
+            ))
+            .unwrap();
+
+        let (_store, states) =
+            WorkflowRunStore::from_restored(None, tx, vec![restored], Some(&timeline));
+        assert_eq!(states[0].execution_epoch, 1);
+        assert_eq!(
+            states[0].status,
+            crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn unsupported_manifest_is_not_restored() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let state = WorkflowTracker::default().start_run(
             "wf_legacy".into(),
@@ -526,19 +626,7 @@ mod tests {
             args: serde_json::json!({}),
         };
 
-        let (_store, states) = WorkflowRunStore::from_restored(None, tx, vec![restored]);
-        let state = &states[0];
-        assert_eq!(
-            state.status,
-            crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
-        );
-        assert_eq!(state.agent_budget, None);
-        assert!(state.agent_usage_incomplete);
-        assert!(
-            state
-                .pause_message
-                .as_deref()
-                .is_some_and(|message| message.contains("predates agent-count accounting"))
-        );
+        let (_store, states) = WorkflowRunStore::from_restored(None, tx, vec![restored], None);
+        assert!(states.is_empty());
     }
 }

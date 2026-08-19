@@ -1135,11 +1135,13 @@ pub(crate) async fn spawn_session_actor(
                 crate::session::behavior::BehaviorState::DeepResearch {
                     run_id: Some(run_id),
                 } => persisted_workflow_runs.iter().any(|run| {
-                    run.manifest.version
-                        == crate::session::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
-                        && run.manifest.state.run_id == *run_id
+                    run.manifest.state.run_id == *run_id
                         && run.manifest.state.name == "deep-research"
                         && run.manifest.state.private
+                        && crate::session::workflow::store::WorkflowRunStore::manifest_matches_timeline_spawn(
+                            &run.manifest,
+                            resumed_timeline.as_ref(),
+                        )
                 }),
                 _ => true,
             };
@@ -1791,6 +1793,7 @@ pub(crate) async fn spawn_session_actor(
             Some(workflow_session_dir.clone()),
             persistence.tx.clone(),
             persisted_workflow_runs,
+            resumed_timeline.as_ref(),
         );
     let restored_behavior = behavior.lock().behavior();
     let public_workflow_active = workflow_snapshots.iter().any(|run| {
@@ -1819,7 +1822,8 @@ pub(crate) async fn spawn_session_actor(
         behavior_normalized = true;
     }
     let workflow_tracker = Arc::new(parking_lot::Mutex::new(
-        crate::session::workflow::tracker::WorkflowTracker::from_snapshot(workflow_snapshots),
+        crate::session::workflow::tracker::WorkflowTracker::from_snapshot(workflow_snapshots)
+            .map_err(|error| agent::AgentBuildError::InvalidConfig(error.into()))?,
     ));
     let workflow_notify = crate::session::workflow::notify::WorkflowNotifySender::new(
         session_info.id.clone(),
@@ -1850,6 +1854,7 @@ pub(crate) async fn spawn_session_actor(
                 }
             }),
             cmd_tx.clone(),
+            chat_state_handle.clone(),
             std::collections::HashMap::new(),
         ),
     ));
@@ -2062,6 +2067,7 @@ pub(crate) async fn spawn_session_actor(
                             };
                             let (run_id, outcome_rx) = workflow_admission
                                 .launch(definition.resolved, spec)
+                                .await
                                 .map_err(|error| ("workflow_launch_failed", error.to_string()))?;
                             let run_handle = workflow_admission
                                 .tracker()
@@ -2171,7 +2177,7 @@ pub(crate) async fn spawn_session_actor(
                                         .get(&state.run_id)
                                 }
                                 WorkflowRunControl::Stop => {
-                                    if !workflow_admission.cancel(&state.run_id) {
+                                    if !workflow_admission.cancel(&state.run_id).await {
                                         return Err((
                                             "workflow_stop_failed",
                                             format!("Run '{}' is already terminal", state.name),
@@ -2209,6 +2215,7 @@ pub(crate) async fn spawn_session_actor(
                                     };
                                     let (resumed_id, outcome_rx) = workflow_admission
                                         .launch(resolved, spec)
+                                        .await
                                         .map_err(|error| {
                                             ("workflow_resume_failed", error.to_string())
                                         })?;

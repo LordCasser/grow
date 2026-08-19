@@ -268,20 +268,22 @@ impl SessionActor {
             .effects
             .contains(&BehaviorEffect::CancelDeepResearchRun)
         {
-            owned_deep_research_run.as_deref().map(|run_id| {
+            if let Some(run_id) = owned_deep_research_run.as_deref() {
                 let tracker = workflow_admission.tracker();
                 let query = tracker
                     .lock()
                     .get(run_id)
                     .map(|run| run.objective.clone())
                     .unwrap_or_default();
-                workflow_admission.cancel(run_id);
-                super::workflow_run::deep_research_terminal_report(
+                workflow_admission.cancel(run_id).await;
+                Some(super::workflow_run::deep_research_terminal_report(
                     &query,
                     &workflow::WorkflowOutcome::Cancelled,
                     None,
-                )
-            })
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };

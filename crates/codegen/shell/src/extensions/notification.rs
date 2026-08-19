@@ -864,8 +864,6 @@ pub enum SessionUpdate {
         agent_budget: Option<u64>,
         #[serde(default)]
         agents_used: u64,
-        #[serde(default)]
-        agents_reserved: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agents_remaining: Option<u64>,
         #[serde(default)]
@@ -877,12 +875,6 @@ pub enum SessionUpdate {
         current_agent_label: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         agents: Vec<WorkflowAgentInfo>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_event: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_event_detail: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_event_timestamp: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pause_message: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

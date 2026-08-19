@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 /// Sideband ledgers remain part of the only supported architecture; older
 /// path-bearing prompts, Chat snapshots, and mutable subagent metadata are not
 /// loaded or rewritten in place.
-pub const SESSION_FORMAT_VERSION: u8 = 5;
+pub const SESSION_FORMAT_VERSION: u8 = 6;
 
 use crate::session::storage::SessionUpdate;
 use serde::{Deserialize, Serialize};
@@ -1010,7 +1010,7 @@ mod head_fields_tests {
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
             "num_messages": 0,
-            "session_format_version": 5,
+            "session_format_version": 6,
             "current_model_id": "test-model"
         }"#;
         let summary: Summary = serde_json::from_str(json).unwrap();
@@ -1025,7 +1025,7 @@ mod head_fields_tests {
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
             "num_messages": 0,
-            "session_format_version": 5,
+            "session_format_version": 6,
             "current_model_id": "test-model"
         }"#;
         let summary: Summary = serde_json::from_str(json).unwrap();

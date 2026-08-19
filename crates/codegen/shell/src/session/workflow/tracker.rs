@@ -64,6 +64,37 @@ impl WorkflowRunStatus {
         self.is_paused() || self == Self::Failed
     }
 
+    pub(crate) fn to_timeline(self) -> chat_state::WorkflowExecutionStatus {
+        match self {
+            Self::UserPaused => chat_state::WorkflowExecutionStatus::UserPaused,
+            Self::BackOffPaused => chat_state::WorkflowExecutionStatus::BackOffPaused,
+            Self::NoProgressPaused => chat_state::WorkflowExecutionStatus::NoProgressPaused,
+            Self::InfraPaused => chat_state::WorkflowExecutionStatus::InfraPaused,
+            Self::Blocked => chat_state::WorkflowExecutionStatus::Blocked,
+            Self::BudgetLimited => chat_state::WorkflowExecutionStatus::BudgetLimited,
+            Self::Interrupted => chat_state::WorkflowExecutionStatus::Interrupted,
+            Self::Complete => chat_state::WorkflowExecutionStatus::Complete,
+            Self::Failed => chat_state::WorkflowExecutionStatus::Failed,
+            Self::Cancelled => chat_state::WorkflowExecutionStatus::Cancelled,
+            Self::Active => unreachable!("an active workflow cannot emit an execution terminal"),
+        }
+    }
+
+    pub(crate) fn from_timeline(status: chat_state::WorkflowExecutionStatus) -> Self {
+        match status {
+            chat_state::WorkflowExecutionStatus::UserPaused => Self::UserPaused,
+            chat_state::WorkflowExecutionStatus::BackOffPaused => Self::BackOffPaused,
+            chat_state::WorkflowExecutionStatus::NoProgressPaused => Self::NoProgressPaused,
+            chat_state::WorkflowExecutionStatus::InfraPaused => Self::InfraPaused,
+            chat_state::WorkflowExecutionStatus::Blocked => Self::Blocked,
+            chat_state::WorkflowExecutionStatus::BudgetLimited => Self::BudgetLimited,
+            chat_state::WorkflowExecutionStatus::Interrupted => Self::Interrupted,
+            chat_state::WorkflowExecutionStatus::Complete => Self::Complete,
+            chat_state::WorkflowExecutionStatus::Failed => Self::Failed,
+            chat_state::WorkflowExecutionStatus::Cancelled => Self::Cancelled,
+        }
+    }
+
     fn from_pause(kind: PauseKind) -> Self {
         match kind {
             PauseKind::User => Self::UserPaused,
@@ -75,15 +106,6 @@ impl WorkflowRunStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowHistoryEntry {
-    pub event: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    pub at: String,
-}
-
-pub const WORKFLOW_HISTORY_MAX: usize = 64;
 const WORKFLOW_PAUSE_MESSAGE_MAX_BYTES: usize = 4 * 1024;
 
 fn capped_pause_message(message: impl Into<String>) -> String {
@@ -114,13 +136,8 @@ fn default_label_for(agents: &[WorkflowAgentRow], phase: Option<&str>) -> String
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkflowTokenLease {
-    pub lease_id: String,
-    pub grant: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowAgentRow {
     pub agent_id: String,
     pub label: String,
@@ -129,15 +146,14 @@ pub struct WorkflowAgentRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub state: String,
-    #[serde(default)]
     pub tokens_used: u64,
-    #[serde(default)]
     pub duration_ms: u64,
 }
 
 pub const WORKFLOW_AGENT_ROWS_MAX: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowRunState {
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,35 +162,27 @@ pub struct WorkflowRunState {
     pub definition_scope: Option<WorkflowScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_hash: Option<String>,
-    #[serde(default)]
     pub private: bool,
-    #[serde(default)]
     pub save_prompt: bool,
-    #[serde(default)]
     pub revision: u64,
+    /// Monotonic identity of the current execution attempt. This is part of
+    /// the durable run state because Timeline resume boundaries validate it
+    /// across process restarts.
+    pub execution_epoch: u64,
     pub name: String,
     pub objective: String,
     pub status: WorkflowRunStatus,
-    #[serde(default)]
     pub phases: Vec<PhaseMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_phase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_budget: Option<u64>,
-    #[serde(default = "default_max_concurrency")]
     pub max_concurrency: u16,
-    #[serde(default)]
     pub agents_used: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub token_leases: Vec<WorkflowTokenLease>,
-    #[serde(default)]
     pub agent_usage_incomplete: bool,
-    #[serde(default)]
     pub elapsed_ms_floor: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_message: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<WorkflowHistoryEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,40 +200,35 @@ impl WorkflowRunState {
         self.revision = self.revision.saturating_add(1);
     }
 
-    fn record_event(&mut self, event: &str, detail: Option<String>) {
+    /// Reconcile the mutable manifest projection to the canonical lifecycle
+    /// reconstructed from Timeline. Returns whether the manifest changed.
+    pub(crate) fn reconcile_lifecycle_after_restore(
+        &mut self,
+        execution_epoch: u64,
+        status: WorkflowRunStatus,
+        message: Option<String>,
+        execution_was_open: bool,
+    ) -> bool {
+        let message = message.map(capped_pause_message);
+        if self.execution_epoch == execution_epoch
+            && self.status == status
+            && self.pause_message == message
+            && !execution_was_open
+        {
+            return false;
+        }
+        self.execution_epoch = execution_epoch;
+        self.status = status;
+        self.pause_message = message.clone();
+        if status != WorkflowRunStatus::Complete {
+            self.result_summary = None;
+        }
+        if execution_was_open {
+            self.agent_usage_incomplete = true;
+        }
         self.advance_revision();
-        self.history.push(WorkflowHistoryEntry {
-            event: event.to_string(),
-            detail,
-            at: now_rfc3339(),
-        });
-        if self.history.len() > WORKFLOW_HISTORY_MAX {
-            let excess = self.history.len() - WORKFLOW_HISTORY_MAX;
-            self.history.drain(..excess);
-        }
+        true
     }
-
-    /// A persisted Active state has no executor after process restart. Treat
-    /// it as a terminal interruption instead of projecting ghost work or
-    /// allowing it to block special-Behavior admission forever.
-    pub(crate) fn interrupt_after_restore(&mut self) {
-        if self.status != WorkflowRunStatus::Active {
-            return;
-        }
-        let message =
-            "the session restarted while this workflow was active; execution ownership was lost"
-                .to_string();
-        self.status = WorkflowRunStatus::Interrupted;
-        self.pause_message = Some(message.clone());
-        self.result_summary = None;
-        self.token_leases.clear();
-        self.agent_usage_incomplete = true;
-        self.record_event("workflow_interrupted", Some(message));
-    }
-}
-
-fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
 }
 
 #[derive(Debug, Default)]
@@ -240,7 +243,6 @@ pub struct WorkflowTracker {
 struct TrackedRun {
     state: WorkflowRunState,
     active_since: Option<Instant>,
-    execution_epoch: u64,
 }
 
 impl WorkflowTracker {
@@ -276,6 +278,7 @@ impl WorkflowTracker {
             private: false,
             save_prompt: false,
             revision: 0,
+            execution_epoch: 0,
             name,
             objective,
             status: WorkflowRunStatus::Active,
@@ -284,20 +287,17 @@ impl WorkflowTracker {
             agent_budget,
             max_concurrency: default_max_concurrency(),
             agents_used: 0,
-            token_leases: Vec::new(),
             agent_usage_incomplete: false,
             elapsed_ms_floor: 0,
             pause_message: None,
-            history: Vec::new(),
             journal_path,
             result_summary: None,
             agents: Vec::new(),
         };
-        state.record_event("workflow_started", None);
+        state.advance_revision();
         self.runs.push(TrackedRun {
             state: state.clone(),
             active_since: Some(Instant::now()),
-            execution_epoch: 0,
         });
         state
     }
@@ -360,9 +360,9 @@ impl WorkflowTracker {
                 agent.state = "cancelled".to_string();
             }
         }
-        run.state.record_event("workflow_resumed", None);
+        run.state.advance_revision();
         run.active_since = Some(Instant::now());
-        run.execution_epoch = run.execution_epoch.wrapping_add(1);
+        run.state.execution_epoch = run.state.execution_epoch.saturating_add(1);
         let state = run.state.clone();
         self.reported_terminal_run_ids.remove(run_id);
         self.terminal_at_restore_run_ids.remove(run_id);
@@ -384,8 +384,7 @@ impl WorkflowTracker {
         let run = self.run_mut(run_id)?;
         if run.state.current_phase.as_deref() != Some(title) {
             run.state.current_phase = Some(title.to_string());
-            run.state
-                .record_event("phase_entered", Some(title.to_string()));
+            run.state.advance_revision();
         }
         Some(run.state.clone())
     }
@@ -430,7 +429,7 @@ impl WorkflowTracker {
         self.runs
             .iter()
             .find(|run| run.state.run_id == run_id)
-            .map(|run| run.execution_epoch)
+            .map(|run| run.state.execution_epoch)
     }
 
     pub(crate) fn reconcile_agents_used(
@@ -443,35 +442,6 @@ impl WorkflowTracker {
             run.state.agents_used = used;
             run.state.advance_revision();
         }
-        Some(run.state.clone())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_budget_accounting(
-        &mut self,
-        run_id: &str,
-        message: impl Into<String>,
-    ) -> Option<WorkflowRunState> {
-        let run = self.run_mut(run_id)?;
-        let reserved = run
-            .state
-            .token_leases
-            .drain(..)
-            .fold(0u64, |sum, lease| sum.saturating_add(lease.grant));
-        run.state.agents_used = run.state.agents_used.saturating_add(reserved);
-        if let Some(limit) = run.state.agent_budget {
-            run.state.agents_used = run.state.agents_used.max(limit);
-        }
-        run.state.agent_usage_incomplete = true;
-        let message = capped_pause_message(message);
-        run.state.record_event(
-            "workflow_budget_accounting_incomplete",
-            Some(message.clone()),
-        );
-        run.fold_elapsed();
-        run.state.status = WorkflowRunStatus::Interrupted;
-        run.state.pause_message = Some(message);
-        run.state.result_summary = None;
         Some(run.state.clone())
     }
 
@@ -508,8 +478,7 @@ impl WorkflowTracker {
             .iter_mut()
             .find(|agent| agent.agent_id == agent_id)?;
         agent.state = "running".to_string();
-        run.state
-            .record_event("agent_running", Some(agent_id.to_string()));
+        run.state.advance_revision();
         Some(run.state.clone())
     }
 
@@ -545,12 +514,6 @@ impl WorkflowTracker {
         }
     }
 
-    pub fn log_message(&mut self, run_id: &str, message: &str) -> Option<WorkflowRunState> {
-        let run = self.run_mut(run_id)?;
-        run.state.record_event("log", Some(message.to_string()));
-        Some(run.state.clone())
-    }
-
     pub fn pause_user(
         &mut self,
         run_id: &str,
@@ -563,8 +526,7 @@ impl WorkflowTracker {
         run.fold_elapsed();
         run.state.status = WorkflowRunStatus::UserPaused;
         run.state.pause_message = message.map(capped_pause_message);
-        run.state
-            .record_event("workflow_paused", Some("user".into()));
+        run.state.advance_revision();
         Some(run.state.clone())
     }
 
@@ -579,8 +541,20 @@ impl WorkflowTracker {
         run.state.status = WorkflowRunStatus::Interrupted;
         run.state.pause_message = Some(message.clone());
         run.state.result_summary = None;
-        run.state
-            .record_event("workflow_interrupted", Some(message));
+        run.state.advance_revision();
+        Some(run.state.clone())
+    }
+
+    pub fn close_cancelled(&mut self, run_id: &str) -> Option<WorkflowRunState> {
+        let run = self.run_mut(run_id)?;
+        if !run.state.status.is_resumable() {
+            return None;
+        }
+        run.fold_elapsed();
+        run.state.status = WorkflowRunStatus::Cancelled;
+        run.state.pause_message = Some("cancelled while no execution was active".into());
+        run.state.result_summary = None;
+        run.state.advance_revision();
         Some(run.state.clone())
     }
 
@@ -597,27 +571,18 @@ impl WorkflowTracker {
                 | WorkflowRunStatus::Failed
                 | WorkflowRunStatus::Cancelled
         ) {
-            run.state.record_event(
-                "workflow_outcome_ignored",
-                Some(format!(
-                    "ignored {} while status is {}",
-                    outcome_kind(outcome),
-                    run.state.status.as_str()
-                )),
-            );
             return Some(run.state.clone());
         }
         match outcome {
             WorkflowOutcome::Completed { result } => {
                 run.state.status = WorkflowRunStatus::Complete;
                 run.state.result_summary = Some(summarize_result(result));
-                run.state.record_event("workflow_completed", None);
+                run.state.advance_revision();
             }
             WorkflowOutcome::Paused { kind, message } => {
                 run.state.status = WorkflowRunStatus::from_pause(*kind);
                 run.state.pause_message = Some(capped_pause_message(message.clone()));
-                run.state
-                    .record_event("workflow_paused", Some(kind.as_str().to_string()));
+                run.state.advance_revision();
             }
             WorkflowOutcome::BudgetExceeded { message } => {
                 run.state.status = WorkflowRunStatus::BudgetLimited;
@@ -629,17 +594,17 @@ impl WorkflowTracker {
                      to continue"
                 };
                 run.state.pause_message = Some(capped_pause_message(format!("{message} — {hint}")));
-                run.state.record_event("workflow_budget_limited", None);
+                run.state.advance_revision();
             }
             WorkflowOutcome::Cancelled => {
                 run.state.status = WorkflowRunStatus::Cancelled;
-                run.state.record_event("workflow_cancelled", None);
+                run.state.advance_revision();
             }
             WorkflowOutcome::Failed { error } => {
                 run.state.status = WorkflowRunStatus::Failed;
                 let error = capped_pause_message(error.clone());
                 run.state.pause_message = Some(error.clone());
-                run.state.record_event("workflow_failed", Some(error));
+                run.state.advance_revision();
             }
         }
         Some(run.state.clone())
@@ -649,7 +614,6 @@ impl WorkflowTracker {
         let idx = self.runs.iter().position(|r| r.state.run_id == run_id)?;
         let mut removed = self.runs.remove(idx);
         removed.fold_elapsed();
-        removed.state.record_event("workflow_cleared", None);
         Some(removed.state)
     }
 
@@ -682,33 +646,18 @@ impl WorkflowTracker {
             .unwrap_or(0)
     }
 
-    pub fn from_snapshot(snapshots: Vec<WorkflowRunState>) -> Self {
+    pub fn from_snapshot(snapshots: Vec<WorkflowRunState>) -> Result<Self, &'static str> {
+        if snapshots
+            .iter()
+            .any(|state| state.status == WorkflowRunStatus::Active)
+        {
+            return Err(
+                "Workflow restore received an active manifest instead of a Timeline-reconciled projection",
+            );
+        }
         let runs = snapshots
             .into_iter()
             .map(|mut state| {
-                if !state.token_leases.is_empty() {
-                    let charge = state
-                        .token_leases
-                        .drain(..)
-                        .fold(0u64, |sum, lease| sum.saturating_add(lease.grant));
-                    state.agents_used = state.agents_used.saturating_add(charge);
-                    state.agent_usage_incomplete = true;
-                    state.record_event(
-                        "workflow_budget_accounting_incomplete",
-                        Some("unresolved reservations charged on restore".into()),
-                    );
-                }
-                if state.status == WorkflowRunStatus::Active {
-                    state.status = WorkflowRunStatus::Interrupted;
-                    state.pause_message = Some(
-                        "the session ended while this workflow was active; start a new run"
-                            .to_string(),
-                    );
-                    state.record_event(
-                        "workflow_interrupted",
-                        Some("restored_without_stable_operation_identity".into()),
-                    );
-                }
                 let mut cancelled_ghost = false;
                 for agent in &mut state.agents {
                     if agent.state == "running" {
@@ -722,7 +671,6 @@ impl WorkflowTracker {
                 TrackedRun {
                     state,
                     active_since: None,
-                    execution_epoch: 0,
                 }
             })
             .collect::<Vec<TrackedRun>>();
@@ -731,12 +679,12 @@ impl WorkflowTracker {
             .filter(|r| r.state.status.is_completion_reportable())
             .map(|r| r.state.run_id.clone())
             .collect();
-        Self {
+        Ok(Self {
             runs,
             reported_terminal_run_ids: std::collections::HashSet::new(),
             terminal_at_restore_run_ids,
             status_reported_revisions: std::collections::HashMap::new(),
-        }
+        })
     }
 
     pub(crate) fn is_unreported_completion(&self, run_id: &str, revision: u64) -> bool {
@@ -831,16 +779,6 @@ impl TrackedRun {
             self.state.elapsed_ms_floor = self.live_elapsed_ms();
             self.active_since = None;
         }
-    }
-}
-
-fn outcome_kind(outcome: &WorkflowOutcome) -> &'static str {
-    match outcome {
-        WorkflowOutcome::Completed { .. } => "completed",
-        WorkflowOutcome::Paused { .. } => "paused",
-        WorkflowOutcome::BudgetExceeded { .. } => "budget_exceeded",
-        WorkflowOutcome::Cancelled => "cancelled",
-        WorkflowOutcome::Failed { .. } => "failed",
     }
 }
 
@@ -1047,16 +985,13 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_restore_marks_active_non_resumable_interrupted() {
+    fn snapshot_restore_rejects_active_without_timeline_reconciliation() {
         let (t, _) = tracker_with_run();
-        let restored = WorkflowTracker::from_snapshot(t.snapshot());
-        let run = restored.get("wf_1").unwrap();
-        assert_eq!(run.status, WorkflowRunStatus::Interrupted);
-        assert!(!run.status.is_paused());
+        assert!(WorkflowTracker::from_snapshot(t.snapshot()).is_err());
     }
 
     #[test]
-    fn snapshot_restore_interrupts_run_and_cancels_ghost_agent_rows() {
+    fn snapshot_restore_cancels_ghost_agent_rows() {
         let (mut t, id) = tracker_with_run();
         t.agent_started(
             &id,
@@ -1070,10 +1005,10 @@ mod tests {
                 duration_ms: 0,
             },
         );
-        let restored = WorkflowTracker::from_snapshot(t.snapshot());
+        t.interrupt(&id, "process_interrupted");
+        let restored = WorkflowTracker::from_snapshot(t.snapshot()).unwrap();
         let run = restored.get(&id).unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Interrupted);
-        assert!(!run.status.is_paused());
         assert_eq!(run.agents[0].state, "cancelled");
     }
 
@@ -1141,7 +1076,7 @@ mod tests {
     #[test]
     fn apply_outcome_does_not_demote_interrupted_to_complete() {
         let (mut t, id) = tracker_with_run();
-        t.fail_budget_accounting(&id, "settlement persist failed");
+        t.interrupt(&id, "settlement persist failed");
         assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Interrupted);
         t.apply_outcome(
             &id,
@@ -1151,19 +1086,12 @@ mod tests {
         );
         let run = t.get(&id).unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Interrupted);
-        assert!(
-            run.history
-                .iter()
-                .any(|e| e.event == "workflow_outcome_ignored"),
-            "expected ignored-outcome history entry, got {:?}",
-            run.history
-        );
     }
 
     #[test]
     fn apply_outcome_does_not_demote_interrupted_to_cancelled() {
         let (mut t, id) = tracker_with_run();
-        t.fail_budget_accounting(&id, "settlement persist failed");
+        t.interrupt(&id, "settlement persist failed");
         t.apply_outcome(&id, &WorkflowOutcome::Cancelled);
         assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Interrupted);
     }
@@ -1181,13 +1109,6 @@ mod tests {
         );
         let run = t.get(&id).unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Cancelled);
-        assert!(
-            run.history
-                .iter()
-                .any(|e| e.event == "workflow_outcome_ignored"),
-            "expected ignored-outcome history entry, got {:?}",
-            run.history
-        );
     }
 
     #[test]
@@ -1202,13 +1123,6 @@ mod tests {
         );
         let run = t.get(&id).unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Cancelled);
-        assert!(
-            run.history
-                .iter()
-                .any(|e| e.event == "workflow_outcome_ignored"),
-            "expected ignored-outcome history entry, got {:?}",
-            run.history
-        );
     }
 
     #[test]
@@ -1273,6 +1187,20 @@ mod tests {
     }
 
     #[test]
+    fn execution_epoch_survives_snapshot_restore() {
+        let (mut tracker, run_id) = tracker_with_run();
+        tracker.pause_user(&run_id, None);
+        tracker.resume_run(&run_id, None).unwrap();
+        tracker.pause_user(&run_id, None);
+        let snapshot = tracker.get(&run_id).unwrap();
+        assert_eq!(snapshot.execution_epoch, 1);
+
+        let mut restored = WorkflowTracker::from_snapshot(vec![snapshot]).unwrap();
+        restored.resume_run(&run_id, None).unwrap();
+        assert_eq!(restored.execution_epoch(&run_id), Some(2));
+    }
+
+    #[test]
     fn resume_run_insufficient_raise_after_overshoot_leaves_budget_unchanged() {
         let (mut t, id) = tracker_with_run();
         t.run_mut(&id).unwrap().state.agents_used = 1200;
@@ -1286,16 +1214,6 @@ mod tests {
         assert!(t.resume_run(&id, Some(1100)).is_none());
         assert_eq!(t.get(&id).unwrap().agent_budget, Some(1000));
         assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::BudgetLimited);
-    }
-
-    #[test]
-    fn fail_budget_accounting_never_lowers_overshoot_spend() {
-        let (mut t, id) = tracker_with_run();
-        t.run_mut(&id).unwrap().state.agents_used = 1500;
-        let state = t.fail_budget_accounting(&id, "persist failed").unwrap();
-        assert_eq!(state.agents_used, 1500);
-        assert!(state.agent_usage_incomplete);
-        assert_eq!(state.status, WorkflowRunStatus::Interrupted);
     }
 
     #[test]
@@ -1353,7 +1271,7 @@ mod tests {
             },
         );
 
-        let mut restored = WorkflowTracker::from_snapshot(t.snapshot());
+        let mut restored = WorkflowTracker::from_snapshot(t.snapshot()).unwrap();
         let (pre_resume, fresh) = restored.take_unreported_terminal_runs();
         assert_eq!(pre_resume.len(), 1);
         assert_eq!(pre_resume[0].run_id, id);
@@ -1387,27 +1305,15 @@ mod tests {
     }
 
     #[test]
-    fn history_is_capped() {
-        let (mut t, id) = tracker_with_run();
-        for i in 0..(WORKFLOW_HISTORY_MAX + 10) {
-            t.set_phase(&id, &format!("phase-{i}"));
-        }
-        let run = t.get(&id).unwrap();
-        assert_eq!(run.history.len(), WORKFLOW_HISTORY_MAX);
-    }
-
-    #[test]
     fn phase_dedupes_consecutive() {
         let (mut t, id) = tracker_with_run();
+        let revision = t.get(&id).unwrap().revision;
         t.set_phase(&id, "Scan");
+        let changed_revision = t.get(&id).unwrap().revision;
         t.set_phase(&id, "Scan");
         let run = t.get(&id).unwrap();
-        let phase_events = run
-            .history
-            .iter()
-            .filter(|e| e.event == "phase_entered")
-            .count();
-        assert_eq!(phase_events, 1);
+        assert!(changed_revision > revision);
+        assert_eq!(run.revision, changed_revision);
     }
 
     #[test]
@@ -1460,24 +1366,6 @@ mod tests {
         t.reserve_agents(id, 20).ok();
         assert_eq!(t.get(id).unwrap().agents_used, 20);
         assert_eq!(t.remaining_agents(id), Some(None));
-    }
-
-    #[test]
-    fn restore_charges_unresolved_lease_and_preserves_cap() {
-        let (mut t, id) = tracker_with_run();
-        let mut snapshot = t.snapshot();
-        snapshot[0].token_leases.push(WorkflowTokenLease {
-            lease_id: "lease_legacy".into(),
-            grant: 400,
-        });
-        let _ = &mut t;
-        let restored = WorkflowTracker::from_snapshot(snapshot);
-        let run = restored.get(&id).unwrap();
-        assert_eq!(run.agent_budget, Some(1000));
-        assert_eq!(run.agents_used, 400);
-        assert!(run.token_leases.is_empty());
-        assert!(run.agent_usage_incomplete);
-        assert_eq!(run.status, WorkflowRunStatus::Interrupted);
     }
 
     #[test]

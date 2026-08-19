@@ -320,8 +320,8 @@ fn format_workflow_status_reminder(
         if run.agent_usage_incomplete {
             let _ = write!(
                 buf,
-                "\n  Agent accounting incomplete: this run predates logical-agent \
-                 budgeting or contains legacy unresolved reservations"
+                "\n  Agent accounting incomplete: the session was interrupted before all \
+                 logical agent reservations were reconciled"
             );
         }
         let _ = write!(
@@ -849,6 +849,7 @@ mod workflow_reminder_tests {
             private: false,
             save_prompt: false,
             revision: 2,
+            execution_epoch: 0,
             name: "demo".to_owned(),
             objective: "exercise formatter".to_owned(),
             status: WorkflowRunStatus::Failed,
@@ -857,11 +858,9 @@ mod workflow_reminder_tests {
             agent_budget: None,
             max_concurrency: 3,
             agents_used: 0,
-            token_leases: Vec::new(),
             agent_usage_incomplete: false,
             elapsed_ms_floor: 1_000,
             pause_message: Some(detail),
-            history: Vec::new(),
             journal_path: None,
             result_summary: None,
             agents: Vec::new(),

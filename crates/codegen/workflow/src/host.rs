@@ -27,6 +27,7 @@ pub struct AgentOpts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentResult {
     pub agent_id: String,
     pub success: bool,

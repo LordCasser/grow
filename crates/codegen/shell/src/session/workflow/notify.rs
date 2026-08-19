@@ -99,8 +99,6 @@ pub(crate) fn build_workflow_updated(
     elapsed_ms: u64,
     _active_agents: u32,
 ) -> GrowSessionUpdate {
-    let last = state.history.last();
-
     let run_complete = state.status == super::tracker::WorkflowRunStatus::Complete;
     let current_idx = state
         .current_phase
@@ -146,10 +144,9 @@ pub(crate) fn build_workflow_updated(
         .filter(|agent| agent.state == "running")
         .count() as u32;
 
-    let agents_reserved = 0u64;
     let agents_remaining = state
         .agent_budget
-        .map(|total| total.saturating_sub(state.agents_used.saturating_add(agents_reserved)));
+        .map(|total| total.saturating_sub(state.agents_used));
 
     GrowSessionUpdate::WorkflowUpdated {
         run_id: state.run_id.clone(),
@@ -168,16 +165,12 @@ pub(crate) fn build_workflow_updated(
         current_phase: state.current_phase.clone(),
         agent_budget: state.agent_budget,
         agents_used: state.agents_used,
-        agents_reserved,
         agents_remaining,
         agent_usage_incomplete: state.agent_usage_incomplete,
         elapsed_ms,
         active_agents,
         current_agent_label,
         agents,
-        last_event: last.map(|e| e.event.clone()),
-        last_event_detail: last.and_then(|e| e.detail.clone()),
-        last_event_timestamp: last.map(|e| e.at.clone()),
         pause_message: state.pause_message.clone(),
         result_summary: state.result_summary.clone(),
     }

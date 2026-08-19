@@ -444,7 +444,6 @@ mod tests {
                 }],
                 agent_budget: None,
                 agents_used: 0,
-                agents_reserved: 0,
                 agents_remaining: None,
                 agent_usage_incomplete: false,
                 active_agents: 1,

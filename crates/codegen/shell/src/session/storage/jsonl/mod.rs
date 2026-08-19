@@ -1052,6 +1052,7 @@ impl JsonlStorageAdapter {
     fn load_workflow_runs_sync(
         &self,
         info: &Info,
+        timeline: &Timeline,
     ) -> io::Result<Vec<crate::session::workflow::store::RestoredWorkflowRun>> {
         use crate::session::workflow::store::{
             MAX_RESTORED_WORKFLOW_RUNS, MAX_WORKFLOW_ARGS_BYTES, MAX_WORKFLOW_MANIFEST_BYTES,
@@ -1068,46 +1069,43 @@ impl JsonlStorageAdapter {
             }
             Err(error) => return Err(error),
         };
-        // Invalid/symlinked rows must not consume the restored-run budget.
-        // Bound directory scanning separately so a hostile directory cannot
-        // turn restore into unbounded work while still allowing bad rows to
-        // be skipped before the valid-run cap is reached.
-        let scan_limit = MAX_RESTORED_WORKFLOW_RUNS.saturating_mul(4);
-        let mut entries: Vec<_> = std::fs::read_dir(&workflows_dir)?
-            .filter_map(Result::ok)
-            .take(scan_limit.saturating_add(1))
-            .collect();
-        let entries_truncated = entries.len() > scan_limit;
-        entries.truncate(scan_limit);
-        entries.sort_by_key(|entry| entry.file_name());
-        if entries_truncated {
+        let mut run_ids = timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
+                    run_id,
+                    ..
+                }) => Some(run_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if run_ids.len() > MAX_RESTORED_WORKFLOW_RUNS {
+            let excess = run_ids.len() - MAX_RESTORED_WORKFLOW_RUNS;
+            run_ids.drain(..excess);
             tracing::warn!(
-                path = %workflows_dir.display(),
-                limit = scan_limit,
-                "workflow restore scan cap reached; ignoring remaining directory entries"
+                session_id = %info.id,
+                limit = MAX_RESTORED_WORKFLOW_RUNS,
+                "workflow restore cap reached; restoring the most recent Timeline-owned runs"
             );
         }
         let mut restored = Vec::new();
-        for entry in entries {
-            if restored.len() == MAX_RESTORED_WORKFLOW_RUNS {
-                tracing::warn!(
-                    path = %workflows_dir.display(),
-                    limit = MAX_RESTORED_WORKFLOW_RUNS,
-                    "workflow restore run-count cap reached; ignoring remaining valid entries"
-                );
-                break;
-            }
-            let run_dir = entry.path();
+        for run_id in run_ids {
+            let run_dir = workflows_dir.join(&run_id);
             let Ok(run_meta) = std::fs::symlink_metadata(&run_dir) else {
                 continue;
             };
             if run_meta.file_type().is_symlink() || !run_meta.is_dir() {
                 continue;
             }
-            if std::fs::symlink_metadata(run_dir.join("cleared"))
-                .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
-            {
-                continue;
+            match std::fs::symlink_metadata(run_dir.join("cleared")) {
+                Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => continue,
+                Ok(_) => {
+                    tracing::warn!(%run_id, "skipping Workflow with invalid cleared marker");
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
             let manifest_path = run_dir.join("state.json");
             let manifest = match read_bounded_nofollow(&manifest_path, MAX_WORKFLOW_MANIFEST_BYTES)
@@ -1124,13 +1122,9 @@ impl JsonlStorageAdapter {
                     continue;
                 }
             };
-            if !matches!(
-                manifest.version,
-                1..=crate::session::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
-            ) || crate::session::workflow::store::validate_run_id(&manifest.state.run_id)
-                .is_err()
-                || run_dir.file_name().and_then(|name| name.to_str())
-                    != Some(manifest.state.run_id.as_str())
+            if manifest.version != crate::session::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
+                || crate::session::workflow::store::validate_run_id(&manifest.state.run_id).is_err()
+                || manifest.state.run_id != run_id
             {
                 tracing::warn!(path = %manifest_path.display(), "skipping unsupported or mismatched workflow manifest");
                 continue;
@@ -1847,7 +1841,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             crate::session::announcement_state::AnnouncementState::latest_from_timeline(
                 timeline.events(),
             )?;
-        let workflow_runs = self.load_workflow_runs_sync(info)?;
+        let workflow_runs = self.load_workflow_runs_sync(info, &timeline)?;
         let rewind_points = self.read_jsonl::<RewindPoint>(self.rewind_points_file(info))?;
         let result = PersistedData {
             summary,
@@ -1900,7 +1894,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             crate::session::announcement_state::AnnouncementState::latest_from_timeline(
                 timeline.events(),
             )?;
-        let workflow_runs = self.load_workflow_runs_sync(info)?;
+        let workflow_runs = self.load_workflow_runs_sync(info, &timeline)?;
         let result = super::PersistedDataLight {
             summary,
             timeline_events,

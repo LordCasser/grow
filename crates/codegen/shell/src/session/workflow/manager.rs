@@ -40,6 +40,8 @@ pub(crate) enum LaunchError {
     Journal(String),
     #[error("workflow store error: {0}")]
     Store(String),
+    #[error("workflow Timeline error: {0}")]
+    Timeline(String),
     #[error("run is not resumable (status: {0})")]
     NotResumable(String),
     #[error(
@@ -64,6 +66,7 @@ pub(crate) struct WorkflowManager {
         mpsc::UnboundedSender<tools::implementations::grow_build::task::types::SubagentEvent>,
     diagnostics: DiagnosticHook,
     session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
+    timeline: chat_state::ChatStateHandle,
     templates: HashMap<String, String>,
     active: HashMap<String, ActiveRun>,
     retiring: Vec<(String, oneshot::Receiver<()>)>,
@@ -83,6 +86,7 @@ impl WorkflowManager {
         >,
         diagnostics: DiagnosticHook,
         session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
+        timeline: chat_state::ChatStateHandle,
         templates: HashMap<String, String>,
     ) -> Self {
         Self {
@@ -95,6 +99,7 @@ impl WorkflowManager {
             subagent_event_tx,
             diagnostics,
             session_cmd_tx,
+            timeline,
             templates,
             active: HashMap::new(),
             retiring: Vec::new(),
@@ -105,7 +110,7 @@ impl WorkflowManager {
         self.tracker.clone()
     }
 
-    pub(crate) fn launch(
+    pub(crate) async fn launch(
         &mut self,
         resolved: ResolvedWorkflow,
         spec: LaunchSpec,
@@ -123,7 +128,7 @@ impl WorkflowManager {
         let definition_private = resolved.private;
         let allow_fork_context = resolved.source == WorkflowSource::Builtin;
         let mut execution_script = resolved.script;
-        let (run_id, journal, state) = match &spec.resume_run_id {
+        let (run_id, journal, state, resumed, execution_epoch) = match &spec.resume_run_id {
             Some(run_id) => {
                 let existing = self
                     .tracker
@@ -154,10 +159,10 @@ impl WorkflowManager {
                 execution_script = self.store.script_for(run_id).ok_or_else(|| {
                     LaunchError::Store("immutable workflow script is missing".into())
                 })?;
-                let mut journal = match existing
-                    .journal_path
+                let journal = match self
+                    .session_dir
                     .as_ref()
-                    .and_then(|p| self.session_dir.as_ref().map(|d| (d, p)))
+                    .zip(existing.journal_path.as_ref())
                 {
                     Some((session_dir, relative)) => {
                         let expected = format!("workflows/{run_id}/journal.jsonl");
@@ -171,38 +176,29 @@ impl WorkflowManager {
                     }
                     None => Journal::new(None),
                 };
-                if existing.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
-                    journal
-                        .prune_trailing_host_error(existing.pause_message.as_deref().unwrap_or(""))
-                        .map_err(|e| LaunchError::Journal(e.to_string()))?;
-                }
-                let state = {
-                    let mut tracker = self.tracker.lock();
-                    tracker.reconcile_agents_used(run_id, journal.agent_reservation_count());
-                    tracker
-                        .resume_run(run_id, spec.agent_budget)
-                        .and_then(|resumed| {
-                            if let Some(max_concurrency) = spec.max_concurrency {
-                                tracker.set_max_concurrency(run_id, max_concurrency)
-                            } else {
-                                Some(resumed)
-                            }
-                        })
-                }
-                .ok_or_else(|| {
-                    if existing.status
-                        == crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited
+                if existing.status
+                    == crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited
+                {
+                    let used = journal.agent_reservation_count();
+                    let previous = existing.agent_budget.unwrap_or(0);
+                    let candidate = spec.agent_budget.unwrap_or(previous).max(previous);
+                    if spec.agent_budget.is_none_or(|raised| raised <= previous)
+                        || used >= candidate
                     {
-                        LaunchError::BudgetNotRaised {
-                            used: existing.agents_used,
-                            limit: existing.agent_budget.unwrap_or(0),
-                        }
-                    } else {
-                        LaunchError::NotResumable(existing.status.as_str().into())
+                        return Err(LaunchError::BudgetNotRaised {
+                            used,
+                            limit: previous,
+                        });
                     }
-                })?;
+                }
+                let execution_epoch = self
+                    .tracker
+                    .lock()
+                    .execution_epoch(run_id)
+                    .unwrap_or(0)
+                    .saturating_add(1);
 
-                (run_id.clone(), journal, state)
+                (run_id.clone(), journal, existing, true, execution_epoch)
             }
             None => {
                 let run_id = format!("wf_{}", uuid::Uuid::now_v7().simple());
@@ -237,22 +233,104 @@ impl WorkflowManager {
                         .set_max_concurrency(&run_id, max_concurrency)
                         .expect("new workflow run must exist")
                 };
-                (run_id, journal, state)
+                (run_id, journal, state, false, 0)
             }
         };
-
-        if let Err(error) = self.store.persist_now(&state) {
-            if spec.resume_run_id.is_some() {
-                if let Some(interrupted) = self.tracker.lock().interrupt(
-                    &run_id,
-                    "workflow state persistence failed before resume; start a new run",
-                ) && let Err(persist_error) = self.store.persist(&interrupted)
-                {
-                    tracing::warn!(run_id = %run_id, %persist_error, "failed to queue interrupted workflow state");
-                }
-            } else {
+        let lifecycle = if resumed {
+            chat_state::WorkflowEvent::Resumed {
+                run_id: run_id.clone(),
+                execution_epoch,
+            }
+        } else {
+            chat_state::WorkflowEvent::Spawned {
+                run_id: run_id.clone(),
+                execution_epoch,
+                name: state.name.clone(),
+                objective: state.objective.clone(),
+                private: state.private,
+            }
+        };
+        if let Err(error) = self
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(lifecycle))
+            .await
+        {
+            if !resumed {
                 self.tracker.lock().clear_run(&run_id);
                 self.store.remove(&run_id);
+            }
+            return Err(LaunchError::Timeline(error.to_string()));
+        }
+
+        let mut journal = journal;
+        let resume_failure_message = (resumed
+            && state.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed)
+            .then(|| state.pause_message.clone().unwrap_or_default());
+        let state = if resumed {
+            let mut tracker = self.tracker.lock();
+            tracker.reconcile_agents_used(&run_id, journal.agent_reservation_count());
+            let resumed = tracker
+                .resume_run(&run_id, spec.agent_budget)
+                .expect("resume admission was validated before the durable boundary");
+            if let Some(max_concurrency) = spec.max_concurrency {
+                tracker
+                    .set_max_concurrency(&run_id, max_concurrency)
+                    .expect("resumed workflow must remain tracked")
+            } else {
+                resumed
+            }
+        } else {
+            state
+        };
+        if let Some(failure_message) = resume_failure_message
+            && let Err(error) = journal.prune_trailing_host_error(failure_message.as_str())
+        {
+            let message = error.to_string();
+            if let Some(interrupted) = self.tracker.lock().interrupt(
+                &run_id,
+                format!("workflow journal could not prepare resume: {message}"),
+            ) {
+                let _ = self.store.persist_now(&interrupted);
+            }
+            let _ = self
+                .timeline
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                    chat_state::WorkflowEvent::Ended {
+                        run_id: run_id.clone(),
+                        execution_epoch,
+                        status: chat_state::WorkflowExecutionStatus::Interrupted,
+                        duration_ms: 0,
+                        message: Some(message.clone()),
+                    },
+                ))
+                .await;
+            return Err(LaunchError::Journal(message));
+        }
+
+        if let Err(error) = self.store.persist_now(&state) {
+            let interrupted = self.tracker.lock().interrupt(
+                &run_id,
+                "workflow state persistence failed before execution; start a new run",
+            );
+            if let Some(interrupted) = interrupted {
+                if let Err(persist_error) = self.store.persist_now(&interrupted) {
+                    tracing::warn!(run_id = %run_id, %persist_error, "failed to persist interrupted workflow state");
+                }
+                if let Err(timeline_error) = self
+                    .timeline
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                        chat_state::WorkflowEvent::Ended {
+                            run_id: run_id.clone(),
+                            execution_epoch,
+                            status: chat_state::WorkflowExecutionStatus::Interrupted,
+                            duration_ms: 0,
+                            message: Some(error.to_string()),
+                        },
+                    ))
+                    .await
+                {
+                    tracing::error!(run_id = %run_id, %timeline_error, "failed to close rejected workflow execution in Timeline");
+                }
             }
             return Err(LaunchError::Store(error.to_string()));
         }
@@ -322,7 +400,7 @@ impl WorkflowManager {
         let completion_cwd = self.cwd.clone();
         let watcher_run_id = run_id.clone();
         let watcher_cancel = cancel.clone();
-        let execution_epoch = self.tracker.lock().execution_epoch(&run_id).unwrap_or(0);
+        let timeline = self.timeline.clone();
         tokio::spawn(async move {
             let mut outcome = exec.await.unwrap_or_else(|e| WorkflowOutcome::Failed {
                 error: format!("workflow executor panicked: {e}"),
@@ -366,7 +444,7 @@ impl WorkflowManager {
                 }
             };
             if let Some(mut state) = state {
-                let mut persisted = true;
+                let mut manifest_persisted = true;
                 if let Err(error) = store.persist_ack(&state).await {
                     tracing::warn!(run_id = %watcher_run_id, %error, "workflow terminal manifest was not durably written");
                     outcome = WorkflowOutcome::Failed {
@@ -384,20 +462,17 @@ impl WorkflowManager {
                         )
                         .unwrap_or(state);
                     if let Err(interrupt_error) = store.persist_ack(&state).await {
-                        persisted = false;
+                        manifest_persisted = false;
                         tracing::error!(run_id = %watcher_run_id, %interrupt_error, "failed to persist workflow interruption marker");
                     }
-                }
-                if !persisted {
-                    let _ = done_tx.send(());
-                    let _ = outcome_tx.send(outcome);
-                    return;
                 }
                 // Consume the once-per-hash save hint only after the successful
                 // terminal state is durable. A persistence failure turns the
                 // Run into Interrupted and must not suppress a later successful
                 // Run's prompt for the same draft hash.
-                if state.status == crate::session::workflow::tracker::WorkflowRunStatus::Complete
+                if manifest_persisted
+                    && state.status
+                        == crate::session::workflow::tracker::WorkflowRunStatus::Complete
                     && !state.private
                     && let (Some(session_dir), Some(definition_id), Some(definition_hash)) = (
                         completion_session_dir.as_deref(),
@@ -419,6 +494,27 @@ impl WorkflowManager {
                     }
                 }
                 let elapsed = tracker.lock().elapsed_ms(&watcher_run_id);
+                if let Err(error) = timeline
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                        chat_state::WorkflowEvent::Ended {
+                            run_id: watcher_run_id.clone(),
+                            execution_epoch,
+                            status: state.status.to_timeline(),
+                            duration_ms: elapsed,
+                            message: state.pause_message.clone(),
+                        },
+                    ))
+                    .await
+                {
+                    tracing::error!(run_id = %watcher_run_id, %error, manifest_persisted, "workflow terminal Timeline boundary was rejected");
+                    let _ = done_tx.send(());
+                    let _ = outcome_tx.send(WorkflowOutcome::Failed {
+                        error: format!(
+                            "workflow Timeline terminal could not be committed: {error}"
+                        ),
+                    });
+                    return;
+                }
                 notify.broadcast(&state, elapsed, 0, true);
                 if state.status.is_completion_reportable() {
                     let _ = session_cmd_tx.send(
@@ -472,6 +568,7 @@ impl WorkflowManager {
             mpsc::unbounded_channel().0,
             Arc::new(|_, _, _| {}),
             mpsc::unbounded_channel().0,
+            test_timeline(),
             std::collections::HashMap::new(),
         )));
         (manager, tracker)
@@ -559,10 +656,8 @@ impl WorkflowManager {
         true
     }
 
-    pub(crate) fn cancel(&mut self, run_id: &str) -> bool {
-        if self.reap_if_terminal(run_id) {
-            return false;
-        }
+    pub(crate) async fn cancel(&mut self, run_id: &str) -> bool {
+        self.reap_terminal_runs();
         if let Some(run) = self.active.remove(run_id) {
             run.cancel.cancel();
             let _ = self.cancel_children_for_run(run_id);
@@ -589,17 +684,44 @@ impl WorkflowManager {
             return true;
         }
         let _ = self.cancel_children_for_run(run_id);
+        let (execution_epoch, elapsed) = {
+            let tracker = self.tracker.lock();
+            let Some(state) = tracker.get(run_id) else {
+                return false;
+            };
+            if !state.status.is_resumable() {
+                return false;
+            }
+            (
+                tracker.execution_epoch(run_id).unwrap_or(0),
+                tracker.elapsed_ms(run_id),
+            )
+        };
+        if let Err(error) = self
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Closed {
+                    run_id: run_id.to_owned(),
+                    execution_epoch,
+                    status: chat_state::WorkflowExecutionStatus::Cancelled,
+                    duration_ms: elapsed,
+                    message: Some("cancelled while no execution was active".into()),
+                },
+            ))
+            .await
+        {
+            tracing::error!(%run_id, %error, "refusing to cancel inactive Workflow without a durable Timeline close");
+            return false;
+        }
         let state = {
             let mut tracker = self.tracker.lock();
-            match tracker.get(run_id) {
-                Some(state) if !state.status.is_terminal() => {
-                    tracker.apply_outcome(run_id, &WorkflowOutcome::Cancelled)
-                }
-                _ => None,
-            }
+            tracker.close_cancelled(run_id)
         };
         match state {
-            Some(_) => {
+            Some(state) => {
+                if let Err(error) = self.store.persist_ack(&state).await {
+                    tracing::error!(%run_id, %error, "Workflow close is durable but cancelled manifest could not be persisted");
+                }
                 let (state, elapsed) = {
                     let tracker = self.tracker.lock();
                     (
@@ -708,6 +830,31 @@ impl WorkflowManager {
 }
 
 #[cfg(test)]
+fn test_timeline() -> chat_state::ChatStateHandle {
+    let config = sampling_types::SamplingConfig {
+        base_url: "https://api.example.com".into(),
+        model: "test-model".into(),
+        output_limit: None,
+        temperature: None,
+        top_p: None,
+        api_backend: Default::default(),
+        extra_headers: Default::default(),
+        query_params: Default::default(),
+        env_http_headers: Default::default(),
+        context_window: std::num::NonZeroU64::new(128_000).expect("non-zero test window"),
+        reasoning_effort: None,
+        stream_tool_calls: None,
+    };
+    chat_state::ChatStateActor::spawn(
+        Vec::new(),
+        config,
+        Box::new(chat_state::NullTimelinePersistence),
+        mpsc::unbounded_channel().0,
+        CancellationToken::new(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::persistence::PersistenceMsg;
@@ -728,6 +875,13 @@ mod tests {
 
     fn test_manager_with_cancels(
         session_dir: Option<PathBuf>,
+    ) -> (WorkflowManager, SubagentEventRx, CancelLog) {
+        test_manager_with_persistence(session_dir, false)
+    }
+
+    fn test_manager_with_persistence(
+        session_dir: Option<PathBuf>,
+        reject_manifest_ack: bool,
     ) -> (WorkflowManager, SubagentEventRx, CancelLog) {
         use tools::implementations::grow_build::task::types::{
             SubagentCancelOutcome, SubagentEvent,
@@ -757,7 +911,12 @@ mod tests {
         tokio::spawn(async move {
             while let Some(message) = persist_rx.recv().await {
                 if let PersistenceMsg::WorkflowRunStateAndAck { respond_to, .. } = message {
-                    let _ = respond_to.send(Ok(()));
+                    let result = if reject_manifest_ack {
+                        Err(std::io::Error::other("manifest disk failure"))
+                    } else {
+                        Ok(())
+                    };
+                    let _ = respond_to.send(result);
                 }
             }
         });
@@ -780,6 +939,7 @@ mod tests {
             subagent_tx,
             Arc::new(|_, _, _| {}),
             mpsc::unbounded_channel().0,
+            test_timeline(),
             HashMap::new(),
         );
         (manager, event_rx, cancels)
@@ -803,7 +963,7 @@ mod tests {
             "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
         )
         .unwrap();
-        let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+        let (run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
 
         let outcome = outcome_rx.await.unwrap();
         assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
@@ -821,6 +981,45 @@ mod tests {
                 .join("script.rhai")
                 .exists()
         );
+        let trajectory = manager.timeline.trajectory().await.unwrap();
+        let workflow_rows = trajectory
+            .rows
+            .iter()
+            .filter(|row| row.actor == format!("workflow:{run_id}"))
+            .collect::<Vec<_>>();
+        assert_eq!(workflow_rows.len(), 2);
+        assert_eq!(workflow_rows[0].state, "running");
+        assert_eq!(workflow_rows[1].state, "complete");
+    }
+
+    #[tokio::test]
+    async fn terminal_manifest_failure_still_closes_timeline_as_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _rx, _cancels) =
+            test_manager_with_persistence(Some(dir.path().to_path_buf()), true);
+        let resolved = resolve_inline(
+            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
+        )
+        .unwrap();
+        let (run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
+
+        assert!(matches!(
+            outcome_rx.await.unwrap(),
+            WorkflowOutcome::Failed { .. }
+        ));
+        assert_eq!(
+            manager.tracker.lock().get(&run_id).unwrap().status,
+            crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
+        );
+        let trajectory = manager.timeline.trajectory().await.unwrap();
+        let last = trajectory
+            .rows
+            .iter()
+            .filter(|row| row.actor == format!("workflow:{run_id}"))
+            .next_back()
+            .unwrap();
+        assert_eq!(last.state, "interrupted");
+        assert!(!trajectory.open_workflows.contains(&run_id));
     }
 
     #[tokio::test]
@@ -839,6 +1038,7 @@ mod tests {
                     ..spec()
                 },
             )
+            .await
             .unwrap();
         let _ = outcome_rx.await.unwrap();
         let state = manager.tracker.lock().get(&run_id).unwrap();
@@ -853,6 +1053,7 @@ mod tests {
         let script = "let meta = #{ name: \"t\", description: \"d\" };\nawait_user(\"user\", \"pause\");\ncomplete(\"original\");";
         let (run_id, outcome_rx) = manager
             .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
             .unwrap();
         assert!(matches!(
             outcome_rx.await.unwrap(),
@@ -876,6 +1077,7 @@ mod tests {
                     ..spec()
                 },
             )
+            .await
             .unwrap();
         match outcome_rx.await.unwrap() {
             WorkflowOutcome::Completed { result } => {
@@ -929,7 +1131,7 @@ mod tests {
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
         let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet r = agent(\"work\");\ncomplete(r.output);";
         let resolved = resolve_inline(script.into()).unwrap();
-        let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+        let (run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
 
         use tools::implementations::grow_build::task::types::SubagentEvent;
         let spawn_req = subagent_rx.recv().await.expect("spawn request");
@@ -960,6 +1162,7 @@ mod tests {
                     ..spec()
                 },
             )
+            .await
             .unwrap();
         let spawn_req = subagent_rx.recv().await.expect("respawned agent");
         use tools::implementations::grow_build::task::types::SubagentResult;
@@ -992,6 +1195,7 @@ mod tests {
         let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet r = agent(\"work\");\ncomplete(r.output);";
         let (run_id, outcome_rx) = manager
             .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
             .unwrap();
 
         let SubagentEvent::Spawn(_first) = subagent_rx.recv().await.expect("first spawn") else {
@@ -1022,6 +1226,7 @@ mod tests {
                     ..spec()
                 },
             )
+            .await
             .unwrap();
         let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("respawned agent") else {
             panic!("expected respawn event");
@@ -1055,6 +1260,7 @@ mod tests {
                       complete(content);";
         let (run_id, outcome_rx) = manager
             .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
             .unwrap();
         match outcome_rx.await.unwrap() {
             WorkflowOutcome::Failed { error } => {
@@ -1090,6 +1296,7 @@ mod tests {
                     ..spec()
                 },
             )
+            .await
             .unwrap();
         match outcome_rx.await.unwrap() {
             WorkflowOutcome::Completed { result } => {
@@ -1114,6 +1321,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_inactive_run_can_be_permanently_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+        let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+                      read_scratch_file(\"missing.txt\");";
+        let (run_id, outcome_rx) = manager
+            .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome_rx.await.unwrap(),
+            WorkflowOutcome::Failed { .. }
+        ));
+        assert_eq!(
+            manager.tracker.lock().get(&run_id).unwrap().status,
+            crate::session::workflow::tracker::WorkflowRunStatus::Failed
+        );
+
+        assert!(manager.cancel(&run_id).await);
+        assert_eq!(
+            manager.tracker.lock().get(&run_id).unwrap().status,
+            crate::session::workflow::tracker::WorkflowRunStatus::Cancelled
+        );
+        let trajectory = manager.timeline.trajectory().await.unwrap();
+        let last = trajectory
+            .rows
+            .iter()
+            .filter(|row| row.actor == format!("workflow:{run_id}"))
+            .next_back()
+            .unwrap();
+        assert_eq!(last.state, "cancelled");
+        assert!(!trajectory.open_workflows.contains(&run_id));
+    }
+
+    #[tokio::test]
     async fn completed_cancelled_and_interrupted_runs_are_not_resumable() {
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 
@@ -1122,6 +1364,7 @@ mod tests {
         let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet a = agent(\"step one\");\ncomplete(a.output);";
         let (run_id, outcome_rx) = manager
             .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
             .unwrap();
         let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("first spawn") else {
             panic!("expected spawn event");
@@ -1147,9 +1390,9 @@ mod tests {
             let mut restored = state.clone();
             restored.status = status;
             let original_tracker = manager.tracker.clone();
-            manager.tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::from_snapshot(
-                vec![restored],
-            )));
+            manager.tracker = Arc::new(parking_lot::Mutex::new(
+                WorkflowTracker::from_snapshot(vec![restored]).unwrap(),
+            ));
             let err = manager
                 .launch(
                     resolve_inline(script.into()).unwrap(),
@@ -1158,6 +1401,7 @@ mod tests {
                         ..spec()
                     },
                 )
+                .await
                 .unwrap_err();
             manager.tracker = original_tracker;
             assert!(
@@ -1216,7 +1460,7 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
 
         let spawn_req = subagent_rx.recv().await.expect("spawn event");
         let SubagentEvent::Spawn(req) = spawn_req else {
@@ -1257,12 +1501,14 @@ mod tests {
         for _ in 0..WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
             let (_, outcome) = manager
                 .launch(resolve_inline(script.into()).unwrap(), spec())
+                .await
                 .unwrap();
             outcomes.push(outcome);
             spawned.push(subagent_rx.recv().await.expect("spawn event"));
         }
         let error = manager
             .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
             .unwrap_err();
         assert!(matches!(error, LaunchError::TooManyActiveRuns));
         drop(spawned);
@@ -1291,7 +1537,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            manager.launch(resolved, spec()).unwrap_err(),
+            manager.launch(resolved, spec()).await.unwrap_err(),
             LaunchError::TooManyActiveRuns
         ));
 
@@ -1319,7 +1565,7 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
 
         match outcome_rx.await.unwrap() {
             WorkflowOutcome::Failed { error } => {
@@ -1347,7 +1593,7 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let (_run_id, outcome_rx) = manager
+        let (run_id, outcome_rx) = manager
             .launch(
                 resolved,
                 LaunchSpec {
@@ -1355,6 +1601,7 @@ mod tests {
                     ..spec()
                 },
             )
+            .await
             .unwrap();
 
         let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("first spawn") else {
@@ -1394,7 +1641,7 @@ mod tests {
             success: true,
             output: std::sync::Arc::from("```json\n{\"ok\": true}\n```"),
             subagent_id: retry_id.clone(),
-            child_session_id: retry_id,
+            child_session_id: retry_id.clone(),
             tokens_used: 50,
             output_tokens_used: 50,
             total_tokens_used: 50,
@@ -1411,6 +1658,17 @@ mod tests {
         let state = manager.tracker.lock().list().into_iter().next().unwrap();
         assert_eq!(state.agents_used, 1, "schema retry is one logical agent");
         assert_eq!(state.agent_budget, Some(5));
+        let journal = std::fs::read_to_string(
+            dir.path()
+                .join("workflows")
+                .join(&run_id)
+                .join("journal.jsonl"),
+        )
+        .unwrap();
+        let entry = serde_json::from_str::<workflow::JournalEntry>(journal.lines().last().unwrap())
+            .unwrap();
+        let agent = serde_json::from_value::<workflow::AgentResult>(entry.result).unwrap();
+        assert_eq!(agent.agent_id, retry_id);
     }
 
     #[tokio::test]
@@ -1425,7 +1683,7 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let (_run_id, _outcome_rx) = manager.launch(resolved, spec()).unwrap();
+        let (_run_id, _outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
         let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("spawn") else {
             panic!("expected spawn");
         };
@@ -1464,12 +1722,13 @@ mod tests {
                     ..spec()
                 },
             )
+            .await
             .unwrap();
         let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("spawn") else {
             panic!("expected spawn");
         };
         assert!(req.owner.is_workflow());
-        assert!(manager.cancel(&run_id));
+        assert!(manager.cancel(&run_id).await);
         let _ = outcome_rx.await;
         assert!(
             req.cancel_token.is_cancelled(),
@@ -1497,7 +1756,7 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+        let (run_id, outcome_rx) = manager.launch(resolved, spec()).await.unwrap();
 
         let spawn_req = subagent_rx.recv().await.expect("spawn event");
         let SubagentEvent::Spawn(req) = spawn_req else {

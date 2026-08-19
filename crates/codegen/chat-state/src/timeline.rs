@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 6;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 7;
+pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -259,6 +260,78 @@ pub enum ToolEvent {
     },
 }
 
+/// Durable lifecycle of one deterministic Workflow actor.
+///
+/// The Workflow journal records calls made by the actor; it cannot declare its
+/// own existence or execution boundary. Those causal facts live in the parent
+/// session Timeline so a merged Trajectory can attach `workflow:<run_id>` to
+/// one exact spawn event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkflowEvent {
+    Spawned {
+        run_id: String,
+        execution_epoch: u64,
+        name: String,
+        objective: String,
+        private: bool,
+    },
+    Resumed {
+        run_id: String,
+        execution_epoch: u64,
+    },
+    Ended {
+        run_id: String,
+        execution_epoch: u64,
+        status: WorkflowExecutionStatus,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    /// Permanently close a resumable run while no execution is active (for
+    /// example, cancelling a paused run).
+    Closed {
+        run_id: String,
+        execution_epoch: u64,
+        status: WorkflowExecutionStatus,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowExecutionStatus {
+    UserPaused,
+    BackOffPaused,
+    NoProgressPaused,
+    InfraPaused,
+    Blocked,
+    BudgetLimited,
+    Interrupted,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
+impl WorkflowExecutionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserPaused => "user_paused",
+            Self::BackOffPaused => "back_off_paused",
+            Self::NoProgressPaused => "no_progress_paused",
+            Self::InfraPaused => "infra_paused",
+            Self::Blocked => "blocked",
+            Self::BudgetLimited => "budget_limited",
+            Self::Interrupted => "interrupted",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompactionEvent {
@@ -471,6 +544,7 @@ pub enum TimelineEventKind {
     Step(StepEvent),
     Request(RequestEvent),
     Tool(ToolEvent),
+    Workflow(WorkflowEvent),
     Compaction(CompactionEvent),
     Recovery(RecoveryEvent),
     Observation(ObservationEvent),
@@ -540,10 +614,37 @@ struct LifecycleFold {
     seen_requests: BTreeSet<String>,
     seen_tools: BTreeSet<String>,
     seen_compactions: BTreeSet<String>,
+    workflows: BTreeMap<String, WorkflowFold>,
+    open_subagents: BTreeMap<String, OpenSubagent>,
     open_requests: BTreeMap<String, (TurnId, StepId)>,
     open_tools: BTreeMap<String, (TurnId, StepId, String)>,
     open_compaction: Option<OpenCompaction>,
     control_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowFold {
+    execution_epoch: u64,
+    open: bool,
+    closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowLifecycle {
+    pub name: String,
+    pub objective: String,
+    pub private: bool,
+    pub execution_epoch: u64,
+    pub status: Option<WorkflowExecutionStatus>,
+    pub message: Option<String>,
+    pub open: bool,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OpenSubagent {
+    child_session_id: String,
+    workflow_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -621,6 +722,24 @@ pub enum TimelineError {
         call_id: String,
         expected: String,
         actual: String,
+    },
+    #[error("invalid workflow lifecycle event")]
+    InvalidWorkflow,
+    #[error("workflow {0} already has a spawn fact")]
+    DuplicateWorkflowSpawn(String),
+    #[error("workflow {0} has no spawn fact")]
+    WorkflowNotFound(String),
+    #[error("workflow {0} already has an active execution")]
+    WorkflowAlreadyOpen(String),
+    #[error("workflow {0} has no active execution")]
+    WorkflowNotOpen(String),
+    #[error("workflow {0} is permanently closed")]
+    WorkflowAlreadyClosed(String),
+    #[error("workflow {run_id} execution epoch {actual} does not follow {previous}")]
+    WorkflowEpochMismatch {
+        run_id: String,
+        previous: u64,
+        actual: u64,
     },
     #[error("{boundary} boundary cannot close with open child events")]
     OpenChildren { boundary: &'static str },
@@ -1113,14 +1232,85 @@ impl Timeline {
         self.lifecycle.open_tools.keys().map(String::as_str)
     }
 
+    pub fn open_workflow_run_ids(&self) -> impl Iterator<Item = &str> {
+        self.lifecycle
+            .workflows
+            .iter()
+            .filter_map(|(run_id, lifecycle)| lifecycle.open.then_some(run_id.as_str()))
+    }
+
+    /// Canonical lifecycle projection for a Workflow owned by this Timeline.
+    /// Consumers must not reconstruct Workflow state by scanning raw events.
+    pub fn workflow_lifecycle(&self, run_id: &str) -> Option<WorkflowLifecycle> {
+        let fold = self.lifecycle.workflows.get(run_id)?;
+        let (name, objective, private) =
+            self.events.iter().find_map(|event| match &event.kind {
+                TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                    run_id: candidate,
+                    name,
+                    objective,
+                    private,
+                    ..
+                }) if candidate == run_id => Some((name.clone(), objective.clone(), *private)),
+                _ => None,
+            })?;
+        let terminal = (!fold.open).then(|| {
+            self.events
+                .iter()
+                .rev()
+                .find_map(|event| match &event.kind {
+                    TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                        run_id: candidate,
+                        status,
+                        message,
+                        ..
+                    })
+                    | TimelineEventKind::Workflow(WorkflowEvent::Closed {
+                        run_id: candidate,
+                        status,
+                        message,
+                        ..
+                    }) if candidate == run_id => Some((*status, message.clone())),
+                    _ => None,
+                })
+        });
+        let (status, message) = terminal
+            .flatten()
+            .map_or((None, None), |(status, message)| (Some(status), message));
+        Some(WorkflowLifecycle {
+            name,
+            objective,
+            private,
+            execution_epoch: fold.execution_epoch,
+            status,
+            message,
+            open: fold.open,
+            closed: fold.closed,
+        })
+    }
+
     /// Append deterministic terminal facts for work left open by an interrupted
     /// process. Physical history is never truncated or rewritten.
     pub fn recover_interrupted(&mut self) -> Result<Vec<TimelineEvent>, TimelineError> {
+        let subagents = self
+            .lifecycle
+            .open_subagents
+            .iter()
+            .map(|(subagent_id, open)| {
+                (
+                    subagent_id.clone(),
+                    open.child_session_id.clone(),
+                    self.subagent_started_at(subagent_id),
+                )
+            })
+            .collect::<Vec<_>>();
         if self.lifecycle.active_turn.is_none()
             && self.lifecycle.active_step.is_none()
             && self.lifecycle.open_requests.is_empty()
             && self.lifecycle.open_tools.is_empty()
             && self.lifecycle.open_compaction.is_none()
+            && self.open_workflow_run_ids().next().is_none()
+            && subagents.is_empty()
         {
             return Ok(Vec::new());
         }
@@ -1139,6 +1329,16 @@ impl Timeline {
             .map(|(call_id, (_, _, name))| (call_id.clone(), name.clone()))
             .collect::<Vec<_>>();
         let compaction = self.lifecycle.open_compaction.clone();
+        let workflows = self
+            .lifecycle
+            .workflows
+            .iter()
+            .filter_map(|(run_id, lifecycle)| {
+                lifecycle
+                    .open
+                    .then_some((run_id.clone(), lifecycle.execution_epoch))
+            })
+            .collect::<Vec<_>>();
         self.record(TimelineEventKind::Recovery(RecoveryEvent {
             action: "close_interrupted_work".into(),
             correlation_id: self.lifecycle.active_turn.map(|turn| turn.0.to_string()),
@@ -1147,6 +1347,8 @@ impl Timeline {
                 "requests": &requests,
                 "tools": tools.iter().map(|(id, _)| id).collect::<Vec<_>>(),
                 "compaction": compaction.as_ref().map(|open| &open.id),
+                "workflows": workflows.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                "subagents": subagents.iter().map(|(id, _, _)| id).collect::<Vec<_>>(),
             })),
         }))?;
         for id in requests {
@@ -1184,6 +1386,33 @@ impl Timeline {
                 }
             };
             self.record(TimelineEventKind::Compaction(terminal))?;
+        }
+        for (subagent_id, child_session_id, started_at_ms) in subagents {
+            self.record(TimelineEventKind::Subagent(SubagentEvent::Ended(
+                SubagentTerminalEvent {
+                    subagent_id,
+                    child_session_id,
+                    outcome: SubagentOutcome::Cancelled,
+                    duration_ms: duration_since(started_at_ms, now),
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 0,
+                    error: Some("process_interrupted".into()),
+                    result_ref: None,
+                    snapshot_ref: None,
+                },
+            )))?;
+        }
+        for (run_id, execution_epoch) in workflows {
+            let duration_ms =
+                duration_since(self.workflow_started_at(&run_id, execution_epoch), now);
+            self.record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id,
+                execution_epoch,
+                status: WorkflowExecutionStatus::Interrupted,
+                duration_ms,
+                message: Some("process_interrupted".into()),
+            }))?;
         }
         if let Some((step, started)) = self
             .lifecycle
@@ -1303,6 +1532,38 @@ impl Timeline {
                 TimelineEventKind::Compaction(CompactionEvent::Started {
                     id: candidate, ..
                 }) if candidate == id => Some(event.at_ms),
+                _ => None,
+            })
+    }
+
+    fn workflow_started_at(&self, run_id: &str, execution_epoch: u64) -> Option<i64> {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                    run_id: candidate,
+                    execution_epoch: epoch,
+                    ..
+                })
+                | TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+                    run_id: candidate,
+                    execution_epoch: epoch,
+                }) if candidate == run_id && *epoch == execution_epoch => Some(event.at_ms),
+                _ => None,
+            })
+    }
+
+    fn subagent_started_at(&self, subagent_id: &str) -> Option<i64> {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn))
+                    if spawn.subagent_id == subagent_id =>
+                {
+                    Some(event.at_ms)
+                }
                 _ => None,
             })
     }
@@ -1679,6 +1940,19 @@ impl Timeline {
                     {
                         return Err(TimelineError::InvalidSubagent);
                     }
+                    if let Some(run_id) = &spawn.workflow_run_id {
+                        let workflow = self
+                            .lifecycle
+                            .workflows
+                            .get(run_id)
+                            .ok_or_else(|| TimelineError::WorkflowNotFound(run_id.clone()))?;
+                        if workflow.closed {
+                            return Err(TimelineError::WorkflowAlreadyClosed(run_id.clone()));
+                        }
+                        if !workflow.open {
+                            return Err(TimelineError::WorkflowNotOpen(run_id.clone()));
+                        }
+                    }
                     if self.events.iter().any(|event| {
                         matches!(
                             &event.kind,
@@ -2026,6 +2300,166 @@ impl LifecycleFold {
                     });
                 }
             }
+            TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn)) => {
+                self.open_subagents.insert(
+                    spawn.subagent_id.clone(),
+                    OpenSubagent {
+                        child_session_id: spawn.child_session_id.clone(),
+                        workflow_run_id: spawn.workflow_run_id.clone(),
+                    },
+                );
+            }
+            TimelineEventKind::Subagent(SubagentEvent::Ended(end)) => {
+                self.open_subagents.remove(&end.subagent_id);
+            }
+            TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id,
+                execution_epoch,
+                name,
+                objective,
+                ..
+            }) => {
+                if !valid_workflow_run_id(run_id)
+                    || *execution_epoch != 0
+                    || name.trim().is_empty()
+                    || objective.trim().is_empty()
+                {
+                    return Err(TimelineError::InvalidWorkflow);
+                }
+                if self.workflows.contains_key(run_id) {
+                    return Err(TimelineError::DuplicateWorkflowSpawn(run_id.clone()));
+                }
+                self.workflows.insert(
+                    run_id.clone(),
+                    WorkflowFold {
+                        execution_epoch: *execution_epoch,
+                        open: true,
+                        closed: false,
+                    },
+                );
+            }
+            TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+                run_id,
+                execution_epoch,
+            }) => {
+                if !valid_workflow_run_id(run_id) {
+                    return Err(TimelineError::InvalidWorkflow);
+                }
+                let lifecycle = self
+                    .workflows
+                    .get_mut(run_id)
+                    .ok_or_else(|| TimelineError::WorkflowNotFound(run_id.clone()))?;
+                if lifecycle.open {
+                    return Err(TimelineError::WorkflowAlreadyOpen(run_id.clone()));
+                }
+                if lifecycle.closed {
+                    return Err(TimelineError::WorkflowAlreadyClosed(run_id.clone()));
+                }
+                if lifecycle.execution_epoch.checked_add(1) != Some(*execution_epoch) {
+                    return Err(TimelineError::WorkflowEpochMismatch {
+                        run_id: run_id.clone(),
+                        previous: lifecycle.execution_epoch,
+                        actual: *execution_epoch,
+                    });
+                }
+                lifecycle.execution_epoch = *execution_epoch;
+                lifecycle.open = true;
+            }
+            TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id,
+                execution_epoch,
+                status,
+                message,
+                ..
+            }) => {
+                if !valid_workflow_run_id(run_id)
+                    || message
+                        .as_deref()
+                        .is_some_and(|message| message.trim().is_empty())
+                {
+                    return Err(TimelineError::InvalidWorkflow);
+                }
+                if self
+                    .open_subagents
+                    .values()
+                    .any(|subagent| subagent.workflow_run_id.as_deref() == Some(run_id.as_str()))
+                {
+                    return Err(TimelineError::OpenChildren {
+                        boundary: "workflow",
+                    });
+                }
+                let lifecycle = self
+                    .workflows
+                    .get_mut(run_id)
+                    .ok_or_else(|| TimelineError::WorkflowNotFound(run_id.clone()))?;
+                if lifecycle.closed {
+                    return Err(TimelineError::WorkflowAlreadyClosed(run_id.clone()));
+                }
+                if !lifecycle.open {
+                    return Err(TimelineError::WorkflowNotOpen(run_id.clone()));
+                }
+                if *execution_epoch != lifecycle.execution_epoch {
+                    return Err(TimelineError::WorkflowEpochMismatch {
+                        run_id: run_id.clone(),
+                        previous: lifecycle.execution_epoch,
+                        actual: *execution_epoch,
+                    });
+                }
+                lifecycle.open = false;
+                lifecycle.closed = matches!(
+                    status,
+                    WorkflowExecutionStatus::Interrupted
+                        | WorkflowExecutionStatus::Complete
+                        | WorkflowExecutionStatus::Cancelled
+                );
+            }
+            TimelineEventKind::Workflow(WorkflowEvent::Closed {
+                run_id,
+                execution_epoch,
+                status,
+                message,
+                ..
+            }) => {
+                if !valid_workflow_run_id(run_id)
+                    || !matches!(
+                        status,
+                        WorkflowExecutionStatus::Interrupted | WorkflowExecutionStatus::Cancelled
+                    )
+                    || message
+                        .as_deref()
+                        .is_some_and(|message| message.trim().is_empty())
+                {
+                    return Err(TimelineError::InvalidWorkflow);
+                }
+                if self
+                    .open_subagents
+                    .values()
+                    .any(|subagent| subagent.workflow_run_id.as_deref() == Some(run_id.as_str()))
+                {
+                    return Err(TimelineError::OpenChildren {
+                        boundary: "workflow",
+                    });
+                }
+                let lifecycle = self
+                    .workflows
+                    .get_mut(run_id)
+                    .ok_or_else(|| TimelineError::WorkflowNotFound(run_id.clone()))?;
+                if lifecycle.open || lifecycle.closed {
+                    return Err(if lifecycle.closed {
+                        TimelineError::WorkflowAlreadyClosed(run_id.clone())
+                    } else {
+                        TimelineError::WorkflowAlreadyOpen(run_id.clone())
+                    });
+                }
+                if *execution_epoch != lifecycle.execution_epoch {
+                    return Err(TimelineError::WorkflowEpochMismatch {
+                        run_id: run_id.clone(),
+                        previous: lifecycle.execution_epoch,
+                        actual: *execution_epoch,
+                    });
+                }
+                lifecycle.closed = true;
+            }
             TimelineEventKind::Compaction(CompactionEvent::Started {
                 id, source_items, ..
             }) => {
@@ -2132,7 +2566,6 @@ impl LifecycleFold {
             | TimelineEventKind::Observation(_)
             | TimelineEventKind::SessionTitle(_)
             | TimelineEventKind::Sideband(_)
-            | TimelineEventKind::Subagent(_)
             | TimelineEventKind::SubagentSeed(_)
             | TimelineEventKind::SubagentResult(_) => {}
             TimelineEventKind::Control(control) => {
@@ -2219,6 +2652,14 @@ fn duration_since(started_at_ms: Option<i64>, now_ms: i64) -> u64 {
         .and_then(|started| now_ms.checked_sub(started))
         .and_then(|duration| u64::try_from(duration).ok())
         .unwrap_or(0)
+}
+
+fn valid_workflow_run_id(run_id: &str) -> bool {
+    !run_id.is_empty()
+        && run_id.len() <= MAX_WORKFLOW_RUN_ID_BYTES
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn validate_tool_result_prune(
@@ -2396,6 +2837,257 @@ mod tests {
                 actual: 7
             })
         ));
+    }
+
+    #[test]
+    fn workflow_lifecycle_is_epoch_strict_and_cannot_resume_after_close() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id: "wf_1".into(),
+                execution_epoch: 0,
+                name: "research".into(),
+                objective: "find the cause".into(),
+                private: false,
+            }))
+            .unwrap();
+        assert_eq!(
+            timeline.open_workflow_run_ids().collect::<Vec<_>>(),
+            ["wf_1"]
+        );
+        assert_eq!(
+            timeline.workflow_lifecycle("wf_1"),
+            Some(WorkflowLifecycle {
+                name: "research".into(),
+                objective: "find the cause".into(),
+                private: false,
+                execution_epoch: 0,
+                status: None,
+                message: None,
+                open: true,
+                closed: false,
+            })
+        );
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id: "wf_1".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Failed,
+                duration_ms: 8,
+                message: Some("host failed".into()),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+                run_id: "wf_1".into(),
+                execution_epoch: 1,
+            }))
+            .unwrap();
+        assert_eq!(timeline.workflow_lifecycle("wf_1").unwrap().status, None);
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id: "wf_1".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Complete,
+                duration_ms: 1,
+                message: None,
+            })),
+            Err(TimelineError::WorkflowEpochMismatch { .. })
+        ));
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id: "wf_1".into(),
+                execution_epoch: 1,
+                status: WorkflowExecutionStatus::Complete,
+                duration_ms: 1,
+                message: None,
+            }))
+            .unwrap();
+        let lifecycle = timeline.workflow_lifecycle("wf_1").unwrap();
+        assert_eq!(lifecycle.execution_epoch, 1);
+        assert_eq!(lifecycle.status, Some(WorkflowExecutionStatus::Complete));
+        assert!(lifecycle.closed);
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Resumed {
+                run_id: "wf_1".into(),
+                execution_epoch: 2,
+            })),
+            Err(TimelineError::WorkflowAlreadyClosed(_))
+        ));
+    }
+
+    #[test]
+    fn interrupted_workflow_execution_is_closed_by_recovery() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id: "wf_recover".into(),
+                execution_epoch: 0,
+                name: "research".into(),
+                objective: "recover causality".into(),
+                private: true,
+            }))
+            .unwrap();
+
+        let repairs = timeline.recover_interrupted().unwrap();
+        assert_eq!(repairs.len(), 2);
+        assert!(matches!(
+            repairs.last().map(|event| &event.kind),
+            Some(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                status: WorkflowExecutionStatus::Interrupted,
+                ..
+            }))
+        ));
+        assert_eq!(timeline.open_workflow_run_ids().next(), None);
+        let lifecycle = timeline.workflow_lifecycle("wf_recover").unwrap();
+        assert_eq!(lifecycle.status, Some(WorkflowExecutionStatus::Interrupted));
+        assert_eq!(lifecycle.message.as_deref(), Some("process_interrupted"));
+    }
+
+    #[test]
+    fn interrupted_subagent_is_closed_by_recovery() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                subagent_spawn("sa-recover", "child-recover"),
+            )))
+            .unwrap();
+
+        let repairs = timeline.recover_interrupted().unwrap();
+        assert_eq!(repairs.len(), 2);
+        assert!(matches!(
+            repairs.last().map(|event| &event.kind),
+            Some(TimelineEventKind::Subagent(SubagentEvent::Ended(
+                SubagentTerminalEvent {
+                    outcome: SubagentOutcome::Cancelled,
+                    error: Some(error),
+                    ..
+                }
+            ))) if error == "process_interrupted"
+        ));
+    }
+
+    #[test]
+    fn paused_workflow_can_only_close_once_without_fake_resume() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id: "wf_pause".into(),
+                execution_epoch: 0,
+                name: "research".into(),
+                objective: "wait for input".into(),
+                private: false,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id: "wf_pause".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::UserPaused,
+                duration_ms: 2,
+                message: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Closed {
+                run_id: "wf_pause".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Cancelled,
+                duration_ms: 3,
+                message: Some("stopped by user".into()),
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Closed {
+                run_id: "wf_pause".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Cancelled,
+                duration_ms: 3,
+                message: None,
+            })),
+            Err(TimelineError::WorkflowAlreadyClosed(_))
+        ));
+    }
+
+    #[test]
+    fn workflow_owned_subagent_requires_an_open_run() {
+        let mut spawn = subagent_spawn("sa-workflow", "child-workflow");
+        spawn.workflow_run_id = Some("wf_owner".into());
+        let mut timeline = Timeline::default();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                spawn.clone()
+            ))),
+            Err(TimelineError::WorkflowNotFound(_))
+        ));
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id: "wf_owner".into(),
+                execution_epoch: 0,
+                name: "owner".into(),
+                objective: "spawn one child".into(),
+                private: false,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn)))
+            .unwrap();
+    }
+
+    #[test]
+    fn workflow_cannot_end_before_its_subagents() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Spawned {
+                run_id: "wf_children".into(),
+                execution_epoch: 0,
+                name: "research".into(),
+                objective: "join children".into(),
+                private: false,
+            }))
+            .unwrap();
+        let mut spawn = subagent_spawn("sa-child", "child-session");
+        spawn.workflow_run_id = Some("wf_children".into());
+        timeline
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn)))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id: "wf_children".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Failed,
+                duration_ms: 1,
+                message: Some("child still running".into()),
+            })),
+            Err(TimelineError::OpenChildren {
+                boundary: "workflow"
+            })
+        ));
+        timeline
+            .record(TimelineEventKind::Subagent(SubagentEvent::Ended(
+                SubagentTerminalEvent {
+                    subagent_id: "sa-child".into(),
+                    child_session_id: "child-session".into(),
+                    outcome: SubagentOutcome::Cancelled,
+                    duration_ms: 1,
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 0,
+                    error: Some("cancelled".into()),
+                    result_ref: None,
+                    snapshot_ref: None,
+                },
+            )))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                run_id: "wf_children".into(),
+                execution_epoch: 0,
+                status: WorkflowExecutionStatus::Failed,
+                duration_ms: 1,
+                message: Some("child cancelled".into()),
+            }))
+            .unwrap();
     }
 
     #[test]

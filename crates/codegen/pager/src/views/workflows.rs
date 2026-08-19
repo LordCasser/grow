@@ -63,7 +63,6 @@ pub struct WorkflowRunSnapshot {
     pub agents: Vec<WorkflowAgentRowView>,
     pub agent_budget: Option<u64>,
     pub agents_used: u64,
-    pub agents_reserved: u64,
     pub agents_remaining: Option<u64>,
     pub agent_usage_incomplete: bool,
     pub active_agents: u32,
@@ -1467,7 +1466,6 @@ mod tests {
             ],
             agent_budget: Some(128),
             agents_used: 2,
-            agents_reserved: 0,
             agents_remaining: Some(126),
             agent_usage_incomplete: false,
             active_agents: 1,
@@ -2179,7 +2177,7 @@ mod tests {
         run.agents_remaining = Some(125);
         assert!(run.agents_used >= first);
         assert_eq!(
-            run.agents_used + run.agents_reserved + run.agents_remaining.unwrap(),
+            run.agents_used + run.agents_remaining.unwrap(),
             run.agent_budget.unwrap()
         );
     }

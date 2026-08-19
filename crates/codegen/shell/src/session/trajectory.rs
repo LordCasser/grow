@@ -30,6 +30,7 @@ struct SessionTrajectoryCache {
     timeline: chat_state::Timeline,
     projector: chat_state::TrajectoryProjector,
     sidebands: BTreeMap<String, SidebandCache>,
+    workflows: BTreeMap<String, WorkflowJournalCache>,
     children: BTreeMap<String, SessionTrajectoryCache>,
 }
 
@@ -37,6 +38,13 @@ struct SessionTrajectoryCache {
 struct SidebandCache {
     offset: u64,
     events: Vec<chat_state::SidebandEvent>,
+}
+
+#[derive(Default)]
+struct WorkflowJournalCache {
+    offset: u64,
+    entries: Vec<workflow::JournalEntry>,
+    prefix_probe: Vec<u8>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -64,6 +72,7 @@ struct TrajectoryResponse {
     active_step: Option<u32>,
     open_requests: Vec<String>,
     open_tools: Vec<String>,
+    open_workflows: Vec<String>,
     matching_count: usize,
     first_seq: Option<u64>,
     last_seq: Option<u64>,
@@ -85,7 +94,7 @@ pub async fn serve(
     let timeline_path = session_dir.join(super::storage::TIMELINE_FILE);
     if !timeline_path.is_file() {
         anyhow::bail!(
-            "session '{}' has no Timeline v6 ledger at {}",
+            "session '{}' has no Timeline v7 ledger at {}",
             session_id,
             timeline_path.display()
         );
@@ -178,6 +187,17 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         &mut all_rows,
     )?;
     all_rows.sort_by(|left, right| left.nesting_path.cmp(&right.nesting_path));
+    if let Some(collision) = all_rows
+        .windows(2)
+        .find(|pair| pair[0].nesting_path == pair[1].nesting_path)
+    {
+        anyhow::bail!(
+            "Trajectory entries '{}' and '{}' share causal path {:?}",
+            collision[0].entry_id,
+            collision[1].entry_id,
+            collision[0].nesting_path
+        );
+    }
     let focus_root = query
         .entry
         .as_deref()
@@ -280,6 +300,11 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
             .open_tool_call_ids()
             .map(str::to_owned)
             .collect(),
+        open_workflows: cache
+            .timeline
+            .open_workflow_run_ids()
+            .map(str::to_owned)
+            .collect(),
         matching_count,
         first_seq,
         last_seq,
@@ -292,7 +317,6 @@ fn session_actor_ref(session_dir: &Path, session_id: &str) -> anyhow::Result<Str
     let summary = read_session_summary(session_dir)?;
     let actor = match summary.session_kind.as_deref() {
         Some(kind) if kind.starts_with("subagent") => format!("subagent:{session_id}"),
-        Some(kind) if kind.starts_with("workflow") => format!("workflow:{session_id}"),
         _ => "main".into(),
     };
     Ok(actor)
@@ -339,6 +363,7 @@ impl SessionTrajectoryCache {
                 );
             }
         }
+        self.refresh_workflows(timeline_id, visited)?;
 
         let terminals = self
             .timeline
@@ -501,6 +526,106 @@ impl SessionTrajectoryCache {
         Ok(())
     }
 
+    fn refresh_workflows(
+        &mut self,
+        timeline_id: &str,
+        visited: &mut BTreeSet<String>,
+    ) -> anyhow::Result<()> {
+        let spawns = self
+            .timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
+                    run_id,
+                    name,
+                    objective,
+                    private,
+                    ..
+                }) => Some((
+                    run_id.clone(),
+                    (event.seq.get(), name.clone(), objective.clone(), *private),
+                )),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let directory = self.session_dir.join("workflows");
+        let mut seen = BTreeSet::new();
+        for (run_id, (spawn_seq, name, objective, private)) in &spawns {
+            if !visited.insert(run_id.clone()) {
+                anyhow::bail!(
+                    "Workflow identity '{run_id}' is linked more than once in the Trajectory tree"
+                );
+            }
+            super::workflow::store::validate_run_id(run_id)?;
+            let run_dir = directory.join(run_id);
+            let run_metadata = match std::fs::symlink_metadata(&run_dir) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if run_metadata.file_type().is_symlink() || !run_metadata.is_dir() {
+                anyhow::bail!(
+                    "Workflow run directory is not a regular directory: {}",
+                    run_dir.display()
+                );
+            }
+            match std::fs::symlink_metadata(run_dir.join("cleared")) {
+                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                    continue;
+                }
+                Ok(_) => anyhow::bail!("Workflow cleared marker is not a regular file"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let manifest_path = run_dir.join("state.json");
+            let manifest = match super::workflow::store::read_bounded_nofollow(
+                &manifest_path,
+                super::workflow::store::MAX_WORKFLOW_MANIFEST_BYTES,
+            ) {
+                Ok(bytes) => {
+                    serde_json::from_slice::<super::workflow::store::WorkflowRunManifest>(&bytes)?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match std::fs::symlink_metadata(run_dir.join("journal.jsonl")) {
+                        Ok(_) => anyhow::bail!(
+                            "Workflow {run_id} has a journal but no manifest under t:{timeline_id}/{spawn_seq}"
+                        ),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let expected_journal = format!("workflows/{run_id}/journal.jsonl");
+            if manifest.version != super::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
+                || manifest.state.run_id != *run_id
+                || manifest.state.name != *name
+                || manifest.state.objective != *objective
+                || manifest.state.private != *private
+                || manifest.state.journal_path.as_deref() != Some(expected_journal.as_str())
+            {
+                anyhow::bail!("Workflow manifest does not match spawn t:{timeline_id}/{spawn_seq}");
+            }
+            let journal_path = run_dir.join("journal.jsonl");
+            let journal = self.workflows.entry(run_id.clone()).or_default();
+            match std::fs::symlink_metadata(&journal_path) {
+                Ok(_) => {
+                    journal.refresh(&journal_path)?;
+                    validate_workflow_journal_links(&self.timeline, run_id, journal)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    *journal = WorkflowJournalCache::default();
+                }
+                Err(error) => return Err(error.into()),
+            }
+            seen.insert(run_id.clone());
+        }
+        self.workflows.retain(|run_id, _| seen.contains(run_id));
+        Ok(())
+    }
+
     fn validate_sidebands(&self, parent_timeline_id: &str) -> anyhow::Result<()> {
         let parents = self
             .timeline
@@ -538,10 +663,23 @@ impl SessionTrajectoryCache {
         path_prefix: &[u64],
         rows: &mut Vec<chat_state::TrajectoryRow>,
     ) -> anyhow::Result<()> {
+        let subagent_workflows = self
+            .timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => spawn
+                    .workflow_run_id
+                    .as_ref()
+                    .map(|run_id| (spawn.subagent_id.clone(), run_id.clone())),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
         for projected in self.projector.rows() {
             let mut row = projected.clone();
             row.entry_id = format!("t:{timeline_id}/{}", row.seq);
-            row.actor = actor_ref.to_owned();
             row.parent_entry_id = parent_entry_id.map(str::to_owned);
             row.nesting_path = path_prefix
                 .iter()
@@ -553,6 +691,37 @@ impl SessionTrajectoryCache {
             let event = self.timeline.events().get(event_index).ok_or_else(|| {
                 anyhow::anyhow!("Trajectory projector outran Timeline {timeline_id}")
             })?;
+            row.actor = match &event.kind {
+                chat_state::TimelineEventKind::Workflow(event) => {
+                    format!("workflow:{}", workflow_run_id(event))
+                }
+                _ => actor_ref.to_owned(),
+            };
+            let workflow_parent = match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => spawn.workflow_run_id.as_deref().and_then(|run_id| {
+                    self.workflow_agent_parent(timeline_id, run_id, &spawn.subagent_id, path_prefix)
+                }),
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(end)) => {
+                    subagent_workflows.get(&end.subagent_id).and_then(|run_id| {
+                        self.workflow_agent_parent(
+                            timeline_id,
+                            run_id,
+                            &end.subagent_id,
+                            path_prefix,
+                        )
+                    })
+                }
+                _ => None,
+            };
+            if let Some((journal_entry, journal_path)) = workflow_parent {
+                row.parent_entry_id = Some(journal_entry);
+                row.nesting_path = journal_path
+                    .into_iter()
+                    .chain(std::iter::once(row.seq))
+                    .collect();
+            }
             rows.push(row.clone());
             match &event.kind {
                 chat_state::TimelineEventKind::Sideband(spawn) => {
@@ -576,10 +745,76 @@ impl SessionTrajectoryCache {
                         )?;
                     }
                 }
+                chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
+                    run_id,
+                    ..
+                }) => {
+                    self.collect_workflow_rows(run_id, &row.entry_id, &row.nesting_path, rows)?;
+                }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    fn collect_workflow_rows(
+        &self,
+        run_id: &str,
+        parent_entry_id: &str,
+        path_prefix: &[u64],
+        rows: &mut Vec<chat_state::TrajectoryRow>,
+    ) -> anyhow::Result<()> {
+        let Some(journal) = self.workflows.get(run_id) else {
+            return Ok(());
+        };
+        for entry in &journal.entries {
+            rows.push(workflow_row(entry, run_id, parent_entry_id, path_prefix));
+        }
+        Ok(())
+    }
+
+    fn workflow_agent_parent(
+        &self,
+        timeline_id: &str,
+        run_id: &str,
+        subagent_id: &str,
+        path_prefix: &[u64],
+    ) -> Option<(String, Vec<u64>)> {
+        let spawn_seq = self
+            .timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
+                    run_id: candidate,
+                    ..
+                }) if candidate == run_id => Some(event.seq.get()),
+                _ => None,
+            })?;
+        let entry = self.workflows.get(run_id).and_then(|journal| {
+            journal.entries.iter().find(|entry| {
+                entry.kind == "spawn_agent"
+                    && entry
+                        .result
+                        .get("agent_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(subagent_id)
+            })
+        });
+        match entry {
+            Some(entry) => {
+                let path = path_prefix
+                    .iter()
+                    .copied()
+                    .chain([spawn_seq, 0, entry.seq])
+                    .collect();
+                Some((format!("t:{run_id}/{}", entry.seq), path))
+            }
+            None => {
+                let path = path_prefix.iter().copied().chain([spawn_seq, 1]).collect();
+                Some((format!("t:{timeline_id}/{spawn_seq}"), path))
+            }
+        }
     }
 
     fn collect_sideband_rows(
@@ -614,6 +849,11 @@ impl SessionTrajectoryCache {
     fn event_count(&self) -> usize {
         self.timeline.events().len()
             + self
+                .workflows
+                .values()
+                .map(|workflow| workflow.entries.len())
+                .sum::<usize>()
+            + self
                 .sidebands
                 .values()
                 .map(|sideband| sideband.events.len())
@@ -624,6 +864,116 @@ impl SessionTrajectoryCache {
 
 fn terminal_requires_child(terminal: &chat_state::SubagentTerminalEvent) -> bool {
     terminal.outcome == chat_state::SubagentOutcome::Completed || terminal.result_ref.is_some()
+}
+
+fn workflow_run_id(event: &chat_state::WorkflowEvent) -> &str {
+    match event {
+        chat_state::WorkflowEvent::Spawned { run_id, .. }
+        | chat_state::WorkflowEvent::Resumed { run_id, .. }
+        | chat_state::WorkflowEvent::Ended { run_id, .. }
+        | chat_state::WorkflowEvent::Closed { run_id, .. } => run_id,
+    }
+}
+
+fn workflow_row(
+    entry: &workflow::JournalEntry,
+    run_id: &str,
+    parent_entry_id: &str,
+    path_prefix: &[u64],
+) -> chat_state::TrajectoryRow {
+    let failed = entry
+        .result
+        .get(workflow::journal::HOST_ERROR_KEY)
+        .and_then(serde_json::Value::as_str);
+    let result = serde_json::to_string(&entry.result).unwrap_or_else(|_| "null".into());
+    chat_state::TrajectoryRow {
+        entry_id: format!("t:{run_id}/{}", entry.seq),
+        seq: entry.seq,
+        parent_entry_id: Some(parent_entry_id.to_owned()),
+        nesting_path: path_prefix.iter().copied().chain([0, entry.seq]).collect(),
+        at_ms: i64::try_from(entry.at_ms).unwrap_or(i64::MAX),
+        layer: "tool.result".into(),
+        actor: format!("workflow:{run_id}"),
+        class: "message".into(),
+        producer: format!("workflow-host:{}", entry.kind),
+        kind: format!("workflow.host_call.{}", entry.kind),
+        state: if failed.is_some() {
+            "failed".into()
+        } else {
+            "completed".into()
+        },
+        visibility: chat_state::SurfaceVisibility::LogOnly,
+        turn_id: None,
+        step_index: None,
+        correlation_id: Some(entry.req_hash.clone()),
+        duration_ms: None,
+        summary: failed.map_or_else(
+            || format!("{} · {}", entry.kind, crate::util::truncate(&result, 220)),
+            |error| format!("{} · {}", entry.kind, crate::util::truncate(error, 220)),
+        ),
+        details: serde_json::to_value(entry).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn validate_workflow_journal_entry(entry: &workflow::JournalEntry) -> anyhow::Result<()> {
+    let host_error = entry
+        .result
+        .get(workflow::journal::HOST_ERROR_KEY)
+        .and_then(serde_json::Value::as_str);
+    if host_error.is_some_and(str::is_empty) {
+        anyhow::bail!("Workflow journal host error must not be empty");
+    }
+    if entry.kind == "spawn_agent" && host_error.is_none() {
+        let result = serde_json::from_value::<workflow::AgentResult>(entry.result.clone())?;
+        if result.agent_id.trim().is_empty() {
+            anyhow::bail!("Workflow spawn_agent result has an empty agent id");
+        }
+    }
+    Ok(())
+}
+
+fn validate_workflow_journal_links(
+    timeline: &chat_state::Timeline,
+    run_id: &str,
+    journal: &WorkflowJournalCache,
+) -> anyhow::Result<()> {
+    let owned_subagents = timeline
+        .events()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn))
+                if spawn.workflow_run_id.as_deref() == Some(run_id) =>
+            {
+                Some(spawn.subagent_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut linked = BTreeSet::new();
+    for entry in &journal.entries {
+        if entry.kind != "spawn_agent"
+            || entry
+                .result
+                .get(workflow::journal::HOST_ERROR_KEY)
+                .is_some()
+        {
+            continue;
+        }
+        let result = serde_json::from_value::<workflow::AgentResult>(entry.result.clone())?;
+        if !owned_subagents.contains(result.agent_id.as_str()) {
+            anyhow::bail!(
+                "Workflow journal agent '{}' has no owned subagent spawn",
+                result.agent_id
+            );
+        }
+        if !linked.insert(result.agent_id.clone()) {
+            anyhow::bail!(
+                "Workflow journal links subagent '{}' more than once",
+                result.agent_id
+            );
+        }
+    }
+    Ok(())
 }
 
 impl SidebandCache {
@@ -657,6 +1007,90 @@ impl SidebandCache {
         chat_state::SidebandTimeline::from_events(events.clone())?;
         self.events = events;
         self.offset += complete_len as u64;
+        Ok(())
+    }
+}
+
+impl WorkflowJournalCache {
+    fn refresh(&mut self, path: &Path) -> anyhow::Result<()> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > workflow::journal::MAX_JOURNAL_BYTES
+        {
+            anyhow::bail!("invalid Workflow journal: {}", path.display());
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() || opened.len() > workflow::journal::MAX_JOURNAL_BYTES {
+            anyhow::bail!("Workflow journal changed during open: {}", path.display());
+        }
+        if opened.len() < self.offset || !self.prefix_matches(&mut file)? {
+            *self = Self::default();
+        }
+        file.seek(std::io::SeekFrom::Start(self.offset))?;
+        let mut bytes = Vec::new();
+        let remaining = workflow::journal::MAX_JOURNAL_BYTES.saturating_sub(self.offset);
+        (&mut file)
+            .take(remaining.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > remaining {
+            anyhow::bail!("Workflow journal exceeds the byte limit");
+        }
+        let complete_len = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        let mut entries = self.entries.clone();
+        for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            if entries.len() >= workflow::journal::MAX_JOURNAL_ENTRIES {
+                anyhow::bail!("Workflow journal exceeds the entry limit");
+            }
+            let entry = serde_json::from_slice::<workflow::JournalEntry>(line)?;
+            let expected = u64::try_from(entries.len())?;
+            if entry.seq != expected {
+                anyhow::bail!(
+                    "Workflow journal is not dense: expected {expected}, found {}",
+                    entry.seq
+                );
+            }
+            validate_workflow_journal_entry(&entry)?;
+            entries.push(entry);
+        }
+        self.entries = entries;
+        self.offset = self.offset.saturating_add(complete_len as u64);
+        self.refresh_prefix_probe(&mut file)?;
+        Ok(())
+    }
+
+    fn prefix_matches(&self, file: &mut std::fs::File) -> anyhow::Result<bool> {
+        if self.prefix_probe.is_empty() {
+            return Ok(true);
+        }
+        let start = self.offset.saturating_sub(self.prefix_probe.len() as u64);
+        file.seek(std::io::SeekFrom::Start(start))?;
+        let mut actual = vec![0; self.prefix_probe.len()];
+        file.read_exact(&mut actual)?;
+        Ok(actual == self.prefix_probe)
+    }
+
+    fn refresh_prefix_probe(&mut self, file: &mut std::fs::File) -> anyhow::Result<()> {
+        const PROBE_BYTES: u64 = 4096;
+        let start = self.offset.saturating_sub(PROBE_BYTES);
+        file.seek(std::io::SeekFrom::Start(start))?;
+        self.prefix_probe.clear();
+        file.take(self.offset.saturating_sub(start))
+            .read_to_end(&mut self.prefix_probe)?;
         Ok(())
     }
 }
@@ -794,7 +1228,7 @@ table{width:100%;min-width:1280px;border-collapse:collapse;table-layout:fixed}th
 @media(max-width:900px){main{grid-template-columns:1fr}.inspector{display:none}.stats{display:none}.turn{display:none}}
 </style></head><body>
 <header><span class="brand">GROW / TRAJECTORY</span><span class="session" id="session">loading…</span><div class="stats"><span id="counts"></span><span id="position"></span><span class="live" id="health">● live</span></div></header>
-<div class="controls"><input id="search" placeholder="Search coordinates, kind, id, payload…"><select id="layer"><option value="">all layers</option><option>system</option><option>user</option><option>assistant</option><option>tool</option><option>plugin</option><option>meta</option></select><select id="actor"><option value="">all actors</option><option>main</option><option>subagent</option><option>workflow</option><option>sideband</option></select><select id="class"><option value="">all classes</option><option>message</option><option>lifecycle</option><option>governance</option><option>audit</option><option>auxiliary</option></select><select id="producer"><option value="">all producers</option><option>core</option><option>model</option><option>tool</option><option>hook</option><option>plugin</option><option>skill</option><option>mcp</option><option>user</option></select><select id="visibility"><option value="">all surfaces</option><option value="current">current</option><option value="shadowed">shadowed</option><option value="log_only">log only</option></select><button id="older">load earlier</button><button class="follow on" id="follow">tail follow</button><button id="refresh">refresh</button></div>
+<div class="controls"><input id="search" placeholder="Search coordinates, kind, id, payload…"><select id="layer"><option value="">all layers</option><option>system</option><option>user</option><option>assistant</option><option>tool</option><option>plugin</option><option>meta</option></select><select id="actor"><option value="">all actors</option><option>main</option><option>subagent</option><option>workflow</option><option>sideband</option></select><select id="class"><option value="">all classes</option><option>message</option><option>lifecycle</option><option>governance</option><option>audit</option><option>auxiliary</option></select><select id="producer"><option value="">all producers</option><option>core</option><option>model</option><option>tool</option><option>workflow-host</option><option>hook</option><option>plugin</option><option>skill</option><option>mcp</option><option>user</option></select><select id="visibility"><option value="">all surfaces</option><option value="current">current</option><option value="shadowed">shadowed</option><option value="log_only">log only</option></select><button id="older">load earlier</button><button class="follow on" id="follow">tail follow</button><button id="refresh">refresh</button></div>
 <div class="overview"><div class="lane-labels"><span>INPUT</span><span>MODEL</span><span>TOOLS</span></div><div class="track" id="track"></div></div>
 <main><div class="ledger" id="ledger"><table><thead><tr><th class="seq">seq</th><th class="time">time</th><th class="class">class</th><th class="layer">layer</th><th class="actor">actor</th><th class="kind">kind</th><th class="producer">producer</th><th class="state">state</th><th class="turn">turn/step</th><th class="duration">duration</th><th class="summary">summary</th></tr></thead><tbody id="rows"></tbody></table></div><aside class="inspector"><h3>Event inspector</h3><div class="empty" id="hint">Select an event to inspect its canonical payload and four-dimensional identity.</div><pre id="details"></pre></aside></main>
 <script>
@@ -806,7 +1240,7 @@ function drawOverview(items){if(!items.length){track.innerHTML='';return}const s
 function rowMarkup(r){const depth=Math.max(0,r.nesting_path.length-1),parent=r.parent_entry_id==null?'':` ← ${esc(r.parent_entry_id)}`;return `<tr data-entry="${esc(r.entry_id)}" class="event-row ${esc(r.class)} ${esc(r.state)} ${esc(r.visibility)}"><td class="seq" title="${esc(r.entry_id)}${parent}"><span style="padding-left:${depth*12}px">${depth?'↳ ':''}${r.nesting_path.join('·')}</span></td><td class="time">${time(r.at_ms)}</td><td class="class"><span class="pill">${esc(r.class)}</span></td><td class="layer">${esc(r.layer)}</td><td class="actor">${esc(r.actor)}</td><td class="kind">${esc(r.kind)}</td><td class="producer">${esc(r.producer)}</td><td class="state">${esc(r.state)}</td><td class="turn">${r.turn_id??'—'}/${r.step_index??'—'}</td><td class="duration">${duration(r.duration_ms)}</td><td class="summary" title="${esc(r.summary)}">${esc(r.summary)}</td></tr>`}
 function renderLedger(){renderQueued=false;const viewport=Math.max(1,ledger.clientHeight),start=Math.max(0,Math.floor(ledger.scrollTop/ROW_HEIGHT)-OVERSCAN),end=Math.min(displayRows.length,Math.ceil((ledger.scrollTop+viewport)/ROW_HEIGHT)+OVERSCAN),top=start*ROW_HEIGHT,bottom=(displayRows.length-end)*ROW_HEIGHT;rows.innerHTML=`<tr class="spacer"><td colspan="11" style="height:${top}px"></td></tr>`+displayRows.slice(start,end).map(rowMarkup).join('')+`<tr class="spacer"><td colspan="11" style="height:${bottom}px"></td></tr>`;rows.querySelectorAll('tr.event-row').forEach(tr=>tr.onclick=()=>inspect(tr.dataset.entry,tr));if(selected!=null)rows.querySelector(selector(selected))?.classList.add('selected')}
 function queueRender(){if(!renderQueued){renderQueued=true;requestAnimationFrame(renderLedger)}}
-function draw(data){$('session').textContent=data.sessionId;$('counts').textContent=`${data.eventCount} events · ${data.currentSurfaceItems} surface · ${data.matchingCount} matched`;$('position').textContent=data.activeTurn==null?'idle':`turn ${data.activeTurn} / step ${data.activeStep??'—'}`;$('older').disabled=!hasEarlier;displayRows=data.rows;window.__trajectory=displayRows;renderLedger();drawOverview(displayRows);if(follow){ledger.scrollTop=Math.max(0,displayRows.length*ROW_HEIGHT-ledger.clientHeight);renderLedger()}if(selected!=null){focusEvent(selected,deepLinkPending);deepLinkPending=false}}
+function draw(data){$('session').textContent=data.sessionId;$('counts').textContent=`${data.eventCount} events · ${data.currentSurfaceItems} surface · ${data.matchingCount} matched`;$('position').textContent=data.activeTurn==null?(data.openWorkflows.length?`${data.openWorkflows.length} workflow active`:'idle'):`turn ${data.activeTurn} / step ${data.activeStep??'—'}`;$('older').disabled=!hasEarlier;displayRows=data.rows;window.__trajectory=displayRows;renderLedger();drawOverview(displayRows);if(follow){ledger.scrollTop=Math.max(0,displayRows.length*ROW_HEIGHT-ledger.clientHeight);renderLedger()}if(selected!=null){focusEvent(selected,deepLinkPending);deepLinkPending=false}}
 function selector(entry){return `[data-entry="${CSS.escape(entry)}"]`}function inspect(entry,tr){rows.querySelector('.selected')?.classList.remove('selected');track.querySelector('.selected')?.classList.remove('selected');tr?.classList.add('selected');track.querySelector(selector(entry))?.classList.add('selected');selected=entry;history.replaceState(null,'',`#${encodeURIComponent(entry)}`);const r=displayRows.find(x=>x.entry_id===entry);if(!r)return;$('hint').style.display='none';$('details').textContent=JSON.stringify(r,null,2)}
 function focusEvent(entry,scroll=true){const index=displayRows.findIndex(row=>row.entry_id===entry);if(index<0)return;follow=false;$('follow').classList.remove('on');$('follow').textContent='tail paused';if(scroll){ledger.scrollTop=Math.max(0,index*ROW_HEIGHT-ledger.clientHeight/2);renderLedger()}inspect(entry,rows.querySelector(selector(entry)))}
 function queryParams(){const p=new URLSearchParams({limit:'5000'});if(deepLinkPending&&selected)p.set('entry',selected);if($('search').value)p.set('search',$('search').value);for(const id of ['layer','actor','class','producer','visibility'])if($(id).value)p.set(id,$(id).value);return p}
@@ -973,6 +1407,217 @@ mod tests {
         assert_eq!(cache.offset, committed_offset);
         assert_eq!(cache.timeline.events().len(), 1);
         assert_eq!(cache.projector.rows().len(), 1);
+    }
+
+    #[test]
+    fn workflow_journal_cache_detects_same_length_tail_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let entry = |result: &str| workflow::JournalEntry {
+            seq: 0,
+            kind: "log".into(),
+            req_hash: "abcd".into(),
+            result: serde_json::Value::String(result.into()),
+            at_ms: 1,
+        };
+        let write = |entry: &workflow::JournalEntry| {
+            std::fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string(entry).unwrap()),
+            )
+            .unwrap();
+        };
+        write(&entry("aa"));
+        let mut cache = WorkflowJournalCache::default();
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.entries[0].result, serde_json::json!("aa"));
+
+        write(&entry("bb"));
+        cache.refresh(&path).unwrap();
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[0].result, serde_json::json!("bb"));
+    }
+
+    #[test]
+    fn workflow_journal_malformed_batch_does_not_partially_advance_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let entry = |seq| workflow::JournalEntry {
+            seq,
+            kind: "log".into(),
+            req_hash: format!("hash-{seq}"),
+            result: serde_json::Value::Null,
+            at_ms: seq,
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&entry(0)).unwrap()),
+        )
+        .unwrap();
+        let mut cache = WorkflowJournalCache::default();
+        cache.refresh(&path).unwrap();
+        let committed_offset = cache.offset;
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{}", serde_json::to_string(&entry(1)).unwrap()).unwrap();
+        writeln!(file, "{{not-json}}").unwrap();
+
+        assert!(cache.refresh(&path).is_err());
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.offset, committed_offset);
+    }
+
+    #[test]
+    fn workflow_journal_is_nested_under_spawn_and_uses_run_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: "wf_debug".into(),
+                    execution_epoch: 0,
+                    name: "debug".into(),
+                    objective: "trace host calls".into(),
+                    private: false,
+                },
+            ))
+            .unwrap();
+        let mut child_spawn = subagent_spawn("sa-debug", "child-debug", "/tmp");
+        child_spawn.workflow_run_id = Some("wf_debug".into());
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(child_spawn),
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                    subagent_id: "sa-debug".into(),
+                    child_session_id: "child-debug".into(),
+                    outcome: chat_state::SubagentOutcome::Cancelled,
+                    duration_ms: 4,
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 7,
+                    error: Some("cancelled".into()),
+                    result_ref: None,
+                    snapshot_ref: None,
+                }),
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Ended {
+                    run_id: "wf_debug".into(),
+                    execution_epoch: 0,
+                    status: chat_state::WorkflowExecutionStatus::Complete,
+                    duration_ms: 9,
+                    message: None,
+                },
+            ))
+            .unwrap();
+        write_timeline(&dir.path().join("timeline.jsonl"), &timeline);
+
+        let run_dir = dir.path().join("workflows/wf_debug");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut tracker = super::super::workflow::tracker::WorkflowTracker::default();
+        let mut state = tracker.start_run(
+            "wf_debug".into(),
+            "debug".into(),
+            "trace host calls".into(),
+            Vec::new(),
+            Some(4),
+            Some("workflows/wf_debug/journal.jsonl".into()),
+        );
+        state = tracker
+            .apply_outcome(
+                "wf_debug",
+                &workflow::WorkflowOutcome::Completed {
+                    result: serde_json::json!("done"),
+                },
+            )
+            .unwrap_or(state);
+        let manifest = super::super::workflow::store::WorkflowRunManifest {
+            version: super::super::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION,
+            state,
+            script_revision: 0,
+        };
+        std::fs::write(
+            run_dir.join("state.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let entries = [
+            workflow::JournalEntry {
+                seq: 0,
+                kind: "spawn_agent".into(),
+                req_hash: "hash-0".into(),
+                result: serde_json::json!({
+                    "agent_id": "sa-debug",
+                    "success": false,
+                    "output": "cancelled",
+                    "cancelled": true,
+                    "tokens_used": 7,
+                    "duration_ms": 4
+                }),
+                at_ms: 2,
+            },
+            workflow::JournalEntry {
+                seq: 1,
+                kind: "budget".into(),
+                req_hash: "hash-1".into(),
+                result: serde_json::json!({"remaining": 3}),
+                at_ms: 3,
+            },
+        ];
+        std::fs::write(
+            run_dir.join("journal.jsonl"),
+            entries
+                .iter()
+                .map(|entry| serde_json::to_string(entry).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let state = AppState {
+            session_id: "session".into(),
+            actor_ref: "main".into(),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        let response = query_cached(
+            &state,
+            TrajectoryQuery {
+                actor: Some("workflow".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(response.event_count, 6);
+        assert_eq!(response.rows.len(), 4);
+        assert_eq!(response.rows[1].entry_id, "t:wf_debug/0");
+        assert_eq!(
+            response.rows[1].parent_entry_id.as_deref(),
+            Some("t:session/0")
+        );
+        assert_eq!(response.rows[1].nesting_path, [0, 0, 0]);
+        assert_eq!(response.rows[1].actor, "workflow:wf_debug");
+        assert_eq!(response.rows[2].entry_id, "t:wf_debug/1");
+
+        let unfiltered = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        let child = unfiltered
+            .rows
+            .iter()
+            .find(|row| row.entry_id == "t:session/1")
+            .unwrap();
+        assert_eq!(child.parent_entry_id.as_deref(), Some("t:wf_debug/0"));
+        assert_eq!(child.nesting_path, [0, 0, 0, 1]);
     }
 
     #[test]

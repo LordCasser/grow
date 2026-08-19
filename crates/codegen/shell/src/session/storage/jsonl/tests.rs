@@ -549,6 +549,19 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
             None,
             Some("workflows/wf_restore/journal.jsonl".into()),
         );
+    let mut timeline = chat_state::Timeline::default();
+    let spawn = timeline
+        .record(chat_state::TimelineEventKind::Workflow(
+            chat_state::WorkflowEvent::Spawned {
+                run_id: "wf_restore".into(),
+                execution_epoch: 0,
+                name: "demo".into(),
+                objective: "ship".into(),
+                private: false,
+            },
+        ))
+        .unwrap();
+    adapter.append_timeline_event(&info, &spawn).await.unwrap();
     let run_dir = adapter.session_dir(&info).join("workflows/wf_restore");
     std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
     std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
@@ -567,8 +580,7 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
     legacy.version = 2;
     adapter.write_workflow_run_state(&info, &legacy).await.unwrap();
     let loaded_v2 = adapter.load_session_without_updates(&info).await.unwrap();
-    assert_eq!(loaded_v2.workflow_runs.len(), 1);
-    assert_eq!(loaded_v2.workflow_runs[0].manifest.version, 2);
+    assert!(loaded_v2.workflow_runs.is_empty());
     adapter.delete_workflow_run_state(&info, "wf_restore").await.unwrap();
     adapter.write_workflow_run_state(&info, &manifest).await.unwrap();
     assert!(run_dir.join("cleared").is_file());
@@ -581,10 +593,8 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
                 .is_empty()
         );
 }
-#[cfg(unix)]
 #[tokio::test]
-async fn workflow_restore_rejects_symlinks_and_caps_run_count() {
-    use std::os::unix::fs::symlink;
+async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
     use crate::session::workflow::store::{
         MAX_RESTORED_WORKFLOW_RUNS, WORKFLOW_RUN_MANIFEST_VERSION, WorkflowRunManifest,
         script_revision_path,
@@ -596,8 +606,21 @@ async fn workflow_restore_rejects_symlinks_and_caps_run_count() {
     adapter.init_session(&info, default_model_id()).await.unwrap();
     let workflows = adapter.session_dir(&info).join("workflows");
     std::fs::create_dir_all(&workflows).unwrap();
+    let mut timeline = chat_state::Timeline::default();
     for index in 0..=MAX_RESTORED_WORKFLOW_RUNS {
         let run_id = format!("wf_{index:03}");
+        let spawn = timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: run_id.clone(),
+                    execution_epoch: 0,
+                    name: "demo".into(),
+                    objective: "ship".into(),
+                    private: false,
+                },
+            ))
+            .unwrap();
+        adapter.append_timeline_event(&info, &spawn).await.unwrap();
         let run_dir = workflows.join(&run_id);
         std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
         let mut tracker = WorkflowTracker::default();
@@ -623,19 +646,61 @@ async fn workflow_restore_rejects_symlinks_and_caps_run_count() {
         std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
         std::fs::write(run_dir.join("args.json"), "{}").unwrap();
     }
-    let attacker = temp_dir.path().join("attacker.json");
-    std::fs::write(&attacker, "{}").unwrap();
-    let symlinked = workflows.join("wf_symlink");
-    std::fs::create_dir_all(symlinked.join("scripts")).unwrap();
-    symlink(&attacker, symlinked.join("state.json")).unwrap();
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
     assert_eq!(loaded.workflow_runs.len(), MAX_RESTORED_WORKFLOW_RUNS);
-    assert!(
-            loaded
-                .workflow_runs
-                .iter()
-                .all(|run| run.manifest.state.run_id != "wf_symlink")
-        );
+    assert!(loaded.workflow_runs.iter().all(|run| {
+        let index = run.manifest.state.run_id[3..].parse::<usize>().unwrap();
+        index > 0
+    }));
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn workflow_restore_rejects_symlink_manifest() {
+    use std::os::unix::fs::symlink;
+    use crate::session::workflow::store::{
+        WORKFLOW_RUN_MANIFEST_VERSION, WorkflowRunManifest, script_revision_path,
+    };
+    use crate::session::workflow::tracker::WorkflowTracker;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let spawn = timeline
+        .record(chat_state::TimelineEventKind::Workflow(
+            chat_state::WorkflowEvent::Spawned {
+                run_id: "wf_symlink".into(),
+                execution_epoch: 0,
+                name: "demo".into(),
+                objective: "ship".into(),
+                private: false,
+            },
+        ))
+        .unwrap();
+    adapter.append_timeline_event(&info, &spawn).await.unwrap();
+    let run_dir = adapter.session_dir(&info).join("workflows/wf_symlink");
+    std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
+    let state = WorkflowTracker::default().start_run(
+        "wf_symlink".into(),
+        "demo".into(),
+        "ship".into(),
+        Vec::new(),
+        None,
+        Some("workflows/wf_symlink/journal.jsonl".into()),
+    );
+    let manifest = WorkflowRunManifest {
+        version: WORKFLOW_RUN_MANIFEST_VERSION,
+        state,
+        script_revision: 0,
+    };
+    let outside = temp_dir.path().join("outside-state.json");
+    std::fs::write(&outside, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    symlink(&outside, run_dir.join("state.json")).unwrap();
+    std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
+    std::fs::write(run_dir.join("args.json"), "{}").unwrap();
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert!(loaded.workflow_runs.is_empty());
 }
 /// `load_session_without_updates` always defers rewind points while the full
 /// `load_session` / `load_rewind_points` still return them.

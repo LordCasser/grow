@@ -45,7 +45,6 @@ fn private_workflow_update(overrides: serde_json::Value) -> serde_json::Value {
         "current_phase": "Research",
         "agent_budget": 8,
         "agents_used": 1,
-        "agents_reserved": 1,
         "agents_remaining": 7,
         "agent_usage_incomplete": false,
         "elapsed_ms": 12000,
@@ -62,9 +61,6 @@ fn private_workflow_update(overrides: serde_json::Value) -> serde_json::Value {
                 "duration_ms": 5000,
             }
         ],
-        "last_event": null,
-        "last_event_detail": null,
-        "last_event_timestamp": null,
         "pause_message": null,
         "result_summary": null,
     });

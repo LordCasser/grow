@@ -6,9 +6,10 @@ use sha2::Digest as _;
 pub const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_JOURNAL_ENTRIES: usize = crate::MAX_HOST_CALLS as usize;
 
-pub(crate) const HOST_ERROR_KEY: &str = "__workflow_host_error";
+pub const HOST_ERROR_KEY: &str = "__workflow_host_error";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JournalEntry {
     pub seq: u64,
     pub kind: String,
@@ -83,35 +84,14 @@ impl Journal {
             let Some(relative_newline) = content[offset..].iter().position(|byte| *byte == b'\n')
             else {
                 let tail = &content[offset..];
-                if tail.iter().all(u8::is_ascii_whitespace) {
-                    truncate_tail(&path, offset as u64)?;
-                    bytes = offset as u64;
-                    break;
+                if !tail.iter().all(u8::is_ascii_whitespace) {
+                    tracing::warn!(
+                        line = line_number,
+                        "truncating unterminated workflow journal tail"
+                    );
                 }
-                match serde_json::from_slice::<JournalEntry>(tail) {
-                    Ok(entry) => {
-                        if entries.len() >= MAX_JOURNAL_ENTRIES {
-                            return Err(JournalError::UnsafeRestore {
-                                limit: MAX_JOURNAL_ENTRIES as u64,
-                                reason: "too many journal entries".into(),
-                            });
-                        }
-                        validate_sequence(&entries, &entry)?;
-                        entries.push(entry);
-                        last_line_start = Some(offset as u64);
-                        terminate_line(&path)?;
-                        bytes = bytes.saturating_add(1);
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            line = line_number,
-                            %error,
-                            "truncating torn workflow journal tail"
-                        );
-                        truncate_tail(&path, offset as u64)?;
-                        bytes = offset as u64;
-                    }
-                }
+                truncate_tail(&path, offset as u64)?;
+                bytes = offset as u64;
                 break;
             };
             let end = offset + relative_newline;
@@ -306,14 +286,21 @@ fn validate_sequence(entries: &[JournalEntry], entry: &JournalEntry) -> Result<(
 }
 
 fn truncate_tail(path: &Path, len: u64) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new().write(true).open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "journal is not a regular file",
+        ));
+    }
     file.set_len(len)?;
-    file.sync_data()
-}
-
-fn terminate_line(path: &Path) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-    file.write_all(b"\n")?;
     file.sync_data()
 }
 
@@ -321,10 +308,20 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "journal is not a regular file",
+        ));
+    }
     file.write_all(line.as_bytes())?;
     file.sync_data()
 }
@@ -421,14 +418,14 @@ mod tests {
     }
 
     #[test]
-    fn valid_unterminated_tail_is_kept_and_terminated() {
+    fn valid_unterminated_tail_is_not_a_committed_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.jsonl");
         let line = "{\"seq\":0,\"kind\":\"log\",\"req_hash\":\"x\",\"result\":null,\"at_ms\":1}";
         std::fs::write(&path, line).unwrap();
 
-        assert_eq!(Journal::load(path.clone()).unwrap().len(), 1);
-        assert_eq!(std::fs::read_to_string(path).unwrap(), format!("{line}\n"));
+        assert_eq!(Journal::load(path.clone()).unwrap().len(), 0);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "");
     }
 
     #[cfg(unix)]
