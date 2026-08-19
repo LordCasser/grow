@@ -447,14 +447,23 @@ impl ChatStateActor {
             }
             ChatStateCommand::MaterializeBranchTranscript { timeline_id, reply } => {
                 let materialized = self.state.timeline.events().last().map(|event| {
-                    (
-                        crate::TimelineRangeRef {
+                    let (transcript_ids, transcript) =
+                        self.state.timeline.branch_transcript_with_ids();
+                    crate::RecallMaterialization {
+                        source_ref: crate::TimelineRangeRef {
                             timeline_id,
                             first_seq: 0,
                             last_seq: event.seq.get(),
                         },
-                        self.state.timeline.branch_transcript(),
-                    )
+                        surface_revision: self.state.timeline.surface_revision(),
+                        need_surface_ids: self.state.timeline.surface_ids().to_vec(),
+                        transcript,
+                        transcript_ids,
+                        unloaded_surface_ids: self
+                            .state
+                            .timeline
+                            .completed_compaction_shadowed_ids(),
+                    }
                 });
                 let _ = reply.send(materialized);
             }

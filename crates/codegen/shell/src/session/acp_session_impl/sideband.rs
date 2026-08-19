@@ -1,12 +1,12 @@
 //! Durable sideband lifecycle shared by every auxiliary model call.
 
-use sampling_types::ConversationResponse;
+use sampling_types::{ConversationRequest, ConversationResponse};
 
 use crate::session::SessionActor;
 use crate::session::notifications::NotificationSender;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SidebandInput {
+pub(crate) enum SidebandSource {
     None,
     Frozen(Vec<chat_state::TimelineRangeRef>),
 }
@@ -34,22 +34,22 @@ impl SessionActor {
         &self,
         purpose: chat_state::SidebandPurpose,
         prompt: String,
-        input: SidebandInput,
+        source: SidebandSource,
         route: chat_state::SidebandRoute,
         output_schema: Option<serde_json::Value>,
     ) -> Result<SidebandRun, SidebandRunError> {
-        let input_refs = match input {
-            SidebandInput::None => Vec::new(),
-            SidebandInput::Frozen(input_refs) => input_refs,
+        let source_refs = match source {
+            SidebandSource::None => Vec::new(),
+            SidebandSource::Frozen(source_refs) => source_refs,
         };
         let parent_timeline_id = self.session_info.id.to_string();
-        if let Some(input_ref) = input_refs
+        if let Some(source_ref) = source_refs
             .iter()
-            .find(|input_ref| input_ref.timeline_id != parent_timeline_id)
+            .find(|source_ref| source_ref.timeline_id != parent_timeline_id)
         {
             return Err(chat_state::SidebandError::ForeignInputTimeline {
                 expected: parent_timeline_id,
-                actual: input_ref.timeline_id.clone(),
+                actual: source_ref.timeline_id.clone(),
             }
             .into());
         }
@@ -60,7 +60,7 @@ impl SessionActor {
                 chat_state::SidebandSpawnEvent {
                     sideband_id: sideband_id.clone(),
                     purpose,
-                    input_refs: input_refs.clone(),
+                    source_refs: source_refs.clone(),
                 },
             ))
             .await?;
@@ -70,7 +70,7 @@ impl SessionActor {
             chat_state::SidebandRequest {
                 purpose,
                 prompt,
-                input_refs,
+                source_refs,
                 route,
                 initiator_ref,
                 executor: if self.startup_hints.is_subagent {
@@ -91,8 +91,42 @@ impl SessionActor {
 }
 
 impl SidebandRun {
-    pub(crate) async fn attempt(
+    pub(crate) async fn attempt_all_sources(
         &mut self,
+        request: &ConversationRequest,
+        feedback: Option<String>,
+    ) -> Result<(), SidebandRunError> {
+        let source_refs = self
+            .timeline
+            .events()
+            .first()
+            .and_then(|event| match &event.kind {
+                chat_state::SidebandEventKind::Request(request) => {
+                    Some(request.source_refs.clone())
+                }
+                _ => None,
+            })
+            .ok_or(chat_state::SidebandError::AttemptWithoutRequest)?;
+        self.attempt_selected(
+            request,
+            source_refs,
+            None,
+            Vec::new(),
+            Vec::new(),
+            "all-sources",
+            feedback,
+        )
+        .await
+    }
+
+    pub(crate) async fn attempt_selected(
+        &mut self,
+        request: &ConversationRequest,
+        input_refs: Vec<chat_state::TimelineRangeRef>,
+        source_revision: Option<u64>,
+        context_surface_ids: Vec<chat_state::SurfaceId>,
+        selected_surface_ids: Vec<chat_state::SurfaceId>,
+        strategy: &str,
         feedback: Option<String>,
     ) -> Result<(), SidebandRunError> {
         let attempt_no = u32::try_from(
@@ -107,6 +141,19 @@ impl SidebandRun {
         self.append(chat_state::SidebandEventKind::Attempt(
             chat_state::SidebandAttempt {
                 attempt_no,
+                input_refs,
+                assembly_manifest: chat_state::SidebandAssemblyManifest {
+                    strategy: strategy.into(),
+                    strategy_version: 1,
+                    source_revision,
+                    context_surface_ids,
+                    selected_surface_ids,
+                    materialized_input_tokens: chat_state::estimate_conversation_tokens(
+                        &request.items,
+                    )
+                    .saturating_add(chat_state::estimate_tool_specs_tokens(&request.tools)),
+                    max_output_tokens: request.max_output_tokens.map(u64::from),
+                },
                 feedback,
             },
         ))
@@ -119,6 +166,7 @@ impl SidebandRun {
         structured_output: Option<serde_json::Value>,
         usage: chat_state::SidebandUsage,
         finish: String,
+        evidence_refs: Vec<chat_state::TimelineRangeRef>,
     ) -> Result<chat_state::TimelineRangeRef, SidebandRunError> {
         let attempt_seq = self
             .timeline
@@ -136,6 +184,7 @@ impl SidebandRun {
                 usage,
                 finish,
                 source_event_seqs: [0, attempt_seq],
+                evidence_refs,
             },
         ))
         .await?;

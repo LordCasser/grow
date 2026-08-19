@@ -323,7 +323,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::MemoryDream,
                 user_message.to_owned(),
-                SidebandInput::None,
+                SidebandSource::None,
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -335,10 +335,13 @@ impl SessionActor {
                 acp::Error::internal_error()
                     .data(format!("dream Sideband could not start: {error}"))
             })?;
-        sideband.attempt(None).await.map_err(|error| {
-            acp::Error::internal_error()
-                .data(format!("dream Sideband attempt could not commit: {error}"))
-        })?;
+        sideband
+            .attempt_all_sources(&request, None)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("dream Sideband attempt could not commit: {error}"))
+            })?;
         let response = match tokio::time::timeout(
             std::time::Duration::from_secs(30 * 60),
             sampling_client.conversation_collect(request),
@@ -387,7 +390,7 @@ impl SessionActor {
         let usage = sideband_usage(&response);
         let finish = sideband_finish(&response);
         sideband
-            .complete(text.clone(), None, usage, finish)
+            .complete(text.clone(), None, usage, finish, Vec::new())
             .await
             .map_err(|error| {
                 acp::Error::internal_error()
@@ -500,7 +503,7 @@ impl SessionActor {
                 .begin_sideband(
                     chat_state::SidebandPurpose::MemoryFlush,
                     sideband_prompt,
-                    SidebandInput::Frozen(vec![input_ref]),
+                    SidebandSource::Frozen(vec![input_ref]),
                     chat_state::SidebandRoute {
                         model,
                         backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -512,7 +515,7 @@ impl SessionActor {
                     acp::Error::internal_error()
                         .data(format!("memory flush Sideband could not start: {error}"))
                 })?;
-            sideband.attempt(None).await.map_err(|error| {
+            sideband.attempt_all_sources(&request, None).await.map_err(|error| {
                 acp::Error::internal_error()
                     .data(format!("memory flush Sideband attempt could not commit: {error}"))
             })?;
@@ -550,6 +553,7 @@ impl SessionActor {
                                 Some(serde_json::json!({ "outcome": "nothing_to_store" })),
                                 usage,
                                 finish,
+                                Vec::new(),
                             )
                             .await
                     }
@@ -563,6 +567,7 @@ impl SessionActor {
                                 })),
                                 usage,
                                 finish,
+                                Vec::new(),
                             )
                             .await
                     }
@@ -825,7 +830,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::MemoryRewrite,
                 sideband_prompt,
-                SidebandInput::None,
+                SidebandSource::None,
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -835,7 +840,7 @@ impl SessionActor {
             .await
             .map_err(|error| format!("rewrite Sideband could not start: {error}"))?;
         sideband
-            .attempt(None)
+            .attempt_all_sources(&request, None)
             .await
             .map_err(|error| format!("rewrite Sideband attempt could not commit: {error}"))?;
         let response = match tokio::time::timeout(
@@ -880,7 +885,7 @@ impl SessionActor {
         let usage = sideband_usage(&response);
         let finish = sideband_finish(&response);
         sideband
-            .complete(text.clone(), None, usage, finish)
+            .complete(text.clone(), None, usage, finish, Vec::new())
             .await
             .map_err(|error| format!("rewrite Sideband result could not commit: {error}"))?;
         Ok(text)

@@ -170,21 +170,21 @@ pub(crate) fn validate_sideband_ledgers(
         let timeline = chat_state::SidebandTimeline::from_events(events.clone())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         timeline
-            .validate_parent(parent_timeline_id, spawn_seq, spawn)
+            .validate_parent(parent_timeline_id, parent, spawn_seq, spawn)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     }
 
     for (_, spawn) in spawns.values() {
-        if let Some(input_ref) = spawn
-            .input_refs
+        if let Some(source_ref) = spawn
+            .source_refs
             .iter()
-            .find(|input_ref| input_ref.timeline_id != parent_timeline_id)
+            .find(|source_ref| source_ref.timeline_id != parent_timeline_id)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "sideband {} references foreign Timeline {}",
-                    spawn.sideband_id, input_ref.timeline_id
+                    spawn.sideband_id, source_ref.timeline_id
                 ),
             ));
         }

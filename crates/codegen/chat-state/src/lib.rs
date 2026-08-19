@@ -41,7 +41,7 @@ pub use actor::ChatStateActor;
 pub use actor::state::{
     estimate_conversation_tokens, estimate_item_tokens, estimate_messages_tokens,
     estimate_system_message_tokens, estimate_tool_definition_tokens,
-    estimate_tool_definitions_tokens,
+    estimate_tool_definitions_tokens, estimate_tool_specs_tokens,
 };
 pub use commands::{
     ImageRewrite, ImageRewriteReport, ModelMetadata, PruneError, PruneReport, RepairHistoryError,
@@ -54,10 +54,10 @@ pub use persistence::{
     TimelinePersistence,
 };
 pub use sideband::{
-    SIDEBAND_SCHEMA_VERSION, SidebandAttempt, SidebandEnd, SidebandError, SidebandEvent,
-    SidebandEventKind, SidebandOutcome, SidebandPurpose, SidebandRequest, SidebandResult,
-    SidebandRoute, SidebandSpawnEvent, SidebandTimeline, SidebandUsage, TimelineMaterialization,
-    TimelineRangeRef, validate_sideband_id,
+    RecallMaterialization, SIDEBAND_SCHEMA_VERSION, SidebandAssemblyManifest, SidebandAttempt,
+    SidebandEnd, SidebandError, SidebandEvent, SidebandEventKind, SidebandOutcome, SidebandPurpose,
+    SidebandRequest, SidebandResult, SidebandRoute, SidebandSpawnEvent, SidebandTimeline,
+    SidebandUsage, TimelineMaterialization, TimelineRangeRef, validate_sideband_id,
 };
 pub use timeline::{
     CompactionEvent, ControlEvent, EventSeq, MessageCause, MessageEvent, ObservationEvent,

@@ -474,7 +474,7 @@ async fn manual_recap_generation_failure_records_sideband() {
                 panic!("first Sideband event must be request")
             };
             assert_eq!(request.purpose, chat_state::SidebandPurpose::SessionRecap);
-            assert_eq!(request.input_refs.len(), 1);
+            assert_eq!(request.source_refs.len(), 1);
             assert!(matches!(
                 events[1].kind,
                 chat_state::SidebandEventKind::Attempt(_)
@@ -564,7 +564,7 @@ async fn manual_recap_over_budget_is_display_only_and_references_timeline() {
                     _ => None,
                 })
                 .expect("over-budget recap must start one Sideband");
-            assert_eq!(request.input_refs.len(), 1);
+            assert_eq!(request.source_refs.len(), 1);
             assert!(request.prompt.contains("Write ONE sentence recap body"));
         })
         .await;

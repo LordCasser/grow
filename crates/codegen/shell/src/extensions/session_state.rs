@@ -569,7 +569,7 @@ mod tests {
                 chat_state::SidebandSpawnEvent {
                     sideband_id: sideband_id.clone(),
                     purpose: chat_state::SidebandPurpose::PermissionJudgment,
-                    input_refs: Vec::new(),
+                    source_refs: Vec::new(),
                 },
             ))
             .unwrap();
@@ -578,7 +578,7 @@ mod tests {
             chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
                 purpose: chat_state::SidebandPurpose::PermissionJudgment,
                 prompt: "judge".into(),
-                input_refs: Vec::new(),
+                source_refs: Vec::new(),
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
                     backend: "responses".into(),
@@ -589,6 +589,16 @@ mod tests {
             }),
             chat_state::SidebandEventKind::Attempt(chat_state::SidebandAttempt {
                 attempt_no: 1,
+                input_refs: Vec::new(),
+                assembly_manifest: chat_state::SidebandAssemblyManifest {
+                    strategy: "all-sources".into(),
+                    strategy_version: 1,
+                    source_revision: None,
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: Vec::new(),
+                    materialized_input_tokens: 1,
+                    max_output_tokens: Some(1),
+                },
                 feedback: None,
             }),
             chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
@@ -597,6 +607,7 @@ mod tests {
                 usage: chat_state::SidebandUsage::default(),
                 finish: "stop".into(),
                 source_event_seqs: [0, 1],
+                evidence_refs: Vec::new(),
             }),
             chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
                 outcome: chat_state::SidebandOutcome::Completed,

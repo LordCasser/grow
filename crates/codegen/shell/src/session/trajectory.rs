@@ -375,6 +375,7 @@ impl TrajectoryCache {
                 })?;
             chat_state::SidebandTimeline::from_events(sideband.events.clone())?.validate_parent(
                 parent_timeline_id,
+                &self.timeline,
                 parent_seq,
                 spawn,
             )?;
@@ -836,7 +837,7 @@ mod tests {
                 chat_state::SidebandSpawnEvent {
                     sideband_id: sideband_id.clone(),
                     purpose: chat_state::SidebandPurpose::PermissionJudgment,
-                    input_refs: vec![chat_state::TimelineRangeRef {
+                    source_refs: vec![chat_state::TimelineRangeRef {
                         timeline_id: "session".into(),
                         first_seq: 0,
                         last_seq: 0,
@@ -864,7 +865,7 @@ mod tests {
             chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
                 purpose: chat_state::SidebandPurpose::PermissionJudgment,
                 prompt: "judge".into(),
-                input_refs: vec![chat_state::TimelineRangeRef {
+                source_refs: vec![chat_state::TimelineRangeRef {
                     timeline_id: "session".into(),
                     first_seq: 0,
                     last_seq: 0,
@@ -879,6 +880,20 @@ mod tests {
             }),
             chat_state::SidebandEventKind::Attempt(chat_state::SidebandAttempt {
                 attempt_no: 1,
+                input_refs: vec![chat_state::TimelineRangeRef {
+                    timeline_id: "session".into(),
+                    first_seq: 0,
+                    last_seq: 0,
+                }],
+                assembly_manifest: chat_state::SidebandAssemblyManifest {
+                    strategy: "all-sources".into(),
+                    strategy_version: 1,
+                    source_revision: Some(1),
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: Vec::new(),
+                    materialized_input_tokens: 1,
+                    max_output_tokens: Some(1),
+                },
                 feedback: None,
             }),
             chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
@@ -887,6 +902,7 @@ mod tests {
                 usage: chat_state::SidebandUsage::default(),
                 finish: "stop".into(),
                 source_event_seqs: [0, 1],
+                evidence_refs: Vec::new(),
             }),
             chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
                 outcome: chat_state::SidebandOutcome::Completed,

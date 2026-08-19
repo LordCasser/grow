@@ -407,7 +407,7 @@ impl SessionActor {
                     .begin_sideband(
                         chat_state::SidebandPurpose::ImageDescription,
                         prompt_text,
-                        SidebandInput::Frozen(vec![input_ref.clone()]),
+                        SidebandSource::Frozen(vec![input_ref.clone()]),
                         chat_state::SidebandRoute {
                             model: model.clone(),
                             backend: sideband_backend(client.api_backend()).into(),
@@ -422,7 +422,7 @@ impl SessionActor {
                         continue;
                     }
                 };
-                if let Err(error) = sideband.attempt(None).await {
+                if let Err(error) = sideband.attempt_all_sources(&request, None).await {
                     tracing::warn!(%error, model, "failed to commit image description attempt");
                     continue;
                 }
@@ -452,7 +452,7 @@ impl SessionActor {
                             let usage = sideband_usage(&response);
                             let finish = sideband_finish(&response);
                             sideband
-                                .complete(raw, None, usage, finish)
+                                .complete(raw, None, usage, finish, Vec::new())
                                 .await
                                 .map_err(|error| {
                                     crate::session::image_describe::DescribeError::Sideband(
@@ -1201,9 +1201,9 @@ impl SessionActor {
                             chat_state::SidebandPurpose::PermissionJudgment,
                             permission_sideband_prompt(&items),
                             if input_refs.is_empty() {
-                                SidebandInput::None
+                                SidebandSource::None
                             } else {
-                                SidebandInput::Frozen(input_refs)
+                                SidebandSource::Frozen(input_refs)
                             },
                             chat_state::SidebandRoute {
                                 model: model.clone(),
@@ -1222,14 +1222,6 @@ impl SessionActor {
                     let sampled = async {
                         let mut feedback = None;
                         for attempt in 1..=PERMISSION_JUDGMENT_MAX_ATTEMPTS {
-                            sideband
-                                .attempt(feedback.take())
-                                .await
-                                .map_err(|error| {
-                                    workspace::permission::ClassifierFailure::TransportError(
-                                        error.to_string(),
-                                    )
-                                })?;
                             let mut attempt_items = items.clone();
                             if attempt > 1 {
                                 // Failed provider output never becomes permission
@@ -1249,6 +1241,14 @@ impl SessionActor {
                                 reasoning_effort,
                                 ..ConversationRequest::default()
                             };
+                            sideband
+                                .attempt_all_sources(&request, feedback.take())
+                                .await
+                                .map_err(|error| {
+                                    workspace::permission::ClassifierFailure::TransportError(
+                                        error.to_string(),
+                                    )
+                                })?;
                             let fut = sampling_client.conversation_collect(request);
                             let attempts_remaining =
                                 PERMISSION_JUDGMENT_MAX_ATTEMPTS - attempt + 1;
@@ -1330,6 +1330,7 @@ impl SessionActor {
                                     Some(structured_output),
                                     sideband_usage(&response),
                                     sideband_finish(&response),
+                                    Vec::new(),
                                 )
                                 .await
                                 .map_err(|error| {

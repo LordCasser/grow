@@ -59,7 +59,7 @@ fn compaction_summary_facts(
     let spawn = crate::SidebandSpawnEvent {
         sideband_id: sideband_id.clone(),
         purpose: crate::SidebandPurpose::CompactionSummary,
-        input_refs: vec![input_ref.clone()],
+        source_refs: vec![input_ref.clone()],
     };
     let summary = crate::CompactionEvent::Summary {
         id: id.into(),
@@ -413,14 +413,15 @@ async fn partial_compaction_preserves_unselected_surface_identity() {
     assert_eq!(&after.surface_ids[3..], &before.surface_ids[4..]);
     assert_ne!(after.surface_ids[2], before.surface_ids[2]);
 
-    let (recall_input_ref, branch) = h
+    let branch = h
         .handle
         .materialize_branch_transcript("test-timeline".into())
         .await
         .unwrap();
-    assert_eq!(recall_input_ref, after.input_ref);
+    assert_eq!(branch.source_ref, after.input_ref);
     assert_eq!(
         branch
+            .transcript
             .iter()
             .map(ConversationItem::text_content)
             .collect::<Vec<_>>(),
@@ -433,6 +434,13 @@ async fn partial_compaction_preserves_unselected_surface_identity() {
             "recent answer"
         ]
     );
+    assert_eq!(branch.transcript.len(), branch.transcript_ids.len());
+    assert_eq!(&branch.transcript_ids[..4], &before.surface_ids[..4]);
+    assert_eq!(
+        branch.unloaded_surface_ids,
+        before.surface_ids[2..=3].to_vec()
+    );
+    assert_eq!(branch.need_surface_ids, after.surface_ids);
 }
 
 #[tokio::test]

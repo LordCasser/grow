@@ -443,7 +443,7 @@ impl ChatStateHandle {
     pub async fn materialize_branch_transcript(
         &self,
         timeline_id: String,
-    ) -> Option<(crate::TimelineRangeRef, Vec<ConversationItem>)> {
+    ) -> Option<crate::RecallMaterialization> {
         self.query("MaterializeBranchTranscript", |reply| {
             ChatStateCommand::MaterializeBranchTranscript { timeline_id, reply }
         })

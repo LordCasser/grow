@@ -2,7 +2,7 @@
 
 use crate::sampling::SamplingClient;
 use crate::session::info::Info;
-use crate::session::{SessionActor, sideband::SidebandInput};
+use crate::session::{SessionActor, sideband::SidebandSource};
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
 use agent_client_protocol as acp;
 
@@ -64,7 +64,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::SessionTitle,
                 session_title::SESSION_TITLE_PROMPT.into(),
-                SidebandInput::Frozen(vec![input_ref]),
+                SidebandSource::Frozen(vec![input_ref]),
                 chat_state::SidebandRoute {
                     model: route.model.clone(),
                     backend: sideband_backend(route.client.api_backend()).into(),
@@ -80,7 +80,7 @@ impl SessionActor {
                 return;
             }
         };
-        if let Err(error) = sideband.attempt(None).await {
+        if let Err(error) = sideband.attempt_all_sources(&request, None).await {
             tracing::warn!(%error, "session title: failed to commit Sideband attempt");
             self.session_title_route.replace(Some(route));
             return;
@@ -152,6 +152,7 @@ impl SessionActor {
                 Some(serde_json::json!({ "session_title": title.clone() })),
                 sideband_usage(&response),
                 sideband_finish(&response),
+                Vec::new(),
             )
             .await
         {

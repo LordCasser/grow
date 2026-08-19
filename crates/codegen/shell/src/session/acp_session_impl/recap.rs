@@ -131,9 +131,9 @@ impl SessionActor {
 
         let mut sideband = self
             .begin_sideband(
-                chat_state::SidebandPurpose::InfoRequest,
+                chat_state::SidebandPurpose::SideQuestion,
                 wrapped_question,
-                SidebandInput::Frozen(vec![input_ref]),
+                SidebandSource::Frozen(vec![input_ref]),
                 chat_state::SidebandRoute {
                     model: model.clone(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -150,7 +150,7 @@ impl SessionActor {
         let mut feedback = None;
         let result = loop {
             sideband
-                .attempt(feedback.take())
+                .attempt_all_sources(&base_request, feedback.take())
                 .await
                 .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
             match sampling_client
@@ -187,7 +187,7 @@ impl SessionActor {
                 let usage = sideband_usage(&response);
                 let finish = sideband_finish(&response);
                 sideband
-                    .complete(content.clone(), None, usage, finish)
+                    .complete(content.clone(), None, usage, finish, Vec::new())
                     .await
                     .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
                 Ok(content)
@@ -332,7 +332,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::SessionRecap,
                 session_recap::recap_instruction(tag),
-                SidebandInput::Frozen(vec![input_ref]),
+                SidebandSource::Frozen(vec![input_ref]),
                 chat_state::SidebandRoute {
                     model: model.clone(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -351,7 +351,7 @@ impl SessionActor {
                 return;
             }
         };
-        if let Err(error) = sideband.attempt(None).await {
+        if let Err(error) = sideband.attempt_all_sources(&request, None).await {
             tracing::warn!(%error, "recap: failed to commit Sideband attempt");
             clear_in_flight();
             if !auto {
@@ -408,6 +408,7 @@ impl SessionActor {
                 Some(serde_json::json!({ "summary": summary.clone() })),
                 usage,
                 finish,
+                Vec::new(),
             )
             .await
         {
@@ -546,7 +547,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::PromptSuggestion,
                 sideband_prompt,
-                SidebandInput::None,
+                SidebandSource::None,
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -555,7 +556,7 @@ impl SessionActor {
             )
             .await
             .ok()?;
-        sideband.attempt(None).await.ok()?;
+        sideband.attempt_all_sources(&request, None).await.ok()?;
 
         let result = match sampling_client.api_backend() {
             crate::sampling::ApiBackend::ChatCompletions => {
@@ -617,7 +618,7 @@ impl SessionActor {
                     let usage = sideband_usage(&response);
                     let finish = sideband_finish(&response);
                     sideband
-                        .complete(text.clone(), None, usage, finish)
+                        .complete(text.clone(), None, usage, finish, Vec::new())
                         .await
                         .ok()?;
                     Some(text)
@@ -723,7 +724,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::PromptSuggestion,
                 format!("{}\n\nCWD: {cwd}", prompt_suggest::SUGGEST_PROMPT_SYSTEM),
-                SidebandInput::Frozen(vec![input_ref]),
+                SidebandSource::Frozen(vec![input_ref]),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -732,7 +733,7 @@ impl SessionActor {
             )
             .await
             .ok()?;
-        sideband.attempt(None).await.ok()?;
+        sideband.attempt_all_sources(&request, None).await.ok()?;
 
         let response = match sampling_client.conversation_collect(request).await {
             Ok(r) => r,
@@ -765,6 +766,7 @@ impl SessionActor {
                     Some(serde_json::json!({ "suggestion": accepted })),
                     usage,
                     finish,
+                    Vec::new(),
                 )
                 .await
                 .ok()?;

@@ -672,7 +672,9 @@ impl SessionActor {
             self.begin_sideband(
                 chat_state::SidebandPurpose::CompactionSummary,
                 sideband_prompt,
-                crate::session::sideband::SidebandInput::Frozen(vec![compaction_input_ref.clone()]),
+                crate::session::sideband::SidebandSource::Frozen(vec![
+                    compaction_input_ref.clone(),
+                ]),
                 chat_state::SidebandRoute {
                     model: sampling_config.model.clone(),
                     backend: crate::session::sideband::sideband_backend(
@@ -953,6 +955,7 @@ impl SessionActor {
                     .stop_reason
                     .clone()
                     .unwrap_or_else(|| "unknown".into()),
+                Vec::new(),
             )
             .await
             .map_err(|error| {

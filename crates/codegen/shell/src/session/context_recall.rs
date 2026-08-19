@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use tools::implementations::context_recall::ContextRecallBackend;
 
 use crate::session::SessionActor;
-use crate::session::sideband::{SidebandInput, sideband_backend, sideband_finish, sideband_usage};
+use crate::session::sideband::{SidebandSource, sideband_backend, sideband_finish, sideband_usage};
 
 const CONTEXT_RECALL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ARCHIVE_ITEM_CHARS: usize = 12_000;
@@ -105,12 +105,12 @@ impl SessionActor {
         if cancellation.is_cancelled() {
             return Err("context recall was cancelled before execution".into());
         }
-        let (input_ref, transcript) = self
+        let materialized = self
             .chat_state_handle
             .materialize_branch_transcript(self.session_info.id.to_string())
             .await
             .ok_or_else(|| "chat-state actor is unavailable".to_string())?;
-        if transcript.is_empty() {
+        if materialized.transcript.is_empty() {
             return Err("the current Timeline branch has no conversation context".into());
         }
 
@@ -149,8 +149,16 @@ impl SessionActor {
             "the recall sideband has insufficient context headroom for archived evidence"
                 .to_string()
         })?;
-        let archive = select_recall_archive(transcript, call_id, query, archive_budget);
-        if archive.is_empty() {
+        let archive = select_recall_archive(
+            materialized.transcript,
+            materialized.transcript_ids,
+            materialized.unloaded_surface_ids,
+            &materialized.source_ref.timeline_id,
+            call_id,
+            query,
+            archive_budget,
+        );
+        if archive.content.is_empty() {
             return Err("the current Timeline branch has no readable archived text".into());
         }
 
@@ -164,7 +172,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::ContextRecall,
                 sideband_prompt,
-                SidebandInput::Frozen(vec![input_ref]),
+                SidebandSource::Frozen(vec![materialized.source_ref]),
                 chat_state::SidebandRoute {
                     model: sampling_config.model.clone(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -173,16 +181,12 @@ impl SessionActor {
             )
             .await
             .map_err(|error| error.to_string())?;
-        sideband
-            .attempt(None)
-            .await
-            .map_err(|error| error.to_string())?;
-
         let request = ConversationRequest {
             items: vec![
                 ConversationItem::system(CONTEXT_RECALL_SYSTEM_PROMPT),
                 ConversationItem::user(format!(
-                    "Recall request:\n{query}\n\n<archived-session-context>\n{archive}\n</archived-session-context>"
+                    "Recall request:\n{query}\n\n<archived-session-context>\n{}\n</archived-session-context>",
+                    archive.content
                 )),
             ],
             tools: vec![],
@@ -192,6 +196,18 @@ impl SessionActor {
             max_output_tokens: Some(output_budget),
             ..ConversationRequest::default()
         };
+        sideband
+            .attempt_selected(
+                &request,
+                archive.input_refs,
+                Some(materialized.surface_revision),
+                materialized.need_surface_ids,
+                archive.selected_surface_ids,
+                "lexical-neighborhood",
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         let response = tokio::select! {
             _ = cancellation.cancelled() => {
                 let message = "context recall sideband was cancelled".to_string();
@@ -245,7 +261,7 @@ impl SessionActor {
         let usage = sideband_usage(&response);
         let finish = sideband_finish(&response);
         sideband
-            .complete(content.clone(), None, usage, finish)
+            .complete(content.clone(), None, usage, finish, Vec::new())
             .await
             .map_err(|error| error.to_string())?;
         Ok(format!(
@@ -282,20 +298,41 @@ fn context_recall_archive_budget(
     (budget >= MIN_RECALL_ARCHIVE_TOKENS).then_some(budget)
 }
 
+#[derive(Debug, Default)]
+struct RecallArchiveSelection {
+    content: String,
+    input_refs: Vec<chat_state::TimelineRangeRef>,
+    selected_surface_ids: Vec<chat_state::SurfaceId>,
+}
+
 fn select_recall_archive(
     transcript: Vec<ConversationItem>,
+    surface_ids: Vec<chat_state::SurfaceId>,
+    unloaded_surface_ids: Vec<chat_state::SurfaceId>,
+    timeline_id: &str,
     active_call_id: &str,
     query: &str,
     token_budget: u64,
-) -> String {
-    let transcript = strip_context_recall_derivatives(transcript, Some(active_call_id), None);
+) -> RecallArchiveSelection {
+    if transcript.len() != surface_ids.len() {
+        return RecallArchiveSelection::default();
+    }
+    let unloaded = unloaded_surface_ids.into_iter().collect::<BTreeSet<_>>();
+    let entries = surface_ids
+        .into_iter()
+        .zip(transcript)
+        .filter(|(surface_id, _)| unloaded.contains(surface_id))
+        .collect::<Vec<_>>();
+    let entries = strip_context_recall_derivative_entries(entries, Some(active_call_id), None);
     let terms = recall_terms(query);
     let exact = query.trim().to_lowercase();
-    let entries = transcript
+    let entries = entries
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| render_archive_item(index, item))
-        .map(|text| {
+        .filter_map(|(index, (surface_id, item))| {
+            render_archive_item(index, item).map(|text| (*surface_id, text))
+        })
+        .map(|(surface_id, text)| {
             let lowered = text.to_lowercase();
             let score = u64::from(!exact.is_empty() && lowered.contains(&exact)) * 100
                 + terms
@@ -304,27 +341,23 @@ fn select_recall_archive(
                     .count() as u64
                     * 10;
             let tokens = chat_state::estimate_item_tokens(&ConversationItem::user(&text));
-            (text, score, tokens)
+            (surface_id, text, score, tokens)
         })
         .collect::<Vec<_>>();
     if entries.is_empty() {
-        return String::new();
+        return RecallArchiveSelection::default();
     }
 
-    let total_tokens = entries.iter().map(|(_, _, tokens)| *tokens).sum::<u64>();
+    let total_tokens = entries.iter().map(|(_, _, _, tokens)| *tokens).sum::<u64>();
     if total_tokens <= token_budget {
-        return entries
-            .into_iter()
-            .map(|(text, _, _)| text)
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        return assemble_recall_selection(timeline_id, &entries, (0..entries.len()).collect());
     }
 
     let mut ranked = entries
         .iter()
         .enumerate()
-        .filter(|(_, (_, score, _))| *score > 0)
-        .map(|(index, (_, score, _))| (index, *score))
+        .filter(|(_, (_, _, score, _))| *score > 0)
+        .map(|(index, (_, _, score, _))| (index, *score))
         .collect::<Vec<_>>();
     ranked.sort_by(|(left_index, left_score), (right_index, right_score)| {
         right_score
@@ -341,7 +374,7 @@ fn select_recall_archive(
             if selected.contains(&index) {
                 continue;
             }
-            let item_tokens = entries[index].2;
+            let item_tokens = entries[index].3;
             if selected_tokens.saturating_add(item_tokens) > token_budget {
                 continue;
             }
@@ -357,7 +390,7 @@ fn select_recall_archive(
         if selected.contains(&index) {
             continue;
         }
-        let item_tokens = entries[index].2;
+        let item_tokens = entries[index].3;
         if selected_tokens.saturating_add(item_tokens) > token_budget {
             continue;
         }
@@ -365,11 +398,57 @@ fn select_recall_archive(
         selected_tokens = selected_tokens.saturating_add(item_tokens);
     }
 
-    selected
-        .into_iter()
-        .map(|index| entries[index].0.clone())
+    assemble_recall_selection(timeline_id, &entries, selected)
+}
+
+fn assemble_recall_selection(
+    timeline_id: &str,
+    entries: &[(chat_state::SurfaceId, String, u64, u64)],
+    selected: BTreeSet<usize>,
+) -> RecallArchiveSelection {
+    let selected_surface_ids = selected
+        .iter()
+        .map(|index| entries[*index].0)
+        .collect::<Vec<_>>();
+    let content = selected
+        .iter()
+        .map(|index| entries[*index].1.clone())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    let input_refs = collapse_surface_refs(timeline_id, &selected_surface_ids);
+    RecallArchiveSelection {
+        content,
+        input_refs,
+        selected_surface_ids,
+    }
+}
+
+fn collapse_surface_refs(
+    timeline_id: &str,
+    surface_ids: &[chat_state::SurfaceId],
+) -> Vec<chat_state::TimelineRangeRef> {
+    let seqs = surface_ids
+        .iter()
+        .map(|id| id.event.get())
+        .collect::<BTreeSet<_>>();
+    let mut refs = Vec::new();
+    for seq in seqs {
+        match refs.last_mut() {
+            Some(chat_state::TimelineRangeRef {
+                timeline_id: previous_timeline,
+                last_seq,
+                ..
+            }) if previous_timeline == timeline_id && last_seq.saturating_add(1) == seq => {
+                *last_seq = seq;
+            }
+            _ => refs.push(chat_state::TimelineRangeRef {
+                timeline_id: timeline_id.to_owned(),
+                first_seq: seq,
+                last_seq: seq,
+            }),
+        }
+    }
+    refs
 }
 
 fn recall_call_ids(
@@ -437,6 +516,36 @@ pub(crate) fn strip_context_recall_derivatives(
         .collect()
 }
 
+fn strip_context_recall_derivative_entries(
+    entries: Vec<(chat_state::SurfaceId, ConversationItem)>,
+    active_call_id: Option<&str>,
+    registered_tool_name: Option<&str>,
+) -> Vec<(chat_state::SurfaceId, ConversationItem)> {
+    let transcript = entries
+        .iter()
+        .map(|(_, item)| item.clone())
+        .collect::<Vec<_>>();
+    let call_ids = recall_call_ids(&transcript, active_call_id, registered_tool_name);
+    entries
+        .into_iter()
+        .filter_map(|(surface_id, item)| match item {
+            ConversationItem::Assistant(mut assistant) => {
+                assistant
+                    .tool_calls
+                    .retain(|call| !call_ids.contains(call.id.as_ref()));
+                (!assistant.content.trim().is_empty() || !assistant.tool_calls.is_empty())
+                    .then_some((surface_id, ConversationItem::Assistant(assistant)))
+            }
+            ConversationItem::ToolResult(result)
+                if call_ids.contains(result.tool_call_id.as_str()) =>
+            {
+                None
+            }
+            item => Some((surface_id, item)),
+        })
+        .collect()
+}
+
 fn render_archive_item(index: usize, item: &ConversationItem) -> Option<String> {
     if matches!(item, ConversationItem::Reasoning(_)) {
         return None;
@@ -493,6 +602,29 @@ fn recall_terms(query: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn select_for_test(
+        transcript: Vec<ConversationItem>,
+        active_call_id: &str,
+        query: &str,
+        token_budget: u64,
+    ) -> RecallArchiveSelection {
+        let surface_ids: Vec<chat_state::SurfaceId> = (0..transcript.len())
+            .map(|seq| chat_state::SurfaceId {
+                event: serde_json::from_value(serde_json::json!(seq)).unwrap(),
+                item: 0,
+            })
+            .collect();
+        select_recall_archive(
+            transcript,
+            surface_ids.clone(),
+            surface_ids,
+            "test-timeline",
+            active_call_id,
+            query,
+            token_budget,
+        )
+    }
+
     #[test]
     fn recall_selection_prefers_matching_old_context_and_keeps_neighbors() {
         let transcript = vec![
@@ -502,10 +634,44 @@ mod tests {
             ConversationItem::assistant("more unrelated work"),
             ConversationItem::user("latest turn"),
         ];
-        let archive = select_recall_archive(transcript, "active", "database migration", 35);
+        let archive = select_for_test(transcript, "active", "database migration", 35);
 
-        assert!(archive.contains("database migration discussion"));
-        assert!(archive.contains("shadow table"));
+        assert!(archive.content.contains("database migration discussion"));
+        assert!(archive.content.contains("shadow table"));
+        assert!(!archive.input_refs.is_empty());
+        assert_eq!(
+            archive.selected_surface_ids.len(),
+            archive.content.matches("[item ").count()
+        );
+    }
+
+    #[test]
+    fn recall_selection_cannot_read_the_live_tail() {
+        let transcript = vec![
+            ConversationItem::user("archived database decision"),
+            ConversationItem::assistant("use the shadow table"),
+            ConversationItem::user("live secret that must stay in need context"),
+        ];
+        let surface_ids: Vec<chat_state::SurfaceId> = (0..transcript.len())
+            .map(|seq| chat_state::SurfaceId {
+                event: serde_json::from_value(serde_json::json!(seq)).unwrap(),
+                item: 0,
+            })
+            .collect();
+        let archive = select_recall_archive(
+            transcript,
+            surface_ids.clone(),
+            surface_ids[..2].to_vec(),
+            "test-timeline",
+            "active",
+            "secret database decision",
+            10_000,
+        );
+
+        assert!(archive.content.contains("archived database decision"));
+        assert!(archive.content.contains("shadow table"));
+        assert!(!archive.content.contains("live secret"));
+        assert_eq!(archive.selected_surface_ids, surface_ids[..2]);
     }
 
     #[test]
@@ -517,7 +683,7 @@ mod tests {
 
     #[test]
     fn output_projection_drops_private_reasoning() {
-        let archive = select_recall_archive(
+        let archive = select_for_test(
             vec![
                 ConversationItem::system("live instruction must not become evidence"),
                 ConversationItem::user("visible fact"),
@@ -529,9 +695,9 @@ mod tests {
             "visible",
             1_000,
         );
-        assert!(archive.contains("visible fact"));
-        assert!(!archive.contains("live instruction"));
-        assert!(!archive.contains("private chain of thought"));
+        assert!(archive.content.contains("visible fact"));
+        assert!(!archive.content.contains("live instruction"));
+        assert!(!archive.content.contains("private chain of thought"));
     }
 
     #[test]
@@ -543,7 +709,7 @@ mod tests {
                 arguments: format!(r#"{{"query":"{query}"}}"#).into(),
             }])
         };
-        let archive = select_recall_archive(
+        let archive = select_for_test(
             vec![
                 ConversationItem::user("The durable decision was shadow-table swap."),
                 recall_call("old-recall", "durable decision"),
@@ -555,11 +721,11 @@ mod tests {
             10_000,
         );
 
-        assert!(archive.contains("shadow-table swap"));
-        assert!(!archive.contains("old-recall"));
-        assert!(!archive.contains("active-recall"));
-        assert!(!archive.contains("Invented recursive recollection"));
-        assert!(!archive.contains("context_recall"));
+        assert!(archive.content.contains("shadow-table swap"));
+        assert!(!archive.content.contains("old-recall"));
+        assert!(!archive.content.contains("active-recall"));
+        assert!(!archive.content.contains("Invented recursive recollection"));
+        assert!(!archive.content.contains("context_recall"));
     }
 
     #[test]

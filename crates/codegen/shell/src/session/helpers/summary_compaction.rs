@@ -31,7 +31,7 @@ use compaction::{
     SummaryAttemptOutcome, SummaryObserver,
 };
 use sampler::SamplerConfig as SamplingConfig;
-use sampling_types::{ConversationItem, ToolSpec};
+use sampling_types::{ConversationItem, ConversationRequest, ToolSpec};
 
 use crate::sampling::SamplingClient;
 use crate::session::helpers::session_compact::{
@@ -119,15 +119,21 @@ impl CompactionSampler for ShellCompactionSampler {
         _timeout: Duration,
     ) -> Result<LlmCompactionOutput, CompactionSampleError> {
         let feedback = self.sideband_feedback.lock().unwrap().take();
-        self.sideband
-            .lock()
-            .await
-            .attempt(feedback)
-            .await
-            .map_err(sideband_error_to_sample_error)?;
         // Append the canonical summarization prompt as the final user message.
         let request_surface =
             build_compaction_request_surface(turns.to_vec(), self.user_context.as_deref());
+        let audit_request = ConversationRequest {
+            items: request_surface.clone(),
+            tools: self.tools.clone(),
+            model: Some(self.sampling_config.model.clone()),
+            ..ConversationRequest::default()
+        };
+        self.sideband
+            .lock()
+            .await
+            .attempt_all_sources(&audit_request, feedback)
+            .await
+            .map_err(sideband_error_to_sample_error)?;
 
         match generate_session_compact(
             request_surface,

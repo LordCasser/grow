@@ -53,7 +53,7 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
             chat_state::SidebandSpawnEvent {
                 sideband_id: sideband_id.clone(),
                 purpose: chat_state::SidebandPurpose::CompactionSummary,
-                input_refs: vec![input_ref.clone()],
+                source_refs: vec![input_ref.clone()],
             },
         ))
         .await

@@ -318,7 +318,7 @@ pub enum ChatStateCommand {
     /// recall Sideband.
     MaterializeBranchTranscript {
         timeline_id: String,
-        reply: oneshot::Sender<Option<(crate::TimelineRangeRef, Vec<ConversationItem>)>>,
+        reply: oneshot::Sender<Option<crate::RecallMaterialization>>,
     },
 
     /// Get current prompt index.

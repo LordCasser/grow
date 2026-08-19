@@ -383,7 +383,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
             chat_state::SidebandSpawnEvent {
                 sideband_id: sideband_id.clone(),
                 purpose: chat_state::SidebandPurpose::CompactionSummary,
-                input_refs: vec![input_ref.clone()],
+                source_refs: vec![input_ref.clone()],
             },
         ))
         .unwrap();
@@ -392,7 +392,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
         chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
             purpose: chat_state::SidebandPurpose::CompactionSummary,
             prompt: "summarize".into(),
-            input_refs: vec![input_ref.clone()],
+            source_refs: vec![input_ref.clone()],
             route: chat_state::SidebandRoute {
                 model: "test-model".into(),
                 backend: "responses".into(),
@@ -403,6 +403,16 @@ async fn timeline_round_trip_folds_the_current_surface() {
         }),
         chat_state::SidebandEventKind::Attempt(chat_state::SidebandAttempt {
             attempt_no: 1,
+            input_refs: vec![input_ref.clone()],
+            assembly_manifest: chat_state::SidebandAssemblyManifest {
+                strategy: "all-sources".into(),
+                strategy_version: 1,
+                source_revision: Some(1),
+                context_surface_ids: Vec::new(),
+                selected_surface_ids: Vec::new(),
+                materialized_input_tokens: 1,
+                max_output_tokens: Some(1),
+            },
             feedback: None,
         }),
         chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
@@ -411,6 +421,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
             usage: chat_state::SidebandUsage::default(),
             finish: "stop".into(),
             source_event_seqs: [0, 1],
+            evidence_refs: Vec::new(),
         }),
         chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
             outcome: chat_state::SidebandOutcome::Completed,
@@ -2843,7 +2854,7 @@ async fn durable_sideband_append_is_sequence_aware_and_idempotent() {
             chat_state::SidebandRequest {
                 purpose: chat_state::SidebandPurpose::PermissionJudgment,
                 prompt: "summarize".into(),
-                input_refs: Vec::new(),
+                source_refs: Vec::new(),
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
                     backend: "responses".into(),

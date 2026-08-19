@@ -824,49 +824,119 @@ impl Timeline {
     /// far. This projection is the source for history/search features that
     /// need original text without resurrecting a rewound-away branch.
     pub fn branch_transcript(&self) -> Vec<ConversationItem> {
-        let mut branch = Vec::new();
+        self.branch_transcript_with_ids().1
+    }
+
+    /// Build the same selected-branch transcript while preserving a stable
+    /// coordinate for every item. Auxiliary retrieval uses these coordinates
+    /// to record the exact subset sent to a provider instead of pretending
+    /// that a whole frozen branch was materialized.
+    pub fn branch_transcript_with_ids(&self) -> (Vec<SurfaceId>, Vec<ConversationItem>) {
+        let mut branch = Vec::<(SurfaceId, ConversationItem)>::new();
         for event in &self.events {
             let TimelineEventKind::Messages(messages) = &event.kind else {
                 continue;
             };
             match (&messages.surface, messages.cause) {
-                (SurfaceOp::Append, _) => branch.extend(messages.items.iter().cloned()),
+                (SurfaceOp::Append, _) => {
+                    branch.extend(messages.items.iter().cloned().enumerate().map(
+                        |(item, value)| {
+                            (
+                                SurfaceId {
+                                    event: event.seq,
+                                    item: item as u32,
+                                },
+                                value,
+                            )
+                        },
+                    ))
+                }
                 (SurfaceOp::Replace { .. }, MessageCause::Rewind) => {
-                    branch.clone_from(&messages.items);
+                    branch = message_entries(event.seq, &messages.items);
                 }
                 (SurfaceOp::Replace { .. }, MessageCause::IntegrityRepair) => {
-                    let _ = crate::compaction_utils::repair_history(&mut branch);
+                    let mut repaired = branch
+                        .iter()
+                        .map(|(_, item)| item.clone())
+                        .collect::<Vec<_>>();
+                    let _ = crate::compaction_utils::repair_history(&mut repaired);
+                    branch = reconcile_repaired_entries(event.seq, &branch, repaired);
                 }
                 (SurfaceOp::Replace { .. }, MessageCause::ContextRebuild) => {
                     // ContextRebuild is accepted only before the first turn. It
                     // finalizes the deferred session preamble as one atomic
                     // projection, so the branch must adopt the whole result.
-                    branch.clone_from(&messages.items);
+                    branch = message_entries(event.seq, &messages.items);
                 }
                 (
                     SurfaceOp::Replace { .. },
                     MessageCause::SystemPrompt | MessageCause::MemoryContext,
                 ) => {
-                    if let Some(system) = messages
+                    if let Some((item_index, system)) = messages
                         .items
                         .iter()
-                        .find(|item| matches!(item, ConversationItem::System(_)))
-                        .cloned()
+                        .enumerate()
+                        .find(|(_, item)| matches!(item, ConversationItem::System(_)))
                     {
                         if let Some(index) = branch
                             .iter()
-                            .position(|item| matches!(item, ConversationItem::System(_)))
+                            .position(|(_, item)| matches!(item, ConversationItem::System(_)))
                         {
-                            branch[index] = system;
+                            branch[index] = (
+                                SurfaceId {
+                                    event: event.seq,
+                                    item: item_index as u32,
+                                },
+                                system.clone(),
+                            );
                         } else {
-                            branch.insert(0, system);
+                            branch.insert(
+                                0,
+                                (
+                                    SurfaceId {
+                                        event: event.seq,
+                                        item: item_index as u32,
+                                    },
+                                    system.clone(),
+                                ),
+                            );
                         }
                     }
                 }
                 (SurfaceOp::Replace { .. }, _) => {}
             }
         }
-        branch
+        branch.into_iter().unzip()
+    }
+
+    /// Original Surface leaves hidden by completed compaction transactions.
+    /// Failed or half-written transactions never become recall evidence.
+    pub fn completed_compaction_shadowed_ids(&self) -> Vec<SurfaceId> {
+        let completed = self
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                TimelineEventKind::Compaction(CompactionEvent::Completed { id, .. }) => {
+                    Some(id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        self.events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                TimelineEventKind::Compaction(CompactionEvent::Summary { id, target, .. })
+                    if completed.contains(id.as_str()) =>
+                {
+                    Some(&target.shadowed)
+                }
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// Build the uncompressed current branch and cut it before prompt `target`.
@@ -1476,7 +1546,7 @@ impl Timeline {
             });
             if !spawn.is_some_and(|spawn| {
                 spawn.purpose == crate::SidebandPurpose::CompactionSummary
-                    && spawn.input_refs.iter().any(|source| source == input_ref)
+                    && spawn.source_refs.iter().any(|source| source == input_ref)
             }) {
                 return Err(TimelineError::InvalidCompactionSummary(id.clone()));
             }
@@ -1501,11 +1571,11 @@ impl Timeline {
                     sideband.sideband_id.clone(),
                 ));
             }
-            for input_ref in &sideband.input_refs {
-                if input_ref.last_seq >= event.seq.get() {
+            for source_ref in &sideband.source_refs {
+                if source_ref.last_seq >= event.seq.get() {
                     return Err(TimelineError::InvalidSideband(
                         crate::SidebandError::FutureInputRef {
-                            last: input_ref.last_seq,
+                            last: source_ref.last_seq,
                             spawn: event.seq.get(),
                         },
                     ));
@@ -2081,6 +2151,62 @@ impl LifecycleFold {
     }
 }
 
+fn message_entries(
+    event: EventSeq,
+    items: &[ConversationItem],
+) -> Vec<(SurfaceId, ConversationItem)> {
+    items
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(item, value)| {
+            (
+                SurfaceId {
+                    event,
+                    item: item as u32,
+                },
+                value,
+            )
+        })
+        .collect()
+}
+
+fn reconcile_repaired_entries(
+    event: EventSeq,
+    previous: &[(SurfaceId, ConversationItem)],
+    repaired: Vec<ConversationItem>,
+) -> Vec<(SurfaceId, ConversationItem)> {
+    let mut next_previous = 0;
+    repaired
+        .into_iter()
+        .enumerate()
+        .map(|(item_index, item)| {
+            let matched = previous[next_previous..]
+                .iter()
+                .position(|(_, previous_item)| conversation_items_match(previous_item, &item))
+                .map(|offset| next_previous + offset);
+            let id = matched.map_or(
+                SurfaceId {
+                    event,
+                    item: item_index as u32,
+                },
+                |index| {
+                    next_previous = index + 1;
+                    previous[index].0
+                },
+            );
+            (id, item)
+        })
+        .collect()
+}
+
+fn conversation_items_match(left: &ConversationItem, right: &ConversationItem) -> bool {
+    match (serde_json::to_value(left), serde_json::to_value(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn wall_time_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2149,7 +2275,7 @@ mod tests {
             .record(TimelineEventKind::Sideband(crate::SidebandSpawnEvent {
                 sideband_id: sideband_id.into(),
                 purpose: crate::SidebandPurpose::CompactionSummary,
-                input_refs: vec![input_ref.clone()],
+                source_refs: vec![input_ref.clone()],
             }))
             .unwrap();
         timeline
@@ -2797,6 +2923,7 @@ mod tests {
         ));
 
         let target = record_compaction_summary(&mut timeline, "compact");
+        let expected_unloaded = target.shadowed.clone();
 
         timeline
             .replace_compaction_range(target, vec![ConversationItem::user("summary")])
@@ -2821,6 +2948,32 @@ mod tests {
                 duration_ms: 1,
             }))
             .unwrap();
+        assert_eq!(
+            timeline.completed_compaction_shadowed_ids(),
+            expected_unloaded
+        );
+    }
+
+    #[test]
+    fn failed_compaction_never_creates_recall_evidence() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        record_compaction_summary(&mut timeline, "compact");
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Failed {
+                id: "compact".into(),
+                duration_ms: 1,
+                error: "provider failed after summary".into(),
+            }))
+            .unwrap();
+
+        assert!(timeline.completed_compaction_shadowed_ids().is_empty());
     }
 
     #[test]
@@ -3008,7 +3161,7 @@ mod tests {
             .record(TimelineEventKind::Sideband(SidebandSpawnEvent {
                 sideband_id: "018f0000-0000-7000-8000-000000000001".into(),
                 purpose: crate::SidebandPurpose::SessionTitle,
-                input_refs: Vec::new(),
+                source_refs: Vec::new(),
             }))
             .unwrap();
         timeline
@@ -3111,7 +3264,7 @@ mod tests {
             .record(TimelineEventKind::Sideband(SidebandSpawnEvent {
                 sideband_id: sideband_id.into(),
                 purpose: crate::SidebandPurpose::PermissionJudgment,
-                input_refs: Vec::new(),
+                source_refs: Vec::new(),
             }))
             .unwrap();
         assert!(matches!(
@@ -3131,7 +3284,7 @@ mod tests {
         let spawn = SidebandSpawnEvent {
             sideband_id: "018f0000-0000-7000-8000-000000000001".into(),
             purpose: crate::SidebandPurpose::PermissionJudgment,
-            input_refs: Vec::new(),
+            source_refs: Vec::new(),
         };
         let mut timeline = Timeline::default();
         timeline

@@ -4,20 +4,23 @@
 //! Parent sessions retain only a [`SidebandSpawnEvent`]; request attempts and
 //! results never enter the model-facing Surface.
 
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sampling_types::ConversationItem;
 use serde::{Deserialize, Serialize};
 
-pub const SIDEBAND_SCHEMA_VERSION: u8 = 2;
+pub const SIDEBAND_SCHEMA_VERSION: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SidebandPurpose {
     CompactionSummary,
+    RangeSummary,
     PermissionJudgment,
     SessionTitle,
     SessionRecap,
+    SideQuestion,
     PromptSuggestion,
     LazinessJudgment,
     MemoryDream,
@@ -25,6 +28,7 @@ pub enum SidebandPurpose {
     MemoryRewrite,
     ImageDescription,
     InfoRequest,
+    ProgressReport,
     ContextRecall,
 }
 
@@ -32,9 +36,11 @@ impl SidebandPurpose {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CompactionSummary => "compaction-summary",
+            Self::RangeSummary => "range-summary",
             Self::PermissionJudgment => "permission-judgment",
             Self::SessionTitle => "session-title",
             Self::SessionRecap => "session-recap",
+            Self::SideQuestion => "side-question",
             Self::PromptSuggestion => "prompt-suggestion",
             Self::LazinessJudgment => "laziness-judgment",
             Self::MemoryDream => "memory-dream",
@@ -42,6 +48,7 @@ impl SidebandPurpose {
             Self::MemoryRewrite => "memory-rewrite",
             Self::ImageDescription => "image-description",
             Self::InfoRequest => "info-request",
+            Self::ProgressReport => "progress-report",
             Self::ContextRecall => "context-recall",
         }
     }
@@ -63,6 +70,19 @@ pub struct TimelineMaterialization {
     pub surface_ids: Vec<crate::SurfaceId>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RecallMaterialization {
+    pub source_ref: TimelineRangeRef,
+    pub surface_revision: u64,
+    /// Current model-visible coordinates that explain why recall is needed.
+    pub need_surface_ids: Vec<crate::SurfaceId>,
+    /// Uncompressed transcript for the selected rewind branch.
+    pub transcript: Vec<ConversationItem>,
+    pub transcript_ids: Vec<crate::SurfaceId>,
+    /// Original leaves shadowed by completed compactions on this branch.
+    pub unloaded_surface_ids: Vec<crate::SurfaceId>,
+}
+
 impl TimelineRangeRef {
     pub fn validate(&self) -> Result<(), SidebandError> {
         if self.timeline_id.trim().is_empty() {
@@ -79,19 +99,19 @@ impl TimelineRangeRef {
 }
 
 /// The only sideband fact retained on the initiating session Timeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SidebandSpawnEvent {
     pub sideband_id: String,
     pub purpose: SidebandPurpose,
-    pub input_refs: Vec<TimelineRangeRef>,
+    pub source_refs: Vec<TimelineRangeRef>,
 }
 
 impl SidebandSpawnEvent {
     pub fn validate(&self) -> Result<(), SidebandError> {
         validate_sideband_id(&self.sideband_id)?;
-        for input_ref in &self.input_refs {
-            input_ref.validate()?;
+        for source_ref in &self.source_refs {
+            source_ref.validate()?;
         }
         Ok(())
     }
@@ -111,17 +131,36 @@ pub struct SidebandRequest {
     /// Purpose-owned instruction. Referenced Timeline content is deliberately
     /// absent and is materialized only when assembling the provider request.
     pub prompt: String,
-    pub input_refs: Vec<TimelineRangeRef>,
+    /// Frozen upper bound on every Timeline range that any attempt may read.
+    pub source_refs: Vec<TimelineRangeRef>,
     pub route: SidebandRoute,
     pub initiator_ref: String,
     pub executor: String,
     pub output_schema: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SidebandAssemblyManifest {
+    /// Purpose-owned deterministic assembly strategy.
+    pub strategy: String,
+    pub strategy_version: u32,
+    pub source_revision: Option<u64>,
+    pub context_surface_ids: Vec<crate::SurfaceId>,
+    /// Stable item coordinates selected inside `input_refs`, when the
+    /// materializer chooses less than a whole event.
+    pub selected_surface_ids: Vec<crate::SurfaceId>,
+    pub materialized_input_tokens: u64,
+    pub max_output_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SidebandAttempt {
     pub attempt_no: u32,
+    /// Exact source subset materialized for this provider request.
+    pub input_refs: Vec<TimelineRangeRef>,
+    pub assembly_manifest: SidebandAssemblyManifest,
     pub feedback: Option<String>,
 }
 
@@ -142,6 +181,8 @@ pub struct SidebandResult {
     pub usage: SidebandUsage,
     pub finish: String,
     pub source_event_seqs: [u64; 2],
+    /// Evidence must be a subset of the successful attempt's input refs.
+    pub evidence_refs: Vec<TimelineRangeRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,10 +255,18 @@ pub enum SidebandError {
     ForeignInputTimeline { expected: String, actual: String },
     #[error("sideband request does not match its parent spawn fact")]
     ParentRequestMismatch,
+    #[error("sideband assembly manifest does not match its frozen parent materialization")]
+    ParentMaterializationMismatch,
     #[error("sideband request must be seq 0 and unique")]
     InvalidRequestBoundary,
     #[error("sideband request route and executor must be non-empty")]
     IncompleteRequest,
+    #[error("sideband attempt input is not covered by the request source refs")]
+    InputOutsideSource,
+    #[error("sideband attempt assembly manifest is invalid")]
+    InvalidAssemblyManifest,
+    #[error("sideband attempt selected Surface ids are not canonical or covered by input refs")]
+    InvalidSurfaceSelection,
     #[error("sideband attempt requires an open request")]
     AttemptWithoutRequest,
     #[error("sideband attempt number {actual} does not follow {expected}")]
@@ -230,6 +279,8 @@ pub enum SidebandError {
     InvalidResultSources { attempt: u64 },
     #[error("sideband result is empty")]
     EmptyResult,
+    #[error("sideband result evidence is not covered by the successful attempt input refs")]
+    EvidenceOutsideInput,
     #[error("sideband already has a result")]
     DuplicateResult,
     #[error("sideband already ended")]
@@ -276,17 +327,18 @@ impl SidebandTimeline {
     pub fn validate_parent(
         &self,
         parent_timeline_id: &str,
+        parent: &crate::Timeline,
         spawn_seq: u64,
         spawn: &SidebandSpawnEvent,
     ) -> Result<(), SidebandError> {
-        if let Some(input_ref) = spawn
-            .input_refs
+        if let Some(source_ref) = spawn
+            .source_refs
             .iter()
-            .find(|input_ref| input_ref.timeline_id != parent_timeline_id)
+            .find(|source_ref| source_ref.timeline_id != parent_timeline_id)
         {
             return Err(SidebandError::ForeignInputTimeline {
                 expected: parent_timeline_id.to_owned(),
-                actual: input_ref.timeline_id.clone(),
+                actual: source_ref.timeline_id.clone(),
             });
         }
         let request = self
@@ -299,10 +351,88 @@ impl SidebandTimeline {
             .ok_or(SidebandError::InvalidRequestBoundary)?;
         if self.sideband_id != spawn.sideband_id
             || request.purpose != spawn.purpose
-            || request.input_refs != spawn.input_refs
+            || request.source_refs != spawn.source_refs
             || request.initiator_ref != format!("t:{parent_timeline_id}/{spawn_seq}")
+            || !usize::try_from(spawn_seq)
+                .ok()
+                .and_then(|index| parent.events().get(index))
+                .is_some_and(|event| {
+                    event.seq.get() == spawn_seq
+                        && matches!(
+                            &event.kind,
+                            crate::TimelineEventKind::Sideband(parent_spawn)
+                                if parent_spawn == spawn
+                        )
+                })
         {
             return Err(SidebandError::ParentRequestMismatch);
+        }
+        for attempt in self.events.iter().filter_map(|event| match &event.kind {
+            SidebandEventKind::Attempt(attempt) => Some(attempt),
+            _ => None,
+        }) {
+            if attempt
+                .assembly_manifest
+                .context_surface_ids
+                .iter()
+                .chain(&attempt.assembly_manifest.selected_surface_ids)
+                .any(|id| !surface_id_exists(parent, *id))
+            {
+                return Err(SidebandError::InvalidSurfaceSelection);
+            }
+        }
+        if request.purpose == SidebandPurpose::ContextRecall {
+            self.validate_recall_materialization(parent, request)?;
+        }
+        Ok(())
+    }
+
+    fn validate_recall_materialization(
+        &self,
+        parent: &crate::Timeline,
+        request: &SidebandRequest,
+    ) -> Result<(), SidebandError> {
+        let high_water = request
+            .source_refs
+            .iter()
+            .map(|source_ref| source_ref.last_seq)
+            .max()
+            .ok_or(SidebandError::ParentMaterializationMismatch)?;
+        let high_water = usize::try_from(high_water)
+            .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
+        let prefix = parent
+            .events()
+            .get(..=high_water)
+            .ok_or(SidebandError::ParentMaterializationMismatch)?;
+        let frozen = crate::Timeline::from_events(prefix.to_vec())
+            .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
+        let branch_ids = frozen
+            .branch_transcript_with_ids()
+            .0
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let unloaded = frozen
+            .completed_compaction_shadowed_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let readable = branch_ids
+            .intersection(&unloaded)
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        for manifest in self.events.iter().filter_map(|event| match &event.kind {
+            SidebandEventKind::Attempt(attempt) => Some(&attempt.assembly_manifest),
+            _ => None,
+        }) {
+            if manifest.source_revision != Some(frozen.surface_revision())
+                || manifest.context_surface_ids != frozen.surface_ids()
+                || manifest
+                    .selected_surface_ids
+                    .iter()
+                    .any(|id| !readable.contains(id))
+            {
+                return Err(SidebandError::ParentMaterializationMismatch);
+            }
         }
         Ok(())
     }
@@ -337,16 +467,17 @@ impl SidebandTimeline {
                 {
                     return Err(SidebandError::IncompleteRequest);
                 }
-                for input_ref in &request.input_refs {
-                    input_ref.validate()?;
+                for source_ref in &request.source_refs {
+                    source_ref.validate()?;
                 }
             }
             SidebandEventKind::Attempt(attempt) => {
-                if !matches!(
-                    self.events.first().map(|event| &event.kind),
-                    Some(SidebandEventKind::Request(_))
-                ) || self.result_seq.is_some()
-                {
+                let Some(SidebandEventKind::Request(request)) =
+                    self.events.first().map(|event| &event.kind)
+                else {
+                    return Err(SidebandError::AttemptWithoutRequest);
+                };
+                if self.result_seq.is_some() {
                     return Err(SidebandError::AttemptWithoutRequest);
                 }
                 let expected = self
@@ -357,6 +488,40 @@ impl SidebandTimeline {
                         expected,
                         actual: attempt.attempt_no,
                     });
+                }
+                for input_ref in &attempt.input_refs {
+                    input_ref.validate()?;
+                    if !request
+                        .source_refs
+                        .iter()
+                        .any(|source_ref| range_covers(source_ref, input_ref))
+                    {
+                        return Err(SidebandError::InputOutsideSource);
+                    }
+                }
+                let manifest = &attempt.assembly_manifest;
+                if manifest.strategy.trim().is_empty()
+                    || manifest.strategy_version == 0
+                    || manifest.max_output_tokens == Some(0)
+                {
+                    return Err(SidebandError::InvalidAssemblyManifest);
+                }
+                if !surface_ids_are_unique(&manifest.context_surface_ids)
+                    || !surface_ids_are_unique(&manifest.selected_surface_ids)
+                    || manifest.context_surface_ids.iter().any(|id| {
+                        !request.source_refs.iter().any(|source_ref| {
+                            source_ref.first_seq <= id.event.get()
+                                && id.event.get() <= source_ref.last_seq
+                        })
+                    })
+                    || manifest.selected_surface_ids.iter().any(|id| {
+                        !attempt.input_refs.iter().any(|input_ref| {
+                            input_ref.first_seq <= id.event.get()
+                                && id.event.get() <= input_ref.last_seq
+                        })
+                    })
+                {
+                    return Err(SidebandError::InvalidSurfaceSelection);
                 }
                 self.last_attempt = Some(event.seq);
             }
@@ -372,6 +537,21 @@ impl SidebandTimeline {
                 }
                 if result.raw_output.trim().is_empty() || result.finish.trim().is_empty() {
                     return Err(SidebandError::EmptyResult);
+                }
+                let SidebandEventKind::Attempt(successful_attempt) =
+                    &self.events[attempt as usize].kind
+                else {
+                    unreachable!("last_attempt always identifies an attempt event")
+                };
+                for evidence_ref in &result.evidence_refs {
+                    evidence_ref.validate()?;
+                    if !successful_attempt
+                        .input_refs
+                        .iter()
+                        .any(|input_ref| range_covers(input_ref, evidence_ref))
+                    {
+                        return Err(SidebandError::EvidenceOutsideInput);
+                    }
                 }
                 self.result_seq = Some(event.seq);
             }
@@ -432,6 +612,32 @@ impl SidebandTimeline {
     }
 }
 
+fn range_covers(outer: &TimelineRangeRef, inner: &TimelineRangeRef) -> bool {
+    outer.timeline_id == inner.timeline_id
+        && outer.first_seq <= inner.first_seq
+        && inner.last_seq <= outer.last_seq
+}
+
+fn surface_ids_are_unique(ids: &[crate::SurfaceId]) -> bool {
+    ids.iter().copied().collect::<BTreeSet<_>>().len() == ids.len()
+}
+
+fn surface_id_exists(parent: &crate::Timeline, id: crate::SurfaceId) -> bool {
+    usize::try_from(id.event.get())
+        .ok()
+        .and_then(|index| parent.events().get(index))
+        .is_some_and(|event| {
+            event.seq == id.event
+                && matches!(
+                    &event.kind,
+                    crate::TimelineEventKind::Messages(messages)
+                        if usize::try_from(id.item)
+                            .ok()
+                            .is_some_and(|item| item < messages.items.len())
+                )
+        })
+}
+
 pub fn validate_sideband_id(id: &str) -> Result<(), SidebandError> {
     let parsed = uuid::Uuid::parse_str(id).map_err(|_| SidebandError::InvalidId)?;
     if parsed.to_string() != id {
@@ -455,7 +661,7 @@ mod tests {
         SidebandRequest {
             purpose: SidebandPurpose::PermissionJudgment,
             prompt: "classify one tool call".into(),
-            input_refs: vec![TimelineRangeRef {
+            source_refs: vec![TimelineRangeRef {
                 timeline_id: "parent".into(),
                 first_seq: 0,
                 last_seq: 4,
@@ -478,6 +684,16 @@ mod tests {
             SidebandEventKind::Request(request()),
             SidebandEventKind::Attempt(SidebandAttempt {
                 attempt_no: 1,
+                input_refs: request().source_refs,
+                assembly_manifest: SidebandAssemblyManifest {
+                    strategy: "all-sources".into(),
+                    strategy_version: 1,
+                    source_revision: None,
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: Vec::new(),
+                    materialized_input_tokens: 32,
+                    max_output_tokens: Some(16),
+                },
                 feedback: None,
             }),
             SidebandEventKind::Result(SidebandResult {
@@ -486,6 +702,7 @@ mod tests {
                 usage: SidebandUsage::default(),
                 finish: "stop".into(),
                 source_event_seqs: [0, 1],
+                evidence_refs: Vec::new(),
             }),
             SidebandEventKind::End(SidebandEnd {
                 outcome: SidebandOutcome::Completed,
@@ -520,6 +737,16 @@ mod tests {
             SidebandEventKind::Request(request()),
             SidebandEventKind::Attempt(SidebandAttempt {
                 attempt_no: 1,
+                input_refs: request().source_refs,
+                assembly_manifest: SidebandAssemblyManifest {
+                    strategy: "all-sources".into(),
+                    strategy_version: 1,
+                    source_revision: None,
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: Vec::new(),
+                    materialized_input_tokens: 32,
+                    max_output_tokens: Some(16),
+                },
                 feedback: None,
             }),
         ] {
@@ -533,6 +760,7 @@ mod tests {
                 usage: SidebandUsage::default(),
                 finish: "stop".into(),
                 source_event_seqs: [0, 0],
+                evidence_refs: Vec::new(),
             }))
             .unwrap_err();
         assert!(matches!(
@@ -556,5 +784,178 @@ mod tests {
             "legacy": true
         });
         assert!(serde_json::from_value::<SidebandEvent>(json).is_err());
+    }
+
+    #[test]
+    fn schema_v2_is_not_replayed_by_the_v3_reader() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let timeline = SidebandTimeline::new(id).unwrap();
+        let mut event = timeline
+            .prepare(SidebandEventKind::Request(request()))
+            .unwrap();
+        event.version = 2;
+
+        assert!(matches!(
+            SidebandTimeline::from_events(vec![event]),
+            Err(SidebandError::UnsupportedVersion {
+                expected: SIDEBAND_SCHEMA_VERSION,
+                actual: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn attempt_input_and_result_evidence_are_bounded_by_frozen_refs() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut timeline = SidebandTimeline::new(id).unwrap();
+        let request = timeline
+            .prepare(SidebandEventKind::Request(request()))
+            .unwrap();
+        timeline.accept(request).unwrap();
+
+        let error = timeline
+            .prepare(SidebandEventKind::Attempt(SidebandAttempt {
+                attempt_no: 1,
+                input_refs: vec![TimelineRangeRef {
+                    timeline_id: "parent".into(),
+                    first_seq: 4,
+                    last_seq: 5,
+                }],
+                assembly_manifest: SidebandAssemblyManifest {
+                    strategy: "selected".into(),
+                    strategy_version: 1,
+                    source_revision: Some(3),
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: Vec::new(),
+                    materialized_input_tokens: 8,
+                    max_output_tokens: Some(8),
+                },
+                feedback: None,
+            }))
+            .unwrap_err();
+        assert!(matches!(error, SidebandError::InputOutsideSource));
+
+        let error = timeline
+            .prepare(SidebandEventKind::Attempt(SidebandAttempt {
+                attempt_no: 1,
+                input_refs: vec![TimelineRangeRef {
+                    timeline_id: "parent".into(),
+                    first_seq: 1,
+                    last_seq: 2,
+                }],
+                assembly_manifest: SidebandAssemblyManifest {
+                    strategy: "selected".into(),
+                    strategy_version: 1,
+                    source_revision: Some(3),
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: vec![crate::SurfaceId {
+                        event: serde_json::from_value(serde_json::json!(3)).unwrap(),
+                        item: 0,
+                    }],
+                    materialized_input_tokens: 8,
+                    max_output_tokens: Some(8),
+                },
+                feedback: None,
+            }))
+            .unwrap_err();
+        assert!(matches!(error, SidebandError::InvalidSurfaceSelection));
+
+        let attempt = timeline
+            .prepare(SidebandEventKind::Attempt(SidebandAttempt {
+                attempt_no: 1,
+                input_refs: vec![TimelineRangeRef {
+                    timeline_id: "parent".into(),
+                    first_seq: 1,
+                    last_seq: 2,
+                }],
+                assembly_manifest: SidebandAssemblyManifest {
+                    strategy: "selected".into(),
+                    strategy_version: 1,
+                    source_revision: Some(3),
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: vec![crate::SurfaceId {
+                        event: serde_json::from_value(serde_json::json!(2)).unwrap(),
+                        item: 0,
+                    }],
+                    materialized_input_tokens: 8,
+                    max_output_tokens: Some(8),
+                },
+                feedback: None,
+            }))
+            .unwrap();
+        timeline.accept(attempt).unwrap();
+
+        let error = timeline
+            .prepare(SidebandEventKind::Result(SidebandResult {
+                raw_output: "result".into(),
+                structured_output: None,
+                usage: SidebandUsage::default(),
+                finish: "stop".into(),
+                source_event_seqs: [0, 1],
+                evidence_refs: vec![TimelineRangeRef {
+                    timeline_id: "parent".into(),
+                    first_seq: 3,
+                    last_seq: 3,
+                }],
+            }))
+            .unwrap_err();
+        assert!(matches!(error, SidebandError::EvidenceOutsideInput));
+    }
+
+    #[test]
+    fn parent_validation_rejects_recall_selection_that_is_not_unloaded() {
+        let mut parent = crate::Timeline::from_seed(vec![ConversationItem::user("live")]).unwrap();
+        let live_id = parent.surface_ids()[0];
+        let source_ref = TimelineRangeRef {
+            timeline_id: "parent".into(),
+            first_seq: 0,
+            last_seq: 0,
+        };
+        let sideband_id = uuid::Uuid::now_v7().to_string();
+        let spawn = SidebandSpawnEvent {
+            sideband_id: sideband_id.clone(),
+            purpose: SidebandPurpose::ContextRecall,
+            source_refs: vec![source_ref.clone()],
+        };
+        let spawn_event = parent
+            .record(crate::TimelineEventKind::Sideband(spawn.clone()))
+            .unwrap();
+        let mut sideband = SidebandTimeline::new(sideband_id).unwrap();
+        for kind in [
+            SidebandEventKind::Request(SidebandRequest {
+                purpose: SidebandPurpose::ContextRecall,
+                prompt: "recall a decision".into(),
+                source_refs: vec![source_ref.clone()],
+                route: SidebandRoute {
+                    model: "test-model".into(),
+                    backend: "responses".into(),
+                },
+                initiator_ref: format!("t:parent/{}", spawn_event.seq.get()),
+                executor: "main".into(),
+                output_schema: None,
+            }),
+            SidebandEventKind::Attempt(SidebandAttempt {
+                attempt_no: 1,
+                input_refs: vec![source_ref],
+                assembly_manifest: SidebandAssemblyManifest {
+                    strategy: "lexical-neighborhood".into(),
+                    strategy_version: 1,
+                    source_revision: Some(1),
+                    context_surface_ids: vec![live_id],
+                    selected_surface_ids: vec![live_id],
+                    materialized_input_tokens: 8,
+                    max_output_tokens: Some(8),
+                },
+                feedback: None,
+            }),
+        ] {
+            let event = sideband.prepare(kind).unwrap();
+            sideband.accept(event).unwrap();
+        }
+
+        assert!(matches!(
+            sideband.validate_parent("parent", &parent, spawn_event.seq.get(), &spawn),
+            Err(SidebandError::ParentMaterializationMismatch)
+        ));
     }
 }

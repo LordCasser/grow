@@ -615,7 +615,7 @@ impl SessionActor {
             .begin_sideband(
                 chat_state::SidebandPurpose::LazinessJudgment,
                 format!("{LAZINESS_CLASSIFIER_PROMPT}\n\n{LAZINESS_USER_PREAMBLE}{runtime_state}"),
-                SidebandInput::Frozen(vec![input_ref]),
+                SidebandSource::Frozen(vec![input_ref]),
                 chat_state::SidebandRoute {
                     model: model_id.clone(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -652,7 +652,7 @@ impl SessionActor {
                 return;
             }
         };
-        if let Err(error) = sideband.attempt(None).await {
+        if let Err(error) = sideband.attempt_all_sources(&request, None).await {
             let detail = error.to_string();
             let elapsed_ms = started.elapsed().as_millis() as u64;
             self.maybe_write_laziness_debug_log(
@@ -811,6 +811,7 @@ impl SessionActor {
                 })),
                 usage,
                 finish,
+                Vec::new(),
             )
             .await
         {
