@@ -802,11 +802,10 @@ mod tests {
 
     #[test]
     fn side_question_retries_overload_only() {
-        // Stream overload and its proxy-wrapped 500 shape retry; so does 529.
-        assert!(should_retry_side_question(&SamplingError::StreamError {
-            error_type: "overloaded_error".into(),
-            message: "Overloaded".into(),
-        }));
+        // Typed stream overload, its proxy-wrapped 500 shape, and 529 retry.
+        assert!(should_retry_side_question(
+            &SamplingError::from_stream_error("overloaded_error", "Overloaded")
+        ));
         assert!(should_retry_side_question(&api(
             500,
             "stream error (overloaded_error): Overloaded",
@@ -846,10 +845,10 @@ mod tests {
         let start = tokio::time::Instant::now();
         let result: Result<(), SamplingError> = (|| async {
             calls.set(calls.get() + 1);
-            Err(SamplingError::StreamError {
-                error_type: "overloaded_error".into(),
-                message: "Overloaded".into(),
-            })
+            Err(SamplingError::from_stream_error(
+                "overloaded_error",
+                "Overloaded",
+            ))
         })
         .retry(side_question_retry_policy())
         .when(should_retry_side_question)

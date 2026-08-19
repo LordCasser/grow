@@ -1325,7 +1325,14 @@ async fn snapshot_projects_timeline_and_token_accounting() {
     assert_eq!(snapshot.total_tokens, 500);
     assert_eq!(snapshot.conversation.len(), 1);
 
-    assert_eq!(snapshot.prompt_texts, vec!["msg"]);
+    assert_eq!(
+        snapshot
+            .prompt_records
+            .iter()
+            .map(|record| (record.prompt_index, record.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "msg")]
+    );
     assert_eq!(snapshot.last_compaction_prompt_index, None);
 }
 
@@ -1531,14 +1538,20 @@ async fn record_agent_edited_path_deduplicates() {
 }
 
 #[tokio::test]
-async fn prompt_texts_are_projected_from_timeline_turns() {
+async fn prompt_records_are_projected_from_timeline_turns() {
     let h = TestHarness::new();
     record_prompt(&h.handle, "first").await;
     record_prompt(&h.handle, "second").await;
     record_prompt(&h.handle, "third").await;
 
     let snap = h.handle.snapshot().await.unwrap();
-    assert_eq!(snap.prompt_texts, vec!["first", "second", "third"]);
+    assert_eq!(
+        snap.prompt_records
+            .iter()
+            .map(|record| (record.prompt_index, record.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "first"), (1, "second"), (2, "third")]
+    );
 }
 
 #[tokio::test]
@@ -1643,7 +1656,13 @@ async fn truncate_removes_items_after_target_prompt_index() {
     assert_eq!(idx, 1);
 
     let snap = h.handle.snapshot().await.unwrap();
-    assert_eq!(snap.prompt_texts, vec!["q1"]);
+    assert_eq!(
+        snap.prompt_records
+            .iter()
+            .map(|record| (record.prompt_index, record.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "q1")]
+    );
 
     // Verify persistence was called
     let records = h.drain_persistence();
@@ -1729,7 +1748,14 @@ async fn snapshot_combines_timeline_projection_and_runtime_metadata() {
     assert_eq!(snapshot.conversation.len(), 2);
     assert_eq!(snapshot.total_tokens, 999);
     assert_eq!(snapshot.prompt_index, 1);
-    assert_eq!(snapshot.prompt_texts, vec!["query 1"]);
+    assert_eq!(
+        snapshot
+            .prompt_records
+            .iter()
+            .map(|record| (record.prompt_index, record.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "query 1")]
+    );
     assert_eq!(snapshot.agent_edited_paths.len(), 2);
     assert_eq!(snapshot.stream_start_ms, Some(12345));
     assert_eq!(snapshot.turn_start_ms, Some(12340));

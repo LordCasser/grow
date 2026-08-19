@@ -163,13 +163,9 @@ async fn build_session_info_used_reflects_recorded_response() {
 
 /// Shell sourcing seam for the fingerprint display gate:
 /// `build_session_info` must populate `SessionInfoData.show_model_fingerprint`
-/// from the catalog entry for the session's current model. Guards the slug-vs-key
-/// bug: the catalog map is keyed by the config key (`"custom-catalog-id"`), which
-/// differs from the routing slug (`"test"`, the harness sampling model) that
-/// `build_session_info` reads from the sampling config. A direct `.get(slug)` would
-/// miss the entry and wrongly yield false. Proven on a NON-coding slug so the flag
-/// — not `is_coding_model_slug` — drives the value (the gate's coding-slug OR is
-/// covered by the `acp_types` / pager `format_session_info` tests).
+/// from the exact catalog identity for the session's current model. Proven on a
+/// non-coding model so the catalog flag — not `is_coding_model_slug` — drives the
+/// value (the coding-model OR is covered by the `acp_types` / pager tests).
 #[tokio::test(flavor = "current_thread")]
 async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
     use crate::agent::config::{ModelEntry, ModelInfo};
@@ -182,8 +178,6 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            // Catalog KEY ("custom-catalog-id") differs from the session's routing
-            // SLUG ("test", the harness sampling model). Flag OFF → false.
             let mut entry = ModelEntry {
                 info: ModelInfo::baseline("test"),
                 api_key: None,
@@ -193,22 +187,17 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
             entry.info.show_model_fingerprint = false;
             actor
                 .models_manager
-                .insert_test_entry("custom-catalog-id", entry.clone());
+                .insert_test_entry("test", entry.clone());
             assert!(
                 !actor.build_session_info().await.show_model_fingerprint,
                 "non-coding slug without the catalog flag must yield false",
             );
 
-            // Same entry with the flag ON → true. Exercises slug→catalog-key
-            // resolution end-to-end; a direct slug `.get("test")` would miss the
-            // entry keyed "custom-catalog-id" and regress to false.
             entry.info.show_model_fingerprint = true;
-            actor
-                .models_manager
-                .insert_test_entry("custom-catalog-id", entry);
+            actor.models_manager.insert_test_entry("test", entry);
             assert!(
                 actor.build_session_info().await.show_model_fingerprint,
-                "catalog show_model_fingerprint=true must flow to SessionInfoData via slug→key resolution",
+                "catalog show_model_fingerprint=true must flow to SessionInfoData",
             );
         })
         .await;

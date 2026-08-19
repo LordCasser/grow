@@ -91,12 +91,9 @@ mod tests {
         values
             .iter()
             .copied()
-            .map(|value| ReasoningEffortOption {
-                id: value.as_str().to_string(),
-                value,
-                label: value.to_string(),
-                description: None,
-                default: false,
+            .map(|value| {
+                serde_json::from_value(serde_json::json!(value.as_str()))
+                    .expect("canonical effort option")
             })
             .collect()
     }

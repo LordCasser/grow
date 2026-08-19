@@ -135,7 +135,8 @@ pub enum TurnInputKind {
     Bash,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PromptRecord {
     pub prompt_index: usize,
     pub text: String,
@@ -925,13 +926,6 @@ impl Timeline {
             }
         }
         prompts.into_values().collect()
-    }
-
-    pub fn prompt_texts(&self) -> Vec<String> {
-        self.prompt_records()
-            .into_iter()
-            .map(|record| record.text)
-            .collect()
     }
 
     /// Next branch-local prompt coordinate, derived only from accepted turn
@@ -2647,7 +2641,19 @@ mod tests {
             .unwrap();
         record_prompt(&mut timeline, 13, 3, "p3");
 
-        assert_eq!(timeline.prompt_texts(), vec!["p0", "p1", "p2", "p3"]);
+        assert_eq!(
+            timeline
+                .prompt_records()
+                .into_iter()
+                .map(|record| (record.prompt_index, record.text))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "p0".into()),
+                (1, "p1".into()),
+                (2, "p2".into()),
+                (3, "p3".into()),
+            ]
+        );
         assert_eq!(timeline.last_completed_compaction_prompt_index(), Some(3));
         let rewound = timeline.rewind_surface(2).unwrap();
         assert_eq!(
@@ -2660,7 +2666,14 @@ mod tests {
 
         timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
         record_prompt(&mut timeline, 14, 2, "new-p2");
-        assert_eq!(timeline.prompt_texts(), vec!["p0", "p1", "new-p2"]);
+        assert_eq!(
+            timeline
+                .prompt_records()
+                .into_iter()
+                .map(|record| (record.prompt_index, record.text))
+                .collect::<Vec<_>>(),
+            vec![(0, "p0".into()), (1, "p1".into()), (2, "new-p2".into())]
+        );
         assert_eq!(timeline.last_completed_compaction_prompt_index(), None);
     }
 

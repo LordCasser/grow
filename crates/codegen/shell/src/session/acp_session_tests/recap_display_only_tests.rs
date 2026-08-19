@@ -223,7 +223,7 @@ async fn drop_recap_after_cancel_auto_silent_manual_unavailable() {
             tokio::task::yield_now().await;
             assert!(!actor.recap_in_flight.get());
             assert!(
-                drained_recap_unavailable(&mut persistence_rx),
+                wait_for_recap_unavailable(&mut persistence_rx).await,
                 "manual cancel must emit SessionRecapUnavailable"
             );
             assert!(
@@ -352,6 +352,31 @@ fn drained_recap_unavailable(
     saw
 }
 
+async fn wait_for_recap_unavailable(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+) -> bool {
+    if drained_recap_unavailable(rx) {
+        return true;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let Some(message) = rx.recv().await else {
+                return false;
+            };
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(n)) = message
+                && matches!(
+                    n.update,
+                    crate::extensions::notification::SessionUpdate::SessionRecapUnavailable
+                )
+            {
+                return true;
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// A manual `/recap` on a brand-new session (no main turns yet) must NOT strand
 /// the client's loading spinner: the recap gate skips before any model call, but
 /// instead of silently dropping, the shell emits `SessionRecapUnavailable` so
@@ -411,7 +436,7 @@ async fn manual_recap_generation_failure_emits_unavailable() {
             tokio::task::yield_now().await;
 
             assert!(
-                drained_recap_unavailable(&mut persistence_rx),
+                wait_for_recap_unavailable(&mut persistence_rx).await,
                 "a failed manual recap must emit SessionRecapUnavailable"
             );
         })

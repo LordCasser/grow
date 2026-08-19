@@ -582,7 +582,22 @@ impl SessionActor {
                 "Compaction skipped: no closed Surface range is large enough to summarize while preserving the recent verbatim tail",
             )
         })?;
-        let target_source = source_surface[range_plan.start_index..=range_plan.end_index].to_vec();
+        let context_recall_tool_name = {
+            let agent_ref = self.agent.borrow();
+            agent_ref
+                .tool_bridge()
+                .render_prompt(
+                    "${{ tools.by_kind.context_recall }}",
+                    &serde_json::json!({}),
+                )
+                .await
+                .filter(|name| !name.is_empty() && !name.contains("by_kind"))
+        };
+        let target_source = crate::session::context_recall::strip_context_recall_derivatives(
+            source_surface[range_plan.start_index..=range_plan.end_index].to_vec(),
+            None,
+            context_recall_tool_name.as_deref(),
+        );
         const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
         let verbatim_input_enabled = self.compaction.verbatim_input;
         let mut summary_source = vec![system_message.clone().ok_or_else(|| {
@@ -962,17 +977,6 @@ impl SessionActor {
                     "compaction summary link was not durably recorded: {error}"
                 ))
             })?;
-        let context_recall_tool_name = {
-            let agent_ref = self.agent.borrow();
-            agent_ref
-                .tool_bridge()
-                .render_prompt(
-                    "${{ tools.by_kind.context_recall }}",
-                    &serde_json::json!({}),
-                )
-                .await
-                .filter(|name| !name.is_empty() && !name.contains("by_kind"))
-        };
         let generate_session_compact = compact_output.content.clone();
         let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) = {
             let agents_md: Vec<std::path::PathBuf> = self

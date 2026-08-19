@@ -227,7 +227,6 @@ impl From<&SamplingError> for SamplingErrorInfo {
                 )
             }
             SamplingError::EventStreamError(_) => (SamplingErrorKind::Http, None, None, None),
-            SamplingError::StreamError { .. } => (SamplingErrorKind::Api, None, None, None),
             SamplingError::IdleTimeout { .. } => (SamplingErrorKind::IdleTimeout, None, None, None),
             SamplingError::EmptyResponse { .. } => {
                 (SamplingErrorKind::EmptyResponse, None, None, None)
@@ -419,14 +418,11 @@ mod tests {
     }
 
     #[test]
-    fn stream_error_classified_as_api_and_retryable() {
-        let err = SamplingError::StreamError {
-            error_type: "server_error".into(),
-            message: "transient".into(),
-        };
+    fn provider_stream_error_classified_as_api_and_retryable() {
+        let err = SamplingError::from_stream_error("server_error", "transient");
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Api);
-        assert_eq!(info.status_code, None);
+        assert_eq!(info.status_code, Some(500));
         assert!(info.is_retryable, "stream errors should be retryable");
     }
 

@@ -224,7 +224,7 @@ pub fn extract_bundle_archive(root: &Path, archive_bytes: &[u8]) -> Result<Bundl
             continue;
         }
 
-        let cache_relative_path = match map_archive_path_to_cache_path(path) {
+        let cache_relative_path = match map_archive_path_to_cache_path(path)? {
             Some(p) => p,
             None => continue,
         };
@@ -417,14 +417,18 @@ fn sanitize_relative_path(relative_path: &str) -> Option<String> {
     }
 }
 
-fn map_archive_path_to_cache_path(archive_path: &str) -> Option<String> {
+fn map_archive_path_to_cache_path(archive_path: &str) -> Result<Option<String>> {
     if let Some(rest) = archive_path.strip_prefix("subagents/") {
-        return sanitize_relative_path(rest);
+        return sanitize_relative_path(rest)
+            .map(Some)
+            .with_context(|| format!("invalid bundled archive path: {archive_path:?}"));
     }
     if archive_path.starts_with("skills/") {
-        return sanitize_relative_path(archive_path);
+        return sanitize_relative_path(archive_path)
+            .map(Some)
+            .with_context(|| format!("invalid bundled archive path: {archive_path:?}"));
     }
-    None
+    Ok(None)
 }
 
 pub fn count_entries_by_prefix(manifest: &BundleManifest, prefix: &str) -> usize {
@@ -516,8 +520,11 @@ mod tests {
             let mut header = tar::Header::new_gnu();
             header.set_size(content.len() as u64);
             header.set_mode(0o644);
+            let path = path.as_bytes();
+            assert!(path.len() < 100, "test archive path exceeds tar name field");
+            header.as_mut_bytes()[..path.len()].copy_from_slice(path);
             header.set_cksum();
-            builder.append_data(&mut header, path, *content).unwrap();
+            builder.append(&header, *content).unwrap();
         }
         let encoder = builder.into_inner().unwrap();
         encoder.finish().unwrap()

@@ -255,7 +255,14 @@ async fn actor_with_sampler(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-    let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = persistence_rx.recv().await {
+            if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
+    });
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     // Point the chat-state sampling config at the mock server so BOTH the
     // main turn requests and the compaction client (which rebuilds its
@@ -332,6 +339,29 @@ async fn run_user_turn(
     )
     .await
     .expect("turn must finish within the timeout (no runaway continue loop)")
+}
+
+/// Partial compaction needs an old closed range and a recent verbatim tail;
+/// the current overflow turn alone is deliberately never summarized whole.
+async fn seed_closed_compaction_range(actor: &SessionActor) {
+    actor
+        .chat_state_handle
+        .replace_system_head("test system prompt")
+        .await
+        .expect("system head must be replaceable");
+    actor
+        .chat_state_handle
+        .push_user_message(ConversationItem::user("old closed turn"));
+    actor
+        .chat_state_handle
+        .push_assistant_response(ConversationItem::assistant("x".repeat(24_000)));
+    actor
+        .chat_state_handle
+        .push_user_message(ConversationItem::user("recent retained turn"));
+    actor
+        .chat_state_handle
+        .push_assistant_response(ConversationItem::assistant("y".repeat(210_000)));
+    let _ = actor.chat_state_handle.get_conversation_len().await;
 }
 
 /// Collect the persisted `ConversationItem::Assistant` texts in order.
@@ -739,13 +769,7 @@ fn context_window_exceeded_triggers_compaction() {
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
-            // Compaction requires a System item in chat state (production
-            // session startup injects it; the bare test actor starts empty).
-            actor
-                .chat_state_handle
-                .replace_system_head("test system prompt")
-                .await
-                .expect("system head must be replaceable");
+            seed_closed_compaction_range(&actor).await;
 
             let result = run_user_turn(&actor, "ctx-exceeded").await;
             result.expect("turn must complete successfully");

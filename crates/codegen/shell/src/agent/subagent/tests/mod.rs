@@ -68,6 +68,7 @@ async fn usage_ack_precedes_terminal_presentation() {
     request.run_in_background = false;
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     completion_data.spawned_notification_emitted = true;
+    completion_data.mark_terminal_committed();
     present_child_completion(
         ChildCompletion {
             request,

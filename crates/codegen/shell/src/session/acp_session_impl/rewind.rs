@@ -34,8 +34,14 @@ impl SessionActor {
         // Query prompt state from the chat state actor.
         let snapshot = self.chat_state_handle.snapshot().await;
         let (prompts, current_prompt_index) = match snapshot {
-            Some(ref s) => (s.prompt_texts.clone(), s.prompt_index),
-            None => (vec![], 0),
+            Some(ref s) => (
+                s.prompt_records
+                    .iter()
+                    .map(|record| (record.prompt_index, record.text.as_str()))
+                    .collect::<std::collections::HashMap<_, _>>(),
+                s.prompt_index,
+            ),
+            None => (std::collections::HashMap::new(), 0),
         };
 
         // Build a lookup of which prompt indices have file snapshots.
@@ -47,7 +53,7 @@ impl SessionActor {
         // Generate a rewind point for every prompt 0..current_prompt_index.
         let rewind_points = (0..current_prompt_index)
             .map(|idx| {
-                let prompt_preview = prompts.get(idx).and_then(|text| {
+                let prompt_preview = prompts.get(&idx).and_then(|text| {
                     let clean_text = extract_user_query(text);
                     let first_line = clean_text
                         .lines()
@@ -268,7 +274,11 @@ impl SessionActor {
         let mut prompt_text: Option<String> = None;
         if wants_conversation_rewind {
             if let Some(snap) = self.chat_state_handle.snapshot().await {
-                prompt_text = snap.prompt_texts.get(target_index).cloned();
+                prompt_text = snap
+                    .prompt_records
+                    .iter()
+                    .find(|record| record.prompt_index == target_index)
+                    .map(|record| record.text.clone());
             }
 
             // Store for edit-and-retry detection in the next prompt() call.

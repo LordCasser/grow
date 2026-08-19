@@ -8,7 +8,7 @@
 //! **Retried** (up to [`DEFAULT_MAX_RETRIES`] = 15, ~6 min with 30s backoff cap):
 //! - 500, 502, 503, 504, 520 (server errors)
 //! - Connection errors (timeout, refused, reset)
-//! - `EventStreamError` / `StreamError` (mid-stream failures)
+//! - `EventStreamError` (mid-stream transport failures)
 //! - `EmptyResponse` (model returned no content/tool calls)
 //!
 //! **Retried with lower cap** ([`RATE_LIMIT_RETRY_THRESHOLD`] = 2):
@@ -325,15 +325,6 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 retry_prefix, msg
             )
         }
-        SamplingError::StreamError {
-            error_type,
-            message,
-        } => {
-            format!(
-                "{}Server stream error ({}): {}. The server encountered an error while streaming the response.",
-                retry_prefix, error_type, message
-            )
-        }
         SamplingError::IdleTimeout { elapsed_secs } => {
             format!(
                 "{}Model stopped responding after {}s. The model may be overloaded or stuck. Try again or use a different model.",
@@ -410,13 +401,6 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             should_retry: *should_retry,
         },
         SamplingError::EventStreamError(msg) => SamplingError::EventStreamError(msg.clone()),
-        SamplingError::StreamError {
-            error_type,
-            message,
-        } => SamplingError::StreamError {
-            error_type: error_type.clone(),
-            message: message.clone(),
-        },
         SamplingError::IdleTimeout { elapsed_secs } => SamplingError::IdleTimeout {
             elapsed_secs: *elapsed_secs,
         },
@@ -649,14 +633,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_stream_error_is_retryable() {
-        let err = SamplingError::StreamError {
-            error_type: "transient".into(),
-            message: "x".into(),
-        };
+    fn classify_provider_stream_error_uses_api_retry_policy() {
+        let err = SamplingError::from_stream_error("transient", "x");
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithClientRebuild { .. } => {}
-            other => panic!("expected RetryWithClientRebuild for StreamError, got {other:?}"),
+            other => panic!("expected RetryWithClientRebuild for stream Api error, got {other:?}"),
         }
     }
 

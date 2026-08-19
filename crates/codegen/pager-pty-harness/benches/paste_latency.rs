@@ -248,6 +248,7 @@ async fn bench_cell(
     let content = ContentController::start()
         .await
         .context("start ContentController")?;
+    content.seed_llm_config().context("seed mock LLM config")?;
     content.set_response(format!("{TURN_SENTINEL} initial bench turn."));
     let mut harness = spawn_ready(binary, rows, cols, &content, surface)?;
 

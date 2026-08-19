@@ -881,9 +881,10 @@ mod tests {
         {
             let mut res = toolset.resources.lock().await;
             res.register_state::<ReportedTaskCompletions>();
+            res.insert(OwnerSessionId("session-1".into()));
         }
         let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal {
-            tasks: vec![completed_task("reserved", None)],
+            tasks: vec![completed_task("reserved", Some("session-1"))],
         });
         let bridge = ToolBridge {
             registry: Arc::new(toolset),

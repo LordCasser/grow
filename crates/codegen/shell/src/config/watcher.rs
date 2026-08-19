@@ -327,30 +327,27 @@ pub enum DiscoveryChange {
     Workflows,
 }
 
+#[cfg(test)]
 fn discovery_change_for_path(path: &Path) -> Option<DiscoveryChange> {
-    let file_name = path.file_name().and_then(|name| name.to_str());
-    if file_name.is_some_and(|name| GROW_CONFIG_ROOT_NAMES.contains(&name)) {
+    let grow_root = path.ancestors().find(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| GROW_CONFIG_ROOT_NAMES.contains(&name))
+    })?;
+    discovery_change_under_root(path, grow_root)
+}
+
+fn discovery_change_under_root(path: &Path, grow_root: &Path) -> Option<DiscoveryChange> {
+    let relative = path.strip_prefix(grow_root).ok()?;
+    let Some(section) = relative.components().next() else {
         return Some(DiscoveryChange::Skills);
+    };
+    match section.as_os_str().to_str() {
+        Some("skills" | "commands") => Some(DiscoveryChange::Skills),
+        Some("workflows") => Some(DiscoveryChange::Workflows),
+        _ => None,
     }
-    if file_name.is_some_and(|name| name == "workflows")
-        || path
-            .ancestors()
-            .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "workflows"))
-    {
-        return Some(DiscoveryChange::Workflows);
-    }
-    if file_name.is_some_and(|name| name == "skills" || name == "commands" || name == "SKILL.md")
-        || path
-            .ancestors()
-            .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "skills"))
-        || (path.extension().is_some_and(|extension| extension == "md")
-            && path
-                .parent()
-                .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "commands")))
-    {
-        return Some(DiscoveryChange::Skills);
-    }
-    None
 }
 
 /// Canonical Grow config root basename.
@@ -525,8 +522,11 @@ impl ProjectDiscoveryWatcher {
                     .iter()
                     .filter(|event| event.path.starts_with(&project_grow_for_events))
                 {
-                    let next = discovery_change_for_path(&event.path)
-                        .unwrap_or(DiscoveryChange::Workflows);
+                    let Some(next) =
+                        discovery_change_under_root(&event.path, &project_grow_for_events)
+                    else {
+                        continue;
+                    };
                     if next == DiscoveryChange::Skills {
                         change = Some(next);
                         break;
@@ -622,15 +622,28 @@ impl SkillsFileWatcher {
         project_root: Option<&Path>,
     ) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let plan = plan_skills_watch_targets(dirs_to_watch, grow_home, project_root);
+        let mut classified_grow_roots = plan.grow_roots.clone();
+        if let Some(project_root) = project_root {
+            classified_grow_roots.push(project_root.join(".grow"));
+        }
+        let recursive_skill_roots = plan.recursive_roots.clone();
 
         let mut debouncer =
             new_filtered_debouncer(SKILLS_DEBOUNCE, move |res: DebounceEventResult| {
                 let Ok(events) = res else { return };
                 let mut change = None;
-                for next in events
-                    .iter()
-                    .filter_map(|event| discovery_change_for_path(&event.path))
-                {
+                for event in &events {
+                    let next = classified_grow_roots
+                        .iter()
+                        .find_map(|root| discovery_change_under_root(&event.path, root))
+                        .or_else(|| {
+                            recursive_skill_roots
+                                .iter()
+                                .any(|root| event.path.starts_with(root))
+                                .then_some(DiscoveryChange::Skills)
+                        });
+                    let Some(next) = next else { continue };
                     if next == DiscoveryChange::Skills {
                         change = Some(next);
                         break;
@@ -643,8 +656,6 @@ impl SkillsFileWatcher {
             })
             .map_err(|e| tracing::warn!(error = %e, "failed to create skills file watcher"))
             .ok()?;
-
-        let plan = plan_skills_watch_targets(dirs_to_watch, grow_home, project_root);
 
         let mut watched = 0;
         let mut refreshed_dirs = HashSet::new();
@@ -732,6 +743,29 @@ mod tests {
         ] {
             assert_eq!(discovery_change_for_path(Path::new(path)), None, "{path}");
         }
+    }
+
+    #[test]
+    fn discovery_classifies_sections_relative_to_an_explicit_grow_root() {
+        let root = Path::new("/tmp/custom-grow-home");
+        assert_eq!(
+            discovery_change_under_root(
+                Path::new("/tmp/custom-grow-home/skills/review/SKILL.md"),
+                root
+            ),
+            Some(DiscoveryChange::Skills)
+        );
+        assert_eq!(
+            discovery_change_under_root(
+                Path::new("/tmp/custom-grow-home/workflows/release.toml"),
+                root
+            ),
+            Some(DiscoveryChange::Workflows)
+        );
+        assert_eq!(
+            discovery_change_under_root(Path::new("/tmp/custom-grow-home/worktrees/x"), root),
+            None
+        );
     }
 
     #[test]

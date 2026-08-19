@@ -1359,7 +1359,7 @@ mod tests {
             .iter()
             .find(|w| w["field"] == "auth.command")
             .expect("inline auth warning present in JSON");
-        assert_eq!(auth_warning["target"], "modelProvider");
+        assert_eq!(auth_warning["target"], "provider");
         assert_eq!(auth_warning["id"], "gateway");
         assert_eq!(auth_warning["kind"], "invalid-value");
         assert!(

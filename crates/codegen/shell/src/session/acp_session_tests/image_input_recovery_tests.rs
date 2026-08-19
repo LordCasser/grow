@@ -21,7 +21,14 @@ async fn actor_with_sampler(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-    let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = persistence_rx.recv().await {
+            if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
+    });
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     if let Some(mut config) = actor.chat_state_handle.get_sampling_config().await {
         config.base_url = server.url();

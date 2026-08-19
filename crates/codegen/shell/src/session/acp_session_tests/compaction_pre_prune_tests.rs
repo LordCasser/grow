@@ -128,7 +128,14 @@ async fn actor_with_sampler_cw_ex(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-    let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = persistence_rx.recv().await {
+            if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
+    });
     let mut actor = create_test_actor(0, context_window, 85, gateway_tx, persistence_tx).await;
     if let Some(prefix_len) = inherited_prefix_len {
         actor.startup_hints.inherited_prefix_len = Some(prefix_len);
@@ -240,6 +247,29 @@ async fn seed_tool_result_rounds(actor: &SessionActor, count: usize) {
                 big_tool_text(),
             ));
     }
+    let _ = actor.chat_state_handle.get_conversation_len().await;
+}
+
+/// Seed one eligible closed turn followed by a large verbatim tail. Partial
+/// compaction must summarize the first turn and preserve the second.
+async fn seed_closed_compaction_range(actor: &SessionActor, retained_tail_chars: usize) {
+    actor
+        .chat_state_handle
+        .replace_system_head("test system prompt")
+        .await
+        .expect("system head must be replaceable");
+    actor
+        .chat_state_handle
+        .push_user_message(ConversationItem::user("old closed turn"));
+    actor
+        .chat_state_handle
+        .push_assistant_response(ConversationItem::assistant("x".repeat(24_000)));
+    actor
+        .chat_state_handle
+        .push_user_message(ConversationItem::user("recent retained turn"));
+    actor
+        .chat_state_handle
+        .push_assistant_response(ConversationItem::assistant("y".repeat(retained_tail_chars)));
     let _ = actor.chat_state_handle.get_conversation_len().await;
 }
 
@@ -507,7 +537,7 @@ fn pre_prune_insufficient_falls_back_to_summary() {
             );
             let (actor, mut gateway_rx) =
                 actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
-            seed_tool_result_rounds(&actor, 1).await;
+            seed_tool_result_rounds(&actor, 2).await;
             actor.chat_state_handle.record_token_usage(86_000);
             // A fresh oversized tool result this turn keeps `since_model`
             // high, so the post-prune estimate cannot drop under the threshold.
@@ -543,14 +573,13 @@ fn pre_prune_insufficient_falls_back_to_summary() {
             // The prune itself still ran and trimmed the oldest tool result.
             let conversation = actor.chat_state_handle.get_conversation().await;
             let tool_texts = tool_result_texts(&conversation);
-            assert_eq!(tool_texts.len(), 2);
-            assert_ne!(
-                &tool_texts[0],
-                &big_tool_text(),
-                "prune must have trimmed it"
+            assert_eq!(tool_texts.len(), 3);
+            assert!(
+                tool_texts[..2].iter().all(|text| text != &big_tool_text()),
+                "pre-prune must trim enough closed-turn results to cross the gate"
             );
             assert_eq!(
-                &tool_texts[1],
+                &tool_texts[2],
                 &big_tool_text(),
                 "the fresh tool result must be untouched"
             );
@@ -622,11 +651,11 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
-            actor
-                .chat_state_handle
-                .replace_system_head("test system prompt")
-                .await
-                .expect("system head must be replaceable");
+            // Keep the static estimate below the 85% preflight trigger, but
+            // make the retained tail large enough that removing the 6K-token
+            // source still leaves the provider-reported 120K usage over the
+            // 100K window after proportional reseeding.
+            seed_closed_compaction_range(&actor, 150_000).await;
 
             let result = run_user_turn(&actor, "ctx-converged").await;
             let err = result.expect_err("turn must fail after converged-over-window");
@@ -784,6 +813,8 @@ fn pre_prune_error_fails_open_to_summary() {
                         arguments: "{}".into(),
                     }]),
                     ConversationItem::tool_result("call-0", big_tool_text()),
+                    ConversationItem::user("recent retained turn"),
+                    ConversationItem::assistant("y".repeat(40_000)),
                 ],
             )
             .await;

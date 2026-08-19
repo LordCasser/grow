@@ -1449,6 +1449,9 @@ mod tests {
         let mut res = Resources::new();
         let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal { tasks });
         res.insert(Terminal(backend));
+        res.insert(crate::types::resources::OwnerSessionId(
+            "test-session".into(),
+        ));
         res.register_state::<ReportedTaskCompletions>();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         res.insert(SubagentEventSender(tx));
@@ -1591,6 +1594,9 @@ mod tests {
             tasks: vec![make_completed("bash-1")],
         });
         res.insert(Terminal(backend));
+        res.insert(crate::types::resources::OwnerSessionId(
+            "test-session".into(),
+        ));
         res.register_state::<ReportedTaskCompletions>();
         res.insert(crate::implementations::grow_build::task::types::GoalLoopActive(true));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1728,6 +1734,9 @@ mod tests {
             tasks: vec![make_completed("t1"), make_completed("t2")],
         });
         res.insert(Terminal(backend));
+        res.insert(crate::types::resources::OwnerSessionId(
+            "test-session".into(),
+        ));
         res.register_state::<ReportedTaskCompletions>();
         let reservations = TaskCompletionReservations::default();
         reservations.reserve("t1".into());
@@ -1757,6 +1766,9 @@ mod tests {
             tasks: vec![make_completed("reserved")],
         });
         res.insert(Terminal(backend));
+        res.insert(crate::types::resources::OwnerSessionId(
+            "test-session".into(),
+        ));
         res.register_state::<ReportedTaskCompletions>();
         let reservations = TaskCompletionReservations::default();
         reservations.reserve("reserved".into());

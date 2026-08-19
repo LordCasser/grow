@@ -30,7 +30,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser as ClapParser;
 use pager_pty_harness::{
     BenchResults, ContentController, PtyHarness, Scenario, compare_baseline, pager_binary,
@@ -48,7 +48,7 @@ struct Cli {
     #[arg(long, value_enum, conflicts_with = "all")]
     scenario: Option<Scenario>,
 
-    /// Run every scenario.
+    /// Run every scenario. This is also the default when --scenario is omitted.
     #[arg(long)]
     all: bool,
 
@@ -112,7 +112,7 @@ async fn run() -> Result<ExitCode> {
     } else if let Some(s) = cli.scenario {
         vec![s]
     } else {
-        bail!("specify --scenario <name> or --all");
+        Scenario::ALL.to_vec()
     };
 
     tracing::info!(
@@ -124,11 +124,13 @@ async fn run() -> Result<ExitCode> {
     );
 
     let mut results: Vec<BenchResults> = Vec::with_capacity(scenarios.len());
+    let mut failed_scenarios = Vec::new();
     for scenario in scenarios {
         tracing::info!(scenario = scenario.as_str(), "running scenario");
         let content = ContentController::start()
             .await
             .context("start ContentController")?;
+        content.seed_llm_config().context("seed mock LLM config")?;
         let mut harness =
             PtyHarness::spawn_with_content(&binary, cli.rows, cli.cols, &content, &[])
                 .context("spawn pager PTY harness")?;
@@ -151,6 +153,7 @@ async fn run() -> Result<ExitCode> {
             }
             Err(e) => {
                 tracing::warn!(scenario = scenario.as_str(), error = %e, "scenario failed");
+                failed_scenarios.push(scenario.as_str());
                 results.push(BenchResults::from_timings(
                     scenario.as_str(),
                     &[],
@@ -163,6 +166,15 @@ async fn run() -> Result<ExitCode> {
     // Emit JSON to stdout for downstream consumption.
     let json = serde_json::to_string_pretty(&results).context("serialize results")?;
     println!("{json}");
+
+    if !failed_scenarios.is_empty() {
+        eprintln!(
+            "FAILED: {} scenario(s) did not complete: {}",
+            failed_scenarios.len(),
+            failed_scenarios.join(", ")
+        );
+        return Ok(ExitCode::from(1));
+    }
 
     if let Some(path) = cli.write_baseline {
         write_baseline(&path, &results)?;

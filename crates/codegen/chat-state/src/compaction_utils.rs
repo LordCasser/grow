@@ -410,9 +410,23 @@ pub fn plan_compaction_range(
         .collect::<Vec<_>>();
     let first_user = *real_users.first()?;
     let last_user = *real_users.last()?;
+    let source_start = surface[..first_user]
+        .iter()
+        .rposition(|item| {
+            !matches!(
+                item,
+                ConversationItem::User(user)
+                    if user.synthetic_reason
+                        == Some(sampling_types::SyntheticReason::CompactionMeta)
+            )
+        })
+        .map_or(0, |index| index + 1);
 
     // Prefer complete old turns. Walk backwards until the retained suffix has
     // the desired budget, then keep everything from that user message onward.
+    // A prior summary immediately before the oldest live user turn belongs to
+    // the same rolling context layer; absorb it into the next summary instead
+    // of accumulating one permanent Surface node per compaction.
     let mut tail_start = last_user;
     for &candidate in real_users.iter().rev() {
         tail_start = candidate;
@@ -422,9 +436,9 @@ pub fn plan_compaction_range(
     }
     if tail_start > first_user {
         let end = tail_start - 1;
-        let source_tokens = range_tokens(first_user, end);
+        let source_tokens = range_tokens(source_start, end);
         if source_tokens >= min_source_tokens {
-            return range_plan(surface_ids, first_user, end, source_tokens);
+            return range_plan(surface_ids, source_start, end, source_tokens);
         }
     }
 
@@ -847,6 +861,23 @@ mod tests {
         assert_eq!(plan.target.shadowed, ids[2..=3]);
         assert_eq!(plan.target.start, ids[2]);
         assert_eq!(plan.target.end, ids[3]);
+    }
+
+    #[test]
+    fn repeated_partial_compaction_rolls_prior_summary_into_next_range() {
+        let (surface, ids) = surface_with_ids(vec![
+            ConversationItem::system("system"),
+            ConversationItem::project_instructions("rules"),
+            ConversationItem::user_meta("prior compacted history"),
+            ConversationItem::user("old retained task"),
+            ConversationItem::assistant("x".repeat(800)),
+            ConversationItem::user("recent task"),
+            ConversationItem::assistant("y".repeat(800)),
+        ]);
+
+        let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
+        assert_eq!((plan.start_index, plan.end_index), (2, 4));
+        assert_eq!(plan.target.shadowed, ids[2..=4]);
     }
 
     #[test]

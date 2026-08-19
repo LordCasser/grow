@@ -15,7 +15,7 @@ use crate::session::{RewindMode, RewindRequest};
 ///
 /// ```text
 /// [Sys, User(user_info), U0(real), A0, U1(auto-wake, synthetic), A1, U2(real), A2]
-/// prompt_index = 3, prompt_texts = [P0, TASK_WAKE, P2]
+/// prompt_index = 3, prompt records = [(0, P0), (2, P2)]
 /// ```
 ///
 /// Turn 1 is a background-task auto-wake (`PromptOrigin::TaskCompleted`):

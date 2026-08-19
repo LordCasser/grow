@@ -169,9 +169,6 @@ pub enum SamplingError {
     },
     #[error("reqwest error stream: {0}")]
     EventStreamError(String),
-    /// Server-side stream error (sent as JSON within the SSE stream)
-    #[error("stream error ({error_type}): {message}")]
-    StreamError { error_type: String, message: String },
     /// Per-chunk idle timeout — no SSE chunk received from the model within the
     /// configured deadline. NOT retryable: the model (or network path) is stuck,
     /// and replaying the same request would likely stall again.
@@ -368,7 +365,6 @@ impl SamplingError {
                 matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520 | 529)
             }
             SamplingError::EventStreamError(_) => true,
-            SamplingError::StreamError { .. } => true,
             SamplingError::IdleTimeout { .. } => false,
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::MaxTokensTruncation => false,
@@ -404,19 +400,16 @@ impl SamplingError {
     /// so retrying the same payload can't help. See [`is_context_length_error`].
     pub fn is_context_length_error(&self) -> bool {
         match self {
-            SamplingError::Api { message, .. } | SamplingError::StreamError { message, .. } => {
-                is_context_length_error(message)
-            }
+            SamplingError::Api { message, .. } => is_context_length_error(message),
             _ => false,
         }
     }
 
     /// Capacity / overload: HTTP 529, a 5xx whose message clearly says
     /// overloaded (proxies wrap stream overloads in a 500), or a stream
-    /// error whose parsed `error_type` is a capacity type (`overloaded_error`
-    /// / `service_unavailable_error`). Never reachable from a 4xx or a
-    /// request-shaped stream error, whatever the message text. Transient —
-    /// worth a short, bounded retry at the call site.
+    /// error mapped to a capacity status by [`Self::from_stream_error`]. Never
+    /// reachable from a 4xx or a request-shaped stream error, whatever the
+    /// message text. Transient — worth a short, bounded retry at the call site.
     pub fn is_overloaded(&self) -> bool {
         match self {
             SamplingError::Api {
@@ -424,13 +417,6 @@ impl SamplingError {
             } => {
                 status.as_u16() == 529
                     || (status.is_server_error() && message_looks_overloaded(message))
-            }
-            // `error_type` is already parsed from the stream payload — trust
-            // it alone; matching message text here would let a request-shaped
-            // error that merely mentions "overloaded" retry.
-            SamplingError::StreamError { error_type, .. } => {
-                error_type.eq_ignore_ascii_case("overloaded_error")
-                    || error_type.eq_ignore_ascii_case("service_unavailable_error")
             }
             _ => false,
         }
@@ -644,13 +630,7 @@ mod tests {
 
     #[test]
     fn overloaded_detects_stream_and_api_shapes() {
-        assert!(
-            SamplingError::StreamError {
-                error_type: "overloaded_error".into(),
-                message: "Overloaded".into(),
-            }
-            .is_overloaded()
-        );
+        assert!(SamplingError::from_stream_error("overloaded_error", "Overloaded").is_overloaded());
         assert!(
             SamplingError::Api {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -704,21 +684,18 @@ mod tests {
             }
             .is_overloaded()
         );
-        // Stream errors classify on the parsed error_type only — a
-        // request-shaped stream error mentioning "overloaded" is not capacity.
+        // The parsed stream error type selects a 4xx before overload message
+        // matching, so request-shaped failures cannot become capacity errors.
         assert!(
-            !SamplingError::StreamError {
-                error_type: "invalid_request_error".into(),
-                message: "tool result mentions overloaded".into(),
-            }
+            !SamplingError::from_stream_error(
+                "invalid_request_error",
+                "tool result mentions overloaded"
+            )
             .is_overloaded()
         );
         assert!(
-            SamplingError::StreamError {
-                error_type: "service_unavailable_error".into(),
-                message: "upstream capacity".into(),
-            }
-            .is_overloaded()
+            SamplingError::from_stream_error("service_unavailable_error", "upstream capacity")
+                .is_overloaded()
         );
     }
 
@@ -814,7 +791,7 @@ mod tests {
         ] {
             assert!(!is_context_length_error(msg), "should not match: {msg}");
         }
-        // The method delegates for the Api/StreamError variants.
+        // Stream errors use the same Api taxonomy before this check.
         let api = SamplingError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "none: The prompt is too long for this model's context window.".into(),
@@ -824,11 +801,8 @@ mod tests {
         };
         assert!(api.is_context_length_error());
         assert!(
-            SamplingError::StreamError {
-                error_type: "overloaded_error".into(),
-                message: "prompt is too long".into(),
-            }
-            .is_context_length_error()
+            SamplingError::from_stream_error("overloaded_error", "prompt is too long")
+                .is_context_length_error()
         );
         assert!(!SamplingError::auth_unknown("nope").is_context_length_error());
     }

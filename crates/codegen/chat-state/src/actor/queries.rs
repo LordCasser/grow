@@ -22,7 +22,7 @@ impl ChatStateActor {
             total_tokens: self.state.total_tokens,
             estimate_at_last_response: self.state.estimate_at_last_response,
             agent_edited_paths: self.state.agent_edited_paths.clone(),
-            prompt_texts: self.state.timeline.prompt_texts(),
+            prompt_records: self.state.timeline.prompt_records(),
             stream_start_ms: self.state.stream_start_ms,
             turn_start_ms: self.state.turn_start_ms,
             last_compaction_prompt_index: self

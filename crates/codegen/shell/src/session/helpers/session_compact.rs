@@ -62,7 +62,6 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
         SamplingError::MaxTokensTruncation => true,
         SamplingError::Http(_)
         | SamplingError::EventStreamError(_)
-        | SamplingError::StreamError { .. }
         | SamplingError::EmptyResponse { .. }
         | SamplingError::DoomLoopDetected { .. } => false,
     };
@@ -806,10 +805,7 @@ mod classify_tests {
             SamplingError::EventStreamError("conn reset".into())
         )));
         assert!(!is_det(&classify_sampling_error(
-            SamplingError::StreamError {
-                error_type: "overloaded_error".into(),
-                message: "try again".into(),
-            }
+            SamplingError::from_stream_error("overloaded_error", "try again")
         )));
     }
     #[test]

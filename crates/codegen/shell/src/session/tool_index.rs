@@ -1220,7 +1220,7 @@ mod tests {
     fn split_mixed_formats() {
         assert_eq!(
             split_identifier("slack__slack_send_message"),
-            vec!["grow", "managed", "slack", "slack", "send", "message"]
+            vec!["slack", "slack", "send", "message"]
         );
     }
 

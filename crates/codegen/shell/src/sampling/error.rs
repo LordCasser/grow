@@ -102,10 +102,6 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
                 .data(error_data_with_status(message, Some(status.as_u16()))),
         },
         SamplingError::EventStreamError(message) => acp::Error::internal_error().data(message),
-        SamplingError::StreamError {
-            error_type,
-            message,
-        } => acp::Error::internal_error().data(format!("{error_type}: {message}")),
         SamplingError::EmptyResponse { context } => acp::Error::internal_error().data(format!(
             "empty response from model ({}): model={}, had_reasoning={}, finish_reason={}",
             context.reason,
@@ -360,10 +356,7 @@ mod tests {
     }
     #[test]
     fn overload_maps_to_display_message_without_data() {
-        let err = SamplingError::StreamError {
-            error_type: "overloaded_error".into(),
-            message: "Overloaded".into(),
-        };
+        let err = SamplingError::from_stream_error("overloaded_error", "Overloaded");
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::ErrorCode::InternalError);
         assert_eq!(acp_err.message, OVERLOADED_USER_MESSAGE);

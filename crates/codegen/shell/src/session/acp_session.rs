@@ -208,7 +208,7 @@ pub(crate) struct InputItem {
 use crate::session::commands::{NotificationPriority, NotificationSource};
 /// Task scheduling state — the only fields that remain behind `TokioMutex`.
 ///
-/// All chat state (conversation, tokens, timing, prompt_index, prompt_texts,
+/// All chat state (conversation, tokens, timing, prompt coordinates,
 /// agent_edited_paths, last_compaction_prompt_index, sampling_config) has been
 /// fully migrated to `ChatStateActor` via `chat_state_handle`.
 /// Credentials (api_key, optional extra access key, client_version) live in

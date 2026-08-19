@@ -308,7 +308,6 @@ fn goal_planner_toolset() -> ToolServerConfig {
             (&grow_build::ReadFileTool).into(),
             (&grow_build::ListDirTool).into(),
             (&grow_build::GrepTool).into(),
-            (&tools::implementations::context_recall::ContextRecallImpl).into(),
             (&grow_build::GetGoalTool).into(),
             (&grow_build::SubmitGoalPlanSectionTool).into(),
             (&grow_build::FinalizeGoalPlanTool).into(),
@@ -326,7 +325,6 @@ fn goal_verifier_toolset() -> ToolServerConfig {
             (&grow_build::ReadFileTool).into(),
             (&grow_build::ListDirTool).into(),
             (&grow_build::GrepTool).into(),
-            (&tools::implementations::context_recall::ContextRecallImpl).into(),
             (&grow_build::GetGoalTool).into(),
         ],
     }

@@ -6,6 +6,8 @@ use std::num::NonZeroU64;
 use sampling_types::{ConversationItem, SamplingConfig};
 use serde::{Deserialize, Serialize};
 
+use crate::PromptRecord;
+
 /// Canonical marker for an injected memory-context block. Shared by the
 /// emitter in `shell` and the upsert/detection here — a drift would
 /// silently break dedup and let blocks accumulate in the prompt prefix.
@@ -33,8 +35,8 @@ pub struct ChatStateSnapshot {
     pub estimate_at_last_response: u64,
     /// File paths the agent has edited.
     pub agent_edited_paths: BTreeSet<String>,
-    /// Cached prompt texts for rewind preview.
-    pub prompt_texts: Vec<String>,
+    /// User-authored prompt coordinates projected from the Timeline.
+    pub prompt_records: Vec<PromptRecord>,
     /// Timestamp when the current stream started (epoch ms).
     pub stream_start_ms: Option<i64>,
     /// Timestamp when the current turn started (epoch ms).
@@ -185,7 +187,7 @@ mod tests {
             total_tokens: 0,
             estimate_at_last_response: 0,
             agent_edited_paths: BTreeSet::new(),
-            prompt_texts: vec![],
+            prompt_records: vec![],
             stream_start_ms: None,
             turn_start_ms: None,
             last_compaction_prompt_index: None,
@@ -233,7 +235,18 @@ mod tests {
                 "src/main.rs".to_string(),
                 "src/lib.rs".to_string(),
             ]),
-            prompt_texts: vec!["first prompt".to_string(), "second prompt".to_string()],
+            prompt_records: vec![
+                PromptRecord {
+                    prompt_index: 0,
+                    text: "first prompt".to_string(),
+                    input_kind: crate::TurnInputKind::Prompt,
+                },
+                PromptRecord {
+                    prompt_index: 3,
+                    text: "second prompt".to_string(),
+                    input_kind: crate::TurnInputKind::Bash,
+                },
+            ],
             stream_start_ms: Some(1234567890),
             turn_start_ms: Some(1234567800),
             last_compaction_prompt_index: Some(2),
@@ -247,7 +260,7 @@ mod tests {
         assert_eq!(deserialized.total_tokens, 1234);
         assert_eq!(deserialized.conversation.len(), 3);
         assert_eq!(deserialized.agent_edited_paths.len(), 2);
-        assert_eq!(deserialized.prompt_texts.len(), 2);
+        assert_eq!(deserialized.prompt_records, snapshot.prompt_records);
         assert_eq!(deserialized.stream_start_ms, Some(1234567890));
         assert_eq!(deserialized.turn_start_ms, Some(1234567800));
         assert_eq!(deserialized.last_compaction_prompt_index, Some(2));

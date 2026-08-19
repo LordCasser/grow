@@ -75,10 +75,10 @@ pub(crate) async fn replace_test_surface(
 pub(crate) async fn seed_test_timeline(
     actor: &SessionActor,
     conversation: Vec<crate::sampling::ConversationItem>,
-    prompt_texts: &[&str],
+    prompts: &[&str],
 ) {
     replace_test_surface(&actor.chat_state_handle, conversation).await;
-    for prompt_text in prompt_texts {
+    for prompt_text in prompts {
         record_test_prompt(actor, prompt_text).await;
     }
 }
@@ -94,7 +94,7 @@ pub(crate) async fn record_test_prompt(actor: &SessionActor, prompt_text: &str) 
             chat_state::TurnEvent::Started {
                 id,
                 identity: chat_state::TurnIdentity {
-                    origin: "test".into(),
+                    origin: "user".into(),
                     turn_kind: "internal".into(),
                     goal_id: None,
                     stage_id: None,

@@ -22,6 +22,18 @@ fn dummy_gateway() -> AcpAgentGatewaySender {
     AcpAgentGatewaySender::new(tx)
 }
 
+fn acking_sideband_persistence() -> tokio::sync::mpsc::UnboundedSender<PersistenceMsg> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = rx.recv().await {
+            if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
+    });
+    tx
+}
+
 /// Replace allow-all permissions with a real permission actor (auto-capable).
 fn install_real_permissions(actor: &mut SessionActor) {
     let cwd = AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
@@ -204,7 +216,7 @@ async fn live_child_judge_receives_primary_context_without_chat_state_pollution(
 
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let persistence_tx = acking_sideband_persistence();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             install_real_permissions(&mut actor);
             let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -345,8 +357,7 @@ async fn chat_child_judge_retries_empty_invalid_and_transient_responses_once() {
 
                 let (gateway_tx, _grx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-                let (persistence_tx, _prx) =
-                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let persistence_tx = acking_sideband_persistence();
                 let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 install_real_permissions(&mut actor);
                 let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();

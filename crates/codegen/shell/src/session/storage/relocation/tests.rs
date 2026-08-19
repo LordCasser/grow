@@ -204,11 +204,8 @@ fn create_source(root: &Path, cwd: &str, id: &str, generation: u64) -> PathBuf {
     )
     .unwrap();
     summary.cwd_generation = generation;
-    let mut value = serde_json::to_value(summary).unwrap();
-    value["opaque_top"] = serde_json::json!({"future": [1, 2, 3]});
-    value["info"]["opaque_info"] = serde_json::json!("future-info");
     let summary_path = dir.join(super::super::SUMMARY_FILE);
-    fs::write(&summary_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    fs::write(&summary_path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
     fs::set_permissions(&summary_path, fs::Permissions::from_mode(0o640)).unwrap();
     fs::write(dir.join("opaque-sidecar.bin"), b"opaque sidecar bytes\n").unwrap();
     let executable = nested.join("tool");

@@ -170,7 +170,7 @@ pub fn mcp_tool_action<'a>(tool_name: &'a str, server_prefix: Option<&str>) -> &
 /// split on `'_'`, title-case each word, join with spaces. Leaves
 /// non-underscore characters (camelCase, hyphens) intact, so
 /// `"list_issues"` → `"List Issues"`, `"notion"` →
-/// `"Grow Managed Notion"`, and `"getMyTaskList"` → `"GetMyTaskList"`.
+/// `"Notion"`, and `"getMyTaskList"` → `"GetMyTaskList"`.
 pub fn mcp_titleize_segment(name: &str) -> String {
     name.split('_')
         .map(|word| {
@@ -1279,7 +1279,7 @@ mod tests {
     fn mcp_titleize_segment_handles_snake_camel_kebab() {
         // snake_case → words split + each title-cased
         assert_eq!(mcp_titleize_segment("list_issues"), "List Issues");
-        assert_eq!(mcp_titleize_segment("notion"), "Grow Managed Notion");
+        assert_eq!(mcp_titleize_segment("notion"), "Notion");
         // single word: just capitalize first letter
         assert_eq!(mcp_titleize_segment("linear"), "Linear");
         // camelCase preserved (no `_` to split on, only first letter touched)

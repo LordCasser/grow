@@ -1428,33 +1428,25 @@ mod tests {
     }
 
     #[test]
-    fn capability_mode_aliases_roundtrip() {
-        for (alias, expected, canonical) in [
-            ("readonly", SubagentCapabilityMode::ReadOnly, "read-only"),
-            ("readOnly", SubagentCapabilityMode::ReadOnly, "read-only"),
-            ("read_only", SubagentCapabilityMode::ReadOnly, "read-only"),
-            ("ReadOnly", SubagentCapabilityMode::ReadOnly, "read-only"),
-            ("readwrite", SubagentCapabilityMode::ReadWrite, "read-write"),
-            ("readWrite", SubagentCapabilityMode::ReadWrite, "read-write"),
-            (
-                "read_write",
-                SubagentCapabilityMode::ReadWrite,
-                "read-write",
-            ),
-            ("ReadWrite", SubagentCapabilityMode::ReadWrite, "read-write"),
-            ("Execute", SubagentCapabilityMode::Execute, "execute"),
-            ("EXECUTE", SubagentCapabilityMode::Execute, "execute"),
-            ("All", SubagentCapabilityMode::All, "all"),
-            ("ALL", SubagentCapabilityMode::All, "all"),
+    fn capability_mode_rejects_noncanonical_aliases() {
+        for alias in [
+            "readonly",
+            "readOnly",
+            "read_only",
+            "ReadOnly",
+            "readwrite",
+            "readWrite",
+            "read_write",
+            "ReadWrite",
+            "Execute",
+            "EXECUTE",
+            "All",
+            "ALL",
         ] {
             let json = format!(r#"{{"description":"d","prompt":"p","capability_mode":"{alias}"}}"#);
-            let input: TaskToolInput = serde_json::from_str(&json)
-                .unwrap_or_else(|e| panic!("alias {alias:?} should parse: {e}"));
-            assert_eq!(input.capability_mode, Some(expected), "parse {alias:?}");
-            assert_eq!(
-                serde_json::to_value(expected).unwrap(),
-                canonical,
-                "serialize {alias:?} back to canonical",
+            assert!(
+                serde_json::from_str::<TaskToolInput>(&json).is_err(),
+                "noncanonical alias {alias:?} must be rejected"
             );
         }
     }
@@ -1505,21 +1497,12 @@ mod tests {
     }
 
     #[test]
-    fn isolation_mode_aliases_roundtrip() {
-        for (alias, expected, canonical) in [
-            ("None", SubagentIsolationMode::None, "none"),
-            ("Worktree", SubagentIsolationMode::Worktree, "worktree"),
-            ("work_tree", SubagentIsolationMode::Worktree, "worktree"),
-            ("work-tree", SubagentIsolationMode::Worktree, "worktree"),
-        ] {
+    fn isolation_mode_rejects_noncanonical_aliases() {
+        for alias in ["None", "Worktree", "work_tree", "work-tree"] {
             let json = format!(r#"{{"description":"d","prompt":"p","isolation":"{alias}"}}"#);
-            let input: TaskToolInput = serde_json::from_str(&json)
-                .unwrap_or_else(|e| panic!("alias {alias:?} should parse: {e}"));
-            assert_eq!(input.isolation, Some(expected), "parse {alias:?}");
-            assert_eq!(
-                serde_json::to_value(expected).unwrap(),
-                canonical,
-                "serialize {alias:?} back to canonical",
+            assert!(
+                serde_json::from_str::<TaskToolInput>(&json).is_err(),
+                "noncanonical alias {alias:?} must be rejected"
             );
         }
     }

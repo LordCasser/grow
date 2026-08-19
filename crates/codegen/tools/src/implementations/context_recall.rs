@@ -37,8 +37,12 @@ impl ContextRecallInput {
 /// calling agent's LocalSet, where shell opens and samples a durable Sideband.
 #[async_trait::async_trait]
 pub trait ContextRecallBackend: Send + Sync {
-    async fn recall(&self, query: &str)
-    -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+    async fn recall(
+        &self,
+        call_id: &str,
+        query: &str,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 #[derive(Debug, Default)]
@@ -111,12 +115,20 @@ impl tool_runtime::Tool for ContextRecallImpl {
             ));
         };
 
-        let output = backend.recall(input.query.trim()).await.map_err(|error| {
-            tool_runtime::ToolError::execution(
-                tool_protocol::ToolId::new(CONTEXT_RECALL_TOOL_NAME).expect("valid tool id"),
-                format!("context recall failed: {error}"),
-            )
-        })?;
+        let cancellation = ctx
+            .get::<tool_runtime::Cancellation>()
+            .map_or_else(tokio_util::sync::CancellationToken::new, |token| {
+                token.0.clone()
+            });
+        let output = backend
+            .recall(ctx.call_id.as_str(), input.query.trim(), cancellation)
+            .await
+            .map_err(|error| {
+                tool_runtime::ToolError::execution(
+                    tool_protocol::ToolId::new(CONTEXT_RECALL_TOOL_NAME).expect("valid tool id"),
+                    format!("context recall failed: {error}"),
+                )
+            })?;
         Ok(ToolOutput::Text(output.into()))
     }
 }

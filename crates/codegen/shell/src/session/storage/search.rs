@@ -1374,7 +1374,12 @@ const TOOL_SEARCH_CALL_LIMIT: usize = 200;
 /// text comes from the uncompressed branch transcript. System instructions,
 /// reasoning, synthetic directives, and tool results are intentionally absent.
 fn timeline_indexable_content(timeline: &Timeline) -> String {
-    let prompts = timeline.prompt_texts().join("\n\n");
+    let prompts = timeline
+        .prompt_records()
+        .into_iter()
+        .map(|record| record.text)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let mut assistant = String::new();
     let mut tools = String::new();
     let mut tool_calls = 0usize;

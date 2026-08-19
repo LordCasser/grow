@@ -1485,9 +1485,9 @@ mod tests {
             }),
         ];
         let counts = count_outstanding_dispatches(&items);
-        assert_eq!(counts.terminal_only, 2, "terminal: b2 + m1");
+        assert_eq!(counts.terminal_only, 1, "terminal: m1");
         assert_eq!(
-            counts.terminal_plus_subagents, 3,
+            counts.terminal_plus_subagents, 2,
             "terminal + subagent (s2)"
         );
     }

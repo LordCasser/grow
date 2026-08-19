@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(state.total_tokens, 0); // empty conversation → 0
         assert!(state.timeline.surface().is_empty());
         assert!(state.agent_edited_paths.is_empty());
-        assert!(state.timeline.prompt_texts().is_empty());
+        assert!(state.timeline.prompt_records().is_empty());
         assert!(state.stream_start_ms.is_none());
         assert!(state.turn_start_ms.is_none());
         assert!(

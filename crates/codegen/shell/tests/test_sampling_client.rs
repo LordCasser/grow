@@ -783,7 +783,11 @@ async fn test_stream_error_during_streaming() {
                     }
                 }
             }
-            Err(SamplingError::StreamError { .. }) => {
+            Err(SamplingError::Api {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                message,
+                ..
+            }) if message == "stream_error: Stream interrupted" => {
                 got_error = true;
             }
             Err(e) => {
@@ -843,7 +847,11 @@ async fn test_stream_error_during_responses_streaming() {
             Ok(_) => {
                 got_event = true;
             }
-            Err(SamplingError::StreamError { .. }) => {
+            Err(SamplingError::Api {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                message,
+                ..
+            }) if message == "stream_error: Stream interrupted" => {
                 got_error = true;
             }
             Err(e) => {

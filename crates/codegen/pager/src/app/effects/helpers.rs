@@ -244,11 +244,13 @@ pub(super) fn extract_first_user_prompt(
     info: &shell::session::info::Info,
 ) -> Option<String> {
     load_timeline(info)?
-        .prompt_texts()
+        .prompt_records()
         .into_iter()
         .next()
-        .and_then(|text| {
-            text.lines()
+        .and_then(|record| {
+            record
+                .text
+                .lines()
                 .next()
                 .map(str::trim)
                 .filter(|line| !line.is_empty())

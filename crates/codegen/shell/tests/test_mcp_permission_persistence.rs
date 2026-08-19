@@ -144,10 +144,9 @@ impl FakeGateway {
             .unwrap();
     }
 
-    fn expect_plain_allow_always(&self) {
-        // Legacy `"always-allow"` option id from `fallback_options`.
+    fn expect_allow_always_mcp_without_scope(&self) {
         self.expected
-            .send(("always-allow".to_string(), None))
+            .send(("allow-always-mcp".to_string(), None))
             .unwrap();
     }
 }
@@ -309,13 +308,12 @@ async fn mcp_tool_grant_persists_and_short_circuits_next_request() {
 
 #[tokio::test]
 #[serial]
-async fn fallback_client_plain_allow_always_persists_mcp_tool() {
-    // Regression: Generic / GrowWeb / Extension clients
-    // submit the legacy `"always-allow"` option id. The prompter maps that
-    // to plain `PromptOutcome::AllowAlways`, and the manager's plain arm
-    // must persist tool-scope into `allowed_mcp_tools`.
+async fn generic_client_canonical_allow_always_defaults_to_mcp_tool_scope() {
+    // Clients without a scope selector use the same canonical MCP option as
+    // richer clients. Omitting scope metadata deterministically selects the
+    // concrete tool from the permission request.
     run_actor_test(ClientType::Generic, |handle, gw, cwd| async move {
-        gw.expect_plain_allow_always();
+        gw.expect_allow_always_mcp_without_scope();
         let d = request(&handle, mcp("notion__fetch"), "1").await;
         assert!(matches!(d, Decision::Allow));
 
