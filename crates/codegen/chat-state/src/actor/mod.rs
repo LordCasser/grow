@@ -470,6 +470,9 @@ impl ChatStateActor {
             ChatStateCommand::GetPromptIndex { reply } => {
                 let _ = reply.send(self.state.timeline.next_prompt_index());
             }
+            ChatStateCommand::GetSurfaceRevision { reply } => {
+                let _ = reply.send(self.state.timeline.surface_revision());
+            }
             ChatStateCommand::GetLastCompactionPromptIndex { reply } => {
                 let _ = reply.send(self.state.timeline.last_completed_compaction_prompt_index());
             }

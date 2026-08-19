@@ -460,6 +460,14 @@ impl ChatStateHandle {
         .unwrap_or(0)
     }
 
+    /// Read the current Surface revision without cloning conversation data.
+    pub async fn get_surface_revision(&self) -> Option<u64> {
+        self.query("GetSurfaceRevision", |reply| {
+            ChatStateCommand::GetSurfaceRevision { reply }
+        })
+        .await
+    }
+
     /// Get the prompt index at which the last compaction occurred.
     /// `Some` means the context currently holds a compaction summary.
     pub async fn get_last_compaction_prompt_index(&self) -> Option<usize> {

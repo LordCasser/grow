@@ -324,6 +324,9 @@ pub enum ChatStateCommand {
     /// Get current prompt index.
     GetPromptIndex { reply: oneshot::Sender<usize> },
 
+    /// Get the current model-visible Surface revision without cloning it.
+    GetSurfaceRevision { reply: oneshot::Sender<u64> },
+
     /// Get the prompt index at which the last compaction occurred.
     /// `Some` means the context currently holds a compaction summary.
     GetLastCompactionPromptIndex {
