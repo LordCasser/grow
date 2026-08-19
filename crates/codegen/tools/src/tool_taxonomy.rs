@@ -54,7 +54,7 @@ impl ToolKind {
             ToolKind::Skill => "Skill",
             ToolKind::MemorySearch => "Memory Search",
             ToolKind::MemoryGet => "Memory Read",
-            ToolKind::ContextFetch => "Restore Context",
+            ToolKind::ContextRecall => "Recall Context",
             ToolKind::Task => "Subagent",
             ToolKind::PlanControl => "Plan Control",
             ToolKind::AskUser => "Ask User",
@@ -85,7 +85,7 @@ impl ToolKind {
             | ToolKind::List
             | ToolKind::MemorySearch
             | ToolKind::MemoryGet
-            | ToolKind::ContextFetch
+            | ToolKind::ContextRecall
             | ToolKind::GoalRead
             | ToolKind::WebFetch
             | ToolKind::GoalPlanSubmit

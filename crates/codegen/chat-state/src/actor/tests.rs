@@ -412,6 +412,27 @@ async fn partial_compaction_preserves_unselected_surface_identity() {
     assert_eq!(&after.surface_ids[..2], &before.surface_ids[..2]);
     assert_eq!(&after.surface_ids[3..], &before.surface_ids[4..]);
     assert_ne!(after.surface_ids[2], before.surface_ids[2]);
+
+    let (recall_input_ref, branch) = h
+        .handle
+        .materialize_branch_transcript("test-timeline".into())
+        .await
+        .unwrap();
+    assert_eq!(recall_input_ref, after.input_ref);
+    assert_eq!(
+        branch
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec![
+            "system",
+            "rules",
+            "old task",
+            "old answer",
+            "recent task",
+            "recent answer"
+        ]
+    );
 }
 
 #[tokio::test]

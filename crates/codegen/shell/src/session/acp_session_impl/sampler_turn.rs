@@ -1430,7 +1430,7 @@ impl SessionActor {
         skip_all,
         fields(force_http1)
     )]
-    pub(super) async fn prepare_chat_completion(
+    pub(crate) async fn prepare_chat_completion(
         &self,
         force_http1: bool,
     ) -> Result<sampler::SamplingClient, acp::Error> {

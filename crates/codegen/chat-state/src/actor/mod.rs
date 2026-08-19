@@ -445,18 +445,18 @@ impl ChatStateActor {
                 });
                 let _ = reply.send(materialized);
             }
-            ChatStateCommand::FetchCompactedContext {
-                summary_seq,
-                offset,
-                limit,
-                reply,
-            } => {
-                let result = self.state.timeline.compacted_context(summary_seq).map(|items| {
-                    let total = items.len();
-                    let page = items.into_iter().skip(offset).take(limit).collect();
-                    (page, total)
+            ChatStateCommand::MaterializeBranchTranscript { timeline_id, reply } => {
+                let materialized = self.state.timeline.events().last().map(|event| {
+                    (
+                        crate::TimelineRangeRef {
+                            timeline_id,
+                            first_seq: 0,
+                            last_seq: event.seq.get(),
+                        },
+                        self.state.timeline.branch_transcript(),
+                    )
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(materialized);
             }
             ChatStateCommand::GetPromptIndex { reply } => {
                 let _ = reply.send(self.state.timeline.next_prompt_index());

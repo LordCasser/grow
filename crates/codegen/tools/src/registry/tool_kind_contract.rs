@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::implementations::{
-    context_fetch, grow_build, grow_build_concise, grow_build_hashline, memory, search_tool,
+    context_recall, grow_build, grow_build_concise, grow_build_hashline, memory, search_tool,
     use_tool,
 };
 use crate::registry::types::{ToolConfig, ToolRegistryBuilder};
@@ -52,7 +52,7 @@ where
 ///
 /// Kind semantics are pinned to `workspace::capability::kind_allowed`:
 /// - Read class (ReadOnly/ReadWrite/Execute): Read, Search, Lsp, ListDir,
-///   List, MemoryGet, MemorySearch, GoalRead, GoalPlanSubmit.
+///   List, MemoryGet, MemorySearch, ContextRecall, GoalRead, GoalPlanSubmit.
 /// - Search class: Search, WebFetch.
 /// - Edit class (ReadWrite): Edit, Write, Delete, Move, DeployApp.
 /// - Execute class (Execute): Execute, BackgroundTaskAction,
@@ -110,7 +110,7 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
         // ── Grow memory ────────────────────────────────────────────────────
         entry::<memory::MemorySearchImpl>(ToolKind::MemorySearch),
         entry::<memory::MemoryGetImpl>(ToolKind::MemoryGet),
-        entry::<context_fetch::ContextFetchImpl>(ToolKind::ContextFetch),
+        entry::<context_recall::ContextRecallImpl>(ToolKind::ContextRecall),
         // ── GrowConcise variants ───────────────────────────────────────────
         entry::<grow_build_concise::ReadFileConciseTool>(ToolKind::Read),
         entry::<grow_build_concise::SearchReplaceConciseTool>(ToolKind::Edit),

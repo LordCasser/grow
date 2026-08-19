@@ -107,7 +107,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::HashlineEdit(_)
         | ToolInput::MemorySearch(_)
         | ToolInput::MemoryGet(_)
-        | ToolInput::ContextFetch(_)
+        | ToolInput::ContextRecall(_)
         | ToolInput::SearchTool(_)
         | ToolInput::UseTool(_)
         | ToolInput::PlanControl(_)

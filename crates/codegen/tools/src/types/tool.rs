@@ -76,7 +76,7 @@ pub enum ToolKind {
     Skill,
     MemorySearch,
     MemoryGet,
-    ContextFetch,
+    ContextRecall,
     Task,
     PlanControl,
     AskUser,

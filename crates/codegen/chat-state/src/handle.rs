@@ -437,24 +437,18 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Fetch one read-only page from a completed compaction's shadowed range.
-    /// `None` means the actor is unavailable; the inner result is Timeline
-    /// validation for the supplied summary reference.
-    pub async fn fetch_compacted_context(
+    /// Freeze and materialize the uncompressed transcript for the currently
+    /// selected branch. Recall Sidebands consume this projection without
+    /// changing the model-facing Surface.
+    pub async fn materialize_branch_transcript(
         &self,
-        summary_seq: u64,
-        offset: usize,
-        limit: usize,
-    ) -> Option<Result<(Vec<ConversationItem>, usize), crate::TimelineError>> {
-        self.query("FetchCompactedContext", |reply| {
-            ChatStateCommand::FetchCompactedContext {
-                summary_seq,
-                offset,
-                limit,
-                reply,
-            }
+        timeline_id: String,
+    ) -> Option<(crate::TimelineRangeRef, Vec<ConversationItem>)> {
+        self.query("MaterializeBranchTranscript", |reply| {
+            ChatStateCommand::MaterializeBranchTranscript { timeline_id, reply }
         })
         .await
+        .flatten()
     }
 
     /// Get current prompt index.

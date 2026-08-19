@@ -1466,6 +1466,8 @@ pub(crate) async fn spawn_session_actor(
         Arc::new(TokioMutex::new(state))
     };
     let tool_metadata_snapshot = Arc::new(std::sync::Mutex::new(Default::default()));
+    let (context_recall_backend, context_recall_receiver) =
+        crate::session::context_recall::context_recall_channel();
     let rebuild_spec = std::sync::Arc::new(crate::session::agent_rebuild::AgentRebuildSpec {
         working_directory: tool_context.cwd.as_path().to_path_buf(),
         terminal_backend: terminal_backend.clone(),
@@ -1478,12 +1480,7 @@ pub(crate) async fn spawn_session_actor(
         reminder_policy,
         memory_enabled: memory_config.as_ref().is_some_and(|mc| mc.enabled),
         memory_backend: memory_backend_for_spec,
-        context_fetch_backend: Arc::new(
-            crate::session::context_fetch::TimelineContextFetchBackend::new(
-                session_info.id.0.to_string(),
-                chat_state_handle.clone(),
-            ),
-        ),
+        context_recall_backend,
         web_fetch_config: web_fetch_config.clone(),
         app_builder_deployer_config: app_builder_deployer_config.clone(),
         write_file_enabled,
@@ -2456,6 +2453,7 @@ pub(crate) async fn spawn_session_actor(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
     });
+    crate::session::context_recall::serve_context_recall(&session, context_recall_receiver);
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.
     session.refresh_goal_harness_enabled().await;

@@ -381,7 +381,7 @@ impl From<&tools::types::ToolInput> for AccessKind {
             | ToolInput::TaskOutput(_)
             | ToolInput::KillTask(_)
             | ToolInput::Skill(_)
-            | ToolInput::ContextFetch(_) => AccessKind::Read(None),
+            | ToolInput::ContextRecall(_) => AccessKind::Read(None),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
             }

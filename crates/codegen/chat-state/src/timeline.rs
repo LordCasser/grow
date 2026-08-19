@@ -647,12 +647,6 @@ pub enum TimelineError {
     MissingCompactionReplacement(String),
     #[error("compaction {0} failed after its replacement was already committed")]
     FailedCompactionHasReplacement(String),
-    #[error("timeline event {0} is not a compaction summary context reference")]
-    InvalidContextReference(u64),
-    #[error("compaction {0} has not completed, so its shadowed context cannot be fetched")]
-    IncompleteCompactionContext(String),
-    #[error("compaction context references missing Surface item {0:?}")]
-    MissingCompactionContextItem(SurfaceId),
     #[error("non-compaction replacement occurred while compaction {0} was active")]
     ReplacementDuringCompaction(String),
     #[error("context rebuild requires a branch with no prompt turns")]
@@ -739,56 +733,6 @@ impl Timeline {
 
     pub fn surface_ids(&self) -> &[SurfaceId] {
         &self.surface_ids
-    }
-
-    /// Reproject the exact original Surface items shadowed by one completed
-    /// compaction. The reference points at the compaction's summary event;
-    /// that event owns the stable, possibly non-contiguous `SurfaceId` set.
-    /// This is a pure read and never expands or otherwise mutates Surface.
-    pub fn compacted_context(
-        &self,
-        summary_seq: u64,
-    ) -> Result<Vec<ConversationItem>, TimelineError> {
-        let summary_index = usize::try_from(summary_seq)
-            .map_err(|_| TimelineError::InvalidContextReference(summary_seq))?;
-        let Some(summary_event) = self.events.get(summary_index) else {
-            return Err(TimelineError::InvalidContextReference(summary_seq));
-        };
-        let TimelineEventKind::Compaction(CompactionEvent::Summary { id, target, .. }) =
-            &summary_event.kind
-        else {
-            return Err(TimelineError::InvalidContextReference(summary_seq));
-        };
-
-        let completed = self.events[summary_index + 1..].iter().any(|event| {
-            matches!(
-                &event.kind,
-                TimelineEventKind::Compaction(CompactionEvent::Completed {
-                    id: completed_id,
-                    ..
-                }) if completed_id == id
-            )
-        });
-        if !completed {
-            return Err(TimelineError::IncompleteCompactionContext(id.clone()));
-        }
-
-        target
-            .shadowed
-            .iter()
-            .map(|surface_id| {
-                let event_index = usize::try_from(surface_id.event.get())
-                    .map_err(|_| TimelineError::MissingCompactionContextItem(*surface_id))?;
-                let item_index = usize::try_from(surface_id.item)
-                    .map_err(|_| TimelineError::MissingCompactionContextItem(*surface_id))?;
-                self.events
-                    .get(event_index)
-                    .and_then(TimelineEvent::messages)
-                    .and_then(|messages| messages.items.get(item_index))
-                    .cloned()
-                    .ok_or(TimelineError::MissingCompactionContextItem(*surface_id))
-            })
-            .collect()
     }
 
     pub fn session_title(&self) -> Option<(EventSeq, &SessionTitleEvent)> {
@@ -2431,54 +2375,6 @@ mod tests {
         assert_eq!(timeline.surface_len(), 2);
         assert_eq!(timeline.branch_transcript().len(), 3);
         assert_eq!(timeline.surface()[1].text_content(), "summary");
-    }
-
-    #[test]
-    fn completed_compaction_reprojects_its_exact_shadowed_items() {
-        let mut timeline = Timeline::from_seed(vec![
-            ConversationItem::system("system"),
-            ConversationItem::user("old question"),
-            ConversationItem::assistant("old answer"),
-            ConversationItem::user("tail"),
-        ])
-        .unwrap();
-        timeline
-            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
-                id: "compact".into(),
-                source_items: 4,
-                prompt_index: 0,
-            }))
-            .unwrap();
-        let target = SurfaceRange {
-            start: timeline.surface_ids()[1],
-            end: timeline.surface_ids()[2],
-            shadowed: timeline.surface_ids()[1..=2].to_vec(),
-        };
-        record_compaction_summary_for(&mut timeline, "compact", target.clone());
-        let summary_seq = timeline.next_seq().get() - 1;
-
-        assert!(matches!(
-            timeline.compacted_context(summary_seq),
-            Err(TimelineError::IncompleteCompactionContext(id)) if id == "compact"
-        ));
-
-        timeline
-            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
-            .unwrap();
-        timeline
-            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
-                id: "compact".into(),
-                source_items: 4,
-                result_items: 3,
-                duration_ms: 1,
-            }))
-            .unwrap();
-
-        let restored = timeline.compacted_context(summary_seq).unwrap();
-        assert_eq!(restored.len(), 2);
-        assert_eq!(restored[0].text_content(), "old question");
-        assert_eq!(restored[1].text_content(), "old answer");
-        assert_eq!(timeline.surface().len(), 3);
     }
 
     #[test]

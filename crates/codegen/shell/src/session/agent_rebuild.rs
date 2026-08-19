@@ -84,8 +84,8 @@ pub(crate) struct AgentRebuildSpec {
     pub reminder_policy: ReminderPolicy,
     pub memory_enabled: bool,
     pub memory_backend: Option<Arc<dyn MemoryBackend>>,
-    pub context_fetch_backend:
-        Arc<dyn tools::implementations::context_fetch::ContextFetchBackend>,
+    pub context_recall_backend:
+        Arc<dyn tools::implementations::context_recall::ContextRecallBackend>,
     pub web_fetch_config: WebFetchConfig,
     pub app_builder_deployer_config: AppBuilderDeployerConfig,
     pub write_file_enabled: bool,
@@ -168,7 +168,7 @@ impl AgentRebuildSpec {
             reminder_policy,
             memory_enabled,
             memory_backend,
-            context_fetch_backend,
+            context_recall_backend,
             web_fetch_config,
             app_builder_deployer_config,
             write_file_enabled,
@@ -264,7 +264,7 @@ impl AgentRebuildSpec {
         let agent = builder.build().await?;
         agent
             .tool_bridge()
-            .update_resource(context_fetch_backend.clone())
+            .update_resource(context_recall_backend.clone())
             .await;
         let model_validator = models_manager.clone();
         agent
@@ -354,12 +354,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         reminder_policy: ReminderPolicy::default(),
         memory_enabled: false,
         memory_backend: None,
-        context_fetch_backend: Arc::new(
-            crate::session::context_fetch::TimelineContextFetchBackend::new(
-                "test-session".into(),
-                chat_state::ChatStateHandle::noop(),
-            ),
-        ),
+        context_recall_backend: crate::session::context_recall::context_recall_channel().0,
         web_fetch_config: WebFetchConfig::Disabled,
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
         write_file_enabled: true,

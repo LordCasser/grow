@@ -93,7 +93,9 @@ Timeline 接受的消息是完整原子记录。采样流的 token/delta 只属�
 
 Timeline 校验器强制 summary 所引用的 Sideband spawn 已存在、purpose 与 input ref 完全匹配、result ref 是单事件引用，并在 summary 落账时验证完整 shadow 集合仍恰好覆盖当前 Surface 范围；replacement 的 `start/end/shadowed` 必须逐项等于该 summary target。无 summary、范围漂移、重复 summary 和重复 replacement 全部拒绝。摘要生成或 revision CAS 提交失败时写入 failed，且失败路径不得包含 replacement；允许已经得到 summary、但尚未替换时失败。替换已经提交后，即使新 Surface 仍超过 provider context window，压缩事务也必须记录 completed，随后由 enclosing turn 单独失败。崩溃恢复只把“恰有一条 summary 且恰有一条匹配 replacement”的事务补成 completed，其余未闭合事务补成 failed。替换只遮蔽 Surface，原消息仍在 Timeline、branch transcript、session search 与 Trajectory 中。
 
-每个成功压缩后的 summary 节点同时携带一个指向主 Timeline `compaction/summary` 单事件的 `TimelineRangeRef`。它不是第二份归档，也不把连续 event seq 冒充 Surface 范围：被遮蔽项的精确集合仍只由该 summary 内的 `SurfaceRange.shadowed` 定义。`context_fetch` 只接受当前会话的这种单事件引用，先验证事务已经 completed，再按 `offset/limit` 将 shadow 集合中的原始 `ConversationItem` 重投影为本轮的只读工具结果；它绝不修改或扩张当前 Surface。外部 Timeline、任意 seq 范围、非 summary 事件和未完成事务全部 fail closed。若较新的压缩遮蔽了较早的 summary，重投影会返回那个旧 summary 节点及其引用，agent 可以继续递归解引用，而不需要一次恢复整段历史。
+压缩后的上下文恢复不是“解包 summary”。Grow 暴露特殊内置工具 `context_recall {query}`，agent 只描述当前缺少的事实、决定、约束或先前工作，不接触 Timeline Ref。工具实现先在 chat-state actor 内原子冻结调用者当前 Timeline 的具体范围，并从同一次快照派生未压缩的当前 rewind 分支；随后创建 `purpose=context-recall` 的 Sideband，`input_refs` 指向该冻结范围，事务 prompt 保存查询与确定的 archive budget。发送侧按同一个 branch-transcript 规则物化引用；若全文超过预算，先做确定性的 query shortlist 与相邻项扩展，再用最近上下文填满剩余预算。Sideband 使用调用者当前模型、无工具、只读采样；其 evidence 输入按 sideband context window 留出 provider/output reserve，输出 `max_output_tokens` 则由调用者当前 Surface 的剩余 headroom 反推，并额外保留下一次 assistant 采样空间。任一预算低于最小可用值时 fail-closed，最终只把“回忆主题 + 回忆内容”作为标准 tool result 回流。
+
+这里需要注意，`context_recall` 返回的是一次新的派生结果，不是旧 `ConversationItem` 的分页展开，也不会把任何被遮蔽节点重新插回 Surface。主 Timeline 仍然只保存原始事实、`sideband/spawn` 与正常 tool call/result；Sideband 自己保存 request/attempt/result/end。直接检查原文继续走 session search、Trajectory 或 rewind，agent 的正常 P 只接收它这次明确请求的回忆。因此压缩的语义是卸载，回忆的语义是按问题重新投影，而不是永久解压。
 
 `SurfaceId {event,item}` 是压缩、rewind、Trajectory 与引用调试共用的唯一消息身份。Grow 不维护 DCP 式 `mNNNN ↔ rawId` 映射表，也不向正常上下文注入仅供框架解析的 ID 标签；自动选择器直接在冻结的 SurfaceId 投影上计划范围，避免第二套可漂移身份状态。
 

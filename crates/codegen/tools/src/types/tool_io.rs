@@ -11,7 +11,7 @@
 //! - `ToolOutput` — one variant per built-in tool + `Dynamic(Value)`.
 //!   `From` derive generates `From<TypedOutput>` for each inner type.
 use crate::implementations::BashToolInput;
-use crate::implementations::context_fetch::ContextFetchInput;
+use crate::implementations::context_recall::ContextRecallInput;
 use crate::implementations::grow_build::ask_user_question::AskUserQuestionInput;
 use crate::implementations::grow_build::grep::GrepSearchInput;
 use crate::implementations::grow_build::list_dir::ListDirInput;
@@ -65,7 +65,7 @@ pub enum ToolInput {
     HashlineEdit(crate::implementations::grow_build_hashline::edit::types::HashlineEditInput),
     MemorySearch(MemorySearchInput),
     MemoryGet(MemoryGetInput),
-    ContextFetch(ContextFetchInput),
+    ContextRecall(ContextRecallInput),
     SearchTool(SearchToolInput),
     UseTool(UseToolInput),
     PlanControl(PlanControlInput),

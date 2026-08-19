@@ -26,20 +26,14 @@ use std::sync::Arc;
 const COMPACTION_RETAIN_PERCENT: u64 = 16;
 const MIN_COMPACTION_SOURCE_TOKENS: u64 = 5_000;
 
-fn context_reprojection_hint(
-    tool_name: &str,
-    reference: &chat_state::TimelineRangeRef,
-) -> String {
-    let reference = serde_json::to_string_pretty(reference)
-        .expect("TimelineRangeRef contains only infallible JSON values");
+fn context_recall_hint(tool_name: &str) -> String {
     format!(
-        "<context-reprojection>\n\
+        "<context-recall>\n\
          Earlier context was unloaded by compaction, not deleted. If a missing detail is relevant, \
-         recover only the needed page with `{tool_name}` and this immutable reference:\n\
-         ```json\n{reference}\n```\n\
-         Start with the default small page; follow the returned offset only when more context is needed. \
-         Reprojection is read-only and does not expand the current conversation.\n\
-         </context-reprojection>"
+         call `{tool_name}` with a specific description of what you need to remember. A read-only \
+         sideband will search this session's immutable branch history and return a concise recollection. \
+         It does not restore or expand old messages into the active conversation.\n\
+         </context-recall>"
     )
 }
 /// Trigger info for auto-compact decisions.
@@ -951,8 +945,7 @@ impl SessionActor {
                     "compaction sideband result could not commit: {error}"
                 ))
             })?;
-        let summary_event = self
-            .chat_state_handle
+        self.chat_state_handle
             .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
                 chat_state::CompactionEvent::Summary {
                     id: transaction_id.to_owned(),
@@ -969,16 +962,14 @@ impl SessionActor {
                     "compaction summary link was not durably recorded: {error}"
                 ))
             })?;
-        let context_reference = chat_state::TimelineRangeRef {
-            timeline_id: self.session_info.id.0.to_string(),
-            first_seq: summary_event.seq.get(),
-            last_seq: summary_event.seq.get(),
-        };
-        let context_fetch_tool_name = {
+        let context_recall_tool_name = {
             let agent_ref = self.agent.borrow();
             agent_ref
                 .tool_bridge()
-                .render_prompt("${{ tools.by_kind.context_fetch }}", &serde_json::json!({}))
+                .render_prompt(
+                    "${{ tools.by_kind.context_recall }}",
+                    &serde_json::json!({}),
+                )
                 .await
                 .filter(|name| !name.is_empty() && !name.contains("by_kind"))
         };
@@ -1264,12 +1255,9 @@ impl SessionActor {
         }
         let mut replacement_content =
             compaction::format_compact_summary_content(&generate_session_compact);
-        if let Some(tool_name) = context_fetch_tool_name {
+        if let Some(tool_name) = context_recall_tool_name {
             replacement_content.push_str("\n\n");
-            replacement_content.push_str(&context_reprojection_hint(
-                &tool_name,
-                &context_reference,
-            ));
+            replacement_content.push_str(&context_recall_hint(&tool_name));
         }
         if let Some(reminder) = system_reminder {
             replacement_content.push_str("\n\n");
@@ -1888,22 +1876,18 @@ impl SessionActor {
 }
 
 #[cfg(test)]
-mod context_reprojection_tests {
+mod context_recall_tests {
     use super::*;
 
     #[test]
-    fn hint_explains_unloading_and_carries_the_exact_summary_reference() {
-        let reference = chat_state::TimelineRangeRef {
-            timeline_id: "session-1".into(),
-            first_seq: 41,
-            last_seq: 41,
-        };
-        let hint = context_reprojection_hint("renamed_context_fetch", &reference);
+    fn hint_explains_model_assisted_recall_without_expanding_surface() {
+        let hint = context_recall_hint("renamed_context_recall");
 
         assert!(hint.contains("unloaded by compaction, not deleted"));
-        assert!(hint.contains("`renamed_context_fetch`"));
-        assert!(hint.contains("\"first_seq\": 41"));
-        assert!(hint.contains("\"last_seq\": 41"));
+        assert!(hint.contains("`renamed_context_recall`"));
+        assert!(hint.contains("sideband"));
+        assert!(hint.contains("concise recollection"));
         assert!(hint.contains("read-only"));
+        assert!(hint.contains("does not restore or expand old messages"));
     }
 }

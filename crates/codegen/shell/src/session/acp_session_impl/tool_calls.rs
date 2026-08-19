@@ -2459,11 +2459,8 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
-            ToolInput::ContextFetch(input) => (
-                format!(
-                    "Restore compacted context: {}#{} (offset {})",
-                    input.timeline_id, input.first_seq, input.offset
-                ),
+            ToolInput::ContextRecall(input) => (
+                format!("Recall context: {}", input.query),
                 acp::ToolKind::Read,
                 vec![],
                 vec![],

@@ -313,13 +313,12 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Option<crate::TimelineMaterialization>>,
     },
 
-    /// Read one page from the exact Surface range shadowed by a completed
-    /// compaction summary. This never mutates or expands the current Surface.
-    FetchCompactedContext {
-        summary_seq: u64,
-        offset: usize,
-        limit: usize,
-        reply: oneshot::Sender<Result<(Vec<ConversationItem>, usize), crate::TimelineError>>,
+    /// Atomically freeze the current Timeline range and materialize the
+    /// uncompressed transcript of its selected rewind branch for a read-only
+    /// recall Sideband.
+    MaterializeBranchTranscript {
+        timeline_id: String,
+        reply: oneshot::Sender<Option<(crate::TimelineRangeRef, Vec<ConversationItem>)>>,
     },
 
     /// Get current prompt index.
@@ -570,10 +569,8 @@ mod tests {
         };
 
         let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::FetchCompactedContext {
-            summary_seq: 1,
-            offset: 0,
-            limit: 4,
+        let _ = ChatStateCommand::MaterializeBranchTranscript {
+            timeline_id: "main".into(),
             reply: tx,
         };
 

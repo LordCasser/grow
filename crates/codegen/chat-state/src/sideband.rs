@@ -25,6 +25,7 @@ pub enum SidebandPurpose {
     MemoryRewrite,
     ImageDescription,
     InfoRequest,
+    ContextRecall,
 }
 
 impl SidebandPurpose {
@@ -41,6 +42,7 @@ impl SidebandPurpose {
             Self::MemoryRewrite => "memory-rewrite",
             Self::ImageDescription => "image-description",
             Self::InfoRequest => "info-request",
+            Self::ContextRecall => "context-recall",
         }
     }
 }

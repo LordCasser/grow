@@ -85,7 +85,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Skill,
     ToolKind::MemorySearch,
     ToolKind::MemoryGet,
-    ToolKind::ContextFetch,
+    ToolKind::ContextRecall,
     ToolKind::Task,
     ToolKind::PlanControl,
     ToolKind::AskUser,
@@ -132,7 +132,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         }
 
         // Read class.
-        Read | MemoryGet | MemorySearch | ContextFetch => {
+        Read | MemoryGet | MemorySearch | ContextRecall => {
             matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute)
         }
 

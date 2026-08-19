@@ -1,5 +1,5 @@
 pub mod editor_infra;
-pub mod context_fetch;
+pub mod context_recall;
 pub mod grow_build;
 pub mod grow_build_concise;
 pub mod grow_build_hashline;

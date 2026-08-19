@@ -2,7 +2,7 @@ pub mod acp_types;
 pub mod announcement_state;
 pub mod commands;
 pub mod compaction_config;
-pub(crate) mod context_fetch;
+pub(crate) mod context_recall;
 pub mod control;
 pub mod goal_board;
 pub mod handle;
