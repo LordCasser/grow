@@ -271,8 +271,11 @@ pub fn persist_user_images(
     if images.is_empty() {
         return Ok(Vec::new());
     }
-    let assets_dir = session_dir.join("assets");
-    std::fs::create_dir_all(&assets_dir)?;
+    let assets_dir = crate::session::storage::create_contained_dir_all(
+        session_dir,
+        Path::new("assets"),
+        "session image asset directory",
+    )?;
     let mut out = Vec::with_capacity(images.len());
     for img in images {
         let bytes = base64::engine::general_purpose::STANDARD
@@ -281,7 +284,15 @@ pub fn persist_user_images(
         let ext = mime_to_extension(&img.mime_type);
         let filename = format!("image-{}.{ext}", uuid::Uuid::new_v4());
         let path = assets_dir.join(&filename);
-        std::fs::write(&path, &bytes)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
         out.push(path);
     }
     Ok(out)
@@ -670,6 +681,25 @@ mod tests {
         .uri(Some("https://example.com/x.png".to_owned()));
         let persisted = persist_user_images(dir.path(), &[img]).unwrap();
         assert_eq!(std::fs::read(&persisted[0]).unwrap(), vec![0u8]);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn persist_user_images_rejects_symlinked_asset_directory() {
+        use base64::Engine as _;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), dir.path().join("assets")).unwrap();
+        let image = ImageContent::new(
+            base64::engine::general_purpose::STANDARD.encode([0u8]),
+            "image/png".to_owned(),
+        );
+
+        let error = persist_user_images(dir.path(), &[image])
+            .expect_err("image writes must not traverse a symlinked asset directory");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
     }
     #[test]
     fn persist_user_images_empty_input_returns_empty() {

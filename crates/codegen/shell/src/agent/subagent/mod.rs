@@ -2075,11 +2075,13 @@ fn write_subagent_output(dir: &Path, output: &str) -> Result<SubagentOutputArtif
         }
     };
     let hash = blake3::hash(json.as_bytes()).to_hex().to_string();
-    let path = dir
-        .join("artifacts")
+    let relative = Path::new("artifacts")
         .join("subagent-output")
         .join(format!("{hash}.json"));
-    if let Err(e) = crate::session::persistence::write_immutable_blob(&path, json.as_bytes()) {
+    let path = dir.join(&relative);
+    if let Err(e) =
+        crate::session::persistence::write_immutable_blob(dir, &relative, json.as_bytes())
+    {
         tracing::warn!(error = %e, "failed to write subagent output");
         return Err(format!("failed to write subagent output: {e}"));
     }
@@ -2095,6 +2097,18 @@ pub(crate) fn read_subagent_output(path: &Path) -> Option<String> {
         schema_version: u32,
         output: String,
     }
+    let artifact_dir = path.parent()?;
+    let artifacts_dir = artifact_dir.parent()?;
+    let session_dir = artifacts_dir.parent()?;
+    if artifact_dir.file_name()? != "subagent-output" || artifacts_dir.file_name()? != "artifacts" {
+        return None;
+    }
+    crate::session::storage::require_contained_directory(
+        session_dir,
+        Path::new("artifacts/subagent-output"),
+        "subagent output artifact directory",
+    )
+    .ok()?;
     let data = crate::session::storage::read_bounded_regular_file(
         path,
         "subagent output artifact",

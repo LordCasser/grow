@@ -175,10 +175,29 @@ impl WorkflowRunStore {
             ));
         }
 
-        if let Some(run_dir) = self.run_dir(run_id) {
-            let scripts_dir = run_dir.join("scripts");
-            std::fs::create_dir_all(&scripts_dir)?;
+        if let Some(session_dir) = self.session_dir.as_deref() {
+            let run_dir = create_workflow_run_dir(session_dir, run_id)?;
+            crate::session::storage::create_contained_dir_all(
+                &run_dir,
+                Path::new("scripts"),
+                "Workflow scripts directory",
+            )?;
             let args_json = serde_json::to_vec_pretty(args).map_err(io::Error::other)?;
+            if args_json.len() as u64 > MAX_WORKFLOW_ARGS_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Workflow args exceed {MAX_WORKFLOW_ARGS_BYTES} bytes"),
+                ));
+            }
+            if script.len() as u64 > super::registry::MAX_WORKFLOW_SOURCE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Workflow source exceeds {} bytes",
+                        super::registry::MAX_WORKFLOW_SOURCE_BYTES
+                    ),
+                ));
+            }
             atomic_write_new(&run_dir.join("args.json"), &args_json)?;
             atomic_write_new(&script_revision_path(&run_dir, 0), script.as_bytes())?;
             atomic_write_replace(&run_dir.join("script.rhai"), script.as_bytes())?;
@@ -268,14 +287,9 @@ impl WorkflowRunStore {
 
     pub(crate) fn remove(&self, run_id: &str) {
         self.sources.lock().remove(run_id);
-        if let Some(run_dir) = self.run_dir(run_id) {
-            if let Err(error) = atomic_write_replace(&run_dir.join("cleared"), b"") {
+        if let Some(session_dir) = self.session_dir.as_deref() {
+            if let Err(error) = tombstone_workflow_run(session_dir, run_id) {
                 tracing::warn!(run_id, %error, "failed to tombstone cleared workflow run");
-            }
-            if let Err(error) = std::fs::remove_file(run_dir.join("state.json"))
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                tracing::warn!(run_id, %error, "failed to remove workflow manifest during clear");
             }
         }
         if self
@@ -333,7 +347,108 @@ pub(crate) fn script_revision_path(run_dir: &Path, revision: u32) -> PathBuf {
     run_dir.join("scripts").join(format!("{revision:04}.rhai"))
 }
 
+fn create_workflow_run_dir(session_dir: &Path, run_id: &str) -> io::Result<PathBuf> {
+    validate_run_id(run_id)?;
+    crate::session::storage::create_contained_dir_all(
+        session_dir,
+        &Path::new("workflows").join(run_id),
+        "Workflow run directory",
+    )
+}
+
+fn cleared_marker_exists(run_dir: &Path) -> io::Result<bool> {
+    let path = run_dir.join("cleared");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Workflow cleared marker is not a regular file: {}",
+                    path.display()
+                ),
+            ))
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn write_workflow_run_manifest(
+    session_dir: &Path,
+    manifest: &WorkflowRunManifest,
+) -> io::Result<()> {
+    let run_id = &manifest.state.run_id;
+    let run_dir = create_workflow_run_dir(session_dir, run_id)?;
+    if cleared_marker_exists(&run_dir)? {
+        return Ok(());
+    }
+    let target = run_dir.join("state.json");
+    match read_bounded_nofollow(&target, MAX_WORKFLOW_MANIFEST_BYTES) {
+        Ok(existing) => {
+            let on_disk: WorkflowRunManifest = serde_json::from_slice(&existing)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if on_disk.state.run_id != *run_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Workflow manifest run id does not match its directory",
+                ));
+            }
+            if on_disk.state.revision > manifest.state.revision {
+                tracing::debug!(
+                    %run_id,
+                    on_disk_revision = on_disk.state.revision,
+                    incoming_revision = manifest.state.revision,
+                    "skipping stale Workflow manifest write"
+                );
+                return Ok(());
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let json = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
+    if json.len() as u64 > MAX_WORKFLOW_MANIFEST_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Workflow manifest exceeds {MAX_WORKFLOW_MANIFEST_BYTES} bytes"),
+        ));
+    }
+    atomic_write_replace(&target, &json)
+}
+
+pub(crate) fn tombstone_workflow_run(session_dir: &Path, run_id: &str) -> io::Result<()> {
+    let run_dir = create_workflow_run_dir(session_dir, run_id)?;
+    atomic_write_replace(&run_dir.join("cleared"), b"")?;
+    let manifest = run_dir.join("state.json");
+    match std::fs::symlink_metadata(&manifest) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Workflow manifest is not a regular file: {}",
+                    manifest.display()
+                ),
+            ));
+        }
+        Ok(_) => {
+            std::fs::remove_file(&manifest)?;
+            crate::session::storage::sync_directory(&run_dir)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
 pub(crate) fn read_bounded_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Workflow artifact has no parent",
+        )
+    })?;
+    crate::session::storage::require_regular_directory(parent, "Workflow artifact directory")?;
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(io::Error::new(
@@ -383,61 +498,52 @@ pub(crate) fn read_bounded_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u
 }
 
 fn atomic_write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("immutable workflow file already exists: {}", path.display()),
-        ));
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("immutable workflow file already exists: {}", path.display()),
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
-    atomic_write(path, bytes, false)
-}
-
-fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    atomic_write(path, bytes, true)
-}
-
-fn atomic_write(path: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "workflow path has no parent")
+        io::Error::new(io::ErrorKind::InvalidInput, "Workflow path has no parent")
     })?;
-    std::fs::create_dir_all(parent)?;
+    crate::session::storage::require_regular_directory(parent, "Workflow artifact directory")?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "workflow path is not UTF-8"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Workflow path is not UTF-8"))?;
     let tmp = parent.join(format!(
         ".{file_name}.{}.{}.tmp",
         std::process::id(),
         uuid::Uuid::now_v7().simple()
     ));
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&tmp)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        crate::session::storage::sync_file_durable(&file)?;
         drop(file);
-        if !replace && path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("immutable workflow file already exists: {}", path.display()),
-            ));
-        }
-        #[cfg(windows)]
-        if replace {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        std::fs::rename(&tmp, path)
+        crate::session::storage::rename_no_replace(&tmp, path)?;
+        crate::session::storage::sync_directory(parent)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    crate::session::storage::write_bytes_atomic_durable(path, bytes)
 }
 
 #[cfg(test)]
@@ -483,6 +589,24 @@ mod tests {
         assert!(!run_dir.join("scripts/0001.rhai").exists());
         assert_eq!(store.script_for("wf_1").as_deref(), Some("complete(1);"));
         assert_eq!(store.args_for("wf_1"), Some(args));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn register_rejects_symlinked_workflow_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), dir.path().join("workflows")).unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let store = WorkflowRunStore::new(Some(dir.path().to_path_buf()), tx);
+
+        let error = store
+            .register("wf_1", "complete(1);", &serde_json::json!({}))
+            .expect_err("Workflow writes must not traverse a symlinked root");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
     #[tokio::test]

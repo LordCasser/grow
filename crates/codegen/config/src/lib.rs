@@ -62,9 +62,8 @@ pub use managed_cache::{
     normalize_identity,
 };
 pub use paths::{
-    decode_cwd_from_dirname, default_grow_home, encode_cwd_dirname, ensure_sessions_cwd_dir,
-    grow_application, grow_application_in, grow_home, sessions_cwd_dir, system_config_dir,
-    user_grow_home,
+    decode_cwd_from_dirname, default_grow_home, encode_cwd_dirname, grow_application,
+    grow_application_in, grow_home, sessions_cwd_dir, system_config_dir, user_grow_home,
 };
 pub use validation::{
     RequirementsError, RequirementsLayer, RequirementsSource, load_merged_requirements,

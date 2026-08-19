@@ -19,6 +19,83 @@ fn create_test_chat_messages() -> Vec<ConversationItem> {
             ConversationItem::user("Test message"),
         ]
 }
+#[cfg(unix)]
+#[tokio::test]
+async fn session_init_rejects_symlinked_sessions_root() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    symlink(outside.path(), root.path().join("sessions")).unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+
+    let error = adapter
+        .init_session(&info, default_model_id())
+        .await
+        .expect_err("session creation must not traverse a symlinked storage root");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn session_init_creates_a_missing_storage_root() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("new-grow-home");
+    let adapter = JsonlStorageAdapter::with_root(root.clone());
+    let info = create_test_info();
+
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    assert!(root.is_dir());
+    assert!(adapter.session_dir(&info).join("summary.json").is_file());
+}
+
+#[tokio::test]
+async fn session_init_publishes_long_cwd_marker_once() {
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let cwd = format!("/workspace/{}", "界".repeat(100));
+    let info = Info {
+        id: acp::SessionId::new("long-cwd-session"),
+        cwd: cwd.clone(),
+    };
+
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let marker = adapter
+        .session_dir(&info)
+        .parent()
+        .unwrap()
+        .join(".cwd");
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), cwd);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_init_rejects_symlinked_long_cwd_marker() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let cwd = format!("/workspace/{}", "界".repeat(100));
+    let encoded = crate::util::grow_home::encode_cwd_dirname(&cwd);
+    let cwd_dir = root.path().join("sessions").join(encoded);
+    std::fs::create_dir_all(&cwd_dir).unwrap();
+    let outside = root.path().join("outside-cwd");
+    std::fs::write(&outside, "untouched").unwrap();
+    symlink(&outside, cwd_dir.join(".cwd")).unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = Info {
+        id: acp::SessionId::new("long-cwd-session"),
+        cwd,
+    };
+
+    let error = adapter
+        .init_session(&info, default_model_id())
+        .await
+        .expect_err("session creation must not accept a symlinked cwd marker");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "untouched");
+}
 async fn append_timeline_seed(
     adapter: &JsonlStorageAdapter,
     info: &Info,
@@ -256,11 +333,14 @@ async fn session_load_rejects_missing_or_corrupt_prompt_blobs() {
         crate::session::persistence::PROMPT_BLOB_REF_PREFIX,
         hash
     );
-    let path = adapter
-        .session_dir(&info)
-        .join("prompts")
-        .join(format!("{hash}.txt"));
-    crate::session::persistence::write_immutable_blob(&path, content).unwrap();
+    let session_dir = adapter.session_dir(&info);
+    let path = session_dir.join("prompts").join(format!("{hash}.txt"));
+    crate::session::persistence::write_immutable_blob(
+        &session_dir,
+        Path::new("prompts").join(format!("{hash}.txt")).as_path(),
+        content,
+    )
+    .unwrap();
     append_timeline_seed(
         &adapter,
         &info,
@@ -524,6 +604,50 @@ fn sideband_reader_rejects_symlinked_directory_roots() {
         .expect_err("sideband discovery must not traverse a symlinked root");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("not a regular directory"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sideband_writer_rejects_symlinked_directory_roots() {
+    use std::os::unix::fs::symlink;
+
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let session_dir = adapter.session_dir(&info);
+    let outside = temp_dir.path().join("outside-sideband-writes");
+    std::fs::create_dir(&outside).unwrap();
+    symlink(
+        &outside,
+        session_dir.join(crate::session::storage::SIDEBANDS_DIR),
+    )
+    .unwrap();
+
+    let id = uuid::Uuid::now_v7().to_string();
+    let event = chat_state::SidebandTimeline::new(id)
+        .unwrap()
+        .prepare(chat_state::SidebandEventKind::Request(
+            chat_state::SidebandRequest {
+                purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                prompt: "judge".into(),
+                source_refs: Vec::new(),
+                route: chat_state::SidebandRoute {
+                    model: "test-model".into(),
+                    backend: "responses".into(),
+                },
+                initiator_ref: format!("t:{}/0", info.id),
+                executor: "main".into(),
+                output_schema: None,
+            },
+        ))
+        .unwrap();
+    let error = adapter
+        .append_sideband_event_durable(&info, &event)
+        .await
+        .expect_err("sideband writes must not traverse a symlinked root");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(std::fs::read_dir(outside).unwrap().next().is_none());
 }
 
 /// UI updates cannot synthesize conversation facts. Without Timeline events,
@@ -1315,7 +1439,8 @@ async fn load_rejects_a_non_current_session_format() {
     let info = create_test_info();
     let mut summary = adapter.init_session(&info, default_model_id()).await.unwrap();
     summary.session_format_version = crate::session::persistence::SESSION_FORMAT_VERSION - 1;
-    adapter.write_summary_sync(&info, &summary).unwrap();
+    let bytes = serde_json::to_vec_pretty(&summary).unwrap();
+    crate::session::storage::write_bytes_atomic(&adapter.summary_file(&info), &bytes).unwrap();
 
     let error = adapter.load_session_without_updates(&info).await.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);

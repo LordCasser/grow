@@ -1,5 +1,6 @@
 //! Filesystem locations for grow config files and binaries.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -77,13 +78,12 @@ const MAX_DIRNAME_BYTES: usize = 255;
 
 /// Encode a CWD string into a filesystem-safe directory name component.
 ///
-/// Short CWDs (URL-encoded form <= 255 bytes) use URL-encoding for backward
-/// compatibility and human readability on disk.
+/// Short CWDs (URL-encoded form <= 255 bytes) use a reversible, readable
+/// URL-encoded representation.
 ///
 /// Long CWDs (> 255 bytes encoded) use a compact `{slug}-{blake3_hex16}`
-/// form that is always <= 57 bytes. Callers must write a `.cwd` metadata
-/// file via [`ensure_sessions_cwd_dir`] so the original CWD can be
-/// recovered by [`decode_cwd_from_dirname`].
+/// form that is always <= 57 bytes. The session storage adapter writes the
+/// marker required by [`decode_cwd_from_dirname`].
 pub fn encode_cwd_dirname(cwd: &str) -> String {
     let url_encoded = urlencoding::encode(cwd);
     if url_encoded.len() <= MAX_DIRNAME_BYTES {
@@ -103,9 +103,12 @@ pub fn encode_cwd_dirname(cwd: &str) -> String {
 /// Recover the original CWD from a sessions CWD directory.
 ///
 /// Tries URL-decoding the directory name first (works for short/legacy dirs).
-/// Falls back to reading a `.cwd` metadata file inside the directory (written
-/// by [`ensure_sessions_cwd_dir`] for hash-based dirs).
+/// Falls back to reading the metadata marker inside hash-based directories.
 pub fn decode_cwd_from_dirname(dir: &std::path::Path) -> Option<String> {
+    let directory_metadata = std::fs::symlink_metadata(dir).ok()?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        return None;
+    }
     let name = dir.file_name()?.to_str()?;
     if let Ok(decoded) = urlencoding::decode(name) {
         let s = decoded.into_owned();
@@ -116,44 +119,39 @@ pub fn decode_cwd_from_dirname(dir: &std::path::Path) -> Option<String> {
             return Some(s);
         }
     }
-    std::fs::read_to_string(dir.join(".cwd"))
-        .ok()
-        .map(|s| s.trim().to_string())
+    const MAX_CWD_MARKER_BYTES: u64 = 1024 * 1024;
+    let marker = dir.join(".cwd");
+    let metadata = std::fs::symlink_metadata(&marker).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_CWD_MARKER_BYTES
+    {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let marker_file = options.open(marker).ok()?;
+    let mut content = String::new();
+    marker_file
+        .take(MAX_CWD_MARKER_BYTES.saturating_add(1))
+        .read_to_string(&mut content)
+        .ok()?;
+    if content.len() as u64 > MAX_CWD_MARKER_BYTES {
+        return None;
+    }
+    Some(content.trim().to_string())
 }
 
 /// Build the CWD-level session directory path:
-/// `grow_home()/sessions/{encode_cwd_dirname(cwd)}`.
-///
-/// Does **not** create the directory on disk — use [`ensure_sessions_cwd_dir`]
-/// when the directory must exist.
+/// The storage adapter owns directory creation and marker publication so all
+/// session writes share one contained, no-symlink mechanism.
 pub fn sessions_cwd_dir(cwd: &str) -> PathBuf {
     grow_home().join("sessions").join(encode_cwd_dirname(cwd))
-}
-
-/// Create the CWD-level session directory and write a `.cwd` metadata file
-/// when hash-based encoding is used (long paths).
-///
-/// For short paths the `.cwd` file is not written because the directory name
-/// itself is reversible via URL-decoding.
-pub fn ensure_sessions_cwd_dir(cwd: &str) -> std::io::Result<PathBuf> {
-    let encoded_name = encode_cwd_dirname(cwd);
-    let dir = grow_home().join("sessions").join(&encoded_name);
-    std::fs::create_dir_all(&dir)?;
-    // Hash-based encoding is in use when the dirname differs from the
-    // plain URL-encoded form.  Write a `.cwd` file so decode can recover
-    // the original path.  O_CREAT|O_EXCL via create_new avoids TOCTOU
-    // races with parallel session starts.
-    if encoded_name != urlencoding::encode(cwd).as_ref() {
-        let cwd_file = dir.join(".cwd");
-        match std::fs::File::create_new(&cwd_file) {
-            Ok(mut f) => {
-                std::io::Write::write_all(&mut f, cwd.as_bytes())?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(dir)
 }
 
 /// Generate a URL-safe slug from a string.
@@ -224,19 +222,18 @@ mod tests {
         assert_eq!(decode_cwd_from_dirname(&dir), None);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn cwd_file_write_is_idempotent_via_excl() {
+    fn decode_rejects_symlinked_cwd_marker() {
+        use std::os::unix::fs::symlink;
+
         let tmp = TempDir::new().unwrap();
-        let long_cwd = format!("/Users/test/{}", "中".repeat(30));
-        let dir = tmp.path().join(encode_cwd_dirname(&long_cwd));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cwd_file = dir.join(".cwd");
-        std::fs::write(&cwd_file, &long_cwd).unwrap();
-        match std::fs::File::create_new(&cwd_file) {
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            other => panic!("expected AlreadyExists, got: {other:?}"),
-        }
-        assert_eq!(std::fs::read_to_string(&cwd_file).unwrap(), long_cwd);
+        let dir = tmp.path().join("some-slug-abcdef0123456789");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(&outside, "/outside/workspace").unwrap();
+        symlink(outside, dir.join(".cwd")).unwrap();
+        assert_eq!(decode_cwd_from_dirname(&dir), None);
     }
 
     #[test]

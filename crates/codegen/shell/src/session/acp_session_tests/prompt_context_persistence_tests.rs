@@ -284,6 +284,7 @@ async fn oversized_prompt_blob_is_owned_by_the_explicit_entity_directory() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 1_000_000, 85, gateway_tx, persistence_tx).await;
             actor.session_dir = temp.path().join("parent/subagents/child");
+            std::fs::create_dir_all(&actor.session_dir).unwrap();
             let query = "Q".repeat(LARGE_PROMPT_THRESHOLD + 1);
 
             let full = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
@@ -388,10 +389,11 @@ fn write_offload_and_build_wires_offload_and_fallback() {
 #[test]
 fn prompt_blob_is_immutable_and_idempotent() {
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("prompt.txt");
-    write_immutable_blob(&path, b"canonical prompt").unwrap();
-    write_immutable_blob(&path, b"canonical prompt").unwrap();
-    let error = write_immutable_blob(&path, b"different bytes").unwrap_err();
+    let relative = Path::new("prompt.txt");
+    let path = temp.path().join(relative);
+    write_immutable_blob(temp.path(), relative, b"canonical prompt").unwrap();
+    write_immutable_blob(temp.path(), relative, b"canonical prompt").unwrap();
+    let error = write_immutable_blob(temp.path(), relative, b"different bytes").unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(std::fs::read(&path).unwrap(), b"canonical prompt");
 }
@@ -411,7 +413,8 @@ fn prompt_blob_read_and_write_reject_symlink_targets() {
     std::fs::write(&target, content).unwrap();
     symlink(&target, &link).unwrap();
 
-    let write_error = write_immutable_blob(&link, content)
+    let relative = Path::new("prompts").join(format!("{hash}.txt"));
+    let write_error = write_immutable_blob(dir.path(), &relative, content)
         .expect_err("immutable writes must not accept an existing symlink");
     assert_eq!(write_error.kind(), std::io::ErrorKind::InvalidData);
     let read_error = crate::session::persistence::verified_prompt_blob_bytes(dir.path(), &hash)
@@ -420,13 +423,30 @@ fn prompt_blob_read_and_write_reject_symlink_targets() {
     assert_eq!(std::fs::read(&target).unwrap(), content);
 }
 
+#[cfg(unix)]
+#[test]
+fn prompt_blob_write_rejects_symlinked_parent_directory() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), dir.path().join("prompts")).unwrap();
+    let relative = Path::new("prompts/blob.txt");
+
+    let error = write_immutable_blob(dir.path(), relative, b"canonical prompt")
+        .expect_err("immutable writes must not traverse a symlinked parent");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+}
+
 #[test]
 fn prompt_blob_reference_is_host_independent_until_request_projection() {
     let dir = tempfile::tempdir().unwrap();
     let content = "canonical oversized prompt";
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-    let path = dir.path().join("prompts").join(format!("{hash}.txt"));
-    write_immutable_blob(&path, content.as_bytes()).unwrap();
+    let relative = Path::new("prompts").join(format!("{hash}.txt"));
+    let path = dir.path().join(&relative);
+    write_immutable_blob(dir.path(), &relative, content.as_bytes()).unwrap();
     let reference = format!(
         "{}{hash}",
         crate::session::persistence::PROMPT_BLOB_REF_PREFIX

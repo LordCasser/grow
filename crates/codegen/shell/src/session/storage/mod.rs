@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::extensions::notification::SessionNotification;
 use crate::sampling::ConversationItem;
@@ -32,6 +32,96 @@ pub(crate) const MAX_JSONL_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_SESSION_SUMMARY_BYTES: u64 = 1024 * 1024;
 
 pub(crate) type SidebandLedgers = BTreeMap<String, Vec<chat_state::SidebandEvent>>;
+
+#[cfg(unix)]
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+pub(crate) fn require_regular_directory(path: &Path, description: &str) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{description} is not a regular directory: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Create a relative directory tree below an existing authority root.
+///
+/// Every component is created and verified independently. This prevents an
+/// entity-owned directory such as `sidebands/` or `workflows/` from redirecting
+/// canonical writes through a symlink outside the session directory.
+pub(crate) fn create_contained_dir_all(
+    root: &Path,
+    relative: &Path,
+    description: &str,
+) -> io::Result<PathBuf> {
+    contained_directory(root, relative, description, true)
+}
+
+pub(crate) fn require_contained_directory(
+    root: &Path,
+    relative: &Path,
+    description: &str,
+) -> io::Result<PathBuf> {
+    contained_directory(root, relative, description, false)
+}
+
+fn contained_directory(
+    root: &Path,
+    relative: &Path,
+    description: &str,
+    create_missing: bool,
+) -> io::Result<PathBuf> {
+    require_regular_directory(root, description)?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{description} path must be relative and contained"),
+            ));
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{description} is not a regular directory: {}",
+                        current.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound && create_missing => {
+                match std::fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                require_regular_directory(&current, description)?;
+                sync_directory(&current)?;
+                if let Some(parent) = current.parent() {
+                    sync_directory(parent)?;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(current)
+}
 
 fn completed_sideband_result<'a>(
     ledgers: &'a SidebandLedgers,
@@ -274,6 +364,13 @@ impl Iterator for CommittedJsonlLines {
 }
 
 pub(crate) fn open_regular_nofollow(path: &Path, description: &str) -> io::Result<std::fs::File> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "regular file path has no parent",
+        )
+    })?;
+    require_regular_directory(parent, description)?;
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(io::Error::new(
@@ -310,6 +407,10 @@ pub(crate) fn open_optional_regular_nofollow(
 }
 
 pub(crate) fn open_read_write_create_nofollow(path: &Path) -> io::Result<std::fs::File> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "write target has no parent"))?;
+    require_regular_directory(parent, "write target directory")?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(io::Error::new(
@@ -523,12 +624,37 @@ pub(crate) fn write_bytes_atomic_durable(path: &Path, bytes: &[u8]) -> io::Resul
 }
 
 fn write_bytes_atomic_inner(path: &Path, bytes: &[u8], durable: bool) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic write path has no parent",
+        )
+    })?;
+    require_regular_directory(parent, "atomic write directory")?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "atomic write target is not a regular file: {}",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     let tmp = temp_sibling(path);
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&tmp)?;
         file.write_all(bytes)?;
         if durable {
             sync_file_durable(&file)?;
@@ -537,9 +663,7 @@ fn write_bytes_atomic_inner(path: &Path, bytes: &[u8], durable: bool) -> io::Res
         replace_file(&tmp, path, durable)?;
         #[cfg(unix)]
         if durable {
-            if let Some(parent) = path.parent() {
-                std::fs::File::open(parent)?.sync_all()?;
-            }
+            std::fs::File::open(parent)?.sync_all()?;
         }
         Ok(())
     })();

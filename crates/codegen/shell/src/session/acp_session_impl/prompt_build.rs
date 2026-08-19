@@ -388,13 +388,22 @@ impl SessionActor {
         );
         let join_fallback =
             strip_offload_notice(&bounded, &build_offload_notice(full_len, &blob_ref));
+        let session_dir = self.session_dir.clone();
         let offload = tokio::task::spawn_blocking(move || {
             write_offload_and_build(
                 &full_message,
                 bounded,
                 file_path,
                 &blob_ref,
-                write_immutable_blob,
+                |path, bytes| {
+                    let relative = path.strip_prefix(&session_dir).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "prompt blob path escapes the session directory",
+                        )
+                    })?;
+                    write_immutable_blob(&session_dir, relative, bytes)
+                },
             )
         })
         .await;

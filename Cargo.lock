@@ -1599,6 +1599,7 @@ dependencies = [
  "blake3",
  "core-foundation",
  "dunce",
+ "libc",
  "ring",
  "semver",
  "serde",

@@ -162,9 +162,10 @@ pub async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
         validate_blobs_column(&request.state, &timeline)?;
         st::validate_sideband_ledgers(&request.session_id, &timeline, &sidebands)
             .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
-        // Write the `.cwd` sidecar for hash-based (long-path) dirs so the session stays
-        // recoverable by id, not just by (id, cwd).
-        crate::util::grow_home::ensure_sessions_cwd_dir(&request.cwd)
+        // Prepare the canonical parent and its hash-path marker through the
+        // same contained storage primitive used by normal session creation.
+        st::JsonlStorageAdapter::new()
+            .ensure_session_parent(&info)
             .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
         write_import(&dir, &request.state, &request.updates).map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
@@ -316,6 +317,19 @@ fn read_entity_blobs(
                 "invalid immutable blob key",
             )
         })?;
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "immutable blob path has no parent",
+            )
+        })?;
+        let relative_parent = parent.strip_prefix(dir).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "immutable blob path escapes session root",
+            )
+        })?;
+        st::require_contained_directory(dir, relative_parent, "session immutable blob directory")?;
         let bytes = st::read_bounded_regular_file(
             &path,
             "session immutable blob",
@@ -468,11 +482,15 @@ fn write_import(
     state: &std::collections::HashMap<String, Value>,
     updates: &[Value],
 ) -> std::io::Result<()> {
-    if dir.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("session/import target already exists: {}", dir.display()),
-        ));
+    match std::fs::symlink_metadata(dir) {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("session/import target already exists: {}", dir.display()),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     let parent = dir.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -480,7 +498,7 @@ fn write_import(
             "session/import target has no parent",
         )
     })?;
-    std::fs::create_dir_all(parent)?;
+    st::require_regular_directory(parent, "session/import parent directory")?;
     let name = dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -498,8 +516,13 @@ fn write_import(
     let result = write_import_staging(&staging, state, updates).and_then(|()| {
         crate::session::storage::jsonl::JsonlStorageAdapter::publish_staged_directory(&staging, dir)
     });
-    if result.is_err() && staging.exists() {
-        let _ = std::fs::remove_dir_all(&staging);
+    if result.is_err()
+        && matches!(
+            std::fs::symlink_metadata(&staging),
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
+        )
+    {
+        let _ = std::fs::remove_dir_all(staging);
     }
     result
 }
@@ -536,13 +559,12 @@ fn write_import_staging(
                 format!("sideband {sideband_id} ledger must be an array"),
             )
         })?;
-        let path = dir
-            .join(st::SIDEBANDS_DIR)
-            .join(sideband_id)
-            .join(st::TIMELINE_FILE);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = st::create_contained_dir_all(
+            dir,
+            &Path::new(st::SIDEBANDS_DIR).join(sideband_id),
+            "session/import sideband directory",
+        )?;
+        let path = parent.join(st::TIMELINE_FILE);
         st::write_jsonl_atomic(&path, events)?;
     }
     let blobs: ImmutableBlobs =
@@ -560,7 +582,13 @@ fn write_import_staging(
                 format!("invalid immutable blob key {key}"),
             )
         })?;
-        crate::session::persistence::write_immutable_blob(&path, content.as_bytes())?;
+        let relative = path.strip_prefix(dir).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("immutable blob key escapes session root: {key}"),
+            )
+        })?;
+        crate::session::persistence::write_immutable_blob(dir, relative, content.as_bytes())?;
     }
     if !updates.is_empty() {
         st::write_jsonl_atomic(&dir.join(st::UPDATES_FILE), updates)?;
@@ -578,9 +606,7 @@ fn write_import_staging(
 
 fn write_column(dir: &Path, rel: &str, value: &Value) -> std::io::Result<()> {
     let path = dir.join(rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    st::require_regular_directory(dir, "session/import staging directory")?;
     st::write_bytes_atomic(&path, value.to_string().as_bytes())
 }
 

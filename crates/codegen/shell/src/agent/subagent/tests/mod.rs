@@ -421,6 +421,31 @@ fn subagent_output_roundtrips_through_immutable_artifact() {
     std::fs::write(&corrupt, "not json").expect("corrupt fixture");
     assert_eq!(read_subagent_output(&corrupt), None);
 }
+#[cfg(unix)]
+#[test]
+fn subagent_output_reader_rejects_symlinked_artifact_root() {
+    use std::os::unix::fs::symlink;
+
+    let session = tempfile::tempdir().expect("session");
+    let outside = tempfile::tempdir().expect("outside");
+    let output = "redirected output";
+    let json = serde_json::to_string(&SubagentOutputFileRef {
+        schema_version: SUBAGENT_OUTPUT_SCHEMA_VERSION,
+        output,
+    })
+    .unwrap();
+    let hash = blake3::hash(json.as_bytes()).to_hex().to_string();
+    let outside_dir = outside.path().join("subagent-output");
+    std::fs::create_dir(&outside_dir).unwrap();
+    std::fs::write(outside_dir.join(format!("{hash}.json")), json).unwrap();
+    symlink(outside.path(), session.path().join("artifacts")).unwrap();
+
+    let path = session
+        .path()
+        .join("artifacts/subagent-output")
+        .join(format!("{hash}.json"));
+    assert_eq!(read_subagent_output(&path), None);
+}
 #[test]
 fn initial_context_source_new_is_default() {
     let source = InitialContextSource::New;

@@ -455,7 +455,12 @@ pub(crate) fn referenced_prompt_blob_hashes(
 }
 
 pub(crate) fn verified_prompt_blob_bytes(session_dir: &Path, hash: &str) -> io::Result<Vec<u8>> {
-    let path = session_dir.join("prompts").join(format!("{hash}.txt"));
+    let prompts = crate::session::storage::require_contained_directory(
+        session_dir,
+        Path::new("prompts"),
+        "immutable prompt blob directory",
+    )?;
+    let path = prompts.join(format!("{hash}.txt"));
     let bytes = crate::session::storage::read_bounded_regular_file(
         &path,
         "immutable prompt blob",
@@ -522,7 +527,8 @@ pub(crate) fn write_initial_prompt_blobs(
             ));
         }
         write_immutable_blob(
-            &session_dir.join("prompts").join(format!("{hash}.txt")),
+            session_dir,
+            &Path::new("prompts").join(format!("{hash}.txt")),
             bytes,
         )?;
     }
@@ -561,84 +567,58 @@ pub(crate) fn materialize_prompt_blob_refs(
     Ok(hashes.len())
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-/// Create a directory tree and cross a durability barrier for every newly
-/// linked component. Concurrent creators are accepted.
-fn create_dir_all_durable(path: &Path) -> io::Result<()> {
-    let mut missing = Vec::new();
-    let mut cursor = path;
-    while !cursor.exists() {
-        missing.push(cursor.to_path_buf());
-        cursor = cursor.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "directory has no existing ancestor",
-            )
-        })?;
-    }
-    for dir in missing.into_iter().rev() {
-        match std::fs::create_dir(&dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-        sync_directory(&dir)?;
-        if let Some(parent) = dir.parent() {
-            sync_directory(parent)?;
-        }
-    }
-    Ok(())
-}
-
 /// Create one immutable content-addressed blob.
 ///
 /// A pre-existing path is accepted only when its bytes match the requested
 /// content. This makes hash collision, corruption, and accidental overwrite
 /// fail closed while allowing concurrent writers of the same blob.
-pub fn write_immutable_blob(path: &Path, content: &[u8]) -> io::Result<()> {
+pub fn write_immutable_blob(root: &Path, relative: &Path, content: &[u8]) -> io::Result<()> {
     if content.len() as u64 > MAX_IMMUTABLE_BLOB_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "immutable blob exceeds {} bytes: {}",
                 MAX_IMMUTABLE_BLOB_BYTES,
-                path.display()
+                relative.display()
             ),
         ));
     }
-    let parent = path.parent().ok_or_else(|| {
+    let parent_relative = relative.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "immutable blob path has no parent",
         )
     })?;
-    create_dir_all_durable(parent)?;
+    let file_name = relative.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "immutable blob path has no file name",
+        )
+    })?;
+    let parent = crate::session::storage::create_contained_dir_all(
+        root,
+        parent_relative,
+        "immutable blob directory",
+    )?;
+    let path = parent.join(file_name);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
         options.mode(0o600);
     }
-    match options.open(path) {
+    match options.open(&path) {
         Ok(mut file) => {
             file.write_all(content)?;
             file.sync_all()?;
-            crate::util::secure_file::ensure_owner_only_permissions(path)?;
-            sync_directory(parent)
+            crate::util::secure_file::ensure_owner_only_permissions(&path)?;
+            crate::session::storage::sync_directory(&parent)
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             let existing = crate::session::storage::read_bounded_regular_file(
-                path,
+                &path,
                 "immutable blob",
                 MAX_IMMUTABLE_BLOB_BYTES,
             )?;
@@ -651,8 +631,8 @@ pub fn write_immutable_blob(path: &Path, content: &[u8]) -> io::Result<()> {
                     ),
                 ));
             }
-            crate::util::secure_file::ensure_owner_only_permissions(path)?;
-            sync_directory(parent)
+            crate::util::secure_file::ensure_owner_only_permissions(&path)?;
+            crate::session::storage::sync_directory(&parent)
         }
         Err(error) => Err(error),
     }

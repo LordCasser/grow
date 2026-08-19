@@ -9,6 +9,7 @@ description = "Shared config loading for Grow — grow_home, effective config (r
 base64 = { workspace = true }
 blake3 = { workspace = true }
 dunce = { workspace = true }
+libc = { workspace = true }
 ring = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
