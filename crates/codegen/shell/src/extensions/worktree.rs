@@ -479,51 +479,13 @@ mod tests {
     }
 
     #[test]
-    fn remove_request_rejects_both_fields_set() {
-        use crate::session::worktree::{
-            BackgroundCopyContext, RemoveWorktreeRequest, remove_worktree,
-        };
-
-        let req = RemoveWorktreeRequest {
-            worktree_path: Some("/a".into()),
-            id_or_path: Some("b".into()),
-            force: false,
-            dry_run: false,
-        };
-        let ctx = BackgroundCopyContext::new();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(remove_worktree(&req, &ctx));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("exactly one"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn remove_request_rejects_neither_field_set() {
-        use crate::session::worktree::{
-            BackgroundCopyContext, RemoveWorktreeRequest, remove_worktree,
-        };
-
-        let req = RemoveWorktreeRequest {
-            worktree_path: None,
-            id_or_path: None,
-            force: false,
-            dry_run: false,
-        };
-        let ctx = BackgroundCopyContext::new();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(remove_worktree(&req, &ctx));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+    fn remove_request_requires_the_canonical_target() {
+        assert!(serde_json::from_str::<RemoveWorktreeRequest>(r#"{"force":false}"#).is_err());
         assert!(
-            msg.contains("either worktreePath or idOrPath"),
-            "unexpected error: {msg}"
+            serde_json::from_str::<RemoveWorktreeRequest>(
+                r#"{"idOrPath":"wt-1","worktreePath":"/old"}"#
+            )
+            .is_err()
         );
     }
 

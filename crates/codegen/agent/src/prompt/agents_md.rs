@@ -1,21 +1,16 @@
-//! AGENTS.md / Claude.md / rules directory discovery and loading.
+//! AGENTS.md and `.grow/rules/` discovery and loading.
 //!
-//! Searches from cwd to repo root, plus `~/.grow/`. Also discovers
-//! `*.md` files in rules directories: vendor-prefixed `.grow/rules/`,
-//! `.claude/rules/`, and `.cursor/rules/` in project directories, and a
-//! plain `rules/` directly under the vendor-qualified home-scope roots
-//! (`~/.grow/rules/`, `~/.claude/rules/`, `~/.cursor/rules/`).
+//! Searches from cwd to repo root, plus `~/.grow/`. Project rules live under
+//! `.grow/rules/`; user rules live under `~/.grow/rules/`.
 
 use std::path::{Path, PathBuf};
 
 use crate::prompt::ignore::{build_gitignore, is_ignored};
 
-use tools::types::compat::CompatConfig;
-
 /// Represents an agent config file with its path and content.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentConfigFile {
-    /// The filename (e.g., "AGENTS.md", "Claude.md")
+    /// The canonical filename (`AGENTS.md`).
     pub file_name: String,
     /// The full absolute path to the config file
     pub file_path: String,
@@ -25,22 +20,19 @@ pub struct AgentConfigFile {
 
 /// Find matching agent config files in a directory.
 ///
-/// `filenames` is the (compat-gated) recognized list, precomputed once by the
-/// caller so the cwd→root walk doesn't re-allocate it per directory. When all
-/// cells are on it equals the legacy `AGENT_FILENAMES` list exactly.
-fn find_agent_files(dir: &Path, filenames: &[&str]) -> Vec<PathBuf> {
-    filenames
-        .iter()
-        .filter_map(|name| {
-            let path = dir.join(name);
-            path.exists().then_some(path)
-        })
+fn find_agent_files(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() == "AGENTS.md")
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
         .collect()
 }
 
-/// Find `*.md` files in `.grow/rules/`, `.claude/rules/`, and `.cursor/rules/`,
-/// sorted alphabetically. `rules_subdirs` is the (compat-gated) list, precomputed
-/// once by the caller so the walk doesn't re-allocate it per directory.
+/// Find `*.md` rule files in the supplied canonical rule directories.
 fn find_rules_files(dir: &Path, rules_subdirs: &[&str]) -> Vec<PathBuf> {
     let mut results = Vec::new();
     for rules_subdir in rules_subdirs {
@@ -141,18 +133,12 @@ fn add_discovered_candidate(
     });
 }
 
-/// Read Agents.md from ~/.grow/, git repo root, and session cwd.
+/// Read AGENTS.md from ~/.grow/, git repo root, and session cwd.
 /// Returns a list of AgentConfigFile with their file names, full paths, and contents.
 ///
-/// `compat` gates which vendor (`.claude`/`.cursor`) surfaces are scanned for
-/// rules / project-instruction files; pass `CompatConfig::default()` to
-/// preserve the historical all-vendors behavior.
-pub async fn read_agents_config_with_paths(
-    working_directory: &str,
-    compat: CompatConfig,
-) -> Vec<AgentConfigFile> {
+pub async fn read_agents_config_with_paths(working_directory: &str) -> Vec<AgentConfigFile> {
     let workspace_user_dir = crate::prompt::workspace_user::optional_workspace_user_dir();
-    read_agents_config_with_options(working_directory, workspace_user_dir.as_deref(), compat).await
+    read_agents_config_with_options(working_directory, workspace_user_dir.as_deref()).await
 }
 
 /// Inner implementation that accepts an optional workspace user dir as a
@@ -160,63 +146,30 @@ pub async fn read_agents_config_with_paths(
 async fn read_agents_config_with_options(
     working_directory: &str,
     workspace_user_dir: Option<&Path>,
-    compat: CompatConfig,
 ) -> Vec<AgentConfigFile> {
     read_agents_config_with_roots(
         working_directory,
         workspace_user_dir,
-        compat,
         tools::util::grow_home::grow_home(),
-        dirs::home_dir(),
     )
     .await
 }
 
 const HOME_RULES_DIRS: &[&str] = &["rules"];
+const PROJECT_RULES_DIRS: &[&str] = &[".grow/rules"];
 
 async fn read_agents_config_with_roots(
     working_directory: &str,
     workspace_user_dir: Option<&Path>,
-    compat: CompatConfig,
     grow_home: PathBuf,
-    home_dir: Option<PathBuf>,
 ) -> Vec<AgentConfigFile> {
     let cwd = PathBuf::from(working_directory);
     let git_root = git2::Repository::discover(&cwd)
         .ok()
         .and_then(|repo| repo.workdir().map(Path::to_path_buf));
     let gitignore = build_gitignore(git_root.as_deref());
-    let agent_filenames = compat.agent_filenames();
-    let project_rules_dirs = compat.rules_dirs();
-
     let mut home_roots = Vec::new();
     add_discovery_root(&mut home_roots, grow_home, true, HOME_RULES_DIRS);
-    if let Some(home) = home_dir {
-        if compat.claude.agents || compat.claude.rules {
-            add_discovery_root(
-                &mut home_roots,
-                home.join(".claude"),
-                compat.claude.agents,
-                if compat.claude.rules {
-                    HOME_RULES_DIRS
-                } else {
-                    &[]
-                },
-            );
-        }
-        if compat.cursor.agents || compat.cursor.rules {
-            add_discovery_root(
-                &mut home_roots,
-                home.join(".cursor"),
-                compat.cursor.agents,
-                if compat.cursor.rules {
-                    HOME_RULES_DIRS
-                } else {
-                    &[]
-                },
-            );
-        }
-    }
 
     let mut project_roots = Vec::new();
     if let Some(ref root) = git_root {
@@ -244,10 +197,10 @@ async fn read_agents_config_with_roots(
         }
 
         for dir in chain {
-            add_discovery_root(&mut project_roots, dir, true, &project_rules_dirs);
+            add_discovery_root(&mut project_roots, dir, true, PROJECT_RULES_DIRS);
         }
     } else {
-        add_discovery_root(&mut project_roots, cwd, true, &project_rules_dirs);
+        add_discovery_root(&mut project_roots, cwd, true, PROJECT_RULES_DIRS);
     }
 
     let roots = home_roots
@@ -258,7 +211,7 @@ async fn read_agents_config_with_roots(
     let mut seen_candidates = std::collections::HashMap::new();
     for (root, is_project) in roots {
         if root.scan_named_files {
-            for path in find_agent_files(&root.path, &agent_filenames) {
+            for path in find_agent_files(&root.path) {
                 if !is_ignored(&path, gitignore.as_ref(), git_root.as_deref()) {
                     add_discovered_candidate(
                         &mut candidates,
@@ -313,13 +266,11 @@ pub fn format_agents_md_section(configs: &[AgentConfigFile]) -> Option<String> {
 }
 
 /// Verbatim leading bytes [`render_agents_md`] emits for every reminder block.
-/// Used by `shell` to structurally detect legacy untagged AGENTS.md
-/// copies (pre-`SyntheticReason::ProjectInstructions`) on resumed sessions.
-pub const LEGACY_AGENTS_MD_REMINDER_PREFIX: &str =
+const AGENTS_MD_REMINDER_PREFIX: &str =
     "\n\n<system-reminder>\nAs you answer the user's questions, you can use the following context";
 
-/// Open/close `system-reminder` (Grow) or `system_reminder` (Cursor/IDE), case-insensitive.
-/// Shared with unit tests so CI fails if the pattern is ever invalid or too narrow.
+/// Reminder-tag spellings are neutralized case-insensitively so project text
+/// cannot forge harness delimiters.
 const SYSTEM_REMINDER_TAG_PATTERN: &str = r"(?i)<(\s*/?\s*system[-_]reminder)";
 
 /// Literal pattern only — compile failure is a programmer bug, not a runtime input error.
@@ -339,7 +290,7 @@ fn render_agents_md(configs: &[AgentConfigFile]) -> Option<String> {
     }
 
     let mut section = String::new();
-    section.push_str(LEGACY_AGENTS_MD_REMINDER_PREFIX);
+    section.push_str(AGENTS_MD_REMINDER_PREFIX);
     section.push_str(
         " (ordered from repo root to current directory - deeper files take precedence on conflicts):\n",
     );
@@ -353,7 +304,7 @@ fn render_agents_md(configs: &[AgentConfigFile]) -> Option<String> {
         section.push('\n');
     }
 
-    section.push_str("\nFollow these instructions exactly. When working in subdirectories not listed above, check for additional project instruction files (AGENTS.md, Claude.md, etc.).");
+    section.push_str("\nFollow these instructions exactly. When working in subdirectories not listed above, check for additional AGENTS.md files.");
     section.push_str("\n</system-reminder>");
 
     Some(section)
@@ -376,75 +327,55 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("AGENTS.md"), "# Instructions").unwrap();
 
-        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
-        // On case-insensitive filesystems (macOS), both "Agents.md" and "AGENTS.md"
-        // resolve to the same file, so we may get more than 1 result.
-        assert!(!files.is_empty());
-        assert!(
-            files
-                .iter()
-                .any(|f| f.to_string_lossy().contains("AGENTS.md")
-                    || f.to_string_lossy().contains("Agents.md"))
-        );
+        let files = find_agent_files(tmp.path());
+        assert_eq!(files, vec![tmp.path().join("AGENTS.md")]);
     }
 
     #[test]
-    fn find_agent_files_finds_all_variants() {
+    fn find_agent_files_ignores_alternate_names() {
         let tmp = tempfile::tempdir().unwrap();
-        let filenames = CompatConfig::default().agent_filenames();
-        for name in &filenames {
-            let path = tmp.path().join(name);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(&path, format!("# {name}")).unwrap();
+        for name in ["AGENT.md", "INSTRUCTIONS.md", "Agents.md"] {
+            fs::write(tmp.path().join(name), format!("# {name}")).unwrap();
         }
-
-        let files = find_agent_files(tmp.path(), &filenames);
-        assert_eq!(files.len(), filenames.len());
+        assert!(find_agent_files(tmp.path()).is_empty());
     }
 
     #[test]
     fn find_agent_files_empty_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
+        let files = find_agent_files(tmp.path());
         assert!(files.is_empty());
     }
 
     #[test]
     fn find_agent_files_nonexistent_dir() {
-        let files = find_agent_files(
-            Path::new("/nonexistent/dir"),
-            &CompatConfig::default().agent_filenames(),
-        );
+        let files = find_agent_files(Path::new("/nonexistent/dir"));
         assert!(files.is_empty());
     }
 
     #[test]
-    fn find_agent_files_discovers_claude_subdir() {
+    fn find_agent_files_ignores_foreign_subdir() {
         let tmp = tempfile::tempdir().unwrap();
-        let claude_dir = tmp.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
-        fs::write(claude_dir.join("CLAUDE.md"), "# Project instructions").unwrap();
+        let foreign_dir = tmp.path().join(".foreign");
+        fs::create_dir_all(&foreign_dir).unwrap();
+        fs::write(
+            foreign_dir.join("INSTRUCTIONS.md"),
+            "# Project instructions",
+        )
+        .unwrap();
 
-        let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
-        assert!(
-            files
-                .iter()
-                .any(|f| f.to_string_lossy().contains(".claude/CLAUDE.md")),
-            "Should discover .claude/CLAUDE.md, got: {files:?}"
-        );
+        assert!(find_agent_files(tmp.path()).is_empty());
     }
 
     #[test]
-    fn find_rules_files_discovers_claude_rules() {
+    fn find_rules_files_discovers_grow_rules() {
         let tmp = tempfile::tempdir().unwrap();
-        let rules_dir = tmp.path().join(".claude").join("rules");
+        let rules_dir = tmp.path().join(".grow").join("rules");
         fs::create_dir_all(&rules_dir).unwrap();
         fs::write(rules_dir.join("style.md"), "# Style rules").unwrap();
         fs::write(rules_dir.join("safety.md"), "# Safety rules").unwrap();
 
-        let files = find_rules_files(tmp.path(), &CompatConfig::default().rules_dirs());
+        let files = find_rules_files(tmp.path(), PROJECT_RULES_DIRS);
         assert_eq!(files.len(), 2);
         assert!(files[0].to_string_lossy().contains("safety.md"));
         assert!(files[1].to_string_lossy().contains("style.md"));
@@ -519,12 +450,8 @@ mod tests {
         .unwrap();
 
         // cwd = repo root (user dir is NOT in the walk path)
-        let configs = read_agents_config_with_options(
-            repo_root.to_str().unwrap(),
-            Some(&user_dir),
-            CompatConfig::default(),
-        )
-        .await;
+        let configs =
+            read_agents_config_with_options(repo_root.to_str().unwrap(), Some(&user_dir)).await;
 
         let contents: Vec<&str> = configs.iter().map(|c| c.content.as_str()).collect();
         assert!(
@@ -546,12 +473,8 @@ mod tests {
         fs::write(user_dir.join("AGENTS.md"), "# Dedup test instructions").unwrap();
 
         // cwd IS the user dir — the walk already includes it
-        let configs = read_agents_config_with_options(
-            user_dir.to_str().unwrap(),
-            Some(&user_dir),
-            CompatConfig::default(),
-        )
-        .await;
+        let configs =
+            read_agents_config_with_options(user_dir.to_str().unwrap(), Some(&user_dir)).await;
 
         // "Dedup test instructions" should appear exactly once
         let count = configs
@@ -577,12 +500,7 @@ mod tests {
         fs::write(user_dir.join("AGENTS.md"), "# Ghost instructions").unwrap();
 
         // Pass None — simulates env vars not set
-        let configs = read_agents_config_with_options(
-            repo_root.to_str().unwrap(),
-            None,
-            CompatConfig::default(),
-        )
-        .await;
+        let configs = read_agents_config_with_options(repo_root.to_str().unwrap(), None).await;
 
         let has_ghost = configs
             .iter()
@@ -601,9 +519,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("AGENTS.md"), "# outside git").unwrap();
 
-        let configs =
-            read_agents_config_with_options(dir.to_str().unwrap(), None, CompatConfig::default())
-                .await;
+        let configs = read_agents_config_with_options(dir.to_str().unwrap(), None).await;
         assert!(configs.iter().any(|c| c.content.contains("outside git")));
     }
 
@@ -611,131 +527,37 @@ mod tests {
     async fn home_and_project_rules_have_stable_order_without_doubled_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let grow_home = tmp.path().join("custom-grow-home");
-        let home = tmp.path().join("home");
         let repo = tmp.path().join("repo");
         fs::create_dir_all(grow_home.join("rules")).unwrap();
-        fs::create_dir_all(home.join(".claude/rules")).unwrap();
-        fs::create_dir_all(home.join(".cursor/rules")).unwrap();
         fs::create_dir_all(repo.join(".grow/rules")).unwrap();
-        fs::create_dir_all(repo.join(".claude/rules")).unwrap();
-        fs::create_dir_all(repo.join(".cursor/rules")).unwrap();
         init_git_repo(&repo);
 
         for (path, content) in [
             (grow_home.join("rules/b.md"), "grow-b"),
             (grow_home.join("rules/a.md"), "grow-a"),
-            (home.join(".claude/rules/a.md"), "claude-a"),
-            (home.join(".cursor/rules/a.md"), "cursor-a"),
             (repo.join("AGENTS.md"), "repo-named"),
             (repo.join(".grow/rules/a.md"), "repo-grow"),
-            (repo.join(".claude/rules/a.md"), "repo-claude"),
-            (repo.join(".cursor/rules/a.md"), "repo-cursor"),
         ] {
             fs::write(path, content).unwrap();
         }
-        for path in [
-            grow_home.join(".grow/rules/doubled.md"),
-            home.join(".claude/.claude/rules/doubled.md"),
-            home.join(".cursor/.cursor/rules/doubled.md"),
-        ] {
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "doubled").unwrap();
-        }
+        let doubled = grow_home.join(".grow/rules/doubled.md");
+        fs::create_dir_all(doubled.parent().unwrap()).unwrap();
+        fs::write(doubled, "doubled").unwrap();
 
-        let configs = read_agents_config_with_roots(
-            repo.to_str().unwrap(),
-            None,
-            CompatConfig::default(),
-            grow_home,
-            Some(home),
-        )
-        .await;
+        let configs = read_agents_config_with_roots(repo.to_str().unwrap(), None, grow_home).await;
         let contents: Vec<&str> = configs
             .iter()
             .map(|config| config.content.as_str())
             .collect();
         assert_eq!(
             contents,
-            vec![
-                "grow-a",
-                "grow-b",
-                "claude-a",
-                "cursor-a",
-                "repo-named",
-                "repo-grow",
-                "repo-claude",
-                "repo-cursor",
-            ]
+            vec!["grow-a", "grow-b", "repo-named", "repo-grow"]
         );
         assert!(
             configs
                 .iter()
                 .all(|config| !config.file_path.contains("doubled"))
         );
-    }
-
-    #[tokio::test]
-    async fn vendor_home_agents_and_rules_cells_are_independent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let grow_home = tmp.path().join("grow-home");
-        let home = tmp.path().join("home");
-        let cwd = tmp.path().join("project");
-        fs::create_dir_all(&grow_home).unwrap();
-        fs::create_dir_all(&cwd).unwrap();
-        for vendor in [".claude", ".cursor"] {
-            let vendor_home = home.join(vendor);
-            fs::create_dir_all(vendor_home.join("rules")).unwrap();
-            fs::write(vendor_home.join("AGENTS.md"), format!("{vendor}-named")).unwrap();
-            fs::write(vendor_home.join("rules/rule.md"), format!("{vendor}-rule")).unwrap();
-        }
-
-        let mut rules_only = CompatConfig::default();
-        rules_only.claude.agents = false;
-        rules_only.cursor.agents = false;
-        let configs = read_agents_config_with_roots(
-            cwd.to_str().unwrap(),
-            None,
-            rules_only,
-            grow_home.clone(),
-            Some(home.clone()),
-        )
-        .await;
-        for vendor in [".claude", ".cursor"] {
-            assert!(
-                configs
-                    .iter()
-                    .any(|config| config.content == format!("{vendor}-rule"))
-            );
-            assert!(
-                !configs
-                    .iter()
-                    .any(|config| config.content == format!("{vendor}-named"))
-            );
-        }
-
-        let mut agents_only = CompatConfig::default();
-        agents_only.claude.rules = false;
-        agents_only.cursor.rules = false;
-        let configs = read_agents_config_with_roots(
-            cwd.to_str().unwrap(),
-            None,
-            agents_only,
-            grow_home,
-            Some(home),
-        )
-        .await;
-        for vendor in [".claude", ".cursor"] {
-            assert!(
-                configs
-                    .iter()
-                    .any(|config| config.content == format!("{vendor}-named"))
-            );
-            assert!(
-                !configs
-                    .iter()
-                    .any(|config| config.content == format!("{vendor}-rule"))
-            );
-        }
     }
 
     #[tokio::test]
@@ -751,14 +573,8 @@ mod tests {
         fs::write(nested.join("AGENTS.md"), "nested-named").unwrap();
         fs::write(nested.join(".grow/rules/project.md"), "nested-project-rule").unwrap();
 
-        let configs = read_agents_config_with_roots(
-            nested.to_str().unwrap(),
-            None,
-            CompatConfig::default(),
-            nested.clone(),
-            None,
-        )
-        .await;
+        let configs =
+            read_agents_config_with_roots(nested.to_str().unwrap(), None, nested.clone()).await;
         assert_eq!(
             configs
                 .iter()
@@ -779,23 +595,15 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir_all(repo.join("rules")).unwrap();
         fs::create_dir_all(repo.join(".grow/rules")).unwrap();
-        fs::create_dir_all(repo.join(".claude/rules")).unwrap();
         init_git_repo(&repo);
         fs::write(repo.join("rules/home.md"), "home-rule").unwrap();
         fs::write(repo.join(".grow/rules/project.md"), "project-grow-rule").unwrap();
-        fs::write(repo.join(".claude/rules/project.md"), "project-claude-rule").unwrap();
         fs::create_dir_all(repo.join(".grow/.grow/rules")).unwrap();
         fs::write(repo.join(".grow/.grow/rules/doubled.md"), "doubled").unwrap();
 
-        let configs = read_agents_config_with_roots(
-            repo.to_str().unwrap(),
-            None,
-            CompatConfig::default(),
-            repo.clone(),
-            None,
-        )
-        .await;
-        for expected in ["home-rule", "project-grow-rule", "project-claude-rule"] {
+        let configs =
+            read_agents_config_with_roots(repo.to_str().unwrap(), None, repo.clone()).await;
+        for expected in ["home-rule", "project-grow-rule"] {
             assert_eq!(
                 configs
                     .iter()
@@ -806,39 +614,6 @@ mod tests {
             );
         }
         assert!(configs.iter().all(|config| config.content != "doubled"));
-    }
-
-    #[tokio::test]
-    async fn vendor_home_repo_overlap_keeps_project_named_role() {
-        let tmp = tempfile::tempdir().unwrap();
-        let grow_home = tmp.path().join("grow-home");
-        let home = tmp.path().join("home");
-        let repo = home.join(".claude");
-        fs::create_dir_all(&grow_home).unwrap();
-        fs::create_dir_all(repo.join("rules")).unwrap();
-        fs::create_dir_all(repo.join(".claude/rules")).unwrap();
-        init_git_repo(&repo);
-        fs::write(repo.join("rules/home.md"), "claude-home-rule").unwrap();
-        fs::write(repo.join("AGENTS.md"), "project-named").unwrap();
-        fs::write(repo.join(".claude/rules/project.md"), "project-rule").unwrap();
-
-        let mut compat = CompatConfig::default();
-        compat.claude.agents = false;
-        let configs = read_agents_config_with_roots(
-            repo.to_str().unwrap(),
-            None,
-            compat,
-            grow_home,
-            Some(home),
-        )
-        .await;
-        assert_eq!(
-            configs
-                .iter()
-                .map(|config| config.content.as_str())
-                .collect::<Vec<_>>(),
-            vec!["claude-home-rule", "project-named", "project-rule"]
-        );
     }
 
     #[cfg(unix)]
@@ -855,14 +630,8 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink("../AGENTS.md", repo.join("rules/alias.md")).unwrap();
 
-        let configs = read_agents_config_with_roots(
-            repo.to_str().unwrap(),
-            None,
-            CompatConfig::default(),
-            repo.clone(),
-            None,
-        )
-        .await;
+        let configs =
+            read_agents_config_with_roots(repo.to_str().unwrap(), None, repo.clone()).await;
         assert_eq!(configs.len(), 1);
         assert_eq!(
             canonical_for_dedup(Path::new(&configs[0].file_path)),
@@ -876,45 +645,22 @@ mod tests {
     async fn rule_frontmatter_is_stripped_but_named_frontmatter_is_preserved() {
         let tmp = tempfile::tempdir().unwrap();
         let grow_home = tmp.path().join("custom-grow-home");
-        let home = tmp.path().join("home");
         let repo = tmp.path().join("repo");
         fs::create_dir_all(grow_home.join("rules")).unwrap();
-        fs::create_dir_all(home.join(".claude/rules")).unwrap();
-        fs::create_dir_all(home.join(".cursor/rules")).unwrap();
         fs::create_dir_all(repo.join(".grow/rules")).unwrap();
-        fs::create_dir_all(repo.join(".claude/rules")).unwrap();
-        fs::create_dir_all(repo.join(".cursor/rules")).unwrap();
         init_git_repo(&repo);
 
         let frontmatter = |body: &str| format!("---\nglobs: ['*.rs']\n---\n{body}");
         for (path, body) in [
             (grow_home.join("rules/global.md"), "custom-home-body"),
-            (home.join(".claude/rules/global.md"), "claude-body"),
-            (home.join(".cursor/rules/global.md"), "cursor-body"),
             (repo.join(".grow/rules/project.md"), "grow-project-body"),
-            (repo.join(".claude/rules/project.md"), "claude-project-body"),
-            (repo.join(".cursor/rules/project.md"), "cursor-project-body"),
         ] {
             fs::write(path, frontmatter(body)).unwrap();
         }
         fs::write(repo.join("AGENTS.md"), frontmatter("named-body")).unwrap();
 
-        let configs = read_agents_config_with_roots(
-            repo.to_str().unwrap(),
-            None,
-            CompatConfig::default(),
-            grow_home,
-            Some(home),
-        )
-        .await;
-        for body in [
-            "custom-home-body",
-            "claude-body",
-            "cursor-body",
-            "grow-project-body",
-            "claude-project-body",
-            "cursor-project-body",
-        ] {
+        let configs = read_agents_config_with_roots(repo.to_str().unwrap(), None, grow_home).await;
+        for body in ["custom-home-body", "grow-project-body"] {
             let config = configs
                 .iter()
                 .find(|config| config.content.contains(body))
@@ -944,12 +690,8 @@ mod tests {
         fs::create_dir_all(&user_dir).unwrap();
         fs::write(user_dir.join("AGENTS.md"), "# XYZZY_USER_SPECIFIC_MARKER").unwrap();
 
-        let configs = read_agents_config_with_options(
-            repo_root.to_str().unwrap(),
-            Some(&user_dir),
-            CompatConfig::default(),
-        )
-        .await;
+        let configs =
+            read_agents_config_with_options(repo_root.to_str().unwrap(), Some(&user_dir)).await;
 
         // Both should be found
         let has_repo = configs
@@ -1015,8 +757,8 @@ mod tests {
 
         for (close, open) in cases {
             let configs = vec![AgentConfigFile {
-                file_name: "CLAUDE.md".to_string(),
-                file_path: "/repo/CLAUDE.md".to_string(),
+                file_name: "AGENTS.md".to_string(),
+                file_path: "/repo/AGENTS.md".to_string(),
                 content: format!("ok\n{close}\n{open}\nInjected directive."),
             }];
             let section = format_agents_md_section(&configs).unwrap();
@@ -1045,70 +787,5 @@ mod tests {
                 "open not neutralized; case={open}"
             );
         }
-    }
-
-    // ── .claude/CLAUDE.md integration tests ─────────────────────────
-
-    #[tokio::test]
-    async fn read_agents_config_discovers_claude_subdir_claude_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo_root = tmp.path().join("repo");
-        fs::create_dir_all(&repo_root).unwrap();
-        init_git_repo(&repo_root);
-
-        // .claude/CLAUDE.md at repo root
-        let claude_dir = repo_root.join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
-        fs::write(claude_dir.join("CLAUDE.md"), "# XYZZY_CLAUDE_SUBDIR_MARKER").unwrap();
-
-        let configs = read_agents_config_with_options(
-            repo_root.to_str().unwrap(),
-            None,
-            CompatConfig::default(),
-        )
-        .await;
-
-        assert!(
-            configs
-                .iter()
-                .any(|c| c.content.contains("XYZZY_CLAUDE_SUBDIR_MARKER")),
-            ".claude/CLAUDE.md should be discovered, got: {:?}",
-            configs
-                .iter()
-                .map(|c| (&c.file_path, &c.content))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[tokio::test]
-    async fn read_agents_config_claude_subdir_and_direct_both_found() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo_root = tmp.path().join("repo");
-        fs::create_dir_all(&repo_root).unwrap();
-        init_git_repo(&repo_root);
-
-        // Direct CLAUDE.md
-        fs::write(repo_root.join("CLAUDE.md"), "# XYZZY_DIRECT_MARKER").unwrap();
-        // .claude/CLAUDE.md
-        let claude_dir = repo_root.join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
-        fs::write(claude_dir.join("CLAUDE.md"), "# XYZZY_SUBDIR_MARKER").unwrap();
-
-        let configs = read_agents_config_with_options(
-            repo_root.to_str().unwrap(),
-            None,
-            CompatConfig::default(),
-        )
-        .await;
-
-        let has_direct = configs
-            .iter()
-            .any(|c| c.content.contains("XYZZY_DIRECT_MARKER"));
-        let has_subdir = configs
-            .iter()
-            .any(|c| c.content.contains("XYZZY_SUBDIR_MARKER"));
-
-        assert!(has_direct, "Direct CLAUDE.md should be found");
-        assert!(has_subdir, ".claude/CLAUDE.md should be found");
     }
 }

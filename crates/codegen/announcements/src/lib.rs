@@ -73,6 +73,13 @@ pub fn default_announcements() -> Vec<Announcement> {
 // Persistence
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct HiddenAnnouncementState<'a> {
+    #[serde(borrow)]
+    hidden_ids: std::borrow::Cow<'a, BTreeSet<String>>,
+}
+
 /// Stable per-announcement hide key: the trimmed non-empty `id`, else a
 /// content-derived fallback so id-less items are still hideable. The fallback
 /// joins title/message with the unprintable unit separator (\x1f) so distinct
@@ -89,29 +96,22 @@ pub fn announcement_hide_key(a: &Announcement) -> String {
 }
 
 /// Parse persisted hidden state into a set of hidden announcement ids.
-/// Unknown fields are tolerated; malformed input yields an empty set. The
-/// legacy `{"hidden": bool}` shape carries no ids to migrate, so it decays to
-/// empty — the banner re-shows once and the next hide re-persists per-ID.
+/// Only the canonical exact shape is accepted; malformed or non-canonical
+/// input yields an empty set so visibility fails open.
 pub fn parse_hidden_announcement_ids(s: &str) -> BTreeSet<String> {
-    #[derive(Deserialize)]
-    struct State {
-        #[serde(default)]
-        hidden_ids: BTreeSet<String>,
-    }
-    serde_json::from_str::<State>(s)
-        .map(|s| s.hidden_ids)
+    serde_json::from_str::<HiddenAnnouncementState<'_>>(s)
+        .map(|state| state.hidden_ids.into_owned())
         .unwrap_or_default()
 }
 
 /// Serialize hidden announcement ids (writes only the `hidden_ids` shape).
 /// `BTreeSet` is load-bearing: deterministic order keeps the on-disk file
 /// stable across writes.
-pub fn serialize_hidden_announcement_ids(ids: &BTreeSet<String>) -> Option<String> {
-    #[derive(Serialize)]
-    struct State<'a> {
-        hidden_ids: &'a BTreeSet<String>,
-    }
-    serde_json::to_string(&State { hidden_ids: ids }).ok()
+pub fn serialize_hidden_announcement_ids(ids: &BTreeSet<String>) -> String {
+    serde_json::to_string(&HiddenAnnouncementState {
+        hidden_ids: std::borrow::Cow::Borrowed(ids),
+    })
+    .expect("a string set is always JSON-serializable")
 }
 
 /// Drop hidden ids whose announcement is no longer active; returns whether the
@@ -137,9 +137,7 @@ pub async fn read_hidden_announcement_ids() -> BTreeSet<String> {
 /// Write hidden announcement ids to `~/.grow/announcements.json`.
 pub async fn write_hidden_announcement_ids(ids: &BTreeSet<String>) {
     let path = announcements_state_path();
-    if let Some(s) = serialize_hidden_announcement_ids(ids) {
-        let _ = tokio::fs::write(&path, s).await;
-    }
+    let _ = tokio::fs::write(&path, serialize_hidden_announcement_ids(ids)).await;
 }
 
 fn announcements_state_path() -> PathBuf {
@@ -268,31 +266,30 @@ mod tests {
         let ids: BTreeSet<String> = ["outage-a".to_string(), "outage-b".to_string()]
             .into_iter()
             .collect();
-        let s = serialize_hidden_announcement_ids(&ids).expect("serialize");
+        let s = serialize_hidden_announcement_ids(&ids);
         assert_eq!(parse_hidden_announcement_ids(&s), ids);
         assert_eq!(s, r#"{"hidden_ids":["outage-a","outage-b"]}"#);
 
         let empty = BTreeSet::new();
-        let s = serialize_hidden_announcement_ids(&empty).expect("serialize empty");
+        let s = serialize_hidden_announcement_ids(&empty);
         assert!(parse_hidden_announcement_ids(&s).is_empty());
     }
 
-    /// The pre-per-ID file shape carried no ids, so it cannot say WHICH
-    /// announcement was hidden — both values decay to "nothing hidden".
     #[test]
-    fn parse_hidden_ids_discards_legacy_bool_shape() {
-        assert!(parse_hidden_announcement_ids(r#"{"hidden":true}"#).is_empty());
-        assert!(parse_hidden_announcement_ids(r#"{"hidden":false}"#).is_empty());
-    }
-
-    #[test]
-    fn parse_hidden_ids_tolerates_unknown_fields_and_malformed_input() {
-        let got = parse_hidden_announcement_ids(r#"{"hidden_ids":["a"],"future_field":{"x":1}}"#);
-        assert_eq!(got, ["a".to_string()].into_iter().collect());
-
-        assert!(parse_hidden_announcement_ids("").is_empty());
-        assert!(parse_hidden_announcement_ids("not json").is_empty());
-        assert!(parse_hidden_announcement_ids(r#"{"hidden_ids":"oops"}"#).is_empty());
+    fn parse_hidden_ids_rejects_noncanonical_state() {
+        for rejected in [
+            r#"{"hidden_ids":["a"],"unknown":true}"#,
+            r#"{"hidden":true}"#,
+            r#"{}"#,
+            r#"{"hidden_ids":"oops"}"#,
+            "",
+            "not json",
+        ] {
+            assert!(
+                parse_hidden_announcement_ids(rejected).is_empty(),
+                "non-canonical state must fail open: {rejected}"
+            );
+        }
     }
 
     #[test]

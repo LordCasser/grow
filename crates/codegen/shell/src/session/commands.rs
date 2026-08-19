@@ -30,6 +30,8 @@ pub enum SideQuestionError {
     Sampling(#[from] sampling_types::SamplingError),
     #[error("failed to prepare client: {0}")]
     PrepareClient(String),
+    #[error("side question Sideband failed: {0}")]
+    Sideband(String),
     #[error("No response from model")]
     EmptyResponse,
 }
@@ -85,15 +87,6 @@ pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> P
         structured_output: None,
         usage: None,
     })
-}
-/// Pre-parsed prompt metadata sent back to the caller after `parse_prompt`.
-pub struct ParsedPromptInfo {
-    /// Post-truncation text (what the model sees).
-    pub text: String,
-    /// Pre-truncation text, only `Some` when truncated.
-    pub full_text: Option<String>,
-    /// Local disk path embedded in truncated message, only `Some` when truncated.
-    pub local_path: Option<std::path::PathBuf>,
 }
 /// Priority levels for notification drain timing.
 ///
@@ -186,10 +179,6 @@ pub enum SessionCommand {
         /// Optional oneshot fired after the user-message Timeline event is
         /// durably committed, before LLM inference begins.
         persist_ack: Option<oneshot::Sender<()>>,
-        /// Pre-parsed prompt content blocks from `parse_prompt`, sent back to the
-        /// caller so it can use the fully-rendered prompt for metadata.json without
-        /// re-parsing. The session sends on this channel right after parsing.
-        parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     },
     /// Execute a host slash command through the actor mailbox instead of the
     /// prompt queue. This keeps commands responsive while a model turn is
@@ -198,6 +187,13 @@ pub enum SessionCommand {
     ExecuteSlashCommand {
         command: String,
         respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Append a user-authored `session/title` fact to the canonical Timeline.
+    /// The actor owns this mutation so it serializes against automatic title
+    /// generation and permanently consumes the one-shot generated-title route.
+    SetSessionTitle {
+        title: String,
+        respond_to: oneshot::Sender<Result<chat_state::TimelineEvent, String>>,
     },
     QueryPromptStatus {
         prompt_id: String,
@@ -318,7 +314,7 @@ pub enum SessionCommand {
         registry: Option<std::sync::Arc<agent::plugins::PluginRegistry>>,
     },
     /// Re-discover the session's own project hooks (`.grow/hooks`,
-    /// `.cursor/hooks.json`, …) mid-session, re-evaluating folder trust. Used by
+    /// `.grow/hooks`, plugin, or MCP config changes) mid-session, re-evaluating folder trust. Used by
     /// the interactive folder-trust grant so a granted folder's repo-local hooks
     /// start without a session restart (plugin-contributed hooks are handled by
     /// `ReloadPlugins`; this covers the non-plugin project hook registry).
@@ -334,13 +330,9 @@ pub enum SessionCommand {
     FlushMemory {
         respond_to: oneshot::Sender<acp::Result<bool>>,
     },
-    /// Auto-approve all permission prompts when `enabled`.
-    SetYoloMode {
-        enabled: bool,
-    },
-    /// Set auto permission mode (LLM classifier for non-fast-path tools).
-    SetAutoMode {
-        enabled: bool,
+    /// Atomically select the session's canonical permission mode.
+    SetPermissionMode {
+        mode: crate::util::config::PermissionMode,
     },
     ResetPermissionState,
     Rewind {
@@ -427,7 +419,7 @@ pub enum SessionCommand {
         server_name: String,
         enabled: bool,
         /// Fully-formed server config to add when re-enabling. Built by the
-        /// caller via `merge_managed_mcp_servers` (with explicit headers injected).
+        /// caller via `merge_mcp_servers` (with explicit headers injected).
         /// `None` when disabling.
         server_config: Option<acp::McpServer>,
         respond_to: oneshot::Sender<Result<(), acp::Error>>,
@@ -438,16 +430,11 @@ pub enum SessionCommand {
         server_name: String,
         tool_name: String,
         enabled: bool,
-        is_managed_gateway: bool,
         respond_to: oneshot::Sender<Result<(), acp::Error>>,
     },
     /// Read MCP status: which servers are configured, which clients are healthy, what tools.
     GetMcpStatus {
         respond_to: oneshot::Sender<crate::extensions::mcp::McpStatusSnapshot>,
-    },
-    GetManagedGatewayDisabledTools {
-        respond_to:
-            oneshot::Sender<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     },
     /// Snapshot the session's live MCP client pool for subagent inheritance.
     SnapshotMcpPool {
@@ -477,7 +464,6 @@ pub enum SessionCommand {
         respond_to:
             oneshot::Sender<Result<crate::extensions::mcp::McpReadResourceResponse, String>>,
     },
-    RefreshMcpSearchIndex,
     /// Move a foreground bash command to background by tool_call_id.
     /// Unblocks the agent loop so it can continue with the next action.
     BackgroundForegroundCommand {

@@ -117,11 +117,6 @@ impl ListToolsContext {
 #[derive(Clone, Debug)]
 pub struct Cwd(pub PathBuf);
 
-/// Opaque behaviour version. Tools that branch on this MUST treat
-/// unknown values as a hard error.
-#[derive(Clone, Debug)]
-pub struct BehaviorVersion(pub String);
-
 /// Session ID context used to dispatch into per-session tool state.
 #[derive(Clone, Debug)]
 pub struct SessionContext(pub String);

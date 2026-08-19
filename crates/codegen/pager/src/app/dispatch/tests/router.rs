@@ -282,11 +282,11 @@ fn quit_returns_quit_effect() {
 fn follow_up_chip_does_not_execute_slash_command() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    assert!(!app.agents[&id].session.is_yolo());
+    assert!(!app.agents[&id].session.is_always_approve());
     let effects = dispatch(Action::SubmitFollowUp("/always-approve".into()), &mut app);
     assert!(
-        !app.agents[&id].session.is_yolo(),
-        "a /always-approve chip must NOT flip YOLO mode"
+        !app.agents[&id].session.is_always_approve(),
+        "a /always-approve chip must NOT flip always-approve mode"
     );
     assert!(
         matches!(&effects[..], [Effect::SendPrompt { text, .. }] if text == "/always-approve"),
@@ -308,7 +308,7 @@ fn chip_submit_while_running_clears_follow_up_chips() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.apply_follow_ups("resp-1".into(), vec!["Summarize".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["Summarize".into()]);
         assert!(agent.follow_ups.is_some(), "precondition: chips shown");
         agent.session.state = AgentState::TurnRunning;
     }
@@ -327,10 +327,11 @@ fn chip_submit_while_running_clears_follow_up_chips() {
 fn chip_submit_while_reconnect_pending_keeps_chips_and_does_not_send() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .apply_follow_ups("resp-1".into(), vec!["Summarize".into()]);
+    app.agents.get_mut(&id).unwrap().apply_follow_ups(
+        "resp-1".into(),
+        "p1",
+        vec!["Summarize".into()],
+    );
     app.reconnect_pending = true;
     let effects = dispatch(Action::SubmitFollowUp("Summarize".into()), &mut app);
     assert!(
@@ -1250,8 +1251,8 @@ fn view_catalog_entry_emits_fetch_effect() {
     let mut app = test_app_with_agent();
     let effects = dispatch(
         Action::ViewCatalogEntry {
-            kind: "persona".into(),
-            name: "researcher".into(),
+            kind: "agent".into(),
+            name: "review".into(),
         },
         &mut app,
     );
@@ -1259,7 +1260,7 @@ fn view_catalog_entry_emits_fetch_effect() {
     assert!(matches!(
         &effects[0],
         Effect::FetchCatalogEntry { kind, name }
-        if kind == "persona" && name == "researcher"
+        if kind == "agent" && name == "review"
     ));
 }
 /// End-to-end regression test for the "always re-asks" requirement.
@@ -1594,7 +1595,7 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
 }
 /// If the user picks the regular "Yes, proceed" option (NOT
 /// enable-always-approve), the dispatcher must behave exactly as
-/// before — no PersistPermissionMode effect, no YOLO flip. Pins
+/// before — no PersistPermissionMode effect, no always-approve flip. Pins
 /// that the new code path is gated strictly on the id check.
 #[test]
 fn regular_allow_once_does_not_trigger_always_approve_persist() {
@@ -1613,21 +1614,21 @@ fn regular_allow_once_does_not_trigger_always_approve_persist() {
              the always-approve mode is opt-in via the dedicated option only",
     );
     assert!(
-        !app.agents[&AgentId(0)].session.is_yolo(),
-        "session.yolo_mode must remain OFF when the regular AllowOnce option is picked",
+        !app.agents[&AgentId(0)].session.is_always_approve(),
+        "session.always_approve_mode must remain OFF when the regular AllowOnce option is picked",
     );
     assert!(
-        !app.default_yolo,
-        "app.default_yolo must remain OFF when the regular AllowOnce option is picked",
+        !app.default_permission_mode.is_always_approve(),
+        "app.default_permission_mode.is_always_approve() must remain OFF when the regular AllowOnce option is picked",
     );
 }
-/// Launch-time blocked `--yolo` in the TUI: the one-shot notice is
+/// Launch-time blocked `--permission-mode always-approve` in the TUI: the one-shot notice is
 /// surfaced (toast + durable system line) on the first agent view and
 /// consumed so later switches stay quiet.
 #[test]
 fn switch_to_agent_surfaces_launch_block_notice_once() {
     let mut app = test_app();
-    app.yolo_launch_block_notice = Some(POLICY_WARNING);
+    app.always_approve_launch_block_notice = Some(POLICY_WARNING);
     let id = AgentId(0);
     let session = make_test_agent_session(&app, id, "test-session");
     app.agents
@@ -1652,7 +1653,7 @@ fn switch_to_agent_surfaces_launch_block_notice_once() {
         "warning must land in the transcript exactly once",
     );
     assert_eq!(
-        app.yolo_launch_block_notice, None,
+        app.always_approve_launch_block_notice, None,
         "one-shot must be consumed"
     );
     let id2 = AgentId(1);
@@ -1663,7 +1664,7 @@ fn switch_to_agent_surfaces_launch_block_notice_once() {
     assert!(app.agents[&id2].toast.is_none());
     assert_eq!(app.agents[&id2].scrollback.iter_entries().count(), 0);
 }
-/// Switching to a non-auto/non-yolo agent re-anchors a stale global
+/// Switching to a non-auto/non-always-approve agent re-anchors a stale global
 /// `"auto"` mirror (left by a different agent) to `"ask"`, so the cycle's
 /// `sync_active_auto_flag` derive can't copy that Auto onto the now-active
 /// agent.

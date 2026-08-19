@@ -14,7 +14,7 @@
 //! and re-runs the full bootstrap when it is missing.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -27,14 +27,12 @@ use tokio::time::Instant;
 
 use super::search_fts::{self, SessionDoc, SessionSearchIndex, SessionSearchRow};
 use super::search_recovery;
-use super::{
-    ContentPeek, GROW_SESSION_UPDATE_METHOD, PromptExtractEvent, RawLinePeek, RawParamsPeek,
-    StorageAdapter, collect_prompts_from_events,
-};
+use super::{StorageAdapter, read_timeline_file};
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
-use crate::session::wire_tags::{REWIND_MARKER, USER_MESSAGE_CHUNK};
 use agent_client_protocol as acp;
+use chat_state::Timeline;
+use sampling_types::ConversationItem;
 
 const SEARCH_INDEX_DEBOUNCE_MS: u64 = 500;
 const SEARCH_CONTENT_CHAR_LIMIT: usize = 200_000;
@@ -275,7 +273,7 @@ pub struct BootstrapProgress {
     pub skipped: AtomicU64,
     /// Sessions skipped because content hash was unchanged.
     pub unchanged: AtomicU64,
-    /// Total bytes of `updates.jsonl` read during this bootstrap.
+    /// Total bytes of canonical Timeline ledgers read during this bootstrap.
     pub bytes_read: AtomicU64,
 }
 
@@ -385,7 +383,7 @@ impl SearchIndexManager {
 /// Trigger indexing for a session that was just saved or updated.
 ///
 /// This is the public hook to call from session persistence paths
-/// (e.g., after `update_session_title`, after each prompt turn).
+/// (e.g., after a canonical title projection, after each prompt turn).
 pub fn notify_session_updated(session_id: &str, cwd: &str) {
     let root = crate::util::grow_home::grow_home();
     SEARCH_INDEX_MANAGER.enqueue(root, session_id.to_string(), cwd.to_string());
@@ -999,7 +997,7 @@ enum UpsertOutcome {
     Indexed { bytes_read: u64 },
     /// Content hash matched existing index entry — no update needed.
     Unchanged { bytes_read: u64 },
-    /// No updates file available (storage backend doesn't expose paths).
+    /// No Timeline file available (storage backend doesn't expose paths).
     NoContent,
 }
 
@@ -1041,15 +1039,12 @@ async fn upsert_session(
     storage: &dyn StorageAdapter,
     info: &Info,
 ) -> io::Result<UpsertOutcome> {
-    // Single-pass direct file I/O: bypass StorageAdapter and open updates.jsonl
-    // once, extracting prompts, assistant text, and tool metadata in one pass.
-    // Reduces I/O by 3x vs the old 3-call pattern.
-    let (content, bytes_read) = if let Some(updates_path) = storage.updates_file_path(info) {
-        tokio::task::spawn_blocking(move || {
-            collect_all_indexable_content_single_pass(&updates_path)
-        })
-        .await
-        .map_err(io::Error::other)??
+    // Search is a pure projection of the canonical Timeline ledger. The UI
+    // replay stream is deliberately excluded from content reconstruction.
+    let (content, bytes_read) = if let Some(timeline_path) = storage.timeline_file_path(info) {
+        tokio::task::spawn_blocking(move || collect_timeline_indexable_content(&timeline_path))
+            .await
+            .map_err(io::Error::other)??
     } else {
         // Storage backend doesn't expose file paths — no content to index
         return Ok(UpsertOutcome::NoContent);
@@ -1112,13 +1107,13 @@ async fn reindex_all(
         .store(summaries.len() as u64, Ordering::Relaxed);
     let expected_ids: HashSet<String> = summaries.iter().map(|s| s.info.id.to_string()).collect();
 
-    // Pre-compute updates file paths for all sessions (cheap path
+    // Pre-compute Timeline file paths for all sessions (cheap path
     // computation — no I/O). This decouples the parallel pipeline from
     // the StorageAdapter reference which cannot be shared across tasks.
     let sessions: Vec<(Summary, Option<PathBuf>)> = summaries
         .into_iter()
         .map(|s| {
-            let path = storage.updates_file_path(&s.info);
+            let path = storage.timeline_file_path(&s.info);
             (s, path)
         })
         .collect();
@@ -1126,8 +1121,8 @@ async fn reindex_all(
     // Pre-scan: count sessions that will be skipped due to size cap
     let mut skipped_large = 0u64;
     for (_, path) in &sessions {
-        if let Some(updates_path) = path
-            && should_skip_session(updates_path, BOOTSTRAP_MAX_FILE_SIZE)
+        if let Some(timeline_path) = path
+            && should_skip_session(timeline_path, BOOTSTRAP_MAX_FILE_SIZE)
         {
             skipped_large += 1;
         }
@@ -1149,7 +1144,7 @@ async fn reindex_all(
 
     let mut join_set = tokio::task::JoinSet::new();
 
-    for (summary, updates_path) in sessions {
+    for (summary, timeline_path) in sessions {
         let sem = semaphore.clone();
         let progress = progress_arc.clone();
         let root = root_owned.clone();
@@ -1174,8 +1169,8 @@ async fn reindex_all(
 
             let session_id = summary.info.id.to_string();
 
-            // File size pre-check: skip sessions with oversized updates.jsonl
-            if let Some(ref path) = updates_path
+            // File size pre-check: skip sessions with oversized Timeline ledgers.
+            if let Some(ref path) = timeline_path
                 && should_skip_session(path, max_file_size)
             {
                 let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -1205,14 +1200,14 @@ async fn reindex_all(
             }
 
             // Wrap with per-session timeout to prevent pipeline stalls.
-            // The inner block is `async move` to own summary, updates_path,
+            // The inner block is `async move` to own summary, timeline_path,
             // and root — the outer block retains session_id and progress
             // for post-timeout error reporting.
             match tokio::time::timeout(timeout_dur, async move {
-                // Collect content via spawn_blocking (single-pass I/O)
-                let (content, bytes_read) = if let Some(path) = updates_path {
+                // Collect content via one strict Timeline fold.
+                let (content, bytes_read) = if let Some(path) = timeline_path {
                     match tokio::task::spawn_blocking(move || {
-                        collect_all_indexable_content_single_pass(&path)
+                        collect_timeline_indexable_content(&path)
                     })
                     .await
                     {
@@ -1370,322 +1365,82 @@ async fn reindex_all(
     Ok(BootstrapOutcome::Done)
 }
 
-// ---------------------------------------------------------------------------
-// Zero-copy peek structs for single-pass content collection
-//
-// Text-bearing fields are `Cow`, not `&str`: serde cannot borrow `&str` from
-// JSON strings containing escapes (\n, \", \\, \uXXXX), so borrowing would
-// error and silently drop the message from the index. Discriminant-only
-// fields (never escaped) stay `&'a str` for the zero-copy fast path.
-// ---------------------------------------------------------------------------
+const ASSISTANT_SEARCH_LIMIT: usize = 100_000;
+const TOOL_SEARCH_LIMIT: usize = 100_000;
+const TOOL_SEARCH_CALL_LIMIT: usize = 200;
 
-/// Selective peek for assistant text extraction (agent_message_chunk content.text).
-#[derive(serde::Deserialize)]
-struct AgentContentPeek<'a> {
-    #[serde(borrow)]
-    update: AgentUpdatePeek<'a>,
-}
+/// Fold one validated Timeline into the search document for its selected
+/// branch. Prompt text comes from Turn identities; assistant and tool-call
+/// text comes from the uncompressed branch transcript. System instructions,
+/// reasoning, synthetic directives, and tool results are intentionally absent.
+fn timeline_indexable_content(timeline: &Timeline) -> String {
+    let prompts = timeline.prompt_texts().join("\n\n");
+    let mut assistant = String::new();
+    let mut tools = String::new();
+    let mut tool_calls = 0usize;
 
-#[derive(serde::Deserialize)]
-struct AgentUpdatePeek<'a> {
-    #[serde(borrow, default)]
-    content: Option<AgentTextPeek<'a>>,
-}
-
-#[derive(serde::Deserialize)]
-struct AgentTextPeek<'a> {
-    #[serde(rename = "type", default)]
-    content_type: Option<&'a str>,
-    #[serde(borrow, default)]
-    text: Option<std::borrow::Cow<'a, str>>,
-}
-
-/// Selective peek for user message content extraction (user_message_chunk content.text).
-/// Reuses [`ContentPeek`] from `parse_prompt_extract_event` (one source of
-/// truth for the peeked fields and their escape-tolerance) but operates on
-/// pre-parsed `raw_params` to avoid re-parsing the envelope.
-#[derive(serde::Deserialize)]
-struct UserContentPeek<'a> {
-    #[serde(borrow)]
-    update: UserUpdatePeek<'a>,
-}
-
-#[derive(serde::Deserialize)]
-struct UserUpdatePeek<'a> {
-    #[serde(borrow, default)]
-    content: Option<ContentPeek<'a>>,
-    #[serde(default, rename = "_meta")]
-    meta: Option<super::RawChunkMetaPeek>,
-}
-
-/// Selective peek for tool call extraction (tool_call title + locations[].path).
-#[derive(serde::Deserialize)]
-struct ToolCallPeek<'a> {
-    #[serde(borrow)]
-    update: ToolUpdatePeek<'a>,
-}
-
-#[derive(serde::Deserialize)]
-struct ToolUpdatePeek<'a> {
-    #[serde(borrow, default)]
-    title: Option<std::borrow::Cow<'a, str>>,
-    #[serde(borrow, default)]
-    locations: Option<Vec<ToolLocationPeek<'a>>>,
-}
-
-#[derive(serde::Deserialize)]
-struct ToolLocationPeek<'a> {
-    #[serde(borrow, default)]
-    path: Option<std::borrow::Cow<'a, str>>,
-}
-
-/// Collect all indexable content from a session in a single pass.
-///
-/// Opens `updates.jsonl` once with `BufReader`, classifies each line via
-/// zero-copy `RawLinePeek` discriminant, and extracts only the fields
-/// needed for search indexing. Never materializes full
-/// `acp::SessionNotification` objects.
-///
-/// Replaces the old 3-call pattern (`load_prompts_only` + `load_assistant_text`
-/// + `load_tool_metadata`), reducing I/O by 3x and deserialization cost significantly.
-fn collect_all_indexable_content_single_pass(updates_path: &Path) -> io::Result<(String, u64)> {
-    let file = match std::fs::File::open(updates_path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((String::new(), 0)),
-        Err(e) => return Err(e),
-    };
-    let bytes_read = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let reader = io::BufReader::new(file);
-
-    let mut prompt_events: Vec<PromptExtractEvent> = Vec::new();
-    let mut assistant_texts: Vec<String> = Vec::new();
-    let mut current_assistant: String = String::new();
-    let mut tool_meta: Vec<String> = Vec::new();
-    let mut assistant_chars = 0usize;
-    let mut tool_call_count = 0usize;
-    let mut tool_chars_emitted = 0usize;
-
-    const ASSISTANT_MAX_CHARS: usize = 100_000;
-    const TOOL_MAX_CALLS: usize = 200;
-    const TOOL_MAX_CHARS: usize = 100_000;
-
-    // Helper: flush in-progress assistant text buffer on turn boundary.
-    // Must be called in every non-agent_message_chunk branch, matching
-    // the existing `collect_assistant_text` flush semantics (mod.rs:883).
-    let flush_assistant = |current: &mut String, texts: &mut Vec<String>| {
-        if !current.is_empty() {
-            let t = current.trim().to_string();
-            if !t.is_empty() {
-                texts.push(t);
-            }
-            current.clear();
-        }
-    };
-
-    for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(error = %e, "skipping unreadable line in single-pass content collector");
-                // Treat I/O errors as a turn boundary: flush assistant
-                // text and emit NotUserMessage so prompt accumulation
-                // and rewind logic stay consistent with the iterator-based
-                // collectors (PromptExtractIterator yields NotUserMessage on Err).
-                flush_assistant(&mut current_assistant, &mut assistant_texts);
-                prompt_events.push(PromptExtractEvent::NotUserMessage);
-                continue;
-            }
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // Step 1: Peek at envelope to get method + raw params
-        let (raw_params, is_grow) =
-            if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(trimmed) {
-                let raw = env.params.map(|p| p.get()).unwrap_or(trimmed);
-                let grow = env.method == Some(GROW_SESSION_UPDATE_METHOD);
-                (raw, grow)
-            } else {
-                (trimmed, false)
-            };
-
-        // Step 2: Peek at the sessionUpdate discriminant tag.
-        // Preserve the full RawUpdatePeek so rewind_marker can read
-        // target_prompt_index without re-parsing the envelope.
-        let update_peek = serde_json::from_str::<RawParamsPeek<'_>>(raw_params)
-            .ok()
-            .and_then(|p| p.update);
-        let tag = update_peek.as_ref().map(|u| u.session_update);
-
-        // Content events (user messages, assistant responses, tool calls,
-        // thoughts) come from the standard ACP protocol ("session/update").
-        // Control events (rewind markers) come from Grow extensions
-        // ("_grow/session/update"). Dispatch on source first, then tag.
-        if !is_grow {
-            // ── ACP content events ──────────────────────────────────
-            match tag {
-                Some(t) if t == *USER_MESSAGE_CHUNK => {
-                    flush_assistant(&mut current_assistant, &mut assistant_texts);
-                    if let Ok(peek) = serde_json::from_str::<UserContentPeek<'_>>(raw_params)
-                        && let Some(content) = peek.update.content
-                        && content.content_type == Some("text")
-                        && let Some(text) = content.text
-                    {
-                        if content
-                            .meta
-                            .as_ref()
-                            .is_some_and(|m| m.bash_command.is_some())
-                            || peek
-                                .update
-                                .meta
-                                .as_ref()
-                                .is_some_and(|m| m.host_turn == Some(true))
-                        {
-                            prompt_events.push(PromptExtractEvent::NotUserMessage);
-                        } else {
-                            let prompt_index = peek
-                                .update
-                                .meta
-                                .as_ref()
-                                .and_then(|m| m.prompt_index.map(|v| v as usize));
-                            prompt_events.push(PromptExtractEvent::UserTextChunk {
-                                text: text.into_owned(),
-                                prompt_index,
-                            });
-                        }
-                    } else {
-                        prompt_events.push(PromptExtractEvent::NotUserMessage);
+    for item in timeline.branch_transcript() {
+        match item {
+            ConversationItem::Assistant(item) => {
+                push_search_text(&mut assistant, item.content.trim(), ASSISTANT_SEARCH_LIMIT);
+                for call in item.tool_calls {
+                    if tool_calls >= TOOL_SEARCH_CALL_LIMIT {
+                        break;
                     }
-                }
-                Some("agent_message_chunk") => {
-                    // Same assistant turn — no flush
-                    if assistant_chars < ASSISTANT_MAX_CHARS
-                        && let Ok(peek) = serde_json::from_str::<AgentContentPeek<'_>>(raw_params)
-                        && let Some(content) = peek.update.content
-                        && content.content_type == Some("text")
-                        && let Some(text) = content.text
-                        && !text.is_empty()
-                    {
-                        let sep_cost = usize::from(!current_assistant.is_empty());
-                        let budget = ASSISTANT_MAX_CHARS
-                            .saturating_sub(assistant_chars)
-                            .saturating_sub(sep_cost);
-                        if budget > 0 {
-                            if sep_cost > 0 {
-                                current_assistant.push(' ');
-                                assistant_chars += 1;
-                            }
-                            let mut take = text.len().min(budget);
-                            while take > 0 && !text.is_char_boundary(take) {
-                                take -= 1;
-                            }
-                            current_assistant.push_str(&text[..take]);
-                            assistant_chars += take;
-                        }
-                    }
-                    prompt_events.push(PromptExtractEvent::NotUserMessage);
-                }
-                Some("agent_thought_chunk") => {
-                    // Thinking tokens are part of the same assistant turn —
-                    // do NOT flush. Content is not indexed but we must avoid
-                    // treating it as a turn boundary.
-                    prompt_events.push(PromptExtractEvent::NotUserMessage);
-                }
-                Some("tool_call") => {
-                    flush_assistant(&mut current_assistant, &mut assistant_texts);
-                    if tool_call_count < TOOL_MAX_CALLS {
-                        tool_call_count += 1;
-                        if let Ok(peek) = serde_json::from_str::<ToolCallPeek<'_>>(raw_params) {
-                            if let Some(title) = peek.update.title
-                                && !title.is_empty()
-                            {
-                                let budget = TOOL_MAX_CHARS.saturating_sub(tool_chars_emitted);
-                                if budget > 0 {
-                                    let mut take = title.len().min(budget);
-                                    while take > 0 && !title.is_char_boundary(take) {
-                                        take -= 1;
-                                    }
-                                    tool_meta.push(title[..take].to_string());
-                                    tool_chars_emitted += take;
-                                }
-                            }
-                            if let Some(locs) = peek.update.locations {
-                                for loc in locs {
-                                    if let Some(p) = loc.path
-                                        && !p.is_empty()
-                                    {
-                                        let budget =
-                                            TOOL_MAX_CHARS.saturating_sub(tool_chars_emitted);
-                                        if budget > 0 {
-                                            let mut take = p.len().min(budget);
-                                            while take > 0 && !p.is_char_boundary(take) {
-                                                take -= 1;
-                                            }
-                                            tool_meta.push(p[..take].to_string());
-                                            tool_chars_emitted += take;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    prompt_events.push(PromptExtractEvent::NotUserMessage);
-                }
-                _ => {
-                    flush_assistant(&mut current_assistant, &mut assistant_texts);
-                    prompt_events.push(PromptExtractEvent::NotUserMessage);
+                    tool_calls += 1;
+                    push_search_text(&mut tools, &call.name, TOOL_SEARCH_LIMIT);
+                    push_search_text(&mut tools, &call.arguments, TOOL_SEARCH_LIMIT);
                 }
             }
-        } else {
-            // ── Grow control events ──────────────────────────────────
-            match tag {
-                Some(t) if t == *REWIND_MARKER => {
-                    flush_assistant(&mut current_assistant, &mut assistant_texts);
-                    if let Some(ref u) = update_peek
-                        && let Some(idx) = u.target_prompt_index
-                    {
-                        prompt_events.push(PromptExtractEvent::RewindTo(idx));
-                    } else {
-                        prompt_events.push(PromptExtractEvent::NotUserMessage);
-                    }
-                }
-                _ => {
-                    flush_assistant(&mut current_assistant, &mut assistant_texts);
-                    prompt_events.push(PromptExtractEvent::NotUserMessage);
+            ConversationItem::BackendToolCall(item) => {
+                if tool_calls < TOOL_SEARCH_CALL_LIMIT {
+                    tool_calls += 1;
+                    push_search_text(&mut tools, &item.text_summary(), TOOL_SEARCH_LIMIT);
                 }
             }
+            ConversationItem::System(_)
+            | ConversationItem::User(_)
+            | ConversationItem::ToolResult(_)
+            | ConversationItem::Reasoning(_) => {}
         }
     }
 
-    // Flush final assistant turn
-    if !current_assistant.is_empty() {
-        let t = current_assistant.trim().to_string();
-        if !t.is_empty() {
-            assistant_texts.push(t);
-        }
-    }
-
-    let prompts = collect_prompts_from_events(prompt_events.into_iter());
-
-    let parts = [
-        prompts.join("\n\n"),
-        assistant_texts.join("\n"),
-        tool_meta.join("\n"),
-    ];
-    let mut joined = parts.join("\n\n");
-
+    let mut joined = [prompts, assistant, tools].join("\n\n");
     if joined.len() > SEARCH_CONTENT_CHAR_LIMIT {
-        // Keep the tail (most recent content is most relevant)
-        let mut start = joined.len().saturating_sub(SEARCH_CONTENT_CHAR_LIMIT);
-        while start < joined.len() && !joined.is_char_boundary(start) {
+        let mut start = joined.len() - SEARCH_CONTENT_CHAR_LIMIT;
+        while !joined.is_char_boundary(start) {
             start += 1;
         }
-        joined = joined[start..].to_string();
+        joined = joined[start..].to_owned();
     }
+    joined
+}
 
-    Ok((joined, bytes_read))
+fn push_search_text(output: &mut String, text: &str, limit: usize) {
+    if text.is_empty() || output.len() >= limit {
+        return;
+    }
+    let separator = usize::from(!output.is_empty());
+    let budget = limit.saturating_sub(output.len()).saturating_sub(separator);
+    if budget == 0 {
+        return;
+    }
+    let mut take = text.len().min(budget);
+    while take > 0 && !text.is_char_boundary(take) {
+        take -= 1;
+    }
+    if separator != 0 {
+        output.push('\n');
+    }
+    output.push_str(&text[..take]);
+}
+
+fn collect_timeline_indexable_content(timeline_path: &Path) -> io::Result<(String, u64)> {
+    let bytes_read = std::fs::metadata(timeline_path)?.len();
+    let events = read_timeline_file(timeline_path)?;
+    let timeline = Timeline::from_events(events)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok((timeline_indexable_content(&timeline), bytes_read))
 }
 
 fn build_session_doc(summary: &Summary, content: String) -> SessionDoc {
@@ -1811,20 +1566,20 @@ mod tests {
             previous_cwd: None,
             pending_cwd_switch_reminder: None,
             cwd_switch_bookkeeping_generation: 0,
-            session_summary: title.to_string(),
+            title: Some(title.to_string()),
+            title_source: Some(chat_state::SessionTitleSource::User),
+            title_event_seq: Some(1),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             num_messages: 0,
-            num_chat_messages: 0,
             current_model_id: acp::ModelId::new("test"),
             parent_session_id: None,
             forked_at: None,
-            chat_format_version: 1,
+            session_format_version: crate::session::persistence::SESSION_FORMAT_VERSION,
             prompt_display_cwd: None,
             session_kind: None,
             fork_context_source: None,
             fork_parent_prompt_id: None,
-            inherited_prefix_len: None,
             hidden: None,
             source_workspace_dir: None,
             git_root_dir: None,
@@ -1833,8 +1588,6 @@ mod tests {
             head_branch: None,
             grow_home: None,
             last_active_at: None,
-            generated_title: None,
-            title_is_manual: false,
             worktree_label: None,
             agent_name: None,
             sandbox_profile: None,
@@ -1857,300 +1610,150 @@ mod tests {
         assert_eq!(doc.content_hash, doc2.content_hash);
     }
 
-    // ── helpers for single-pass tests ──────────────────────────────────────
-
-    /// Write an updates.jsonl temp file from envelope strings.
-    fn write_updates_jsonl(lines: &[String]) -> tempfile::NamedTempFile {
-        use std::io::Write as _;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        for line in lines {
-            writeln!(f, "{line}").unwrap();
-        }
-        f
-    }
-
-    fn acp_update(session_update_json: &str) -> String {
-        format!(
-            r#"{{"timestamp":1,"method":"session/update","params":{{"sessionId":"s","update":{session_update_json}}}}}"#
-        )
-    }
-
-    fn update(session_update_json: &str) -> String {
-        format!(
-            r#"{{"timestamp":1,"method":"_grow/session/update","params":{{"sessionId":"s","update":{session_update_json}}}}}"#
-        )
-    }
-
-    // ── single-pass content collection tests ─────────────────────────────
-
-    #[test]
-    fn test_single_pass_extracts_user_prompts() {
-        let lines = vec![
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello world"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi there"}}"#,
-            ),
-        ];
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        assert!(
-            content.contains("hello world"),
-            "should contain user prompt"
-        );
-    }
-
-    #[test]
-    fn test_single_pass_extracts_assistant_text() {
-        let lines = vec![
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"assistant reply"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"next prompt"}}"#,
-            ),
-        ];
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        assert!(
-            content.contains("assistant reply"),
-            "should contain assistant text"
-        );
-    }
-
-    #[test]
-    fn test_single_pass_extracts_tool_metadata() {
-        let lines = vec![acp_update(
-            r#"{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read file","kind":"read","locations":[{"path":"/tmp/foo.rs"}]}"#,
-        )];
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        assert!(content.contains("Read file"), "should contain tool title");
-        assert!(
-            content.contains("/tmp/foo.rs"),
-            "should contain tool location path"
-        );
+    fn record_search_turn(
+        timeline: &mut Timeline,
+        id: u64,
+        prompt_index: usize,
+        prompt: &str,
+        answer: &str,
+        tool_calls: Vec<sampling_types::ToolCall>,
+    ) {
+        let turn = chat_state::TurnId(id);
+        timeline
+            .record(chat_state::TimelineEventKind::Turn(
+                chat_state::TurnEvent::Started {
+                    id: turn,
+                    identity: chat_state::TurnIdentity {
+                        origin: "user".into(),
+                        turn_kind: "interactive".into(),
+                        goal_id: None,
+                        stage_id: None,
+                    },
+                    model_id: "model".into(),
+                    input_message_count: timeline.surface().len(),
+                    prompt_index,
+                    prompt_text: prompt.into(),
+                    input_kind: chat_state::TurnInputKind::Prompt,
+                    redirect_kind: None,
+                },
+            ))
+            .unwrap();
+        let mut user = ConversationItem::user(prompt);
+        user.set_prompt_index(prompt_index);
+        timeline
+            .append(user, chat_state::MessageCause::User)
+            .unwrap();
+        timeline
+            .append(
+                ConversationItem::Assistant(sampling_types::AssistantItem {
+                    content: answer.into(),
+                    tool_calls,
+                    model_id: Some("model".into()),
+                    model_fingerprint: None,
+                    reasoning_effort: None,
+                }),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Turn(
+                chat_state::TurnEvent::Ended {
+                    id: turn,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                    tool_count: 0,
+                    terminal: chat_state::TurnTerminal {
+                        stop_reason: "end_turn".into(),
+                        completion_kind: "completed".into(),
+                    },
+                    cancellation_category: None,
+                    details: None,
+                },
+            ))
+            .unwrap();
     }
 
     #[test]
-    fn test_single_pass_extracts_text_with_json_escapes() {
-        // Escaped JSON strings cannot be borrowed as &str; a regression to
-        // borrowed peek fields silently drops these messages from the index.
-        let lines = vec![
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"fix the bug\nin main.rs"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"use \"quotes\" and caf\u00e9"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"! echo \"hi\"","_meta":{"bash_command":"echo \"hi\""}}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Run \"cargo test\"","kind":"execute","locations":[{"path":"/tmp/my\tdir/foo.rs"}]}"#,
-            ),
-        ];
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        assert!(
-            content.contains("fix the bug\nin main.rs"),
-            "multiline user prompt must be indexed: {content:?}"
+    fn timeline_index_includes_prompt_assistant_and_tool_identity() {
+        let mut timeline = Timeline::default();
+        record_search_turn(
+            &mut timeline,
+            1,
+            0,
+            "fix the bug\nin main.rs",
+            "use \"quotes\" and café",
+            vec![sampling_types::ToolCall {
+                id: "call".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"/tmp/foo.rs"}"#.into(),
+            }],
         );
-        assert!(
-            content.contains("use \"quotes\" and caf\u{e9}"),
-            "assistant text with escaped quotes and unicode escape must be indexed: {content:?}"
-        );
-        assert!(
-            content.contains("Run \"cargo test\""),
-            "tool title with escaped quotes must be indexed: {content:?}"
-        );
-        assert!(
-            content.contains("/tmp/my\tdir/foo.rs"),
-            "tool location path with escapes must be indexed: {content:?}"
-        );
-        assert!(
-            !content.contains("echo \"hi\""),
-            "escaped bash command must still be excluded from the index: {content:?}"
-        );
+
+        let content = timeline_indexable_content(&timeline);
+        assert!(content.contains("fix the bug\nin main.rs"));
+        assert!(content.contains("use \"quotes\" and café"));
+        assert!(content.contains("read_file"));
+        assert!(content.contains("/tmp/foo.rs"));
     }
 
     #[test]
-    fn test_single_pass_handles_rewind() {
-        let lines = vec![
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"first prompt"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first reply"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"second prompt"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second reply"}}"#,
-            ),
-            update(
-                r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"replacement prompt"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replacement reply"}}"#,
-            ),
-        ];
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        assert!(
-            content.contains("first prompt"),
-            "first prompt should survive rewind"
+    fn timeline_index_excludes_rewound_branch() {
+        let mut timeline = Timeline::default();
+        record_search_turn(&mut timeline, 1, 0, "first prompt", "first reply", vec![]);
+        record_search_turn(
+            &mut timeline,
+            2,
+            1,
+            "discarded prompt",
+            "discarded reply",
+            vec![],
         );
-        assert!(
-            !content.contains("second prompt"),
-            "rewound prompt should be removed"
+        let replacement = timeline.rewind_surface(1).unwrap();
+        timeline
+            .replace_all(replacement, chat_state::MessageCause::Rewind)
+            .unwrap();
+        record_search_turn(
+            &mut timeline,
+            3,
+            1,
+            "replacement prompt",
+            "replacement reply",
+            vec![],
         );
-        assert!(
-            content.contains("replacement prompt"),
-            "replacement prompt should be present"
-        );
+
+        let content = timeline_indexable_content(&timeline);
+        assert!(content.contains("first prompt"));
+        assert!(content.contains("replacement prompt"));
+        assert!(!content.contains("discarded prompt"));
+        assert!(!content.contains("discarded reply"));
     }
 
     #[test]
-    fn test_single_pass_thought_chunk_does_not_flush_assistant() {
-        // agent_thought_chunk interleaved between agent_message_chunk should
-        // NOT break the assistant text into separate entries.
-        let lines = vec![
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking about stuff"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"}}"#,
-            ),
-            // A user message ends the assistant turn
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"thanks"}}"#,
-            ),
-        ];
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        // "hello" and "world" should be in the same assistant turn (not split)
-        assert!(
-            content.contains("hello world"),
-            "thought chunk should not flush assistant text: got {content:?}"
-        );
-    }
-
-    #[test]
-    fn test_single_pass_empty_file() {
-        let f = write_updates_jsonl(&[]);
-        let (content, bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        assert!(content.is_empty() || content.trim().is_empty());
-        assert_eq!(bytes, 0, "empty file should report 0 bytes read");
-    }
-
-    #[test]
-    fn test_single_pass_nonexistent_file() {
-        let (content, bytes) =
-            collect_all_indexable_content_single_pass(Path::new("/nonexistent/updates.jsonl"))
-                .unwrap();
-        assert!(content.is_empty());
-        assert_eq!(bytes, 0, "nonexistent file should report 0 bytes read");
-    }
-
-    #[test]
-    fn test_single_pass_assistant_text_cap() {
-        // Two 60K chunks in the same turn — the 100K assistant cap should
-        // truncate the second chunk.  Total assistant text ≤ 100K.
-        let big_text = "x".repeat(60_000);
-        let lines = vec![
-            acp_update(&format!(
-                r#"{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{big_text}"}}}}"#
-            )),
-            acp_update(&format!(
-                r#"{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{big_text}"}}}}"#
-            )),
-            // Flush the assistant turn
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"q"}}"#,
-            ),
-        ];
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        // Count 'x' chars — the assistant section is the only source of 'x'
-        let x_count = content.chars().filter(|&c| c == 'x').count();
-        assert!(
-            x_count <= 100_000,
-            "assistant text should be capped at 100K chars, got {x_count}"
-        );
-        // Must have truncated the second chunk (60K + 60K > 100K)
-        assert!(
-            x_count < 120_001,
-            "without the cap this would be 120K, got {x_count}"
-        );
-        // Verify we actually collected substantial text (not accidentally empty)
-        assert!(
-            x_count > 50_000,
-            "should have collected at least the first 60K chunk, got {x_count}"
-        );
-    }
-
-    #[test]
-    fn test_single_pass_tool_call_count_cap() {
-        // Generate 250 tool calls — only the first 200 should be indexed
-        let lines: Vec<String> = (0..250)
-            .map(|i| {
-                acp_update(&format!(
-                    r#"{{"sessionUpdate":"tool_call","toolCallId":"tc{i}","title":"tool_{i}","kind":"exec","locations":[]}}"#
-                ))
+    fn timeline_index_caps_assistant_and_tool_content() {
+        let tool_calls = (0..250)
+            .map(|i| sampling_types::ToolCall {
+                id: format!("call-{i}").into(),
+                name: format!("tool_{i}"),
+                arguments: "{}".into(),
             })
             .collect();
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        // tool_200 through tool_249 should NOT appear
-        assert!(
-            !content.contains("tool_200"),
-            "tool calls beyond 200 should be ignored"
+        let mut timeline = Timeline::default();
+        record_search_turn(
+            &mut timeline,
+            1,
+            0,
+            "prompt",
+            &"x".repeat(120_000),
+            tool_calls,
         );
-        assert!(
-            !content.contains("tool_249"),
-            "tool calls beyond 200 should be ignored"
-        );
-        // tool_0 and tool_199 should appear
-        assert!(content.contains("tool_0"), "first tool should be indexed");
-        assert!(
-            content.contains("tool_199"),
-            "tool #200 (0-indexed) should be indexed"
-        );
-    }
 
-    #[test]
-    fn test_single_pass_tool_chars_cap() {
-        // Generate tool calls with long titles that exceed the 100K char budget
-        let long_title = "a".repeat(20_000);
-        let lines: Vec<String> = (0..10)
-            .map(|i| {
-                acp_update(&format!(
-                    r#"{{"sessionUpdate":"tool_call","toolCallId":"tc{i}","title":"{long_title}","kind":"exec","locations":[]}}"#
-                ))
-            })
-            .collect();
-        let f = write_updates_jsonl(&lines);
-        let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        // 10 * 20K = 200K, but cap is 100K, so 'a' count should be ≤ 100K
-        let a_count = content.chars().filter(|&c| c == 'a').count();
-        assert!(
-            a_count <= 100_000,
-            "tool metadata should be capped at 100K chars, got {a_count}"
-        );
-        // Should have at least some tool metadata
-        assert!(
-            a_count > 19_000,
-            "should have collected at least one tool title, got {a_count}"
-        );
+        let content = timeline_indexable_content(&timeline);
+        assert!(content.chars().filter(|&ch| ch == 'x').count() <= ASSISTANT_SEARCH_LIMIT);
+        assert!(content.contains("tool_199"));
+        assert!(!content.contains("tool_200"));
+        let mut tool_text = String::new();
+        push_search_text(&mut tool_text, &"a".repeat(120_000), TOOL_SEARCH_LIMIT);
+        assert_eq!(tool_text.len(), TOOL_SEARCH_LIMIT);
     }
 
     /// A title rename with identical content must produce a different hash,
@@ -2172,15 +1775,15 @@ mod tests {
     }
 
     #[test]
-    fn test_build_session_doc_prefers_generated_title() {
+    fn test_build_session_doc_uses_title_projection() {
         let mut summary = test_summary("s1", "/workspace", "session summary");
-        summary.generated_title = Some("Generated Title".to_string());
+        summary.title = Some("Generated Title".to_string());
         let doc = build_session_doc(&summary, "content".to_string());
         assert_eq!(doc.title, "Generated Title");
 
-        summary.generated_title = Some(String::new());
+        summary.title = None;
         let doc2 = build_session_doc(&summary, "content".to_string());
-        assert_eq!(doc2.title, "session summary");
+        assert_eq!(doc2.title, "");
     }
 
     // ── should_skip_session tests ──────────────────────────────────────────
@@ -2218,7 +1821,7 @@ mod tests {
     #[test]
     fn test_should_skip_session_nonexistent_file() {
         assert!(!should_skip_session(
-            Path::new("/nonexistent/updates.jsonl"),
+            Path::new("/nonexistent/timeline.jsonl"),
             100
         ));
     }
@@ -2251,25 +1854,24 @@ mod tests {
         assert!(json.contains("\"bootstrapping\":true"));
     }
 
-    // ── single-pass bytes_read tests ───────────────────────────────────────
-
     #[test]
-    fn test_single_pass_reports_bytes_read() {
-        let lines = vec![acp_update(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello"}}"#,
-        )];
-        let f = write_updates_jsonl(&lines);
-        let file_size = std::fs::metadata(f.path()).unwrap().len();
+    fn timeline_collector_reports_bytes_and_validates_lifecycle() {
+        use std::io::Write as _;
 
-        let (_content, bytes_read) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-        assert_eq!(
-            bytes_read, file_size,
-            "bytes_read should match the actual file size"
-        );
-        assert!(
-            bytes_read > 0,
-            "bytes_read should be non-zero for non-empty file"
-        );
+        let mut timeline = Timeline::default();
+        record_search_turn(&mut timeline, 1, 0, "hello", "world", vec![]);
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for event in timeline.events() {
+            serde_json::to_writer(&mut file, event).unwrap();
+            writeln!(file).unwrap();
+        }
+        file.flush().unwrap();
+        let file_size = std::fs::metadata(file.path()).unwrap().len();
+
+        let (content, bytes_read) = collect_timeline_indexable_content(file.path()).unwrap();
+        assert!(content.contains("hello"));
+        assert!(content.contains("world"));
+        assert_eq!(bytes_read, file_size);
     }
 
     // ── bootstrap_once eager flag tests ────────────────────────────────────

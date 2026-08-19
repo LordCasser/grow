@@ -33,7 +33,6 @@ pub mod gboom;
 pub mod help;
 pub mod history;
 pub mod home;
-pub mod import_claude;
 pub mod jump;
 pub mod loop_cmd;
 pub mod mcps;
@@ -41,7 +40,6 @@ pub mod model;
 pub mod multiline;
 pub mod new;
 pub mod permission;
-pub mod personas;
 pub mod plan;
 pub mod plugin;
 pub mod queue;
@@ -139,14 +137,12 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(rewind::RewindCommand),
         Arc::new(jump::JumpCommand),
-        Arc::new(import_claude::ImportClaudeCommand),
         Arc::new(usage::UsageCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
         Arc::new(release_notes::ReleaseNotesCommand),
         Arc::new(tutorial::TutorialCommand),
         Arc::new(config_agents::ConfigAgentsCommand),
-        Arc::new(personas::PersonasCommand),
         // Hidden easter egg: never listed, runs on bare `/gboom`.
         Arc::new(gboom::GboomCommand),
         // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
@@ -183,12 +179,8 @@ mod tests {
         crate::app::bundle::BundleState {
             has_cache: false,
             version: String::new(),
-            personas: Vec::new(),
-            roles: Vec::new(),
             agents: Vec::new(),
             skills: Vec::new(),
-            persona_details: Vec::new(),
-            role_details: Vec::new(),
         };
     pub(crate) fn make_ctx(models: &ModelState) -> CommandExecCtx<'_> {
         CommandExecCtx {
@@ -198,7 +190,7 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
-                yolo_mode: false,
+                permission_mode: shell::util::config::PermissionMode::Ask,
                 ..crate::settings::PagerLocalSnapshot::default()
             },
         }
@@ -278,7 +270,6 @@ mod tests {
             "feedback",
             "find",
             "fork",
-            "full",
             "fullscreen",
             "gboom",
             "guides",
@@ -287,7 +278,6 @@ mod tests {
             "home",
             "hooks",
             "howto",
-            "import-claude",
             "jump",
             "log",
             "loop",
@@ -301,7 +291,6 @@ mod tests {
             "new",
             "normal",
             "onboarding",
-            "personas",
             "permission",
             "plan",
             "plan-view",
@@ -344,7 +333,6 @@ mod tests {
             "workflow",
             "workflow-run",
             "workflows",
-            "yolo",
         ];
         for command in builtin_commands() {
             for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
@@ -717,15 +705,11 @@ mod tests {
         );
     }
     #[test]
-    fn minimal_and_fullscreen_registered_in_builtin_commands() {
+    fn minimal_and_fullscreen_are_the_only_screen_commands() {
         let reg = CommandRegistry::new(builtin_commands());
         assert!(reg.get("minimal").is_some());
         assert!(reg.get("fullscreen").is_some());
-        assert!(reg.get("full").is_some());
-        assert_eq!(
-            reg.get("full").unwrap().name(),
-            reg.get("fullscreen").unwrap().name()
-        );
+        assert!(reg.get("full").is_none());
     }
     #[test]
     fn recap_registered_in_builtin_commands() {

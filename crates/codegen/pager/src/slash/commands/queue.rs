@@ -47,12 +47,8 @@ mod tests {
     static DEFAULT_BUNDLE_STATE: BundleState = BundleState {
         has_cache: false,
         version: String::new(),
-        personas: Vec::new(),
-        roles: Vec::new(),
         agents: Vec::new(),
         skills: Vec::new(),
-        persona_details: Vec::new(),
-        role_details: Vec::new(),
     };
 
     fn ctx_with_session(models: &ModelState, sid: Option<&agent_client_protocol::SessionId>) {

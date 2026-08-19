@@ -69,12 +69,11 @@ pub struct ToolOutcome {
 /// Written into `turn_result.json` via `SessionSignalsDelta.tool_durations_this_turn`
 /// so downstream analytics can join wall time to a specific tool call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolDuration {
     /// Tool name (e.g. "bash", "read_file", "search_replace")
     pub tool_name: String,
-    /// Join key (`missing-call-id-{batch_idx}` if the model omitted one). Empty on legacy packages.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// Join key (`missing-call-id-{batch_idx}` if the model omitted one).
     pub tool_call_id: String,
     /// Dispatch wall-clock ms (start → result ready), including lock wait and
     /// in-dispatch credential retries.
@@ -405,6 +404,73 @@ pub struct SessionSignals {
     pub peak_rss_bytes: u64,
 }
 
+const TIMELINE_SIGNALS_VERSION: u32 = 1;
+const TIMELINE_SIGNALS_SCOPE: &str = "analytics";
+const TIMELINE_SIGNALS_NAME: &str = "session_signals_snapshot";
+
+#[derive(Serialize, Deserialize)]
+struct TimelineSignalsSnapshot {
+    version: u32,
+    signals: SessionSignals,
+}
+
+impl SessionSignals {
+    /// Encode the analytics snapshot as a Timeline fact. Session metrics have
+    /// no separate sidecar: the latest matching observation is the recovery
+    /// projection, while per-turn deltas remain transient transport data.
+    pub fn timeline_kind(&self) -> std::io::Result<chat_state::TimelineEventKind> {
+        let data = serde_json::to_value(TimelineSignalsSnapshot {
+            version: TIMELINE_SIGNALS_VERSION,
+            signals: self.clone(),
+        })
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: TIMELINE_SIGNALS_SCOPE.into(),
+                name: TIMELINE_SIGNALS_NAME.into(),
+                turn: None,
+                step: None,
+                data: Some(data),
+            },
+        ))
+    }
+
+    pub fn latest_from_timeline(
+        events: &[chat_state::TimelineEvent],
+    ) -> std::io::Result<Option<Self>> {
+        let mut latest = None;
+        for observation in events.iter().filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Observation(observation)
+                if observation.scope == TIMELINE_SIGNALS_SCOPE
+                    && observation.name == TIMELINE_SIGNALS_NAME =>
+            {
+                Some(observation)
+            }
+            _ => None,
+        }) {
+            let snapshot: TimelineSignalsSnapshot =
+                serde_json::from_value(observation.data.clone().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Timeline signals observation has no payload",
+                    )
+                })?)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            if snapshot.version != TIMELINE_SIGNALS_VERSION {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "unsupported Timeline signals version {}; expected {}",
+                        snapshot.version, TIMELINE_SIGNALS_VERSION
+                    ),
+                ));
+            }
+            latest = Some(snapshot.signals);
+        }
+        Ok(latest)
+    }
+}
+
 /// Events that can be sent to the signals actor.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -484,11 +550,6 @@ pub enum SignalEvent {
     SetPrimaryModel(String),
 
     // === Latency Events ===
-    /// Record latency for a response (time to first token and total response time in ms)
-    RecordLatency {
-        time_to_first_token_ms: u64,
-        total_response_time_ms: u64,
-    },
     /// Record detailed inference metrics including inter-token latency
     RecordInferenceMetrics(InferenceLatencyStats),
     /// Record token usage from a model response (completion + reasoning tokens).
@@ -539,8 +600,7 @@ pub enum SignalEvent {
         tools_used: Vec<String>,
         models_used: Vec<String>,
     },
-    /// Restore full signals state from a persisted snapshot.
-    /// Preferred over SeedCounts when a signals.json file exists.
+    /// Restore full signals state from the latest Timeline analytics snapshot.
     RestoreSignals(SessionSignals),
     /// Request a snapshot of current signals
     GetSnapshot(oneshot::Sender<SessionSignals>),
@@ -784,8 +844,8 @@ impl SessionSignalsHandle {
 
     /// Restore full signals state from a persisted snapshot.
     ///
-    /// This is the preferred method when a `signals.json` file exists from a
-    /// previous session. Unlike `seed_counts` (which only restores a subset),
+    /// This is the preferred method when Timeline has an analytics snapshot.
+    /// Unlike `seed_counts` (which only restores a subset),
     /// this restores all counters faithfully, including those that survive
     /// conversation compaction (turn_count, error_count, tool_failure_count, etc.).
     pub fn restore_signals(&self, signals: SessionSignals) {
@@ -795,17 +855,6 @@ impl SessionSignalsHandle {
     }
 
     // === Latency Methods ===
-
-    /// Record latency metrics for a response.
-    ///
-    /// - `time_to_first_token_ms`: Time from request start to first token received
-    /// - `total_response_time_ms`: Time from request start to response complete
-    pub fn record_latency(&self, time_to_first_token_ms: u64, total_response_time_ms: u64) {
-        let _ = self.tx.send(SignalEvent::RecordLatency {
-            time_to_first_token_ms,
-            total_response_time_ms,
-        });
-    }
 
     /// Record inference metrics including inter-token latency stats.
     ///
@@ -1214,17 +1263,6 @@ impl SessionSignalsActor {
                 }
 
                 // === Latency Events ===
-                SignalEvent::RecordLatency {
-                    time_to_first_token_ms,
-                    total_response_time_ms,
-                } => {
-                    // Track per-turn latency (overwritten each time within a turn;
-                    // the last value before TakeTurnEndSnapshot is used)
-                    self.last_turn_ttft_ms = Some(time_to_first_token_ms);
-                    self.last_turn_response_time_ms = Some(total_response_time_ms);
-
-                    self.update_latency_stats(time_to_first_token_ms, total_response_time_ms);
-                }
                 SignalEvent::RecordInferenceMetrics(stats) => {
                     // Track per-turn latency for turn-delta snapshots
                     if let Some(ttfb) = stats.time_to_first_token_ms {
@@ -1240,7 +1278,6 @@ impl SessionSignalsActor {
                         self.signals.itl_sample_count += 1;
                     }
 
-                    // Also feed the existing TTFB/TTLB tracking for backward compat
                     if let Some(ttfb) = stats.time_to_first_token_ms {
                         self.update_latency_stats(ttfb, stats.time_to_last_byte_ms);
                     }
@@ -1604,7 +1641,7 @@ impl SessionSignalsActor {
 
     /// Update TTFB/TTLB latency statistics (min/max/avg tracking).
     ///
-    /// Shared by `RecordLatency` and `RecordInferenceMetrics` handlers.
+    /// Update cumulative TTFB/TTLB aggregates from the canonical inference event.
     fn update_latency_stats(&mut self, time_to_first_token_ms: u64, total_response_time_ms: u64) {
         // Track min/max
         if self.signals.latency_sample_count == 0 {
@@ -1725,6 +1762,49 @@ pub fn spawn_signals_actor() -> SessionSignalsHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn latency(ttfb_ms: u64, ttlb_ms: u64) -> InferenceLatencyStats {
+        InferenceLatencyStats {
+            time_to_first_token_ms: Some(ttfb_ms),
+            time_to_last_byte_ms: ttlb_ms,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn latest_snapshot_is_folded_from_timeline() {
+        let mut timeline = chat_state::Timeline::default();
+        let first = SessionSignals {
+            turn_count: 2,
+            ..Default::default()
+        };
+        let latest = SessionSignals {
+            turn_count: 4,
+            tool_call_count: 7,
+            ..Default::default()
+        };
+        timeline.record(first.timeline_kind().unwrap()).unwrap();
+        timeline.record(latest.timeline_kind().unwrap()).unwrap();
+
+        assert_eq!(
+            SessionSignals::latest_from_timeline(timeline.events()).unwrap(),
+            Some(latest)
+        );
+    }
+
+    #[test]
+    fn unsupported_timeline_snapshot_version_fails_closed() {
+        let mut kind = SessionSignals::default().timeline_kind().unwrap();
+        let chat_state::TimelineEventKind::Observation(observation) = &mut kind else {
+            unreachable!();
+        };
+        observation.data.as_mut().unwrap()["version"] = serde_json::json!(2);
+        let mut timeline = chat_state::Timeline::default();
+        timeline.record(kind).unwrap();
+
+        let error = SessionSignals::latest_from_timeline(timeline.events()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[tokio::test]
     async fn test_session_signals_basic() {
@@ -2012,7 +2092,7 @@ mod tests {
         handle.record_tool_call("search_replace");
         handle.record_tool_call("read_file"); // repeat
         handle.record_assistant_message();
-        handle.record_latency(150, 2500);
+        handle.record_inference_metrics(latency(150, 2500));
 
         let snap = handle.take_turn_end_snapshot().await.unwrap();
 
@@ -2090,7 +2170,7 @@ mod tests {
         handle.record_tool_call("bash");
         handle.record_error_typed("timeout");
         handle.record_assistant_message();
-        handle.record_latency(100, 2000);
+        handle.record_inference_metrics(latency(100, 2000));
 
         let snap1 = handle.take_turn_end_snapshot().await.unwrap();
         assert_eq!(snap1.delta.turn_number, 1);
@@ -2105,7 +2185,7 @@ mod tests {
         handle.record_tool_call("search_replace");
         handle.record_tool_failure("search_replace"); // 1 tool failure (also increments error_count)
         handle.record_assistant_message();
-        handle.record_latency(200, 3000);
+        handle.record_inference_metrics(latency(200, 3000));
 
         let snap2 = handle.take_turn_end_snapshot().await.unwrap();
         assert_eq!(snap2.delta.turn_number, 2);
@@ -2224,7 +2304,7 @@ mod tests {
         handle.increment_turn();
         handle.record_tool_call("bash");
         handle.record_error_typed("rate_limit");
-        handle.record_latency(100, 500);
+        handle.record_inference_metrics(latency(100, 500));
 
         // Take snapshot — should consume per-turn state
         let snap1 = handle.take_turn_end_snapshot().await.unwrap();
@@ -2488,7 +2568,7 @@ mod tests {
         handle1.record_assistant_message();
 
         // Record latency for an additional response (no ITL)
-        handle1.record_latency(200, 2000);
+        handle1.record_inference_metrics(latency(200, 2000));
 
         // Take a turn-end snapshot (to set previous_turn_snapshot baseline)
         let _snap1 = handle1.take_turn_end_snapshot().await;
@@ -2608,7 +2688,7 @@ mod tests {
         handle2.record_assistant_message();
 
         // Record latency — average should incorporate restored history
-        handle2.record_latency(300, 3000);
+        handle2.record_inference_metrics(latency(300, 3000));
 
         let after_turn = handle2.snapshot().await.unwrap();
         assert_eq!(after_turn.turn_count, 5);
@@ -2955,15 +3035,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_duration_deserializes_legacy_without_call_id() {
-        let v = serde_json::json!({
+    fn tool_duration_requires_call_id() {
+        let value = serde_json::json!({
             "toolName": "bash",
             "durationMs": 12
         });
-        let d: ToolDuration = serde_json::from_value(v).unwrap();
-        assert_eq!(d.tool_name, "bash");
-        assert!(d.tool_call_id.is_empty());
-        assert_eq!(d.duration_ms, 12);
+        assert!(serde_json::from_value::<ToolDuration>(value).is_err());
     }
 
     #[tokio::test]

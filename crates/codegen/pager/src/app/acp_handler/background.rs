@@ -359,9 +359,7 @@ pub(super) fn handle_scheduled_task_fired(notif: &acp::ExtNotification, app: &mu
         Entry::Occupied(mut e) => {
             let info = e.get_mut();
             info.next_fire_at = next_fire_at;
-            if subagent_id.is_some() {
-                info.last_subagent_id = subagent_id;
-            }
+            info.last_subagent_id = Some(subagent_id);
         }
         Entry::Vacant(e) => {
             if next_fire_at.is_none() {
@@ -375,7 +373,7 @@ pub(super) fn handle_scheduled_task_fired(notif: &acp::ExtNotification, app: &mu
                 created_at: std::time::Instant::now(),
                 next_fire_at,
                 tag: "loop".into(),
-                last_subagent_id: subagent_id,
+                last_subagent_id: Some(subagent_id),
             });
         }
     }
@@ -406,79 +404,6 @@ pub(super) fn handle_scheduled_task_deleted(
 
     agent.session.scheduled_tasks.remove(&task_id);
     is_active
-}
-
-pub(super) fn handle_scheduled_task_inject_prompt(
-    notif: &acp::ExtNotification,
-    app: &mut AppView,
-) -> bool {
-    let payload: serde_json::Value = match serde_json::from_str(notif.params.get()) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to parse grow/scheduled_task_inject_prompt");
-            return false;
-        }
-    };
-    let Some(session_id) = payload["sessionId"].as_str() else {
-        tracing::warn!("grow/scheduled_task_inject_prompt: missing or non-string sessionId");
-        return false;
-    };
-    let Some(prompt) = payload["prompt"].as_str().filter(|s| !s.is_empty()) else {
-        tracing::warn!("grow/scheduled_task_inject_prompt: missing or empty prompt");
-        return false;
-    };
-    let task_id = payload["taskId"].as_str().unwrap_or("unknown");
-    let human_schedule = payload["humanSchedule"].as_str().unwrap_or("unknown");
-    tracing::debug!(task_id, human_schedule, "Enqueuing scheduled cron prompt");
-
-    // Only the driver injects + runs the scheduled prompt. In leader mode the
-    // `grow/scheduled_task_inject_prompt` notification is routed by the leader
-    // to the SINGLE session driver (see `is_scheduled_task_inject_prompt` in
-    // leader/server.rs), so any client that receives it IS the driver and must
-    // enqueue + run it — including a client that attached via `session/load`
-    // (`attached_as_viewer == true`) but is the designated driver. We therefore
-    // do NOT skip on `attached_as_viewer` here: that latched flag wrongly
-    // suppressed cron on an attacher-driver, leaving the loop stuck with no
-    // output. The other clients render the resulting turn from the broadcast
-    // deltas. (The de-dup guards below still prevent a double enqueue.)
-    let agent_id = {
-        let agent = app.agents.values_mut().find(|a| {
-            a.session
-                .session_id
-                .as_ref()
-                .is_some_and(|sid| sid.0.as_ref() == session_id)
-        });
-        let Some(agent) = agent else {
-            return false;
-        };
-
-        // Skip if this specific task is already running or queued.
-        if agent.cron_task_id.as_deref() == Some(task_id) {
-            tracing::debug!(task_id, "cron prompt skipped: task already running");
-            return true;
-        }
-        let already_queued = agent
-            .session
-            .pending_prompts
-            .iter()
-            .any(|p| p.task_id.as_deref() == Some(task_id));
-        if already_queued {
-            tracing::debug!(task_id, "cron prompt already queued, skipping duplicate");
-            return true;
-        }
-
-        let agent_id = agent.session.id;
-        agent.session.enqueue_cron_prompt(
-            prompt.to_string(),
-            task_id.to_string(),
-            human_schedule.to_string(),
-        );
-        agent_id
-    };
-    let effects = super::super::dispatch::maybe_drain_queue_and_note_peek(app, agent_id);
-    app.pending_effects.extend(effects);
-
-    true
 }
 
 /// Derive the effective CWD and worktree flag for a child session.

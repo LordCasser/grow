@@ -2049,7 +2049,7 @@ async fn std_child_died(child: &mut std::process::Child) -> bool {
 async fn scope_reaps_enrolled_language_server_child() {
     let (_script_dir, _workspace, mut client) = start_mock_client().await;
 
-    let scope = crate::util::ProcessScope::new();
+    let scope = tty_utils::ProcessScope::new();
     assert!(
         client.enroll(Some(&scope)),
         "enroll on an open scope must succeed"

@@ -568,7 +568,7 @@ struct RenderArgs {
 /// Parse the child's argv (`--out`, `--theme`, `--quality`, `--width`,
 /// `--deadline-ms`). Separated from stdin reading + rendering so the many
 /// malformed-argv cases are unit-testable without touching the process's real
-/// stdin. Legacy `--max-height` is accepted and ignored (height comes from quality).
+/// stdin.
 fn parse_render_args(
     mut args: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<RenderArgs, String> {
@@ -590,10 +590,6 @@ fn parse_render_args(
                 }
             }
             "--width" => width = parse_u32_arg(&flag, value()?)?,
-            // Legacy: height is derived from --quality now; accept and ignore.
-            "--max-height" => {
-                let _ = parse_u32_arg(&flag, value()?)?;
-            }
             "--quality" => {
                 quality = match value()?.to_str() {
                     Some("terminal") | Some("t") => MermaidRenderQuality::Terminal,
@@ -1707,8 +1703,6 @@ mod tests {
             "open",
             "--width",
             "640",
-            "--max-height",
-            "900",
         ]))
         .expect("valid argv parses");
         assert_eq!(ok.out, PathBuf::from("/tmp/x.png"));

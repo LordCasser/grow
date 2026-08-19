@@ -830,7 +830,7 @@ async fn prepare_grep(
     cmd.arg("--max-filesize").arg("5M");
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    crate::util::detach_command(&mut cmd);
+    tty_utils::detach_command(&mut cmd);
     cmd.stdin(Stdio::null());
 
     #[allow(clippy::disallowed_methods)] // search helper, waited on below

@@ -40,6 +40,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tty-utils = { workspace = true }
 config = { workspace = true }
 
 # For mcp_grow_http.rs (rmcp trait signatures). Must match rmcp 2.1's own

@@ -12,7 +12,7 @@ pub const CAMPAIGNS_KEY: &str = "campaigns";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CampaignMeta {
-    #[serde(default, alias = "campaign_id")]
+    #[serde(default)]
     pub id: Option<String>,
 }
 
@@ -227,24 +227,17 @@ mod tests {
     }
 
     #[test]
-    fn campaign_id_alias_is_accepted_in_toml_and_does_not_leak_into_patch() {
-        for src in [
-            "[[campaigns]]\ncampaign_id = \"c1\"\n[campaigns.models]\ndefault = \"m\"\n",
-            "[[campaigns]]\nid = \"c1\"\n[campaigns.models]\ndefault = \"m\"\n",
-        ] {
-            let mut layer = parse(src);
-            let entries = take_campaign_entries(&mut layer, "user");
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].id, "c1");
-            // The id key (either spelling) must be consumed by the meta, never
-            // land in the patch — a leaked key would deep-merge a junk top-level
-            // `id` into every effective config.
-            assert!(
-                entries[0].patch.get("id").is_none()
-                    && entries[0].patch.get("campaign_id").is_none(),
-                "id keys must not leak into the patch: {src}"
-            );
-        }
+    fn campaign_requires_canonical_id() {
+        let mut canonical =
+            parse("[[campaigns]]\nid = \"c1\"\n[campaigns.models]\ndefault = \"m\"\n");
+        let entries = take_campaign_entries(&mut canonical, "user");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "c1");
+        assert!(entries[0].patch.get("id").is_none());
+
+        let mut obsolete =
+            parse("[[campaigns]]\ncampaign_id = \"c1\"\n[campaigns.models]\ndefault = \"m\"\n");
+        assert!(take_campaign_entries(&mut obsolete, "user").is_empty());
     }
 
     #[test]

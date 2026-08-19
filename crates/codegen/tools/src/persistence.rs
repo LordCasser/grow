@@ -1,7 +1,7 @@
-//! Background persistence for tool state.
+//! Background persistence for the tool runtime's registered Resources.
 //!
-//! [`ResourcesPersistence`] persists `Resources` state (the new architecture).
-//! Old `ToolStatePersistence` and `PersistenceLayer` have been deleted.
+//! [`ResourcesPersistence`] is the sole persistence path for this independent
+//! state domain. Empty session paths construct a no-op handle explicitly.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,14 +36,9 @@ fn published_persistence_error(error: io::Error) -> io::Error {
 
 /// Background persistence for `Resources` state/params.
 ///
-/// Same pattern as `ToolStatePersistence` — debounced background writes with
-/// atomic rename. Takes a `serde_json::Value` from `Resources::serialize()`
-/// and writes it to disk. On load, parses the JSON and feeds it to
-/// `Resources::load_from()`.
-///
-/// This replaces the old `ToolStatePersistence` pipeline for the new
-/// architecture. During migration both coexist; once all tools are migrated,
-/// `ToolStatePersistence` will be deleted.
+/// Debounced background writes with atomic rename. Takes a `serde_json::Value`
+/// from `Resources::serialize()` and writes it to disk. On load, parses the
+/// JSON and feeds it to `Resources::load_from()`.
 pub struct ResourcesPersistence {
     /// Path to the JSON file where Resources state is persisted
     state_path: PathBuf,
@@ -435,9 +430,6 @@ impl ResourcesPersistence {
         Ok(result)
     }
 }
-
-// Old `PersistenceLayer` / `PersistenceRunner` deleted.
-// ToolState persistence replaced by Resources persistence via `ResourcesPersistence`.
 
 #[cfg(test)]
 mod tests {

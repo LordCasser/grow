@@ -14,7 +14,7 @@ use tracing::{debug, trace, warn};
 
 use super::protocol::{
     ClientCapabilities, ClientMessage, ClientMode, ControlCommand, ControlPayload,
-    LeaderCapabilities, ProtocolError, ServerMessage, read_message, write_message,
+    LEADER_PROTOCOL_VERSION, ProtocolError, ServerMessage, read_message, write_message,
 };
 use crate::cpu_profile::ControlError;
 
@@ -54,18 +54,9 @@ pub enum DisconnectReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaderRegistration {
     pub client_id: u64,
-    pub leader_protocol_version: Option<u32>,
-    pub leader_binary_version: Option<String>,
-    pub leader_capabilities: Option<LeaderCapabilities>,
-}
-
-impl LeaderRegistration {
-    /// Whether the connected leader advertises the `RelaunchForUpdate` control.
-    pub fn supports_relaunch(&self) -> bool {
-        self.leader_capabilities
-            .as_ref()
-            .is_some_and(|c| c.relaunch_v1)
-    }
+    pub leader_protocol_version: u32,
+    pub leader_binary_version: String,
+    pub runtime_cpu_profile: bool,
 }
 
 type ControlResponse = Result<ControlPayload, ControlError>;
@@ -101,6 +92,8 @@ pub enum ClientError {
     Connect(u32, std::io::Error),
     #[error("Protocol error: {0}")]
     Protocol(#[from] ProtocolError),
+    #[error("Incompatible leader protocol: {0}")]
+    IncompatibleProtocol(String),
     #[error("Registration failed: {0}")]
     Registration(String),
     #[error("Connection timeout after {0:?}")]
@@ -189,32 +182,13 @@ impl LeaderClient {
         &self,
         command: ControlCommand,
     ) -> Result<Result<ControlPayload, ControlError>, ClientError> {
-        let protocol_version = self.registration.leader_protocol_version.ok_or_else(|| {
-            ClientError::UnsupportedControl(
-                "leader is legacy and does not advertise protocol metadata".into(),
-            )
-        })?;
+        let protocol_version = self.registration.leader_protocol_version;
         if protocol_version != super::protocol::LEADER_PROTOCOL_VERSION {
             return Err(ClientError::UnsupportedControl(format!(
                 "leader uses unsupported protocol version {}",
                 protocol_version
             )));
         }
-        let capabilities = self
-            .registration
-            .leader_capabilities
-            .as_ref()
-            .ok_or_else(|| {
-                ClientError::UnsupportedControl(
-                    "leader did not advertise capabilities metadata".into(),
-                )
-            })?;
-        if !capabilities.control_v1 {
-            return Err(ClientError::UnsupportedControl(
-                "leader does not advertise control_v1 support".into(),
-            ));
-        }
-
         let request_id = self
             .next_request_id
             .fetch_add(1, Ordering::Relaxed)
@@ -350,6 +324,7 @@ async fn register(
         &ClientMessage::Register {
             client_type: client_type.into(),
             mode,
+            protocol_version: LEADER_PROTOCOL_VERSION,
             capabilities,
         },
     )
@@ -363,6 +338,9 @@ async fn register(
     .await
     {
         Ok(Ok(msg)) => msg,
+        Ok(Err(ProtocolError::InvalidJson(error))) => {
+            return Err(ClientError::IncompatibleProtocol(error.to_string()));
+        }
         Ok(Err(e)) => return Err(e.into()),
         Err(_) => {
             return Err(ClientError::Timeout(REGISTRATION_RESPONSE_TIMEOUT));
@@ -374,21 +352,30 @@ async fn register(
             ready,
             leader_protocol_version,
             leader_binary_version,
-            leader_capabilities,
+            runtime_cpu_profile,
         } => (
             LeaderRegistration {
                 client_id,
                 leader_protocol_version,
                 leader_binary_version,
-                leader_capabilities,
+                runtime_cpu_profile,
             },
             ready,
         ),
+        ServerMessage::Error { code: 4, message } => {
+            return Err(ClientError::IncompatibleProtocol(message));
+        }
         ServerMessage::Error { message, .. } => {
             return Err(ClientError::Registration(message));
         }
         _ => return Err(ClientError::Registration("Unexpected response".into())),
     };
+    if registration.leader_protocol_version != LEADER_PROTOCOL_VERSION {
+        return Err(ClientError::IncompatibleProtocol(format!(
+            "leader protocol mismatch: client={}, leader={}",
+            LEADER_PROTOCOL_VERSION, registration.leader_protocol_version
+        )));
+    }
 
     let client_id = registration.client_id;
 
@@ -543,9 +530,7 @@ mod tests {
     use crate::leader::server::{
         LeaderServerControlState, LeaderServerMetadata, spawn_leader_server,
     };
-    use crate::leader::test_support::{
-        FakeLeaderBehavior, FakeVersions, fake_caps, spawn_fake_leader,
-    };
+    use crate::leader::test_support::{FakeLeaderBehavior, FakeVersions, spawn_fake_leader};
     use tempfile::TempDir;
 
     // --- Misbehaving-leader wire shapes (fake leaders, paused clock) ---
@@ -666,51 +651,45 @@ mod tests {
             panic!("a garbage frame must not yield a connection");
         };
         assert!(
-            matches!(err, ClientError::Protocol(ProtocolError::InvalidJson(_))),
-            "expected InvalidJson, got {err:?}"
+            matches!(err, ClientError::IncompatibleProtocol(_)),
+            "expected IncompatibleProtocol, got {err:?}"
         );
 
         fake.cancel();
     }
 
-    /// Registration succeeds against a future-protocol leader (the field is
-    /// informational at registration time), but the control surface rejects it.
+    /// Registration rejects a mismatched leader protocol before exposing a client.
     #[tokio::test(start_paused = true)]
-    async fn wrong_protocol_version_registers_but_rejects_control() {
+    async fn wrong_protocol_version_rejects_registration() {
         let temp = TempDir::new().unwrap();
         let sock_path = temp.path().join("wrong-proto.sock");
         let fake = spawn_fake_leader(
             sock_path.clone(),
             FakeLeaderBehavior::Normal {
                 versions: FakeVersions {
-                    protocol_version: Some(999),
-                    binary_version: Some(version::VERSION.to_string()),
+                    protocol_version: 999,
+                    binary_version: version::VERSION.to_string(),
                 },
-                caps: fake_caps(true, false),
+                runtime_cpu_profile: false,
             },
         )
         .await;
 
-        let client = LeaderClient::connect(
+        let result = LeaderClient::connect(
             sock_path,
             "test",
             ClientMode::Stdio,
             ClientCapabilities::default(),
         )
-        .await
-        .unwrap();
-        assert_eq!(client.registration().leader_protocol_version, Some(999));
-
-        let err = client
-            .send_control(ControlCommand::GetLeaderInfo)
-            .await
-            .expect_err("control must be rejected for an unsupported protocol version");
+        .await;
+        let Err(err) = result else {
+            panic!("registration must reject a mismatched protocol");
+        };
         assert!(
-            matches!(err, ClientError::UnsupportedControl(_)),
-            "expected UnsupportedControl, got {err:?}"
+            matches!(err, ClientError::IncompatibleProtocol(_)),
+            "expected IncompatibleProtocol, got {err:?}"
         );
 
-        client.cancel();
         fake.cancel();
     }
 
@@ -736,18 +715,15 @@ mod tests {
         assert!(client.registration().client_id > 0);
         assert_eq!(
             client.registration().leader_protocol_version,
-            Some(super::super::protocol::LEADER_PROTOCOL_VERSION)
+            super::super::protocol::LEADER_PROTOCOL_VERSION
         );
         assert_eq!(
-            client.registration().leader_binary_version.as_deref(),
-            Some(env!("CARGO_PKG_VERSION"))
+            client.registration().leader_binary_version,
+            env!("CARGO_PKG_VERSION")
         );
-        assert!(
-            client
-                .registration()
-                .leader_capabilities
-                .as_ref()
-                .is_some_and(|capabilities| capabilities.control_v1)
+        assert_eq!(
+            client.registration().runtime_cpu_profile,
+            crate::cpu_profile::CpuProfileManager::new().runtime_cpu_profile()
         );
 
         // Cleanup
@@ -783,7 +759,7 @@ mod tests {
                 active: false,
                 stopping: false,
                 started_at: None,
-                svg_path: None,
+                artifact_path: None,
                 frequency_hz: None,
             }
         ));
@@ -797,12 +773,15 @@ mod tests {
         release_rx: Mutex<Option<tokio::sync::oneshot::Receiver<Result<(), ControlError>>>>,
         started_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
         stop_calls: Arc<Mutex<Vec<PathBuf>>>,
-        svg_path: PathBuf,
+        artifact_path: PathBuf,
     }
 
     impl ProfilerEngine for BlockingProfilerEngine {
         fn stop(self: Box<Self>) -> Result<(), ControlError> {
-            self.stop_calls.lock().unwrap().push(self.svg_path.clone());
+            self.stop_calls
+                .lock()
+                .unwrap()
+                .push(self.artifact_path.clone());
             if let Some(started_tx) = self.started_tx.lock().unwrap().take() {
                 let _ = started_tx.send(());
             }
@@ -815,7 +794,7 @@ mod tests {
                 .blocking_recv()
                 .expect("release signal");
             if result.is_ok() {
-                std::fs::write(&self.svg_path, "main;work 42\n").unwrap();
+                std::fs::write(&self.artifact_path, "main;work 42\n").unwrap();
             }
             result
         }
@@ -839,11 +818,7 @@ mod tests {
         .await
         .unwrap();
 
-        let runtime_cpu_profile = client
-            .registration()
-            .leader_capabilities
-            .as_ref()
-            .is_some_and(|capabilities| capabilities.runtime_cpu_profile);
+        let runtime_cpu_profile = client.registration().runtime_cpu_profile;
 
         let start_result = client
             .send_control(ControlCommand::StartCpuProfile {
@@ -862,10 +837,10 @@ mod tests {
                     assert!(matches!(
                         started,
                         ControlPayload::CpuProfileStarted {
-                            svg_path,
+                            artifact_path,
                             frequency_hz: 200,
                             ..
-                        } if svg_path == output_path
+                        } if artifact_path == output_path
                     ));
 
                     let status = client
@@ -878,7 +853,7 @@ mod tests {
                         ControlPayload::CpuProfileStatus {
                             active: true,
                             stopping: false,
-                            svg_path: Some(path),
+                            artifact_path: Some(path),
                             frequency_hz: Some(200),
                             ..
                         } if path == output_path
@@ -891,7 +866,7 @@ mod tests {
                         .unwrap();
                     assert!(matches!(
                         stopped,
-                        ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == output_path
+                        ControlPayload::CpuProfileStopped { artifact_path, .. } if artifact_path == output_path
                     ));
                     assert!(output_path.exists());
                 }
@@ -954,7 +929,7 @@ mod tests {
                     release_rx: Mutex::new(Some(release_rx)),
                     started_tx: Mutex::new(Some(started_tx)),
                     stop_calls: stop_calls.clone(),
-                    svg_path: output_path.clone(),
+                    artifact_path: output_path.clone(),
                 }),
             )
             .unwrap();
@@ -993,7 +968,7 @@ mod tests {
             ControlPayload::CpuProfileStatus {
                 active: false,
                 stopping: true,
-                svg_path: Some(path),
+                artifact_path: Some(path),
                 frequency_hz: Some(200),
                 ..
             } if path == output_path
@@ -1036,7 +1011,7 @@ mod tests {
         let stopped = stop_task.await.unwrap().unwrap().unwrap();
         assert!(matches!(
             stopped,
-            ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == output_path
+            ControlPayload::CpuProfileStopped { artifact_path, .. } if artifact_path == output_path
         ));
         assert_eq!(
             stop_calls.lock().unwrap().as_slice(),
@@ -1055,7 +1030,7 @@ mod tests {
                 active: false,
                 stopping: false,
                 started_at: None,
-                svg_path: None,
+                artifact_path: None,
                 frequency_hz: None,
             }
         ));
@@ -1111,7 +1086,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_with_yolo_mode() {
+    async fn connect_with_always_approve_mode() {
         let temp = TempDir::new().unwrap();
         let sock_path = temp.path().join("test.sock");
 
@@ -1119,7 +1094,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let caps = ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: ::diagnostics::enums::PermissionMode::AlwaysApprove,
             default_model: None,
             ..Default::default()
         };

@@ -17,24 +17,21 @@ struct ArchiveBundleMetadata {
     version: String,
 }
 
-/// Legacy JSON bundle returned when the archive endpoint is unavailable.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SubagentBundle {
+pub struct TestBundleFixture {
     pub version: String,
-    pub personas: HashMap<String, String>,
-    pub roles: HashMap<String, String>,
     pub agents: HashMap<String, String>,
     #[serde(default)]
     pub skills: HashMap<String, String>,
 }
 
-impl SubagentBundle {
+#[cfg(test)]
+impl TestBundleFixture {
     pub fn empty(version: impl Into<String>) -> Self {
         Self {
             version: version.into(),
-            personas: HashMap::new(),
-            roles: HashMap::new(),
             agents: HashMap::new(),
             skills: HashMap::new(),
         }
@@ -49,8 +46,6 @@ pub struct BundleManifest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BundleFileKind {
-    Persona,
-    Role,
     Agent,
     Skill,
 }
@@ -58,8 +53,6 @@ enum BundleFileKind {
 impl BundleFileKind {
     fn dir_name(self) -> &'static str {
         match self {
-            Self::Persona => "personas",
-            Self::Role => "roles",
             Self::Agent => "agents",
             Self::Skill => "skills",
         }
@@ -68,14 +61,11 @@ impl BundleFileKind {
     fn extension(self) -> &'static str {
         match self {
             Self::Agent | Self::Skill => "md",
-            Self::Persona | Self::Role => "toml",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Persona => "persona",
-            Self::Role => "role",
             Self::Agent => "agent",
             Self::Skill => "skill",
         }
@@ -83,8 +73,6 @@ impl BundleFileKind {
 
     fn from_dir_name(dir_name: &str) -> Option<Self> {
         match dir_name {
-            "personas" => Some(Self::Persona),
-            "roles" => Some(Self::Role),
             "agents" => Some(Self::Agent),
             "skills" => Some(Self::Skill),
             _ => None,
@@ -100,6 +88,7 @@ enum BundleFileState {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct BundleFile<'a> {
     relative_path: String,
     checksum: String,
@@ -126,7 +115,11 @@ pub fn read_cached_manifest(root: &Path) -> Result<Option<BundleManifest>> {
         .map(Some)
 }
 
-pub fn write_bundle_to_cache(root: &Path, bundle: &SubagentBundle) -> Result<BundleManifest> {
+#[cfg(test)]
+pub fn install_test_bundle_fixture(
+    root: &Path,
+    bundle: &TestBundleFixture,
+) -> Result<BundleManifest> {
     let old_manifest = read_cached_manifest(root)?.map(sanitize_manifest);
     ensure_bundle_dirs(root)?;
 
@@ -322,7 +315,7 @@ fn ensure_bundle_dirs(root: &Path) -> Result<()> {
     std::fs::create_dir_all(root)
         .with_context(|| format!("failed to create {}", root.display()))?;
 
-    for dir_name in ["personas", "roles", "agents", "skills"] {
+    for dir_name in ["agents", "skills"] {
         let dir = root.join(dir_name);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -442,15 +435,15 @@ pub fn count_entries_by_prefix(manifest: &BundleManifest, prefix: &str) -> usize
         .count()
 }
 
-fn bundle_files(bundle: &SubagentBundle) -> Result<Vec<BundleFile<'_>>> {
+#[cfg(test)]
+fn bundle_files(bundle: &TestBundleFixture) -> Result<Vec<BundleFile<'_>>> {
     let mut files = Vec::new();
-    extend_bundle_files(&mut files, BundleFileKind::Persona, &bundle.personas)?;
-    extend_bundle_files(&mut files, BundleFileKind::Role, &bundle.roles)?;
     extend_bundle_files(&mut files, BundleFileKind::Agent, &bundle.agents)?;
     extend_bundle_files(&mut files, BundleFileKind::Skill, &bundle.skills)?;
     Ok(files)
 }
 
+#[cfg(test)]
 fn extend_bundle_files<'a>(
     files: &mut Vec<BundleFile<'a>>,
     kind: BundleFileKind,
@@ -512,1070 +505,93 @@ pub(crate) mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
 
-    fn bundle_with_persona(version: &str, name: &str, content: &str) -> SubagentBundle {
-        let mut bundle = SubagentBundle::empty(version);
-        bundle
-            .personas
-            .insert(name.to_string(), content.to_string());
-        bundle
-    }
-
-    fn bundle_with_skill(version: &str, name: &str, content: &str) -> SubagentBundle {
-        let mut bundle = SubagentBundle::empty(version);
-        bundle.skills.insert(name.to_string(), content.to_string());
-        bundle
-    }
-
-    fn cache_root(tmp: &TempDir) -> PathBuf {
-        tmp.path().join("bundled")
+    fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        for (path, content) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, *content).unwrap();
+        }
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap()
     }
 
     #[test]
-    fn legacy_bundle_serializes_expected_shape() {
-        let bundle = SubagentBundle {
-            version: "bundle-v1".to_owned(),
-            personas: HashMap::from([("researcher".to_owned(), "persona body".to_owned())]),
-            roles: HashMap::from([("reviewer".to_owned(), "role body".to_owned())]),
-            agents: HashMap::from([("default".to_owned(), "agent body".to_owned())]),
-            skills: HashMap::from([("commit".to_owned(), "skill body".to_owned())]),
-        };
-
+    fn canonical_paths_accept_only_agents_and_skills() {
         assert_eq!(
-            serde_json::to_value(bundle).unwrap(),
-            serde_json::json!({
-                "version": "bundle-v1",
-                "personas": { "researcher": "persona body" },
-                "roles": { "reviewer": "role body" },
-                "agents": { "default": "agent body" },
-                "skills": { "commit": "skill body" }
-            })
+            sanitize_relative_path("agents/reviewer.md"),
+            Some("agents/reviewer.md".to_string())
         );
-    }
-
-    #[test]
-    fn legacy_bundle_defaults_missing_skills() {
-        let bundle: SubagentBundle = serde_json::from_value(serde_json::json!({
-            "version": "bundle-v1",
-            "personas": {},
-            "roles": {},
-            "agents": {}
-        }))
-        .unwrap();
-
-        assert!(bundle.skills.is_empty());
-        assert!(SubagentBundle::empty("v1").skills.is_empty());
-    }
-
-    #[test]
-    fn legacy_bundle_round_trips_with_skills() {
-        let mut bundle = SubagentBundle::empty("v2");
-        bundle
-            .skills
-            .insert("commit".to_owned(), "# Commit".to_owned());
-
-        let json = serde_json::to_string(&bundle).unwrap();
-        assert_eq!(
-            serde_json::from_str::<SubagentBundle>(&json).unwrap(),
-            bundle
-        );
-    }
-
-    #[test]
-    fn write_new_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let bundle = bundle_with_persona("v1", "researcher", "instructions = \"hello\"");
-
-        let manifest = write_bundle_to_cache(&root, &bundle).unwrap();
-
-        assert_eq!(manifest.version, "v1");
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"hello\""
-        );
-        assert_eq!(read_cached_manifest(&root).unwrap(), Some(manifest));
-    }
-
-    #[test]
-    fn overwrite_unchanged_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v1", "researcher", "instructions = \"old\""),
-        )
-        .unwrap();
-
-        write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v2", "researcher", "instructions = \"new\""),
-        )
-        .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"new\""
-        );
-    }
-
-    #[test]
-    fn skip_user_modified_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let manifest_v1 = write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v1", "researcher", "instructions = \"old\""),
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("personas/researcher.toml"),
-            "instructions = \"user edit\"",
-        )
-        .unwrap();
-
-        let manifest_v2 = write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v2", "researcher", "instructions = \"new\""),
-        )
-        .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"user edit\""
-        );
-        assert_eq!(
-            manifest_v2.checksums.get("personas/researcher.toml"),
-            manifest_v1.checksums.get("personas/researcher.toml")
-        );
-    }
-
-    #[test]
-    fn prune_removed_unmodified_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v1", "researcher", "instructions = \"old\""),
-        )
-        .unwrap();
-
-        let manifest = write_bundle_to_cache(&root, &SubagentBundle::empty("v2")).unwrap();
-
-        assert!(!root.join("personas/researcher.toml").exists());
-        assert!(!manifest.checksums.contains_key("personas/researcher.toml"));
-    }
-
-    #[test]
-    fn keep_removed_modified_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let manifest_v1 = write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v1", "researcher", "instructions = \"old\""),
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("personas/researcher.toml"),
-            "instructions = \"user edit\"",
-        )
-        .unwrap();
-
-        let manifest_v2 = write_bundle_to_cache(&root, &SubagentBundle::empty("v2")).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"user edit\""
-        );
-        assert_eq!(
-            manifest_v2.checksums.get("personas/researcher.toml"),
-            manifest_v1.checksums.get("personas/researcher.toml")
-        );
-    }
-
-    #[test]
-    fn write_rejects_path_traversal_names() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let outside = tmp.path().join("outside.toml");
-        let bundle = bundle_with_persona("v1", "../../outside", "instructions = \"evil\"");
-
-        let error = write_bundle_to_cache(&root, &bundle).unwrap_err();
-
-        assert!(error.to_string().contains("invalid bundled persona name"));
-        assert!(!outside.exists());
-    }
-
-    #[test]
-    fn prune_skips_unsafe_manifest_paths() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        std::fs::create_dir_all(&root).unwrap();
-
-        let outside = tmp.path().join("outside.toml");
-        std::fs::write(&outside, "keep me").unwrap();
-
-        let old_manifest = BundleManifest {
-            version: "v1".to_string(),
-            checksums: HashMap::from([(
-                "personas/../../outside.toml".to_string(),
-                checksum_file(&outside).unwrap(),
-            )]),
-        };
-        let mut retained = HashMap::new();
-
-        prune_removed_files(&root, &old_manifest, &mut retained).unwrap();
-
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep me");
-        assert!(retained.is_empty());
-    }
-
-    #[test]
-    fn user_revert_after_skipped_update_allows_future_update() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v1", "researcher", "instructions = \"old\""),
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("personas/researcher.toml"),
-            "instructions = \"user edit\"",
-        )
-        .unwrap();
-        write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v2", "researcher", "instructions = \"new\""),
-        )
-        .unwrap();
-
-        std::fs::write(
-            root.join("personas/researcher.toml"),
-            "instructions = \"old\"",
-        )
-        .unwrap();
-
-        write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v3", "researcher", "instructions = \"latest\""),
-        )
-        .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"latest\""
-        );
-    }
-
-    #[test]
-    fn user_revert_after_preserved_remove_allows_future_prune() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        write_bundle_to_cache(
-            &root,
-            &bundle_with_persona("v1", "researcher", "instructions = \"old\""),
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("personas/researcher.toml"),
-            "instructions = \"user edit\"",
-        )
-        .unwrap();
-        write_bundle_to_cache(&root, &SubagentBundle::empty("v2")).unwrap();
-
-        std::fs::write(
-            root.join("personas/researcher.toml"),
-            "instructions = \"old\"",
-        )
-        .unwrap();
-
-        let manifest = write_bundle_to_cache(&root, &SubagentBundle::empty("v3")).unwrap();
-
-        assert!(!root.join("personas/researcher.toml").exists());
-        assert!(!manifest.checksums.contains_key("personas/researcher.toml"));
-    }
-
-    #[test]
-    fn same_version_retry_repairs_missing_managed_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let bundle = bundle_with_persona("v1", "researcher", "instructions = \"hello\"");
-
-        write_bundle_to_cache(&root, &bundle).unwrap();
-        std::fs::remove_file(root.join("personas/researcher.toml")).unwrap();
-
-        write_bundle_to_cache(&root, &bundle).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"hello\""
-        );
-    }
-
-    #[test]
-    fn write_new_skill_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let bundle = bundle_with_skill("v1", "commit", "# Commit Skill\nRun git commit.");
-
-        let manifest = write_bundle_to_cache(&root, &bundle).unwrap();
-
-        assert_eq!(manifest.version, "v1");
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
-            "# Commit Skill\nRun git commit."
-        );
-        assert!(manifest.checksums.contains_key("skills/commit/SKILL.md"));
-    }
-
-    #[test]
-    fn skip_user_modified_skill() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let manifest_v1 =
-            write_bundle_to_cache(&root, &bundle_with_skill("v1", "commit", "# Original")).unwrap();
-        std::fs::write(root.join("skills/commit/SKILL.md"), "# User custom").unwrap();
-
-        let manifest_v2 =
-            write_bundle_to_cache(&root, &bundle_with_skill("v2", "commit", "# Updated")).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
-            "# User custom"
-        );
-        assert_eq!(
-            manifest_v2.checksums.get("skills/commit/SKILL.md"),
-            manifest_v1.checksums.get("skills/commit/SKILL.md")
-        );
-    }
-
-    #[test]
-    fn prune_removed_unmodified_skill() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        write_bundle_to_cache(&root, &bundle_with_skill("v1", "commit", "# Original")).unwrap();
-
-        let manifest = write_bundle_to_cache(&root, &SubagentBundle::empty("v2")).unwrap();
-
-        assert!(!root.join("skills/commit/SKILL.md").exists());
-        assert!(!manifest.checksums.contains_key("skills/commit/SKILL.md"));
-    }
-
-    #[test]
-    fn keep_removed_modified_skill() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let manifest_v1 =
-            write_bundle_to_cache(&root, &bundle_with_skill("v1", "commit", "# Original")).unwrap();
-        std::fs::write(root.join("skills/commit/SKILL.md"), "# User custom").unwrap();
-
-        let manifest_v2 = write_bundle_to_cache(&root, &SubagentBundle::empty("v2")).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
-            "# User custom"
-        );
-        assert_eq!(
-            manifest_v2.checksums.get("skills/commit/SKILL.md"),
-            manifest_v1.checksums.get("skills/commit/SKILL.md")
-        );
-    }
-
-    #[test]
-    fn skill_rejects_path_traversal() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let outside = tmp.path().join("outside.md");
-        let bundle = bundle_with_skill("v1", "../../outside", "# evil");
-
-        let error = write_bundle_to_cache(&root, &bundle).unwrap_err();
-
-        assert!(error.to_string().contains("invalid bundled skill name"));
-        assert!(!outside.exists());
-    }
-
-    #[test]
-    fn sanitize_accepts_valid_skill_path() {
         assert_eq!(
             sanitize_relative_path("skills/commit/SKILL.md"),
             Some("skills/commit/SKILL.md".to_string())
         );
+        assert_eq!(sanitize_relative_path("agents/../escape.md"), None);
+        assert_eq!(sanitize_relative_path("unknown/entry.md"), None);
     }
 
     #[test]
-    fn sanitize_accepts_nested_skill_paths() {
-        assert_eq!(
-            sanitize_relative_path("skills/implement/scripts/memory.py"),
-            Some("skills/implement/scripts/memory.py".to_string())
-        );
-        assert_eq!(
-            sanitize_relative_path("skills/implement/tests/test_memory.py"),
-            Some("skills/implement/tests/test_memory.py".to_string())
-        );
-        assert_eq!(
-            sanitize_relative_path("skills/commit/README.md"),
-            Some("skills/commit/README.md".to_string())
-        );
-        assert_eq!(
-            sanitize_relative_path("skills/foo/a/b/c/d.txt"),
-            Some("skills/foo/a/b/c/d.txt".to_string())
-        );
-    }
-
-    #[test]
-    fn sanitize_rejects_invalid_skill_paths() {
-        // Wrong top-level directory.
-        assert_eq!(sanitize_relative_path("personas/commit/SKILL.md"), None);
-        // Two-component skill path (must be at least 3).
-        assert_eq!(sanitize_relative_path("skills/commit.md"), None);
-        // Empty skill name.
-        assert_eq!(sanitize_relative_path("skills//SKILL.md"), None);
-        // Path traversal in skill name.
-        assert_eq!(sanitize_relative_path("skills/../SKILL.md"), None);
-        assert_eq!(sanitize_relative_path("skills/../etc/SKILL.md"), None);
-        // Path traversal in nested components.
-        assert_eq!(sanitize_relative_path("skills/foo/../bar/SKILL.md"), None);
-        assert_eq!(
-            sanitize_relative_path("skills/foo/scripts/../../etc/passwd"),
-            None
-        );
-        // `.` and empty components in the nested portion are rejected.
-        assert_eq!(sanitize_relative_path("skills/foo/./SKILL.md"), None);
-        assert_eq!(sanitize_relative_path("skills/foo//SKILL.md"), None);
-    }
-
-    #[test]
-    fn sanitize_accepts_valid_two_component_paths() {
-        assert_eq!(
-            sanitize_relative_path("personas/researcher.toml"),
-            Some("personas/researcher.toml".to_string())
-        );
-        assert_eq!(
-            sanitize_relative_path("roles/reviewer.toml"),
-            Some("roles/reviewer.toml".to_string())
-        );
-        assert_eq!(
-            sanitize_relative_path("agents/coder.md"),
-            Some("agents/coder.md".to_string())
-        );
-    }
-
-    // --- archive extraction tests ---
-
-    use super::test_helpers::{bundle_json, make_test_archive};
-
-    #[test]
-    fn extract_archive_writes_personas_roles_agents_and_skills() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let v = bundle_json("v1");
-        let archive = make_test_archive(&[
-            ("bundle.json", v.as_bytes()),
-            (
-                "subagents/personas/researcher.toml",
-                b"instructions = \"hello\"",
-            ),
-            ("subagents/roles/reviewer.toml", b"description = \"review\""),
-            ("subagents/agents/default.md", b"# agent"),
-            ("skills/commit/SKILL.md", b"# Commit skill"),
+    fn archive_extracts_canonical_catalog() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = archive(&[
+            ("bundle.json", br#"{"version":"v2"}"#),
+            ("subagents/agents/reviewer.md", b"# Reviewer"),
+            ("skills/commit/SKILL.md", b"# Commit"),
         ]);
-
-        let manifest = extract_bundle_archive(&root, &archive).unwrap();
-
-        assert_eq!(manifest.version, "v1");
+        let manifest = extract_bundle_archive(root.path(), &bytes).unwrap();
+        assert_eq!(manifest.version, "v2");
         assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"hello\""
+            std::fs::read_to_string(root.path().join("agents/reviewer.md")).unwrap(),
+            "# Reviewer"
         );
         assert_eq!(
-            std::fs::read_to_string(root.join("roles/reviewer.toml")).unwrap(),
-            "description = \"review\""
+            std::fs::read_to_string(root.path().join("skills/commit/SKILL.md")).unwrap(),
+            "# Commit"
         );
-        assert_eq!(
-            std::fs::read_to_string(root.join("agents/default.md")).unwrap(),
-            "# agent"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/commit/SKILL.md")).unwrap(),
-            "# Commit skill"
-        );
-        assert!(manifest.checksums.contains_key("personas/researcher.toml"));
-        assert!(manifest.checksums.contains_key("roles/reviewer.toml"));
-        assert!(manifest.checksums.contains_key("agents/default.md"));
+        assert!(manifest.checksums.contains_key("agents/reviewer.md"));
         assert!(manifest.checksums.contains_key("skills/commit/SKILL.md"));
     }
 
     #[test]
-    fn extract_archive_writes_nested_skill_files() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let v = bundle_json("v1");
-        let archive = make_test_archive(&[
-            ("bundle.json", v.as_bytes()),
-            ("skills/implement/SKILL.md", b"# Implement skill"),
-            ("skills/implement/scripts/memory.py", b"print('memory')\n"),
-            (
-                "skills/implement/tests/test_memory.py",
-                b"def test_memory():\n    pass\n",
-            ),
+    fn archive_rejects_traversal_and_oversized_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let traversal = archive(&[
+            ("bundle.json", br#"{"version":"v2"}"#),
+            ("subagents/agents/../../escape.md", b"bad"),
         ]);
+        assert!(extract_bundle_archive(root.path(), &traversal).is_err());
 
-        let manifest = extract_bundle_archive(&root, &archive).unwrap();
-
-        assert_eq!(manifest.version, "v1");
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/implement/SKILL.md")).unwrap(),
-            "# Implement skill"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/implement/scripts/memory.py")).unwrap(),
-            "print('memory')\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/implement/tests/test_memory.py")).unwrap(),
-            "def test_memory():\n    pass\n"
-        );
-        assert!(manifest.checksums.contains_key("skills/implement/SKILL.md"));
-        assert!(
-            manifest
-                .checksums
-                .contains_key("skills/implement/scripts/memory.py")
-        );
-        assert!(
-            manifest
-                .checksums
-                .contains_key("skills/implement/tests/test_memory.py")
-        );
-    }
-
-    #[test]
-    fn extract_archive_prunes_removed_nested_skill_files() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let v1 = bundle_json("v1");
-        let v1_archive = make_test_archive(&[
-            ("bundle.json", v1.as_bytes()),
-            ("skills/implement/SKILL.md", b"# Implement"),
-            ("skills/implement/scripts/memory.py", b"# v1 helper\n"),
+        let large = vec![b'x'; ARCHIVE_MAX_ENTRY_SIZE as usize + 1];
+        let oversized = archive(&[
+            ("bundle.json", br#"{"version":"v2"}"#),
+            ("subagents/agents/large.md", &large),
         ]);
-        extract_bundle_archive(&root, &v1_archive).unwrap();
-        assert!(root.join("skills/implement/scripts/memory.py").exists());
-
-        let v2 = bundle_json("v2");
-        let v2_archive = make_test_archive(&[
-            ("bundle.json", v2.as_bytes()),
-            ("skills/implement/SKILL.md", b"# Implement"),
-        ]);
-        let manifest = extract_bundle_archive(&root, &v2_archive).unwrap();
-
-        assert!(!root.join("skills/implement/scripts/memory.py").exists());
-        assert!(
-            !manifest
-                .checksums
-                .contains_key("skills/implement/scripts/memory.py")
-        );
-        assert!(manifest.checksums.contains_key("skills/implement/SKILL.md"));
+        assert!(extract_bundle_archive(root.path(), &oversized).is_err());
     }
 
     #[test]
-    fn extract_archive_keeps_user_modified_nested_skill_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let v1 = bundle_json("v1");
-        let v1_archive = make_test_archive(&[
-            ("bundle.json", v1.as_bytes()),
-            ("skills/implement/SKILL.md", b"# v1"),
-            ("skills/implement/scripts/memory.py", b"# v1 helper\n"),
-        ]);
-        let manifest_v1 = extract_bundle_archive(&root, &v1_archive).unwrap();
-
-        std::fs::write(
-            root.join("skills/implement/scripts/memory.py"),
-            b"# user edit\n",
-        )
-        .unwrap();
-
-        let v2 = bundle_json("v2");
-        let v2_archive = make_test_archive(&[
-            ("bundle.json", v2.as_bytes()),
-            ("skills/implement/SKILL.md", b"# v2"),
-            ("skills/implement/scripts/memory.py", b"# v2 helper\n"),
-        ]);
-        let manifest_v2 = extract_bundle_archive(&root, &v2_archive).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/implement/scripts/memory.py")).unwrap(),
-            "# user edit\n"
-        );
-        assert_eq!(
-            manifest_v2
-                .checksums
-                .get("skills/implement/scripts/memory.py"),
-            manifest_v1
-                .checksums
-                .get("skills/implement/scripts/memory.py")
-        );
-    }
-
-    #[test]
-    fn extract_archive_overwrites_unchanged_nested_skill_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let v1 = bundle_json("v1");
-        let v1_archive = make_test_archive(&[
-            ("bundle.json", v1.as_bytes()),
-            ("skills/implement/SKILL.md", b"# v1"),
-            ("skills/implement/scripts/memory.py", b"# v1 helper\n"),
-        ]);
-        extract_bundle_archive(&root, &v1_archive).unwrap();
-
-        let v2 = bundle_json("v2");
-        let v2_archive = make_test_archive(&[
-            ("bundle.json", v2.as_bytes()),
-            ("skills/implement/SKILL.md", b"# v2"),
-            ("skills/implement/scripts/memory.py", b"# v2 helper\n"),
-        ]);
-        extract_bundle_archive(&root, &v2_archive).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/implement/scripts/memory.py")).unwrap(),
-            "# v2 helper\n"
-        );
-    }
-
-    #[test]
-    fn extract_archive_skips_user_modified_files() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let v1 = bundle_json("v1");
-        let v1_archive = make_test_archive(&[
-            ("bundle.json", v1.as_bytes()),
-            (
-                "subagents/personas/researcher.toml",
-                b"instructions = \"old\"",
-            ),
-        ]);
-        let manifest_v1 = extract_bundle_archive(&root, &v1_archive).unwrap();
-
-        std::fs::write(
-            root.join("personas/researcher.toml"),
-            "instructions = \"user edit\"",
-        )
-        .unwrap();
-
-        let v2 = bundle_json("v2");
-        let v2_archive = make_test_archive(&[
-            ("bundle.json", v2.as_bytes()),
-            (
-                "subagents/personas/researcher.toml",
-                b"instructions = \"new\"",
-            ),
-        ]);
-        let manifest_v2 = extract_bundle_archive(&root, &v2_archive).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"user edit\""
-        );
-        assert_eq!(
-            manifest_v2.checksums.get("personas/researcher.toml"),
-            manifest_v1.checksums.get("personas/researcher.toml")
-        );
-    }
-
-    #[test]
-    fn extract_archive_prunes_removed_files() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let v1 = bundle_json("v1");
-        let v1_archive = make_test_archive(&[
-            ("bundle.json", v1.as_bytes()),
-            (
-                "subagents/personas/researcher.toml",
-                b"instructions = \"hello\"",
-            ),
-        ]);
-        extract_bundle_archive(&root, &v1_archive).unwrap();
-
-        let v2 = bundle_json("v2");
-        let v2_archive = make_test_archive(&[("bundle.json", v2.as_bytes())]);
-        let manifest = extract_bundle_archive(&root, &v2_archive).unwrap();
-
-        assert!(!root.join("personas/researcher.toml").exists());
-        assert!(!manifest.checksums.contains_key("personas/researcher.toml"));
-    }
-
-    #[test]
-    fn extract_archive_keeps_removed_modified_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let v1 = bundle_json("v1");
-        let v1_archive = make_test_archive(&[
-            ("bundle.json", v1.as_bytes()),
-            (
-                "subagents/personas/researcher.toml",
-                b"instructions = \"old\"",
-            ),
-        ]);
-        let manifest_v1 = extract_bundle_archive(&root, &v1_archive).unwrap();
-
-        std::fs::write(
-            root.join("personas/researcher.toml"),
-            "instructions = \"user edit\"",
-        )
-        .unwrap();
-
-        let v2 = bundle_json("v2");
-        let v2_archive = make_test_archive(&[("bundle.json", v2.as_bytes())]);
-        let manifest_v2 = extract_bundle_archive(&root, &v2_archive).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"user edit\""
-        );
-        assert_eq!(
-            manifest_v2.checksums.get("personas/researcher.toml"),
-            manifest_v1.checksums.get("personas/researcher.toml")
-        );
-    }
-
-    #[test]
-    fn extract_archive_rejects_oversized_entry() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let v = bundle_json("v1");
-        let big_content = vec![0u8; ARCHIVE_MAX_ENTRY_SIZE as usize + 1];
-        let archive = make_test_archive(&[
-            ("bundle.json", v.as_bytes()),
-            ("subagents/personas/big.toml", &big_content),
-        ]);
-
-        let err = extract_bundle_archive(&root, &archive).unwrap_err();
-        assert!(err.to_string().contains("exceeds maximum size"));
-    }
-
-    #[test]
-    fn extract_archive_rejects_too_many_entries() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut builder = tar::Builder::new(encoder);
-
-        let v = r#"{"version":"v1"}"#;
-        let mut header = tar::Header::new_gnu();
-        header.set_size(v.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "bundle.json", v.as_bytes())
-            .unwrap();
-
-        let small = b"x";
-        for i in 0..ARCHIVE_MAX_ENTRIES {
-            let path = format!("unknown/f{i}");
-            let mut h = tar::Header::new_gnu();
-            h.set_size(small.len() as u64);
-            h.set_mode(0o644);
-            h.set_cksum();
-            builder.append_data(&mut h, &path, &small[..]).unwrap();
-        }
-
-        let encoder = builder.into_inner().unwrap();
-        let archive = encoder.finish().unwrap();
-
-        let err = extract_bundle_archive(&root, &archive).unwrap_err();
-        assert!(err.to_string().contains("exceeds maximum entry count"));
-    }
-
-    #[test]
-    fn extract_archive_skips_directory_entries() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut builder = tar::Builder::new(encoder);
-
-        let v = r#"{"version":"v1"}"#;
-        let mut h = tar::Header::new_gnu();
-        h.set_size(v.len() as u64);
-        h.set_mode(0o644);
-        h.set_cksum();
-        builder
-            .append_data(&mut h, "bundle.json", v.as_bytes())
-            .unwrap();
-
-        let mut dir_h = tar::Header::new_gnu();
-        dir_h.set_size(0);
-        dir_h.set_mode(0o755);
-        dir_h.set_entry_type(tar::EntryType::Directory);
-        dir_h.set_cksum();
-        builder
-            .append_data(&mut dir_h, "subagents/personas/", &[] as &[u8])
-            .unwrap();
-
-        let content = b"instructions = \"hello\"";
-        let mut fh = tar::Header::new_gnu();
-        fh.set_size(content.len() as u64);
-        fh.set_mode(0o644);
-        fh.set_cksum();
-        builder
-            .append_data(&mut fh, "subagents/personas/researcher.toml", &content[..])
-            .unwrap();
-
-        let encoder = builder.into_inner().unwrap();
-        let archive = encoder.finish().unwrap();
-
-        let manifest = extract_bundle_archive(&root, &archive).unwrap();
-
-        assert_eq!(manifest.checksums.len(), 1);
-        assert!(manifest.checksums.contains_key("personas/researcher.toml"));
-    }
-
-    #[test]
-    fn extract_archive_missing_bundle_json_fails() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let archive = make_test_archive(&[(
-            "subagents/personas/researcher.toml",
-            b"instructions = \"hello\"" as &[u8],
-        )]);
-
-        let err = extract_bundle_archive(&root, &archive).unwrap_err();
-        assert!(err.to_string().contains("bundle.json"));
-    }
-
-    #[test]
-    fn extract_archive_handles_dot_slash_prefix() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let v = bundle_json("v1");
-        let archive = make_test_archive(&[
-            ("./bundle.json", v.as_bytes()),
-            (
-                "./subagents/personas/researcher.toml",
-                b"instructions = \"hello\"",
-            ),
-            ("./skills/commit/SKILL.md", b"# Commit"),
-        ]);
-
-        let manifest = extract_bundle_archive(&root, &archive).unwrap();
-        assert_eq!(manifest.version, "v1");
-        assert!(manifest.checksums.contains_key("personas/researcher.toml"));
-        assert!(manifest.checksums.contains_key("skills/commit/SKILL.md"));
-    }
-
-    #[test]
-    fn extract_archive_overwrites_unchanged_file() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let v1 = bundle_json("v1");
-        let v1_archive = make_test_archive(&[
-            ("bundle.json", v1.as_bytes()),
-            (
-                "subagents/personas/researcher.toml",
-                b"instructions = \"old\"",
-            ),
-        ]);
-        extract_bundle_archive(&root, &v1_archive).unwrap();
-
-        let v2 = bundle_json("v2");
-        let v2_archive = make_test_archive(&[
-            ("bundle.json", v2.as_bytes()),
-            (
-                "subagents/personas/researcher.toml",
-                b"instructions = \"new\"",
-            ),
-        ]);
-        extract_bundle_archive(&root, &v2_archive).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("personas/researcher.toml")).unwrap(),
-            "instructions = \"new\""
-        );
-    }
-
-    #[test]
-    fn extract_archive_skips_unknown_top_level_paths() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let v = bundle_json("v1");
-        let archive = make_test_archive(&[
-            ("bundle.json", v.as_bytes()),
-            ("README.md", b"# readme"),
-            ("unknown/file.txt", b"data"),
-            ("subagents/personas/valid.toml", b"instructions = \"ok\""),
-        ]);
-
-        let manifest = extract_bundle_archive(&root, &archive).unwrap();
-        assert_eq!(manifest.checksums.len(), 1);
-        assert!(manifest.checksums.contains_key("personas/valid.toml"));
-    }
-
-    #[test]
-    fn extract_archive_rejects_excessive_total_decompressed_size() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut builder = tar::Builder::new(encoder);
-
-        let v = r#"{"version":"v1"}"#;
-        let mut h = tar::Header::new_gnu();
-        h.set_size(v.len() as u64);
-        h.set_mode(0o644);
-        h.set_cksum();
-        builder
-            .append_data(&mut h, "bundle.json", v.as_bytes())
-            .unwrap();
-
-        // 51 entries of 1 MB each = 51 MB > 50 MB limit.
-        // Each entry is at the per-entry limit (not over), so only the aggregate check fires.
-        let big = vec![0u8; ARCHIVE_MAX_ENTRY_SIZE as usize];
-        for i in 0..51 {
-            let path = format!("subagents/personas/p{i}.toml");
-            let mut fh = tar::Header::new_gnu();
-            fh.set_size(big.len() as u64);
-            fh.set_mode(0o644);
-            fh.set_cksum();
-            builder.append_data(&mut fh, &path, big.as_slice()).unwrap();
-        }
-
-        let encoder = builder.into_inner().unwrap();
-        let archive = encoder.finish().unwrap();
-
-        let err = extract_bundle_archive(&root, &archive).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("exceeds maximum decompressed size")
-        );
-    }
-
-    // --- map_archive_path_to_cache_path tests ---
-
-    #[test]
-    fn map_archive_strips_subagents_prefix() {
-        assert_eq!(
-            map_archive_path_to_cache_path("subagents/personas/researcher.toml"),
-            Some("personas/researcher.toml".to_string())
-        );
-        assert_eq!(
-            map_archive_path_to_cache_path("subagents/roles/reviewer.toml"),
-            Some("roles/reviewer.toml".to_string())
-        );
-        assert_eq!(
-            map_archive_path_to_cache_path("subagents/agents/default.md"),
-            Some("agents/default.md".to_string())
-        );
-    }
-
-    #[test]
-    fn map_archive_preserves_skills_path() {
-        assert_eq!(
-            map_archive_path_to_cache_path("skills/commit/SKILL.md"),
-            Some("skills/commit/SKILL.md".to_string())
-        );
-    }
-
-    #[test]
-    fn map_archive_preserves_nested_skill_paths() {
-        assert_eq!(
-            map_archive_path_to_cache_path("skills/implement/scripts/memory.py"),
-            Some("skills/implement/scripts/memory.py".to_string())
-        );
-        assert_eq!(
-            map_archive_path_to_cache_path("skills/implement/tests/test_memory.py"),
-            Some("skills/implement/tests/test_memory.py".to_string())
-        );
-    }
-
-    #[test]
-    fn sanitize_accepts_shared_data_under_skills() {
-        // Non-skill directories under skills/ (e.g., shared/personas/) are
-        // valid archive entries -- they carry data that skills read at runtime.
-        assert_eq!(
-            sanitize_relative_path("skills/shared/personas/reviewer.md"),
-            Some("skills/shared/personas/reviewer.md".to_string())
-        );
-        assert_eq!(
-            sanitize_relative_path("skills/shared/personas/implementer.md"),
-            Some("skills/shared/personas/implementer.md".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_archive_writes_shared_data_under_skills() {
-        let tmp = TempDir::new().unwrap();
-        let root = cache_root(&tmp);
-        let v = bundle_json("v1");
-        let archive = make_test_archive(&[
-            ("bundle.json", v.as_bytes()),
-            ("skills/review/SKILL.md", b"# Review skill"),
-            ("skills/shared/personas/reviewer.md", b"You are a reviewer."),
-        ]);
-
-        let manifest = extract_bundle_archive(&root, &archive).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(root.join("skills/shared/personas/reviewer.md")).unwrap(),
-            "You are a reviewer."
-        );
-        assert!(
-            manifest
-                .checksums
-                .contains_key("skills/shared/personas/reviewer.md")
-        );
-    }
-
-    #[test]
-    fn map_archive_skips_unknown_paths() {
-        assert_eq!(map_archive_path_to_cache_path("unknown/file.txt"), None);
-        assert_eq!(map_archive_path_to_cache_path("README.md"), None);
-        assert_eq!(map_archive_path_to_cache_path(""), None);
-    }
-
-    #[test]
-    fn map_archive_rejects_traversal_under_subagents() {
-        assert_eq!(
-            map_archive_path_to_cache_path("subagents/personas/../../etc/passwd"),
-            None
-        );
-    }
-
-    // --- count_entries_by_prefix tests ---
-
-    #[test]
-    fn count_entries_by_prefix_counts_correctly() {
-        let manifest = BundleManifest {
-            version: "v1".to_string(),
-            checksums: HashMap::from([
-                ("personas/a.toml".to_string(), "abc".to_string()),
-                ("personas/b.toml".to_string(), "def".to_string()),
-                ("roles/r.toml".to_string(), "ghi".to_string()),
-                ("skills/commit/SKILL.md".to_string(), "jkl".to_string()),
-            ]),
+    fn modified_managed_files_survive_pruning() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agents/reviewer.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "local edit").unwrap();
+        let old = BundleManifest {
+            version: "v1".into(),
+            checksums: HashMap::from([(
+                "agents/reviewer.md".into(),
+                checksum_bytes(b"managed value"),
+            )]),
         };
-        assert_eq!(count_entries_by_prefix(&manifest, "personas/"), 2);
-        assert_eq!(count_entries_by_prefix(&manifest, "roles/"), 1);
-        assert_eq!(count_entries_by_prefix(&manifest, "skills/"), 1);
-        assert_eq!(count_entries_by_prefix(&manifest, "agents/"), 0);
+        let mut retained = HashMap::new();
+        prune_removed_files(root.path(), &old, &mut retained).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "local edit");
+        assert!(retained.contains_key("agents/reviewer.md"));
     }
 }

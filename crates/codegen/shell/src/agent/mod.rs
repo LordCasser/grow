@@ -7,7 +7,7 @@ mod ext_parsers;
 pub mod folder_trust;
 pub(crate) mod handlers;
 pub mod init;
-pub mod model_providers;
+pub mod provider_catalog;
 pub mod models;
 pub mod mvp_agent;
 pub(crate) mod restore_code;

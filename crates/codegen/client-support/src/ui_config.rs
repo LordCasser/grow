@@ -48,9 +48,7 @@ impl FollowUpBehavior {
 /// default (`queue`) instead of failing the whole `[ui]` section. A
 /// non-string value still fails the section (consistent with the other
 /// typed `[ui]` fields, which fall back to `UiConfig::default()`).
-fn deserialize_follow_up_behavior<'de, D>(
-    deserializer: D,
-) -> Result<FollowUpBehavior, D::Error>
+fn deserialize_follow_up_behavior<'de, D>(deserializer: D) -> Result<FollowUpBehavior, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -67,12 +65,6 @@ pub struct UiConfig {
     /// Model ID to use for the secondary agent when forking.
     /// Empty means inherit the configured default model.
     pub fork_secondary_model: String,
-    /// YOLO mode. Read by `util::config`, declared here for `serde_ignored`.
-    #[serde(default)]
-    pub yolo: bool,
-    /// UI theme alias. Read by `util::config`, declared here for `serde_ignored`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ui_theme: Option<String>,
     /// Compact mode. Read by pager, declared here for `serde_ignored`.
     #[serde(default)]
     pub compact_mode: bool,
@@ -82,9 +74,6 @@ pub struct UiConfig {
     /// Read by `load_permission_mode()`. Declared for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
-    /// Legacy name for `permission_mode`. Declared for `serde_ignored`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_mode: Option<String>,
     /// Which permission option the cursor preselects on the **first**
     /// permission prompt of a session. One of `allow_once`, `allow_always`,
     /// or `reject`. After the first prompt, the cursor sticks to the user's
@@ -156,16 +145,9 @@ pub struct UiConfig {
     /// effective gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remember_tool_approvals: Option<bool>,
-    /// In-app drag selection highlight: `flash` | `hold` (legacy bool accepted).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_keep_text_selection"
-    )]
-    pub keep_text_selection: Option<String>,
-    /// Legacy TTL ms; only `Some(0)` counts when `keep_text_selection` is unset.
+    /// In-app drag selection highlight: `flash` | `hold` | `word_select`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selection_highlight_duration_ms: Option<u64>,
+    pub keep_text_selection: Option<String>,
     /// Show agent thinking/reasoning blocks in the TUI scrollback.
     /// `None` = on (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,11 +157,6 @@ pub struct UiConfig {
     /// by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_tool_verbs: Option<bool>,
-    /// Show Edit tool calls as a collapsed one-line `+N/-M` diffstat summary
-    /// by default (expand for the diff). `None` = off (client default).
-    /// Written by the pager's settings modal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collapsed_edit_blocks: Option<bool>,
     /// Next-prompt suggestions (tab autocomplete ghost text) after each turn.
     /// `None` = on (client default). Written by the pager's settings modal;
     /// the `GROW_PROMPT_SUGGESTIONS` env var overrides at runtime.
@@ -193,12 +170,6 @@ pub struct UiConfig {
     /// `"fullscreen"` | `"minimal"`; unset → product default fullscreen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
-    /// Retired hidden opt-in for terminal-like double/triple-click word/line
-    /// selection. Superseded by `keep_text_selection = "word_select"`. Still
-    /// read only when `keep_text_selection` is unset; Settings clears this on
-    /// write. `"word_select"` | unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub double_click_action: Option<String>,
     /// Per-tip contextual-hint opt-outs (`[ui.contextual_hints]`). Each `None`
     /// inherits the remote/default (on); `Some` is a user-explicit choice that
     /// beats the remote tier. Skipped on the wire when untouched so the section
@@ -272,38 +243,15 @@ impl ContextualHints {
 
 const DEFAULT_MAX_THOUGHTS_WIDTH: u16 = 120;
 
-fn deserialize_keep_text_selection<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Raw {
-        Bool(bool),
-        Str(String),
-    }
-
-    Ok(
-        Option::<Raw>::deserialize(deserializer)?.map(|raw| match raw {
-            Raw::Bool(true) => "hold".to_string(),
-            Raw::Bool(false) => "flash".to_string(),
-            Raw::Str(s) => s,
-        }),
-    )
-}
-
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             max_thoughts_width: DEFAULT_MAX_THOUGHTS_WIDTH,
             theme: None,
             fork_secondary_model: String::new(),
-            yolo: false,
-            ui_theme: None,
             compact_mode: false,
             simple_mode: None,
             permission_mode: None,
-            approval_mode: None,
             default_selected_permission: None,
             show_timestamps: None,
             show_timeline: None,
@@ -321,14 +269,11 @@ impl Default for UiConfig {
             remember_tool_approvals: None,
             cancel_subagents_on_turn_cancel: None,
             keep_text_selection: None,
-            selection_highlight_duration_ms: None,
             show_thinking_blocks: None,
             group_tool_verbs: None,
-            collapsed_edit_blocks: None,
             prompt_suggestions: None,
             cursor_blink: None,
             screen_mode: None,
-            double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
             follow_up_behavior: FollowUpBehavior::default(),
@@ -364,13 +309,12 @@ impl UiConfig {
             .unwrap_or(Self::PAGE_FLIP_ON_SEND_DEFAULT)
     }
 
-    /// True when the highlight should not timer-dismiss (`hold` / `word_select`,
-    /// or legacy duration 0).
+    /// True when the configured highlight mode does not timer-dismiss.
     pub fn keep_text_selection_enabled(&self) -> bool {
-        if let Some(ref s) = self.keep_text_selection {
-            return s == "hold" || s == "word_select";
-        }
-        matches!(self.selection_highlight_duration_ms, Some(0))
+        matches!(
+            self.keep_text_selection.as_deref(),
+            Some("hold" | "word_select")
+        )
     }
 }
 
@@ -393,39 +337,19 @@ mod tests {
         let mut ui = UiConfig::default();
         assert!(!ui.keep_text_selection_enabled());
 
-        ui.selection_highlight_duration_ms = Some(0);
-        assert!(ui.keep_text_selection_enabled());
-
-        ui.selection_highlight_duration_ms = Some(150);
-        assert!(!ui.keep_text_selection_enabled());
-
-        ui.selection_highlight_duration_ms = Some(0);
         ui.keep_text_selection = Some("flash".into());
         assert!(!ui.keep_text_selection_enabled());
 
         ui.keep_text_selection = Some("hold".into());
-        ui.selection_highlight_duration_ms = Some(999);
-        assert!(ui.keep_text_selection_enabled());
-
-        ui.keep_text_selection = Some("hold".into());
-        ui.selection_highlight_duration_ms = None;
         assert!(ui.keep_text_selection_enabled());
 
         // `word_select` implies hold (persistent highlight).
         ui.keep_text_selection = Some("word_select".into());
-        ui.selection_highlight_duration_ms = None;
         assert!(ui.keep_text_selection_enabled());
     }
 
     #[test]
-    fn keep_text_selection_deserializes_legacy_bool_and_string() {
-        let from_true: UiConfig = serde_json::from_str(r#"{"keep_text_selection": true}"#).unwrap();
-        assert_eq!(from_true.keep_text_selection.as_deref(), Some("hold"));
-
-        let from_false: UiConfig =
-            serde_json::from_str(r#"{"keep_text_selection": false}"#).unwrap();
-        assert_eq!(from_false.keep_text_selection.as_deref(), Some("flash"));
-
+    fn keep_text_selection_deserializes_canonical_strings() {
         let from_hold: UiConfig =
             serde_json::from_str(r#"{"keep_text_selection": "hold"}"#).unwrap();
         assert_eq!(from_hold.keep_text_selection.as_deref(), Some("hold"));
@@ -433,6 +357,8 @@ mod tests {
         let from_flash: UiConfig =
             serde_json::from_str(r#"{"keep_text_selection": "flash"}"#).unwrap();
         assert_eq!(from_flash.keep_text_selection.as_deref(), Some("flash"));
+
+        assert!(serde_json::from_str::<UiConfig>(r#"{"keep_text_selection": true}"#).is_err());
     }
 
     #[test]
@@ -479,12 +405,10 @@ mod tests {
         let ui: UiConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(ui.follow_up_behavior, FollowUpBehavior::Queue);
         // Explicit steer → Steer.
-        let ui: UiConfig =
-            serde_json::from_str(r#"{"follow_up_behavior": "steer"}"#).unwrap();
+        let ui: UiConfig = serde_json::from_str(r#"{"follow_up_behavior": "steer"}"#).unwrap();
         assert_eq!(ui.follow_up_behavior, FollowUpBehavior::Steer);
         // Unknown canonical folds to the default instead of failing `[ui]`.
-        let ui: UiConfig =
-            serde_json::from_str(r#"{"follow_up_behavior": "banana"}"#).unwrap();
+        let ui: UiConfig = serde_json::from_str(r#"{"follow_up_behavior": "banana"}"#).unwrap();
         assert_eq!(ui.follow_up_behavior, FollowUpBehavior::Queue);
     }
 
@@ -501,7 +425,9 @@ mod tests {
         };
         let serialized = serde_json::to_value(&steer).unwrap();
         assert_eq!(
-            serialized.get("follow_up_behavior").and_then(|v| v.as_str()),
+            serialized
+                .get("follow_up_behavior")
+                .and_then(|v| v.as_str()),
             Some("steer")
         );
     }

@@ -1412,7 +1412,7 @@ impl AgentView {
                     if let Some((orig_idx, _)) = filtered.get(i)
                         && let Some(doc) = entries.get(*orig_idx)
                     {
-                        let title = doc.title.clone();
+                        let title = doc.title.to_owned();
                         let content = doc.content.to_string();
                         // Shuttle the palette snapshot through DocViewer so it can
                         // be passed back to DocPicker when the user presses Esc.

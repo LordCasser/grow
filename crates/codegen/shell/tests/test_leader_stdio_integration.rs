@@ -17,7 +17,9 @@ use shell::cpu_profile::ControlErrorCode;
 use shell::leader::{
     ClientCapabilities, ClientMode, ControlCommand, ControlPayload, LeaderClient,
     LeaderServerControlState, LeaderServerMetadata,
-    protocol::{ClientMessage, ServerMessage, read_message, write_message},
+    protocol::{
+        ClientMessage, LEADER_PROTOCOL_VERSION, ServerMessage, read_message, write_message,
+    },
     spawn_leader_server,
 };
 use tempfile::TempDir;
@@ -440,6 +442,7 @@ async fn test_stdio_client_disconnect() {
         &ClientMessage::Register {
             client_type: "test".into(),
             mode: ClientMode::Stdio,
+            protocol_version: LEADER_PROTOCOL_VERSION,
             capabilities: ClientCapabilities::default(),
         },
     )
@@ -475,6 +478,7 @@ async fn test_stdio_client_ping_pong() {
         &ClientMessage::Register {
             client_type: "test".into(),
             mode: ClientMode::Stdio,
+            protocol_version: LEADER_PROTOCOL_VERSION,
             capabilities: ClientCapabilities::default(),
         },
     )
@@ -513,6 +517,7 @@ async fn test_server_exits_when_all_clients_disconnect() {
         &ClientMessage::Register {
             client_type: "test".into(),
             mode: ClientMode::Stdio,
+            protocol_version: LEADER_PROTOCOL_VERSION,
             capabilities: ClientCapabilities::default(),
         },
     )
@@ -558,11 +563,7 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
     .await
     .unwrap();
 
-    let runtime_cpu_profile = client_a
-        .registration()
-        .leader_capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.runtime_cpu_profile);
+    let runtime_cpu_profile = client_a.registration().runtime_cpu_profile;
 
     if runtime_cpu_profile {
         // In sandboxed CI (Bazel), pprof may report as supported at compile time
@@ -582,7 +583,7 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
         };
         assert!(matches!(
             started,
-            ControlPayload::CpuProfileStarted { svg_path, .. } if svg_path == output_path
+            ControlPayload::CpuProfileStarted { artifact_path, .. } if artifact_path == output_path
         ));
 
         let status = client_b
@@ -599,7 +600,7 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
             ControlPayload::CpuProfileStatus {
                 active: true,
                 stopping: false,
-                svg_path: Some(path),
+                artifact_path: Some(path),
                 frequency_hz: Some(200),
                 ..
             } if path == output_path
@@ -612,7 +613,7 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
             .unwrap();
         assert!(matches!(
             stopped,
-            ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == output_path
+            ControlPayload::CpuProfileStopped { artifact_path, .. } if artifact_path == output_path
         ));
         assert!(output_path.exists());
     } else {
@@ -647,11 +648,7 @@ async fn test_runtime_profile_finalizes_on_graceful_shutdown() {
     .await
     .unwrap();
 
-    let runtime_cpu_profile = client
-        .registration()
-        .leader_capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.runtime_cpu_profile);
+    let runtime_cpu_profile = client.registration().runtime_cpu_profile;
 
     if runtime_cpu_profile {
         let start_result = client
@@ -706,11 +703,7 @@ async fn test_runtime_profile_creates_missing_parent_directory_end_to_end() {
     .await
     .unwrap();
 
-    let runtime_cpu_profile = client
-        .registration()
-        .leader_capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.runtime_cpu_profile);
+    let runtime_cpu_profile = client.registration().runtime_cpu_profile;
 
     if runtime_cpu_profile {
         let start_result = client
@@ -727,7 +720,7 @@ async fn test_runtime_profile_creates_missing_parent_directory_end_to_end() {
         };
         assert!(matches!(
             started,
-            ControlPayload::CpuProfileStarted { svg_path, .. } if svg_path == nested_output
+            ControlPayload::CpuProfileStarted { artifact_path, .. } if artifact_path == nested_output
         ));
 
         let stopped = client
@@ -737,7 +730,7 @@ async fn test_runtime_profile_creates_missing_parent_directory_end_to_end() {
             .unwrap();
         assert!(matches!(
             stopped,
-            ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == nested_output
+            ControlPayload::CpuProfileStopped { artifact_path, .. } if artifact_path == nested_output
         ));
         assert!(nested_output.exists());
     } else {
@@ -781,12 +774,7 @@ async fn test_runtime_profile_rejects_output_collision_end_to_end() {
         .unwrap()
         .unwrap_err();
 
-    if client
-        .registration()
-        .leader_capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.runtime_cpu_profile)
-    {
+    if client.registration().runtime_cpu_profile {
         assert_eq!(error.code, ControlErrorCode::OutputPathCollision);
     } else {
         assert_eq!(error.code, ControlErrorCode::RuntimeProfilingUnsupported);
@@ -897,13 +885,13 @@ async fn test_session_new_without_model_id_no_default() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, mut acp_rx, _response_tx) = setup_test_server(&temp).await;
 
-    // Connect with yolo_mode but no default_model (typical VS Code extension setup)
+    // Connect with no default model (typical extension setup).
     let client = LeaderClient::connect(
         sock_path,
         "vscode-ext",
         ClientMode::Stdio,
         ClientCapabilities {
-            yolo_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             default_model: None,
             ..Default::default()
         },
@@ -912,7 +900,7 @@ async fn test_session_new_without_model_id_no_default() {
     .unwrap();
 
     // Send session/new without modelId (exactly like the VS Code extension does)
-    let session_new = r#"{"jsonrpc":"2.0","id":31,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_meta":{"yoloMode":true}}}"#;
+    let session_new = r#"{"jsonrpc":"2.0","id":31,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_meta":{"permissionMode":"always-approve"}}}"#;
     client.send(session_new.to_string()).unwrap();
 
     // Server should forward it without injecting modelId
@@ -920,9 +908,9 @@ async fn test_session_new_without_model_id_no_default() {
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
     assert_eq!(json["method"], "session/new");
-    // _meta should have yoloMode but NOT modelId
+    // Explicit permission mode survives, but modelId is not invented.
     let meta = &json["params"]["_meta"];
-    assert_eq!(meta["yoloMode"], true);
+    assert_eq!(meta["permissionMode"], "always-approve");
     assert!(
         meta.get("modelId").is_none(),
         "modelId should not be injected when client has no default_model"
@@ -932,20 +920,19 @@ async fn test_session_new_without_model_id_no_default() {
     cancel.cancel();
 }
 
-/// Test that when a client registers with yolo_mode, yoloMode is injected
-/// into session/new _meta, but modelId is NOT injected when default_model is None.
+/// AlwaysApprove is injected into session/new, but modelId is not invented.
 #[tokio::test]
-async fn test_session_new_yolo_mode_no_model() {
+async fn test_session_new_always_approve_no_model() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, mut acp_rx, _response_tx) = setup_test_server(&temp).await;
 
-    // Client with yolo_mode=true but no default model
+    // Client with AlwaysApprove but no default model.
     let client = LeaderClient::connect(
         sock_path,
         "vscode-ext",
         ClientMode::Stdio,
         ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: shell::util::config::PermissionMode::AlwaysApprove,
             default_model: None,
             ..Default::default()
         },
@@ -953,16 +940,16 @@ async fn test_session_new_yolo_mode_no_model() {
     .await
     .unwrap();
 
-    // Send session/new without modelId or yoloMode in _meta
+    // Send session/new without modelId or permissionMode in _meta.
     let session_new = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#;
     client.send(session_new.to_string()).unwrap();
 
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // yoloMode should be injected from capabilities
+    // permissionMode is injected from capabilities.
     let meta = &json["params"]["_meta"];
-    assert_eq!(meta["yoloMode"], true);
+    assert_eq!(meta["permissionMode"], "always-approve");
     // modelId should NOT be present
     assert!(
         meta.get("modelId").is_none(),
@@ -985,7 +972,7 @@ async fn test_session_new_empty_default_model_not_injected() {
         "vscode-ext",
         ClientMode::Stdio,
         ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: shell::util::config::PermissionMode::AlwaysApprove,
             default_model: Some("".to_string()),
             ..Default::default()
         },
@@ -999,9 +986,9 @@ async fn test_session_new_empty_default_model_not_injected() {
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // yoloMode should be injected
+    // permissionMode should be injected.
     let meta = &json["params"]["_meta"];
-    assert_eq!(meta["yoloMode"], true);
+    assert_eq!(meta["permissionMode"], "always-approve");
     // Empty modelId should NOT be injected
     assert!(
         meta.get("modelId").is_none(),
@@ -1023,7 +1010,7 @@ async fn test_session_new_valid_default_model_injected() {
         "vscode-ext",
         ClientMode::Stdio,
         ClientCapabilities {
-            yolo_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             default_model: Some("grow-3-fast".to_string()),
             ..Default::default()
         },
@@ -1389,9 +1376,7 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
 
 // ── Capability injection scope ────────────────────────────────────────
 
-/// Test that capability injection ONLY applies to session/new, NOT to other
-/// methods like session/prompt or session/load. The leader must not mutate
-/// arbitrary requests.
+/// Capability injection applies only to session lifecycle requests, not prompts.
 #[tokio::test]
 async fn test_capabilities_not_injected_into_non_session_new() {
     let temp = TempDir::new().unwrap();
@@ -1402,7 +1387,7 @@ async fn test_capabilities_not_injected_into_non_session_new() {
         "vscode-ext",
         ClientMode::Stdio,
         ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: shell::util::config::PermissionMode::AlwaysApprove,
             default_model: Some("grow-3-fast".to_string()),
             ..Default::default()
         },
@@ -1417,7 +1402,7 @@ async fn test_capabilities_not_injected_into_non_session_new() {
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // The params should NOT have _meta.yoloMode or _meta.modelId injected
+    // Arbitrary prompt params are untouched.
     assert!(
         json["params"].get("_meta").is_none(),
         "session/prompt should not have _meta injected"
@@ -1425,17 +1410,13 @@ async fn test_capabilities_not_injected_into_non_session_new() {
     // Original params should be preserved
     assert_eq!(json["params"]["sessionId"], "sess-123");
 
-    // Send session/load — should get clientIdentifier but NOT yoloMode/modelId
+    // session/load gets the canonical permission mode, but not a new-session model.
     let load = r#"{"jsonrpc":"2.0","id":11,"method":"session/load","params":{"sessionId":"sess-456","cwd":"/tmp","mcpServers":[]}}"#;
     client.send(load.to_string()).unwrap();
 
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
-    // session/load should NOT get yoloMode or modelId injected
-    assert!(
-        json["params"]["_meta"].get("yoloMode").is_none(),
-        "session/load should not have yoloMode injected"
-    );
+    assert_eq!(json["params"]["_meta"]["permissionMode"], "always-approve");
     assert!(
         json["params"]["_meta"].get("modelId").is_none(),
         "session/load should not have modelId injected"
@@ -1445,21 +1426,19 @@ async fn test_capabilities_not_injected_into_non_session_new() {
     cancel.cancel();
 }
 
-/// Test that capability injection does NOT overwrite yoloMode if the
-/// request already has _meta.yoloMode set to false. This lets a client
-/// disable YOLO for a single session even when its default capability is on.
+/// An explicit per-session mode overrides the client's launch default.
 #[tokio::test]
-async fn test_yolo_mode_injection_preserves_explicit_false() {
+async fn test_permission_mode_injection_preserves_explicit_ask() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, mut acp_rx, _response_tx) = setup_test_server(&temp).await;
 
-    // Client registered with yolo_mode=true
+    // Client registered with AlwaysApprove.
     let client = LeaderClient::connect(
         sock_path,
         "vscode-ext",
         ClientMode::Stdio,
         ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: shell::util::config::PermissionMode::AlwaysApprove,
             default_model: None,
             ..Default::default()
         },
@@ -1467,15 +1446,13 @@ async fn test_yolo_mode_injection_preserves_explicit_false() {
     .await
     .unwrap();
 
-    // Request explicitly sets yoloMode to false
-    let session_new = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_meta":{"yoloMode":false}}}"#;
+    let session_new = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_meta":{"permissionMode":"ask"}}}"#;
     client.send(session_new.to_string()).unwrap();
 
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // Per-session yoloMode=false must win over client default yolo_mode=true
-    assert_eq!(json["params"]["_meta"]["yoloMode"], false);
+    assert_eq!(json["params"]["_meta"]["permissionMode"], "ask");
 
     client.cancel();
     cancel.cancel();
@@ -1484,7 +1461,7 @@ async fn test_yolo_mode_injection_preserves_explicit_false() {
 // ── Notification (no ID) pass-through ─────────────────────────────────
 
 /// Test that JSON-RPC notifications (no "id" field) sent by a client are
-/// forwarded without ID rewriting. Notifications include cancel, yolo_mode_changed, etc.
+/// forwarded without ID rewriting. Notifications include cancel and permission-mode changes.
 #[tokio::test]
 async fn test_client_notification_forwarded_without_id_rewrite() {
     let temp = TempDir::new().unwrap();
@@ -2118,6 +2095,7 @@ async fn test_raw_registration_handshake_not_ready_then_ready() {
         &ClientMessage::Register {
             client_type: "raw-test".into(),
             mode: ClientMode::Stdio,
+            protocol_version: LEADER_PROTOCOL_VERSION,
             capabilities: ClientCapabilities::default(),
         },
     )
@@ -2994,6 +2972,7 @@ async fn raw_register(sock_path: &std::path::Path, client_type: &str) -> RawClie
         &ClientMessage::Register {
             client_type: client_type.into(),
             mode: ClientMode::Stdio,
+            protocol_version: LEADER_PROTOCOL_VERSION,
             capabilities: ClientCapabilities::default(),
         },
     )

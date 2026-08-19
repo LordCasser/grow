@@ -174,6 +174,25 @@ mod links {
         fn flush(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
+        #[cfg(feature = "scrolling-regions")]
+        fn scroll_region_up(
+            &mut self,
+            region: std::ops::Range<u16>,
+            line_count: u16,
+        ) -> Result<(), Self::Error> {
+            if region.start == 0 {
+                self.appended_lines += line_count;
+            }
+            Ok(())
+        }
+        #[cfg(feature = "scrolling-regions")]
+        fn scroll_region_down(
+            &mut self,
+            _region: std::ops::Range<u16>,
+            _line_count: u16,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     fn term(w: u16, h: u16) -> Terminal<RecordingBackend> {

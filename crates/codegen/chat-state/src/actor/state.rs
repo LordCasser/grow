@@ -121,10 +121,6 @@ pub(crate) struct ChatState {
     pub timeline: Timeline,
     /// Current sampling configuration (model, context window, etc.).
     pub sampling_config: SamplingConfig,
-    /// Current prompt index (incremented per user turn).
-    pub prompt_index: usize,
-    /// Cached prompt texts for rewind preview.
-    pub prompt_texts: Vec<String>,
     /// Accumulated token usage.
     pub total_tokens: u64,
     /// Timestamp when the current stream started (epoch ms).
@@ -133,8 +129,6 @@ pub(crate) struct ChatState {
     pub turn_start_ms: Option<i64>,
     /// File paths the agent has edited.
     pub agent_edited_paths: BTreeSet<String>,
-    /// Prompt index at which the last compaction occurred.
-    pub last_compaction_prompt_index: Option<usize>,
     /// Opaque credential secrets (api key, optional extra auth, client version).
     /// Stored opaquely — the actor never interprets them.
     pub credentials: Credentials,
@@ -160,7 +154,7 @@ pub(crate) struct ChatState {
     pub session_usage: UsageLedger,
     /// Event-sequence turn capture state. `Some` = capture active, `None` = inactive.
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),
-    /// and `TruncateToPromptIndex` (rewind abandons the turn).
+    /// and the durable rewind transaction (which abandons the turn capture).
     pub(super) turn_capture: Option<TurnCaptureState>,
 }
 
@@ -215,13 +209,10 @@ impl ChatState {
         Self {
             timeline,
             sampling_config,
-            prompt_index: 0,
-            prompt_texts: Vec::new(),
             total_tokens: initial_tokens,
             stream_start_ms: None,
             turn_start_ms: None,
             agent_edited_paths: BTreeSet::new(),
-            last_compaction_prompt_index: None,
             credentials: Credentials::default(),
             estimated_tokens_since_model: 0,
             estimate_at_last_response: initial_tokens,
@@ -277,14 +268,19 @@ mod tests {
     #[test]
     fn new_state_has_correct_defaults() {
         let state = ChatState::new(vec![], test_sampling_config());
-        assert_eq!(state.prompt_index, 0);
+        assert_eq!(state.timeline.next_prompt_index(), 0);
         assert_eq!(state.total_tokens, 0); // empty conversation → 0
         assert!(state.timeline.surface().is_empty());
         assert!(state.agent_edited_paths.is_empty());
-        assert!(state.prompt_texts.is_empty());
+        assert!(state.timeline.prompt_texts().is_empty());
         assert!(state.stream_start_ms.is_none());
         assert!(state.turn_start_ms.is_none());
-        assert!(state.last_compaction_prompt_index.is_none());
+        assert!(
+            state
+                .timeline
+                .last_completed_compaction_prompt_index()
+                .is_none()
+        );
     }
 
     #[test]

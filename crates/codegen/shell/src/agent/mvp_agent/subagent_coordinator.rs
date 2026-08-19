@@ -46,7 +46,6 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                         ..Default::default()
                     },
                     completion_data: Default::default(),
-                    snapshot_ref: None,
                 };
             };
             let parent_handle = {
@@ -101,7 +100,7 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
     }
     fn persisted_output_ref(&self, completion_data: &Self::CompletionData) -> Option<String> {
         completion_data
-            .persisted_output_dir()
+            .persisted_output_ref()
             .map(|path| path.to_string_lossy().into_owned())
     }
     fn load_persisted_output(&self, reference: &str) -> Option<std::sync::Arc<str>> {
@@ -206,7 +205,7 @@ impl MvpAgent {
             parent_chat_state,
             parent_cmd_tx,
             parent_cwd,
-            yolo_mode,
+            permission_mode,
             parent_depth,
             hunk_tracker_handle,
             hunk_tracking_enabled,
@@ -215,7 +214,6 @@ impl MvpAgent {
             session_env,
             parent_agent_name,
             parent_subagent_filter,
-            parent_managed_mcp_proxy_base_url,
         ) = {
             let sessions = self.sessions.borrow();
             let ps = sessions.get(&parent_sid);
@@ -226,7 +224,8 @@ impl MvpAgent {
                 ps.map(|h| h.cmd_tx.clone()),
                 ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
                     .unwrap_or_default(),
-                ps.map(|h| h.yolo_mode).unwrap_or(self.default_yolo_mode),
+                ps.map(|h| h.permission_mode)
+                    .unwrap_or(self.default_permission_mode),
                 ps.map(|h| h.tool_context.subagent_depth).unwrap_or(0),
                 ps.map(|h| h.tool_context.hunk_tracker_handle.clone())
                     .unwrap_or_else(hunk_tracker::HunkTrackerHandle::noop),
@@ -250,7 +249,6 @@ impl MvpAgent {
                     .unwrap_or_else(|| std::sync::Arc::new(std::collections::HashMap::new())),
                 ps.map(|h| h.agent_name.clone()),
                 ps.map(|h| h.subagent_filter.clone()).unwrap_or_default(),
-                ps.map(|h| h.managed_mcp_proxy_base_url.clone()),
             )
         };
         let (
@@ -279,8 +277,9 @@ impl MvpAgent {
             )
         };
         let inference_idle_timeout_secs = {
-            let per_model = config::find_model_by_id(&available_models, parent_model_id.0.as_ref())
-                .and_then(|e| e.info.inference_idle_timeout_secs);
+            let per_model =
+                config::find_model_by_catalog_id(&available_models, parent_model_id.0.as_ref())
+                    .and_then(|e| e.info.inference_idle_timeout_secs);
             let cfg = self.cfg.borrow();
             let remote = cfg
                 .remote_settings
@@ -311,30 +310,18 @@ impl MvpAgent {
                 .map(|h| h.ask_user_question_enabled)
                 .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value)
         };
-        let project_trusted = crate::agent::folder_trust::project_scope_allowed(&parent_cwd);
-        let (base_roles, base_personas, subagent_model_overrides, subagent_toggle) = {
+        let (subagent_model_overrides, subagent_toggle) = {
             let cfg = self.cfg.borrow();
             (
-                cfg.subagent_roles.clone(),
-                cfg.subagent_personas.clone(),
                 cfg.subagent_model_overrides.clone(),
                 cfg.subagent_toggle.clone(),
             )
         };
-        let (subagent_roles, subagent_personas) =
-            crate::config::SubagentsConfig::effective_definition_maps(
-                &base_roles,
-                &base_personas,
-                &parent_cwd,
-                project_trusted,
-            );
         Some(crate::agent::subagent::SubagentSpawnContext {
             lsp: parent_lsp,
             process_scope: parent_process_scope,
             client_hooks: Default::default(),
             sampling_config: self.sampling_config.borrow().clone(),
-            managed_mcp_proxy_base_url: parent_managed_mcp_proxy_base_url
-                .unwrap_or_else(|| self.cli_chat_proxy_base_url()),
             alpha_test_key: self.alpha_test_key(),
             auth_method_id: self
                 .auth_method_id
@@ -345,7 +332,7 @@ impl MvpAgent {
             model_id: parent_model_id,
             parent_cwd: parent_cwd.clone(),
             parent_session_id: parent_session_id.to_string(),
-            yolo_mode,
+            permission_mode,
             subagent_event_tx: self.subagent_event_tx.clone(),
             parent_depth,
             subagents_max_depth: self.cfg.borrow().subagents_max_depth,
@@ -383,8 +370,6 @@ impl MvpAgent {
             subagent_model_overrides,
             subagent_toggle,
             subagent_filter: parent_subagent_filter,
-            subagent_roles,
-            subagent_personas,
             todo_gate: self.cfg.borrow().todo_gate,
             remote_settings: self.cfg.borrow().remote_settings.clone(),
             laziness_debug_log: self.cfg.borrow().laziness_debug_log.clone(),
@@ -415,11 +400,9 @@ impl MvpAgent {
             image_description_model: self.resolve_image_description_model(),
             workspace_ops: parent_workspace_ops.clone(),
             parent_agent_name,
-            managed_mcp_state: self.managed_mcp_cache.clone(),
             parent_mcp_pool: None,
             parent_skills: None,
             parent_skills_config: self.cfg.borrow().skills.clone(),
-            parent_compat: self.cfg.borrow().compat_resolved,
             task_completion_reservations: {
                 let sessions = self.sessions.borrow();
                 sessions

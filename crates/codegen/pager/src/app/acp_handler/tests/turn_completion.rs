@@ -66,7 +66,10 @@ fn structured_internal_foreground_is_adopted_without_id_prefix_inference() {
     assert!(handle_ext_notification(&notif, &mut app));
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(agent.session.state.is_turn_running());
-    assert_eq!(agent.session.current_prompt_id.as_deref(), Some("019f-turn"));
+    assert_eq!(
+        agent.session.current_prompt_id.as_deref(),
+        Some("019f-turn")
+    );
 }
 
 #[test]

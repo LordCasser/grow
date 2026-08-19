@@ -9,7 +9,7 @@
 //!
 //! `ModalConfirmation<R>` is a small dialog that blocks all input until
 //! the user presses one of the listed keys.
-use crate::docs::{DocEntry, default_howto_entries};
+use crate::docs::{Doc, all_docs};
 use crate::theme::Theme;
 use crate::views::modal_window::ModalWindowState;
 use ratatui::buffer::Buffer;
@@ -212,7 +212,7 @@ pub struct CancelTurnViewState {
 /// closing the modal outright.
 pub fn howto_list_modal(previous_palette: Option<PaletteSnapshot>) -> ActiveModal {
     ActiveModal::DocPicker {
-        entries: default_howto_entries(),
+        entries: all_docs().collect(),
         state: crate::views::picker::PickerState::default(),
         previous_palette,
         window: ModalWindowState::new(),
@@ -283,7 +283,7 @@ pub enum ActiveModal {
     },
     /// How-to documentation list modal (wider picker style).
     DocPicker {
-        entries: Vec<DocEntry>,
+        entries: Vec<&'static Doc>,
         state: crate::views::picker::PickerState,
         /// Previous command palette state (if opened from palette). Restored on Esc.
         previous_palette: Option<PaletteSnapshot>,
@@ -1181,7 +1181,7 @@ pub fn render_doc_picker_overlay(
     buf: &mut ratatui::buffer::Buffer,
     area: Rect,
     window: &mut super::modal_window::ModalWindowState,
-    entries: &[DocEntry],
+    entries: &[&'static Doc],
     state: &mut super::picker::PickerState,
     compact: bool,
     theme: &Theme,
@@ -1256,10 +1256,7 @@ pub fn render_doc_picker_overlay(
     const NARROW_THRESHOLD: u16 = 70;
     let narrow = picker_area.width < NARROW_THRESHOLD;
     let desc_slices: Vec<Vec<&str>> = if narrow {
-        filtered
-            .iter()
-            .map(|(_, e)| vec![e.description.as_str()])
-            .collect()
+        filtered.iter().map(|(_, e)| vec![e.description]).collect()
     } else {
         Vec::new()
     };
@@ -1555,10 +1552,7 @@ mod palette_tests {
         };
         assert!(!state.search_active, "how-to picker must open list-focused");
         assert_eq!(state.selected, 0);
-        assert_eq!(
-            entries.first().map(|e| e.title.as_str()),
-            Some("Getting Started")
-        );
+        assert_eq!(entries.first().map(|e| e.title), Some("Getting Started"));
     }
 }
 #[cfg(test)]

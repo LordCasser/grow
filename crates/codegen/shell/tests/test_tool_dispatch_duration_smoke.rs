@@ -99,7 +99,7 @@ async fn sleep_tool_records_multi_second_dispatch_duration() {
     let sandbox = TestSandbox::builder().mock_url(server.url()).git().build();
 
     let mut cmd = tokio::process::Command::new(grow_binary());
-    cmd.args(["-p", "please sleep two seconds", "--yolo"])
+    cmd.args(["-p", "please sleep two seconds", "--permission-mode", "always-approve"])
         .current_dir(sandbox.workspace());
 
     let started = std::time::Instant::now();

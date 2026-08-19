@@ -355,28 +355,32 @@
     }
 
     #[test]
-    fn permission_for_inactive_yolo_agent_auto_approves() {
-        // YOLO mode is honored on the OWNING agent, not the active one,
+    fn permission_for_inactive_always_approve_agent_auto_approves() {
+        // always-approve mode is honored on the OWNING agent, not the active one,
         // so background turns aren't blocked waiting for a switch.
         let mut app = make_app_with_agent("sess-A");
-        app.agents.get_mut(&AgentId(0)).unwrap().session.yolo_mode = true;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
         insert_agent(&mut app, AgentId(1), Some("sess-B"));
         switch_active_to(&mut app, AgentId(1));
 
         let (msg, rx) = make_permission_message("sess-A");
         let affected = handle(msg, &mut app);
 
-        assert!(!affected, "YOLO auto-approve never needs a redraw");
+        assert!(!affected, "always-approve auto-approve never needs a redraw");
         let agent_a = app.agents.get(&AgentId(0)).unwrap();
         assert_eq!(
             agent_a.permission_queue.len(),
             0,
-            "YOLO must auto-approve in place of queueing"
+            "always-approve must auto-approve in place of queueing"
         );
         let response = rx
             .blocking_recv()
-            .expect("YOLO must have sent a response on response_tx");
-        let resp = response.expect("YOLO response must be Ok");
+            .expect("always-approve must have sent a response on response_tx");
+        let resp = response.expect("always-approve response must be Ok");
         match resp.outcome {
             acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome {
                 option_id,
@@ -389,10 +393,10 @@
     }
 
     #[test]
-    fn child_permission_is_not_auto_approved_by_parent_yolo() {
+    fn child_permission_is_not_auto_approved_by_parent_always_approve() {
         let mut app = make_app_with_agent("sess-parent");
         let parent = app.agents.get_mut(&AgentId(0)).unwrap();
-        parent.session.yolo_mode = true;
+        parent.session.permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
         parent.subagent_views.insert(
             "sess-child".into(),
             Box::new(make_agent(Some("sess-child"))),
@@ -418,7 +422,7 @@
                 rx.try_recv(),
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty)
             ),
-            "child ask must remain pending instead of inheriting parent YOLO"
+            "child ask must remain pending instead of inheriting parent always-approve"
         );
     }
 

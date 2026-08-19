@@ -61,8 +61,8 @@ pub enum SessionEvent {
     },
     /// Auto-compaction completed successfully.
     CompactionCompleted {
-        /// Tokens used before compaction (`None` from older shells).
-        tokens_before: Option<u64>,
+        /// Tokens used before compaction.
+        tokens_before: u64,
         /// Tokens used after compaction.
         tokens_after: u64,
         /// How long compaction took (milliseconds).
@@ -197,16 +197,10 @@ impl SessionEvent {
                 elapsed_ms,
             } => {
                 let after = format_tokens(*tokens_after);
-                // Older shells don't send tokens_before — keep the legacy format.
-                let body = match tokens_before {
-                    Some(before) if *before > 0 => {
-                        format!(
-                            "Context compacted: {} → {after} tokens",
-                            format_tokens(*before)
-                        )
-                    }
-                    _ => format!("Context compacted → {after} tokens"),
-                };
+                let body = format!(
+                    "Context compacted: {} → {after} tokens",
+                    format_tokens(*tokens_before)
+                );
                 if let Some(ms) = elapsed_ms {
                     let secs = *ms as f64 / 1000.0;
                     format!("{body} ({secs:.1}s)")
@@ -841,7 +835,7 @@ mod tests {
     #[test]
     fn compaction_completed_renders_before_after_delta() {
         let event = SessionEvent::CompactionCompleted {
-            tokens_before: Some(48_800),
+            tokens_before: 48_800,
             tokens_after: 27_100,
             elapsed_ms: Some(21_000),
         };
@@ -849,16 +843,6 @@ mod tests {
             event.message(),
             "Context compacted: 48.8k → 27.1k tokens (21.0s)"
         );
-    }
-
-    #[test]
-    fn compaction_completed_without_before_keeps_legacy_format() {
-        let event = SessionEvent::CompactionCompleted {
-            tokens_before: None,
-            tokens_after: 27_100,
-            elapsed_ms: None,
-        };
-        assert_eq!(event.message(), "Context compacted → 27.1k tokens");
     }
 
     #[test]

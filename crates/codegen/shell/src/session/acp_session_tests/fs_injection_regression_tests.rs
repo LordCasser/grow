@@ -14,7 +14,7 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
     let terminal: std::sync::Arc<dyn TerminalBackend> =
         std::sync::Arc::new(LocalTerminalBackend::new());
 
-    let builder = crate::tools::bridge::ToolBridge::get_builder();
+    let builder = tools::bridge::ToolBridge::get_builder();
     let config = ToolServerConfig {
         tools: vec![
             ToolConfig {
@@ -23,25 +23,17 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             },
             ToolConfig {
                 id: "Grow:search_replace".into(),
-                params: Some(
-                    serde_json::from_value(serde_json::json!({
-                        "skip_read_before_edit": true
-                    }))
-                    .unwrap(),
-                ),
+                params: None,
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             },
         ],
-        behavior_preset: None,
     };
     let ctx = SessionContext {
         backend: terminal,
@@ -54,14 +46,14 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::env::temp_dir().join("grow-test-fs/tool_state.json"),
+        state_path: std::env::temp_dir().join("grow-test-fs/resources_state.json"),
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,
         app_builder_deployer_config: Default::default(),
         system_reminder_tag: tools::reminders::DEFAULT_REMINDER_TAG,
     };
-    let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
+    let bridge = tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
         .await
         .expect("finalize_builder should succeed");
 

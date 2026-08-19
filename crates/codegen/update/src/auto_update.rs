@@ -282,10 +282,9 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
         return Ok(outcome);
     };
 
-    let effective_current =
-        disk_version_for_installer(installer)
-            .await
-            .unwrap_or_else(get_installed_version);
+    let effective_current = disk_version_for_installer(installer)
+        .await
+        .unwrap_or_else(get_installed_version);
     if needs_update(
         &effective_current,
         &target,
@@ -543,7 +542,7 @@ async fn probe_version_by_exec(path: &std::path::Path) -> Option<String> {
         // process is detached and stderr is null, so the probe stays silent.
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    tools::util::detach_command(&mut cmd);
+    tty_utils::detach_command(&mut cmd);
     let output = tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.output())
         .await
         .ok()?
@@ -889,7 +888,7 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
                 .stderr(Stdio::null());
             // Detach = new session (Ctrl+C isolation), not handle abandonment:
             // the child is still ours to wait() on.
-            tools::util::detach_command(&mut cmd);
+            tty_utils::detach_command(&mut cmd);
             #[allow(clippy::disallowed_methods)] // the caller owns the returned handle
             let child = cmd.spawn()?;
             Ok(Some(child))
@@ -909,7 +908,11 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
 ///    the managed link always points at the latest version.
 /// 3. Otherwise the current executable.
 fn resolve_restart_exe() -> Result<std::path::PathBuf> {
-    resolve_restart_exe_impl(find_grow_on_path(), std::env::current_exe().ok(), &grow_home())
+    resolve_restart_exe_impl(
+        find_grow_on_path(),
+        std::env::current_exe().ok(),
+        &grow_home(),
+    )
 }
 
 /// Pure core of [`resolve_restart_exe`] with the environment-dependent
@@ -1407,7 +1410,7 @@ async fn smoke_test_binary(binary_path: &std::path::Path) -> bool {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        tools::util::detach_command(&mut cmd);
+        tty_utils::detach_command(&mut cmd);
         match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.status()).await {
             Ok(Ok(status)) => return status.success(),
             Ok(Err(e))
@@ -1449,7 +1452,7 @@ async fn regenerate_completions(binary: &std::path::Path, grow_home: &std::path:
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
-        tools::util::detach_command(&mut cmd);
+        tty_utils::detach_command(&mut cmd);
         let Ok(output) = cmd.output().await else {
             continue;
         };
@@ -2413,7 +2416,8 @@ pub async fn install_gh_release_from(
                 let system_link = std::path::PathBuf::from(format!("/usr/local/bin/{name}"));
                 if let Ok(existing_target) = tokio::fs::read_link(&system_link).await {
                     let target_str = existing_target.to_string_lossy();
-                    if target_str.contains(".grow/downloads/") && !target_str.ends_with("grow-latest")
+                    if target_str.contains(".grow/downloads/")
+                        && !target_str.ends_with("grow-latest")
                     {
                         // Try to update; ignore permission errors
                         let _ = atomic_symlink_swap(&binary_path, &system_link).await;
@@ -2825,21 +2829,36 @@ mod tests {
     #[test]
     fn test_parse_version_output() {
         // Plain.
-        assert_eq!(parse_version_output(b"grow 0.1.181\n"), Some("0.1.181".into()));
+        assert_eq!(
+            parse_version_output(b"grow 0.1.181\n"),
+            Some("0.1.181".into())
+        );
         // Commit-suffixed build: `VERSION_WITH_COMMIT` is "{ver} ({commit})".
         assert_eq!(
             parse_version_output(b"grow 0.1.181 (bde00506) [stable]\n"),
             Some("0.1.181".into())
         );
         // Channel suffix only.
-        assert_eq!(parse_version_output(b"grow 0.1.181 [alpha]\n"), Some("0.1.181".into()));
+        assert_eq!(
+            parse_version_output(b"grow 0.1.181 [alpha]\n"),
+            Some("0.1.181".into())
+        );
         // CRLF tolerant.
-        assert_eq!(parse_version_output(b"grow 0.1.181\r\n"), Some("0.1.181".into()));
+        assert_eq!(
+            parse_version_output(b"grow 0.1.181\r\n"),
+            Some("0.1.181".into())
+        );
         // Extra trailing junk after the token is fine.
-        assert_eq!(parse_version_output(b"grow 0.1.181\njunk"), Some("0.1.181".into()));
+        assert_eq!(
+            parse_version_output(b"grow 0.1.181\njunk"),
+            Some("0.1.181".into())
+        );
 
         // Pre-release versions are valid semver and must round-trip.
-        assert_eq!(parse_version_output(b"grow 0.1.181-alpha.4\n"), Some("0.1.181-alpha.4".into()));
+        assert_eq!(
+            parse_version_output(b"grow 0.1.181-alpha.4\n"),
+            Some("0.1.181-alpha.4".into())
+        );
 
         // Garbage → None.
         assert_eq!(parse_version_output(b""), None);
@@ -3034,11 +3053,13 @@ mod tests {
         std::fs::write(&managed, "managed").unwrap();
         // current_exe lives under grow_home (e.g. the versioned downloads
         // file) and PATH missed → the managed link wins.
-        let current = home.path().join("downloads").join("grow-0.1.181-macos-aarch64");
+        let current = home
+            .path()
+            .join("downloads")
+            .join("grow-0.1.181-macos-aarch64");
         std::fs::create_dir_all(current.parent().unwrap()).unwrap();
         std::fs::write(&current, "old").unwrap();
-        let resolved =
-            resolve_restart_exe_impl(None, Some(current.clone()), home.path()).unwrap();
+        let resolved = resolve_restart_exe_impl(None, Some(current.clone()), home.path()).unwrap();
         assert_eq!(resolved, managed);
     }
 

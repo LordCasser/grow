@@ -13,12 +13,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::implementations::skills::types::SkillInfo;
-use crate::types::compat::CompatConfig;
-
 use conditional::ConditionalSkills;
 use listing::{DEFAULT_SKILL_TOOL_NAME, SKILL_BUDGET_CONTEXT_PERCENT, format_announcement};
 
-pub use listing::{XmlRenderMode, format_announcement_xml, format_compaction_skill_listing};
+pub use listing::format_compaction_skill_listing;
 
 /// Why a `SkillUpdateEffects` was produced.
 ///
@@ -42,7 +40,7 @@ pub enum SkillUpdateKind {
 /// [`SkillManager::listing_snapshot`], used for `/context` accounting.
 #[derive(Debug, Clone)]
 pub struct SkillListingSnapshot {
-    /// The rendered listing, including the XML envelope in XML mode.
+    /// The rendered canonical listing.
     pub text: String,
     /// Number of skills that qualified for the listing. Under extreme
     /// budget pressure the names-only tier can drop trailing entries from
@@ -124,20 +122,6 @@ pub struct SkillManager {
     /// Falls back to `"Skill"` when not set.
     skill_tool_name: Option<String>,
 
-    /// Client-facing name of the read tool (resolved from `TemplateRenderer`).
-    /// Falls back to `"Read"` when not set. Used in the `<available_skills>`
-    /// description attribute of mid-session XML skill announcements.
-    read_tool_name: Option<String>,
-
-    /// When true, `take_pending()` formats announcements as XML instead of
-    /// markdown.
-    use_xml_format: bool,
-
-    /// Resolved vendor-compat config governing which vendor dirs dynamic
-    /// skill discovery scans. Defaults to all-on (historical behavior).
-    /// Set by the bridge at seed time; read by `SkillDiscoveryReminder`.
-    pub(crate) compat: CompatConfig,
-
     /// `paths:`-gated skills held back from the listing until a matching file
     /// is touched, plus their activation state. See [`ConditionalSkills`].
     conditional: ConditionalSkills,
@@ -199,8 +183,6 @@ struct ListingRenderParams<'a> {
     real_prefix: Option<&'a str>,
     display_prefix: Option<&'a str>,
     budget: Option<usize>,
-    use_xml_format: bool,
-    read_tool_name: &'a str,
     skill_tool_name: &'a str,
 }
 
@@ -216,35 +198,14 @@ fn render_listing(
     announced: &mut HashSet<String>,
     params: &ListingRenderParams<'_>,
 ) -> Option<String> {
-    if params.use_xml_format {
-        // Same envelope as the startup preamble, so startup and
-        // mid-session listings share one structure.
-        let read_tool = params.read_tool_name;
-        let envelope_open = format!(
-            "<agent_skills>\n\
-             <available_skills description=\"Newly discovered skills. \
-             Use the {read_tool} tool with the provided absolute path to fetch full contents.\">\n"
-        );
-        let envelope_close = "</available_skills>\n</agent_skills>";
-        format_announcement_xml(
-            skills,
-            announced,
-            params.real_prefix,
-            params.display_prefix,
-            // The XML format is only enabled by templates that request it.
-            XmlRenderMode::Verbatim,
-        )
-        .map(|rows| format!("{envelope_open}{rows}{envelope_close}"))
-    } else {
-        format_announcement(
-            skills,
-            announced,
-            params.real_prefix,
-            params.display_prefix,
-            params.budget,
-            params.skill_tool_name,
-        )
-    }
+    format_announcement(
+        skills,
+        announced,
+        params.real_prefix,
+        params.display_prefix,
+        params.budget,
+        params.skill_tool_name,
+    )
 }
 
 impl SkillManager {
@@ -256,23 +217,6 @@ impl SkillManager {
     /// Set the client-facing name of the skill tool.
     pub fn set_skill_tool_name(&mut self, name: String) {
         self.skill_tool_name = Some(name);
-    }
-
-    /// Set the client-facing name of the read tool.
-    pub fn set_read_tool_name(&mut self, name: String) {
-        self.read_tool_name = Some(name);
-    }
-
-    /// Enable XML formatting for skill announcements.
-    pub fn set_xml_format(&mut self, enabled: bool) {
-        self.use_xml_format = enabled;
-    }
-
-    /// Set the resolved vendor-compat config used by dynamic skill discovery.
-    /// Must be called at session start (alongside `seed`) so the
-    /// `SkillDiscoveryReminder` gates vendor dirs correctly.
-    pub fn set_compat(&mut self, compat: CompatConfig) {
-        self.compat = compat;
     }
 
     /// Pre-populate `announced_names` from persisted state.
@@ -310,11 +254,9 @@ impl SkillManager {
         startup_skills: Vec<SkillInfo>,
         display_cwd: Option<String>,
         context_window_tokens: Option<u64>,
-        skill_budget_percent: Option<f64>,
     ) {
-        let percent = skill_budget_percent.unwrap_or(SKILL_BUDGET_CONTEXT_PERCENT);
-        self.listing_budget_chars =
-            context_window_tokens.map(|tokens| (tokens as f64 * 4.0 * percent) as usize);
+        self.listing_budget_chars = context_window_tokens
+            .map(|tokens| (tokens as f64 * 4.0 * SKILL_BUDGET_CONTEXT_PERCENT) as usize);
         // Store the real cwd as string for path prefix rewriting.
         if let Some(ref display) = display_cwd {
             if let Some(ref c) = cwd {
@@ -437,7 +379,7 @@ impl SkillManager {
         self.announced_names = announced;
 
         // Disabled skills are omitted from the listing via `s.enabled` in
-        // `format_announcement` / `format_announcement_xml`. Do not append a
+        // `format_announcement`. Do not append a
         // separate "must not be used" name footer — it wastes tokens and
         // looks like skills with no description.
 
@@ -494,8 +436,6 @@ impl SkillManager {
             real_prefix: self.real_cwd_prefix.as_deref(),
             display_prefix: self.display_cwd.as_deref(),
             budget: self.listing_budget_chars,
-            use_xml_format: self.use_xml_format,
-            read_tool_name: self.read_tool_name.as_deref().unwrap_or("Read"),
             skill_tool_name: self
                 .skill_tool_name
                 .as_deref()
@@ -587,7 +527,6 @@ mod tests {
             ],
             None,
             None,
-            None,
         );
 
         // Baseline listing omits the gated skill.
@@ -607,7 +546,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
         let mut mgr = SkillManager::new();
-        mgr.seed(Some(cwd.clone()), None, vec![], None, None, None);
+        mgr.seed(Some(cwd.clone()), None, vec![], None, None);
 
         // Dynamic discovery (reminder path) must apply the `paths:` gate too.
         let any_new = mgr.add_discovered(vec![make_conditional_skill(
@@ -631,7 +570,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
         let mut mgr = SkillManager::new();
-        mgr.seed(Some(cwd.clone()), None, vec![], None, None, None);
+        mgr.seed(Some(cwd.clone()), None, vec![], None, None);
 
         mgr.add_discovered(vec![make_conditional_skill(
             "gated",
@@ -658,7 +597,6 @@ mod tests {
             vec![make_conditional_skill("gated", "/g/SKILL.md", &["src/**"])],
             None,
             None,
-            None,
         );
         let _ = mgr.take_pending_reconciliation();
 
@@ -678,7 +616,6 @@ mod tests {
             vec![make_conditional_skill("gated", "/g/SKILL.md", &["src/**"])],
             None,
             None,
-            None,
         );
         let _ = mgr.take_pending_reconciliation();
         let touched = cwd.join("src").join("lib.rs");
@@ -692,7 +629,6 @@ mod tests {
             vec![make_conditional_skill("gated", "/g/SKILL.md", &["src/**"])],
             None,
             None,
-            None,
         );
         let slash = mgr.slash_skills();
         assert!(slash.iter().any(|s| s.name == "gated"));
@@ -703,7 +639,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
         let mut mgr = SkillManager::new();
-        mgr.seed(Some(cwd), None, vec![], None, None, None);
+        mgr.seed(Some(cwd), None, vec![], None, None);
         let _ = mgr.take_pending_reconciliation();
 
         mgr.update_startup_baseline(vec![
@@ -724,7 +660,6 @@ mod tests {
             Some(cwd.clone()),
             None,
             vec![make_conditional_skill("gated", "/g/SKILL.md", &["src/**"])],
-            None,
             None,
             None,
         );
@@ -781,7 +716,7 @@ mod tests {
     #[test]
     fn same_name_different_paths_coexist_in_runtime() {
         let mut tracker = SkillManager::new();
-        tracker.seed(None, None, vec![], None, None, None);
+        tracker.seed(None, None, vec![], None, None);
         tracker.add_discovered(vec![
             make_skill("deploy", "/path/a/deploy/SKILL.md"),
             make_skill("deploy", "/path/b/deploy/SKILL.md"),
@@ -800,7 +735,6 @@ mod tests {
             vec![make_skill("startup", "/s/SKILL.md")],
             None,
             None,
-            None,
         );
         assert!(tracker.cwd.is_some());
         assert!(tracker.git_root.is_some());
@@ -814,7 +748,6 @@ mod tests {
             None,
             None,
             vec![make_skill("startup", "/s/SKILL.md")],
-            None,
             None,
             None,
         );
@@ -845,7 +778,6 @@ mod tests {
             vec![],
             None,
             None,
-            None,
         );
         tracker.add_discovered(vec![make_skill("dyn", "/d/SKILL.md")]);
 
@@ -874,7 +806,6 @@ mod tests {
             None,
             None,
             vec![make_skill("startup", "/s/SKILL.md")],
-            None,
             None,
             None,
         );
@@ -942,7 +873,6 @@ mod tests {
             vec![make_skill("old", "/old/SKILL.md")],
             None,
             None,
-            None,
         );
         let _ = tracker.take_pending_reconciliation(); // drain startup
 
@@ -971,7 +901,6 @@ mod tests {
             vec![make_skill("s1", "/s/SKILL.md")],
             None,
             None,
-            None,
         );
         let _ = tracker.take_pending_reconciliation(); // drain startup
 
@@ -992,7 +921,6 @@ mod tests {
             vec![make_skill("startup", "/s/SKILL.md")],
             None,
             None,
-            None,
         );
         tracker.add_discovered(vec![make_skill("dyn", "/d/SKILL.md")]);
         let _ = tracker.take_pending_reconciliation(); // drain discovery
@@ -1008,7 +936,7 @@ mod tests {
     #[test]
     fn add_discovered_after_clear_works() {
         let mut tracker = SkillManager::new();
-        tracker.seed(None, None, vec![], None, None, None);
+        tracker.seed(None, None, vec![], None, None);
         tracker.add_discovered(vec![make_skill("old", "/old/SKILL.md")]);
         let _ = tracker.take_pending_reconciliation();
 
@@ -1034,7 +962,6 @@ mod tests {
             vec![make_skill("startup", "/s/SKILL.md")],
             None,
             None,
-            None,
         );
         let r = mgr.take_pending_reconciliation().unwrap();
         // Must produce a system-reminder for the model to see skills.
@@ -1049,7 +976,7 @@ mod tests {
     fn no_skills_seed_produces_no_pending() {
         // Empty startup should not produce a pending update.
         let mut mgr = SkillManager::new();
-        mgr.seed(None, None, vec![], None, None, None);
+        mgr.seed(None, None, vec![], None, None);
         assert!(mgr.take_pending_reconciliation().is_none());
     }
 
@@ -1061,7 +988,6 @@ mod tests {
             None,
             None,
             vec![make_skill("startup", "/s/SKILL.md")],
-            None,
             None,
             None,
         );
@@ -1085,7 +1011,6 @@ mod tests {
             vec![make_skill("startup", "/s/SKILL.md")],
             None,
             None,
-            None,
         );
         mgr.add_discovered(vec![make_skill("dyn", "/d/SKILL.md")]);
         let _ = mgr.take_pending_reconciliation();
@@ -1107,7 +1032,6 @@ mod tests {
             vec![make_skill("old-startup", "/os/SKILL.md")],
             None,
             None,
-            None,
         );
         mgr.add_discovered(vec![make_skill("dyn", "/d/SKILL.md")]);
         let _ = mgr.take_pending_reconciliation();
@@ -1126,14 +1050,7 @@ mod tests {
         // Compaction clears announced_names but does NOT queue a pending.
         // Re-announcement happens when the reminder re-fires after compaction.
         let mut mgr = SkillManager::new();
-        mgr.seed(
-            None,
-            None,
-            vec![make_skill("s", "/s/SKILL.md")],
-            None,
-            None,
-            None,
-        );
+        mgr.seed(None, None, vec![make_skill("s", "/s/SKILL.md")], None, None);
         mgr.add_discovered(vec![make_skill("d", "/d/SKILL.md")]);
         let _ = mgr.take_pending_reconciliation();
 
@@ -1150,14 +1067,7 @@ mod tests {
         // a bool for slash command refresh, and a kind discriminator
         // so harnesses can suppress one update kind without the other.
         let mut mgr = SkillManager::new();
-        mgr.seed(
-            None,
-            None,
-            vec![make_skill("s", "/s/SKILL.md")],
-            None,
-            None,
-            None,
-        );
+        mgr.seed(None, None, vec![make_skill("s", "/s/SKILL.md")], None, None);
         let r = mgr.take_pending_reconciliation().unwrap();
         let effects = r.effects;
         let _ = effects.system_reminder;
@@ -1178,7 +1088,6 @@ mod tests {
             None,
             None,
             vec![make_skill("startup", "/startup/SKILL.md")],
-            None,
             None,
             None,
         );
@@ -1204,7 +1113,6 @@ mod tests {
             )],
             Some("/home/user/project".to_string()),
             None,
-            None,
         );
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
@@ -1224,7 +1132,6 @@ mod tests {
                 "deploy",
                 "/real/path/.grow/skills/deploy/SKILL.md",
             )],
-            None,
             None,
             None,
         );
@@ -1247,7 +1154,6 @@ mod tests {
             vec![make_skill("startup", "/s/SKILL.md")],
             None,
             None,
-            None,
         );
         let _ = mgr.take_pending_reconciliation(); // drain initial
 
@@ -1268,14 +1174,7 @@ mod tests {
         // Fresh tracker: on_clear is a no-op on empty state,
         // but still queues a baseline-change pending.
         let mut mgr = SkillManager::new();
-        mgr.seed(
-            None,
-            None,
-            vec![make_skill("s", "/s/SKILL.md")],
-            None,
-            None,
-            None,
-        );
+        mgr.seed(None, None, vec![make_skill("s", "/s/SKILL.md")], None, None);
         let _ = mgr.take_pending_reconciliation(); // drain seed
 
         mgr.on_clear();
@@ -1299,7 +1198,7 @@ mod tests {
         // 128k context window → budget = 128_000 * 4 * 0.5 = 256000 chars
         let context_window: u64 = 128_000;
         let expected_budget = (context_window as f64 * 4.0 * SKILL_BUDGET_CONTEXT_PERCENT) as usize;
-        mgr.seed(None, None, skills, None, Some(context_window), None);
+        mgr.seed(None, None, skills, None, Some(context_window));
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
         assert!(
@@ -1323,7 +1222,7 @@ mod tests {
         // 200 skills with 500-char descriptions can't fit.
         let context_window: u64 = 300;
         let expected_budget = (context_window as f64 * 4.0 * SKILL_BUDGET_CONTEXT_PERCENT) as usize;
-        mgr.seed(None, None, skills, None, Some(context_window), None);
+        mgr.seed(None, None, skills, None, Some(context_window));
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
         assert!(
@@ -1342,78 +1241,20 @@ mod tests {
             make_skill("review", "/s/review/SKILL.md"),
         ];
         // 200k context window → 12000 char budget, 2 skills fit easily.
-        mgr.seed(None, None, skills, None, Some(200_000), None);
+        mgr.seed(None, None, skills, None, Some(200_000));
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
         assert!(text.contains("desc for commit"));
         assert!(text.contains("desc for review"));
     }
 
-    // ── XML format mode tests ───────────────────────────────────
-
     #[test]
-    fn xml_format_produces_agent_skill_tags_with_envelope() {
+    fn canonical_format_produces_markdown() {
         let mut mgr = SkillManager::new();
-        mgr.set_xml_format(true);
         mgr.seed(
             None,
             None,
             vec![make_skill("commit", "/s/commit/SKILL.md")],
-            None,
-            None,
-            None,
-        );
-        let r = mgr.take_pending_reconciliation().unwrap();
-        let text = r.effects.system_reminder.unwrap();
-        assert!(
-            text.contains("<agent_skills>"),
-            "XML format should wrap in <agent_skills> envelope: {text}"
-        );
-        assert!(
-            text.contains("<available_skills"),
-            "XML format should include <available_skills> wrapper: {text}"
-        );
-        assert!(
-            text.contains("<agent_skill fullPath="),
-            "XML format should produce <agent_skill> tags: {text}"
-        );
-        assert!(
-            text.contains("</available_skills>\n</agent_skills>"),
-            "XML format should close envelope: {text}"
-        );
-        assert!(
-            !text.contains("Path:"),
-            "XML format should not contain markdown-style paths: {text}"
-        );
-    }
-
-    #[test]
-    fn xml_format_discovery_uses_xml_with_envelope() {
-        let mut mgr = SkillManager::new();
-        mgr.set_xml_format(true);
-        mgr.seed(None, None, vec![], None, None, None);
-        mgr.add_discovered(vec![make_skill("review", "/d/review/SKILL.md")]);
-        let r = mgr.take_pending_reconciliation().unwrap();
-        let text = r.effects.system_reminder.unwrap();
-        assert!(
-            text.starts_with("<agent_skills>"),
-            "XML discovery should start with envelope: {text}"
-        );
-        assert!(
-            text.contains("<agent_skill fullPath="),
-            "XML format discovery should produce <agent_skill> tags: {text}"
-        );
-    }
-
-    #[test]
-    fn default_format_produces_markdown() {
-        let mut mgr = SkillManager::new();
-        // use_xml_format defaults to false.
-        mgr.seed(
-            None,
-            None,
-            vec![make_skill("commit", "/s/commit/SKILL.md")],
-            None,
             None,
             None,
         );
@@ -1443,7 +1284,6 @@ mod tests {
             vec![make_skill("startup", "/s/SKILL.md")],
             None,
             None,
-            None,
         );
         assert!(
             mgr.take_pending_reconciliation().is_none(),
@@ -1461,7 +1301,6 @@ mod tests {
             vec![make_skill("startup", "/s/SKILL.md")],
             None,
             None,
-            None,
         );
         let r = mgr.take_pending_reconciliation().unwrap();
         assert!(r.effects.system_reminder.is_some());
@@ -1471,14 +1310,7 @@ mod tests {
     fn on_clear_after_restore_still_works() {
         let mut mgr = SkillManager::new();
         mgr.restore_announced_names(HashSet::from(["s".to_string()]));
-        mgr.seed(
-            None,
-            None,
-            vec![make_skill("s", "/s/SKILL.md")],
-            None,
-            None,
-            None,
-        );
+        mgr.seed(None, None, vec![make_skill("s", "/s/SKILL.md")], None, None);
         // No pending from seed (restored)
         assert!(mgr.take_pending_reconciliation().is_none());
 
@@ -1496,7 +1328,6 @@ mod tests {
             None,
             None,
             vec![make_skill("old", "/s/old/SKILL.md")],
-            None,
             None,
             None,
         );
@@ -1526,7 +1357,6 @@ mod tests {
             vec![make_skill("alpha", "/s/alpha/SKILL.md")],
             None,
             None,
-            None,
         );
         // Announce the baseline, then discover one more skill, so
         // `announced_names` holds both.
@@ -1547,30 +1377,25 @@ mod tests {
     #[test]
     fn listing_snapshot_matches_injected_baseline_reminder() {
         // Snapshot and injection share one render path: for a fresh session
-        // the snapshot text must equal the baseline announcement byte for
-        // byte, in both plain and XML modes.
-        for xml in [false, true] {
-            let mut mgr = SkillManager::new();
-            mgr.set_xml_format(xml);
-            mgr.seed(
-                None,
-                None,
-                vec![
-                    make_skill("alpha", "/s/alpha/SKILL.md"),
-                    make_skill("beta", "/s/beta/SKILL.md"),
-                ],
-                None,
-                Some(128_000),
-                None,
-            );
-            let snapshot = mgr.listing_snapshot().unwrap();
-            let injected = mgr
-                .take_pending_reconciliation()
-                .unwrap()
-                .effects
-                .system_reminder
-                .unwrap();
-            assert_eq!(snapshot.text, injected, "xml={xml}");
-        }
+        // the snapshot text must equal the baseline announcement byte for byte.
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("alpha", "/s/alpha/SKILL.md"),
+                make_skill("beta", "/s/beta/SKILL.md"),
+            ],
+            None,
+            Some(128_000),
+        );
+        let snapshot = mgr.listing_snapshot().unwrap();
+        let injected = mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder
+            .unwrap();
+        assert_eq!(snapshot.text, injected);
     }
 }

@@ -151,7 +151,6 @@ impl SessionActor {
             task_wake_fallback: None,
             respond_to,
             persist_ack: None,
-            parsed_prompt_tx: None,
             queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
                 id: auto.prompt_id,
                 version: 0,
@@ -175,8 +174,7 @@ impl SessionActor {
         if images.is_empty() {
             return images;
         }
-        self.normalize_images_with_notices(wrapped, images, false)
-            .await
+        self.normalize_images_with_notices(wrapped, images).await
     }
 
     /// Broadcast a mid-turn interjection to every attached client.

@@ -31,7 +31,7 @@ use super::shell_state;
 /// Result of spawning a shell command (persistent or plain).
 struct SpawnResult {
     child: tokio::process::Child,
-    process_group: crate::util::ProcessGroup,
+    process_group: tty_utils::ProcessGroup,
     /// Handle for reading the state dump from fd 4 (persistent shell only).
     state_dump_handle: Option<tokio::task::JoinHandle<std::io::Result<String>>>,
 }
@@ -232,7 +232,7 @@ struct ProcessState {
     /// `killpg` a pid the OS may have recycled. On Windows it stays `Some` until
     /// the `ProcessState` is removed (the JobObject HANDLE has no recyclable pid,
     /// so dropping early at reap is unnecessary).
-    process_group: Option<std::sync::Arc<crate::util::ProcessGroup>>,
+    process_group: Option<std::sync::Arc<tty_utils::ProcessGroup>>,
     /// Accumulated output buffer — tail portion (may be truncated)
     output_buffer: Vec<u8>,
     /// Front portion of output, captured before truncation kicks in.
@@ -474,13 +474,13 @@ struct LocalTerminalActor {
     /// paths can `kill_all()` `setsid`-detached children that would otherwise
     /// outlive the process. Defaults to the process-global scope; tests inject
     /// their own to avoid latching the global.
-    scope: crate::util::ProcessScope,
+    scope: tty_utils::ProcessScope,
 
     /// Additional owner: the scope of the session that started this backend, so
     /// closing the session reaps its commands without waiting for process exit.
     /// Enrolling in both means whichever reaper fires first wins and the other
     /// finds a dead group.
-    session_scope: Option<crate::util::ProcessScope>,
+    session_scope: Option<tty_utils::ProcessScope>,
 
     /// Active processes: task_id -> ProcessState
     processes: HashMap<String, ProcessState>,
@@ -554,8 +554,8 @@ impl LocalTerminalActor {
         completed_task_ttl: Duration,
         foreground_block_budget: Duration,
         output_file_cap: u64,
-        scope: crate::util::ProcessScope,
-        session_scope: Option<crate::util::ProcessScope>,
+        scope: tty_utils::ProcessScope,
+        session_scope: Option<tty_utils::ProcessScope>,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
     ) -> Self {
         Self {
@@ -692,7 +692,7 @@ impl LocalTerminalActor {
             .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
         unsafe {
-            cmd.pre_exec(crate::util::detach_from_tty);
+            cmd.pre_exec(tty_utils::detach_from_tty);
         }
 
         #[cfg(target_os = "linux")]
@@ -708,7 +708,7 @@ impl LocalTerminalActor {
         })?;
         drop(cmd);
 
-        let mut process_group = crate::util::ProcessGroup::new()
+        let mut process_group = tty_utils::ProcessGroup::new()
             .map_err(|e| ComputerError::io(format!("ProcessGroup::new: {e}")))?;
         if let Err(e) = process_group.attach(&child) {
             tracing::debug!("Failed to attach static-shell child to ProcessGroup: {e}");
@@ -813,7 +813,7 @@ impl LocalTerminalActor {
             .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
         unsafe {
-            cmd.pre_exec(crate::util::detach_from_tty);
+            cmd.pre_exec(tty_utils::detach_from_tty);
         }
 
         #[cfg(target_os = "linux")]
@@ -835,7 +835,7 @@ impl LocalTerminalActor {
         // preventing the dump reader from seeing EOF.
         drop(cmd);
 
-        let mut process_group = crate::util::ProcessGroup::new()
+        let mut process_group = tty_utils::ProcessGroup::new()
             .map_err(|e| ComputerError::io(format!("ProcessGroup::new: {e}")))?;
         if let Err(e) = process_group.attach(&child) {
             tracing::debug!("Failed to attach persistent-shell child to ProcessGroup: {e}");
@@ -1016,8 +1016,8 @@ impl LocalTerminalActor {
     /// strong ref, so a clean reap leaves a dead `Weak` (PID-reuse-safe).
     fn enroll_spawned(
         &self,
-        group: crate::util::ProcessGroup,
-    ) -> std::sync::Arc<crate::util::ProcessGroup> {
+        group: tty_utils::ProcessGroup,
+    ) -> std::sync::Arc<tty_utils::ProcessGroup> {
         let group = std::sync::Arc::new(group);
         self.scope.register(&group);
         if let Some(session_scope) = &self.session_scope {
@@ -2159,7 +2159,7 @@ struct LocalTerminalConfig {
     login_shell_capture: bool,
     search_shadows: SearchShadowConfig,
     shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
-    process_scope: Option<crate::util::ProcessScope>,
+    process_scope: Option<tty_utils::ProcessScope>,
 }
 
 impl Default for LocalTerminalConfig {
@@ -2224,30 +2224,11 @@ impl LocalTerminalBackend {
         search_shadows: SearchShadowConfig,
         login_shell_capture: bool,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
-        process_scope: Option<crate::util::ProcessScope>,
+        process_scope: Option<tty_utils::ProcessScope>,
     ) -> Self {
         Self::new_inner(LocalTerminalConfig {
             use_spawn_local: true,
             login_shell_capture,
-            search_shadows,
-            shell_env_policy,
-            process_scope,
-            ..Default::default()
-        })
-    }
-
-    /// Create a new LocalTerminalBackend using spawn_local with persistent shell.
-    ///
-    /// `search_shadows` is the host-resolved `find`→`bfs` / `grep`→`ugrep` enable
-    /// state, baked into this backend (see [`SearchShadowConfig`]).
-    pub fn new_local_with_persistent_shell(
-        search_shadows: SearchShadowConfig,
-        shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
-        process_scope: Option<crate::util::ProcessScope>,
-    ) -> Self {
-        Self::new_inner(LocalTerminalConfig {
-            use_spawn_local: true,
-            persistent_shell: true,
             search_shadows,
             shell_env_policy,
             process_scope,
@@ -2261,8 +2242,8 @@ impl LocalTerminalBackend {
     #[cfg(test)]
     pub(crate) fn new_local_with_scope(
         search_shadows: SearchShadowConfig,
-        scope: crate::util::ProcessScope,
-        session_scope: Option<crate::util::ProcessScope>,
+        scope: tty_utils::ProcessScope,
+        session_scope: Option<tty_utils::ProcessScope>,
     ) -> Self {
         Self::new_with_ttl(
             None,
@@ -2291,7 +2272,7 @@ impl LocalTerminalBackend {
             ttl,
             FOREGROUND_BLOCK_BUDGET,
             MAX_OUTPUT_FILE_BYTES,
-            crate::util::global_process_scope().clone(),
+            tty_utils::global_process_scope().clone(),
             None,
             None,
         )
@@ -2309,7 +2290,7 @@ impl LocalTerminalBackend {
             COMPLETED_TASK_TTL,
             budget,
             MAX_OUTPUT_FILE_BYTES,
-            crate::util::global_process_scope().clone(),
+            tty_utils::global_process_scope().clone(),
             None,
             None,
         )
@@ -2327,7 +2308,7 @@ impl LocalTerminalBackend {
             COMPLETED_TASK_TTL,
             FOREGROUND_BLOCK_BUDGET,
             output_file_cap,
-            crate::util::global_process_scope().clone(),
+            tty_utils::global_process_scope().clone(),
             None,
             None,
         )
@@ -2352,7 +2333,7 @@ impl LocalTerminalBackend {
             COMPLETED_TASK_TTL,
             foreground_block_budget_from_env(),
             output_file_cap_from_env(),
-            crate::util::global_process_scope().clone(),
+            tty_utils::global_process_scope().clone(),
             process_scope,
             shell_env_policy,
         )
@@ -2367,8 +2348,8 @@ impl LocalTerminalBackend {
         completed_task_ttl: Duration,
         foreground_block_budget: Duration,
         output_file_cap: u64,
-        scope: crate::util::ProcessScope,
-        session_scope: Option<crate::util::ProcessScope>,
+        scope: tty_utils::ProcessScope,
+        session_scope: Option<tty_utils::ProcessScope>,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_SIZE);
@@ -2943,8 +2924,8 @@ async fn capture_login_env() -> HashMap<String, String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        crate::util::detach_command(&mut cmd);
-        cmd.envs(crate::util::pager_env());
+        tty_utils::detach_command(&mut cmd);
+        cmd.envs(tty_utils::pager_env());
         #[allow(clippy::disallowed_methods)] // probe killed on drop
         let mut child = cmd.spawn().ok()?;
 
@@ -3077,7 +3058,7 @@ fn apply_child_env(
     layer_login_env_vars(cmd, login_env, active_policy);
     cmd.envs(shell_state::shell_env_overrides());
     layer_request_env(cmd, request_env, active_policy);
-    cmd.envs(crate::util::pager_env());
+    cmd.envs(tty_utils::pager_env());
     layer_login_path(cmd, login_env, active_policy);
     crate::util::apply_agent_marker(cmd);
 }
@@ -3091,7 +3072,7 @@ fn spawn_shell_command(
     login_env: Option<&HashMap<String, String>>,
     search_shadows: SearchShadowConfig,
     shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
-) -> std::io::Result<(tokio::process::Child, crate::util::ProcessGroup)> {
+) -> std::io::Result<(tokio::process::Child, tty_utils::ProcessGroup)> {
     // `login_env` and `search_shadows` are only consumed by the `#[cfg(unix)]`
     // shell wrapper below; keep them live on Windows to avoid unused-arg warnings.
     #[cfg(not(unix))]
@@ -3128,7 +3109,7 @@ fn spawn_shell_command(
 
         // Detach from the controlling terminal so subprocesses cannot open
         // /dev/tty and compete with the TUI for terminal input.
-        crate::util::detach_command(&mut cmd);
+        tty_utils::detach_command(&mut cmd);
 
         // If the sandbox profile restricts network, install a seccomp BPF
         // filter on the child that blocks connect/bind/sendto/listen/accept.
@@ -3167,10 +3148,10 @@ fn spawn_shell_command(
         crate::util::shell_env_policy::install_policy_base_env(&mut cmd, active_policy);
         cmd.envs(inv.env);
         layer_request_env(&mut cmd, env, active_policy);
-        cmd.envs(crate::util::pager_env());
+        cmd.envs(tty_utils::pager_env());
         crate::util::apply_agent_marker(&mut cmd);
 
-        // Set creation flags inline rather than via crate::util::detach_command
+        // Set creation flags inline rather than via tty_utils::detach_command
         // + new_process_group: tokio's creation_flags is a SET, not OR, so
         // the helpers don't compose.
         //   - CREATE_NO_WINDOW: no console window pops up.
@@ -3192,7 +3173,7 @@ fn spawn_shell_command(
     };
 
     #[cfg(unix)]
-    let mut group = crate::util::ProcessGroup::new()?;
+    let mut group = tty_utils::ProcessGroup::new()?;
     #[cfg(unix)]
     #[allow(clippy::disallowed_methods)] // attached to the process group built above
     let child = cmd.spawn().map_err(|e| {
@@ -3202,7 +3183,7 @@ fn spawn_shell_command(
     #[cfg(not(unix))]
     #[allow(clippy::disallowed_methods)] // attached to the process group built in this block
     let (child, mut group) = {
-        let group = crate::util::ProcessGroup::new()?;
+        let group = tty_utils::ProcessGroup::new()?;
         let mut cmd = build_cmd(true);
         match cmd.spawn() {
             Ok(child) => (child, group),
@@ -4575,7 +4556,7 @@ mod tests {
             .unwrap();
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async {
-            let scope = crate::util::ProcessScope::new();
+            let scope = tty_utils::ProcessScope::new();
             let backend = LocalTerminalBackend::new_local_with_scope(
                 SearchShadowConfig::default(),
                 scope.clone(),
@@ -4622,8 +4603,8 @@ mod tests {
             .unwrap();
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async {
-            let base = crate::util::ProcessScope::new();
-            let session = crate::util::ProcessScope::new();
+            let base = tty_utils::ProcessScope::new();
+            let session = tty_utils::ProcessScope::new();
             let backend = LocalTerminalBackend::new_local_with_scope(
                 SearchShadowConfig::default(),
                 base.clone(),
@@ -4659,7 +4640,7 @@ mod tests {
             .unwrap();
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async {
-            let scope = crate::util::ProcessScope::new();
+            let scope = tty_utils::ProcessScope::new();
             let backend = LocalTerminalBackend::new_local_with_scope(
                 SearchShadowConfig::default(),
                 scope.clone(),

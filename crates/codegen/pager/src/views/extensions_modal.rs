@@ -128,14 +128,13 @@ pub fn filtered_marketplace_count(
 #[cfg(test)]
 pub(crate) fn test_plugin_info(
     name: &str,
-    origin: Option<extension_types::PluginOrigin>,
+    origin: extension_types::PluginOrigin,
 ) -> extension_types::PluginInfo {
     extension_types::PluginInfo {
         name: name.to_string(),
         id: format!("user/abcd1234/{name}"),
         root: format!("/tmp/{name}"),
         scope: extension_types::PluginScope::User,
-        trusted: true,
         enabled: true,
         version: None,
         description: None,
@@ -147,7 +146,6 @@ pub(crate) fn test_plugin_info(
         hook_count: 0,
         mcp_server_count: 0,
         mcp_status: extension_types::McpStatus::None,
-        marketplace_source: None,
         origin,
         conflict: None,
     }
@@ -189,60 +187,26 @@ fn plugin_count_label(n: usize) -> String {
 
 /// Resolve the source group a plugin belongs to on the Plugins tab.
 ///
-/// Uses the plugin's `origin` when present. A missing origin (older shell)
-/// or an unrecognized variant (newer shell) falls back to the scope plus
-/// the legacy `marketplace_source` label so the UI still degrades to
-/// sensible groups.
+/// Uses the plugin's required discovery `origin`.
 pub fn plugin_group(plugin: &extension_types::PluginInfo) -> PluginGroup {
-    use extension_types::{PluginOrigin, PluginScope};
+    use extension_types::PluginOrigin;
 
     match &plugin.origin {
-        Some(PluginOrigin::ProjectGrow) => PluginGroup::new(0, "origin:project", "Project"),
-        Some(PluginOrigin::ProjectClaude) => {
-            PluginGroup::new(1, "origin:project-claude", "Project (Claude)")
-        }
-        Some(PluginOrigin::UserGrow) => PluginGroup::new(2, "origin:user", "User"),
-        Some(PluginOrigin::UserClaude)
-        | Some(PluginOrigin::ClaudeInstalled { marketplace: None }) => {
-            PluginGroup::new(3, "origin:user-claude", "User (Claude)")
-        }
-        Some(PluginOrigin::ClaudeMarketplace { marketplace })
-        | Some(PluginOrigin::ClaudeInstalled {
-            marketplace: Some(marketplace),
-        }) => PluginGroup {
-            rank: 4,
-            key: format!("claude-mp:{marketplace}"),
-            label: marketplace.clone(),
-        },
-        Some(PluginOrigin::MarketplaceInstall {
+        PluginOrigin::ProjectGrow => PluginGroup::new(0, "origin:project", "Project"),
+        PluginOrigin::UserGrow => PluginGroup::new(1, "origin:user", "User"),
+        PluginOrigin::MarketplaceInstall {
             source_name: Some(source),
             ..
-        }) => PluginGroup {
-            rank: 5,
-            key: format!("grow-mp:{source}"),
+        } => PluginGroup {
+            rank: 2,
+            key: format!("marketplace:{source}"),
             label: source.clone(),
         },
-        Some(PluginOrigin::MarketplaceInstall {
+        PluginOrigin::MarketplaceInstall {
             source_name: None, ..
-        }) => PluginGroup::new(6, "origin:direct", "Direct installs"),
-        Some(PluginOrigin::CliOverride) => PluginGroup::new(7, "origin:cli", "CLI override"),
-        Some(PluginOrigin::ConfigPath) => PluginGroup::new(8, "origin:config", "Custom paths"),
-        Some(PluginOrigin::Unknown) | None => match plugin.scope {
-            PluginScope::Project => PluginGroup::new(0, "origin:project", "Project"),
-            PluginScope::User => match plugin.marketplace_source.as_deref() {
-                Some(source) if source.starts_with("git: ") => {
-                    PluginGroup::new(6, "origin:direct", "Direct installs")
-                }
-                Some(source) => PluginGroup {
-                    rank: 5,
-                    key: format!("grow-mp:{source}"),
-                    label: source.to_string(),
-                },
-                None => PluginGroup::new(2, "origin:user", "User"),
-            },
-            PluginScope::Cli => PluginGroup::new(7, "origin:cli", "CLI override"),
-            PluginScope::Config => PluginGroup::new(8, "origin:config", "Custom paths"),
-        },
+        } => PluginGroup::new(3, "origin:direct", "Direct installs"),
+        PluginOrigin::CliOverride => PluginGroup::new(4, "origin:cli", "CLI override"),
+        PluginOrigin::ConfigPath => PluginGroup::new(5, "origin:config", "Custom paths"),
     }
 }
 
@@ -2226,10 +2190,6 @@ pub fn derive_source_label(source_dir: &str) -> (String, bool) {
     if source_dir == global_str || source_dir.starts_with(&format!("{global_str}/")) {
         return ("Global hooks".into(), false);
     }
-    // Settings under .claude/
-    if source_dir.contains("/.claude/") {
-        return ("Claude settings".into(), false);
-    }
     // Project hooks
     if source_dir.ends_with("/.grow/hooks") || source_dir.contains("/.grow/hooks/") {
         return ("Project hooks".into(), false);
@@ -2306,8 +2266,6 @@ fn skill_source_str(skill: &SkillInfo) -> String {
             tools::types::config_source::ConfigSource::User { path } => {
                 if crate::util::is_under_user_grow_home(path) {
                     crate::util::display_user_grow_path("skills")
-                } else if path.display().to_string().contains("/.claude/") {
-                    "~/.claude/skills".into()
                 } else {
                     "user".into()
                 }
@@ -2316,8 +2274,6 @@ fn skill_source_str(skill: &SkillInfo) -> String {
                 let s = path.display().to_string();
                 if s.contains("/.grow/") {
                     ".grow/skills".into()
-                } else if s.contains("/.claude/") {
-                    ".claude/skills".into()
                 } else {
                     "project".into()
                 }
@@ -4105,7 +4061,6 @@ mod tests {
     fn mcp_setup_form_defaults_and_pref_value() {
         use crate::views::mcps_modal::{
             McpServerDisplayStatus, McpServerInfo, McpSetupConfig, McpSetupField, McpSetupOption,
-            McpWireSource,
         };
 
         let mut server = McpServerInfo {
@@ -4137,9 +4092,7 @@ mod tests {
             tools: vec![],
             enabled: true,
             source: "plugin: acme".into(),
-            wire_source: McpWireSource::Local,
             plugin_name: Some("acme".into()),
-            is_managed_gateway: false,
         };
         let form = McpSetupFormState::new(&server).unwrap();
         assert_eq!(form.selected_value().as_deref(), Some("us1"));
@@ -4215,7 +4168,6 @@ mod tests {
 
     fn make_mcp_server_for_rows(
         name: &str,
-        wire: crate::views::mcps_modal::McpWireSource,
         tools: Vec<(&str, bool)>,
     ) -> crate::views::mcps_modal::McpServerInfo {
         use crate::views::mcps_modal::{McpServerDisplayStatus, McpToolDetail};
@@ -4240,55 +4192,15 @@ mod tests {
             tools: tool_details,
             enabled: true,
             source: "local".into(),
-            wire_source: wire,
             plugin_name: None,
-            is_managed_gateway: false,
         }
     }
 
     #[test]
-    fn mcp_collapsed_managed_section_omits_server_rows() {
-        use crate::views::mcps_modal::McpWireSource;
-
-        let servers = vec![
-            make_mcp_server_for_rows("grow_managed_linear", McpWireSource::Managed, vec![]),
-            make_mcp_server_for_rows("local-srv", McpWireSource::Local, vec![]),
-        ];
-        let mut collapsed = std::collections::HashSet::new();
-        collapsed.insert("mcp-section:managed".to_string());
-        let rows = build_mcp_servers_picker_rows(
-            &servers,
-            "",
-            StatusFilter::All,
-            &collapsed,
-            &std::collections::HashSet::new(),
-        );
-        assert!(
-            rows.labels.iter().any(|l| l.starts_with("Managed service")),
-            "managed section header must appear"
-        );
-        assert!(
-            !rows.labels.iter().any(|l| l == "grow_managed_linear"),
-            "servers in collapsed managed section must be omitted"
-        );
-        assert!(
-            rows.labels.iter().any(|l| l.starts_with("Local")),
-            "local section should still render"
-        );
-        assert!(rows.labels.iter().any(|l| l == "local-srv"));
-    }
-
-    #[test]
     fn mcp_tool_rows_emitted_when_tools_expanded_by_server_index() {
-        use crate::views::mcps_modal::McpWireSource;
-
         let servers = vec![
-            make_mcp_server_for_rows(
-                "alpha",
-                McpWireSource::Managed,
-                vec![("tool-a1", true), ("tool-a2", true)],
-            ),
-            make_mcp_server_for_rows("beta", McpWireSource::Managed, vec![("tool-b1", true)]),
+            make_mcp_server_for_rows("alpha", vec![("tool-a1", true), ("tool-a2", true)]),
+            make_mcp_server_for_rows("beta", vec![("tool-b1", true)]),
         ];
         let mut tools_expanded = std::collections::HashSet::new();
         tools_expanded.insert(0);
@@ -4315,7 +4227,7 @@ mod tests {
 
     #[test]
     fn mcps_plugin_sections_collapsed_on_first_load() {
-        use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};
+        use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo};
 
         let servers = vec![
             McpServerInfo {
@@ -4329,9 +4241,7 @@ mod tests {
                 tools: vec![],
                 enabled: true,
                 source: "plugin: alpha".into(),
-                wire_source: McpWireSource::Local,
                 plugin_name: Some("alpha".into()),
-                is_managed_gateway: false,
             },
             McpServerInfo {
                 name: "p2-srv".into(),
@@ -4344,20 +4254,13 @@ mod tests {
                 tools: vec![],
                 enabled: true,
                 source: "plugin: beta".into(),
-                wire_source: McpWireSource::Local,
                 plugin_name: Some("beta".into()),
-                is_managed_gateway: false,
             },
         ];
         let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
         assert!(
             !state.mcps_collapsed_sections.contains("mcp-section:local"),
             "Local section starts expanded by default for a less noisy initial view"
-        );
-        assert!(
-            !state
-                .mcps_collapsed_sections
-                .contains("mcp-section:managed")
         );
         init_mcps_section_collapse_on_first_load(
             &mut state.mcps_collapsed_sections,
@@ -4733,14 +4636,14 @@ mod tests {
     // ── Plugin fixtures ─────────────────────────────────────────────
 
     fn make_plugin(name: &str) -> extension_types::PluginInfo {
-        test_plugin_info(name, None)
+        test_plugin_info(name, extension_types::PluginOrigin::UserGrow)
     }
 
     fn make_plugin_with_origin(
         name: &str,
         origin: extension_types::PluginOrigin,
     ) -> extension_types::PluginInfo {
-        test_plugin_info(name, Some(origin))
+        test_plugin_info(name, origin)
     }
 
     // ── StatusFilter unit tests ─────────────────────────────────────
@@ -5614,9 +5517,6 @@ mod tests {
                     description: Some(
                         "An agentic skills framework & software development methodology",
                     ),
-                    skill_count: 14,
-                    has_hooks: true,
-                    has_agents: true,
                     ..Default::default()
                 }
                 .build(),
@@ -5645,7 +5545,6 @@ mod tests {
                 TestPlugin {
                     name: "subagent-driven-development",
                     description: Some("Fast iteration with two-stage review"),
-                    has_agents: true,
                     ..Default::default()
                 }
                 .build(),
@@ -5667,7 +5566,6 @@ mod tests {
                     version: Some("0.1.0"),
                     description: Some("Custom linting rules"),
                     author: None,
-                    has_hooks: true,
                     install_status: "installed",
                     ..Default::default()
                 }
@@ -5683,10 +5581,6 @@ mod tests {
         version: Option<&'static str>,
         description: Option<&'static str>,
         author: Option<&'static str>,
-        skill_count: usize,
-        has_hooks: bool,
-        has_agents: bool,
-        has_mcp: bool,
         install_status: &'static str,
         components: Option<extension_types::PluginComponents>,
     }
@@ -5698,10 +5592,6 @@ mod tests {
                 version: Some("5.1.0"),
                 description: None,
                 author: Some("obra"),
-                skill_count: 1,
-                has_hooks: false,
-                has_agents: false,
-                has_mcp: false,
                 install_status: "not_installed",
                 components: None,
             }
@@ -5728,10 +5618,6 @@ mod tests {
                 domains: vec![],
                 homepage: None,
                 relative_path: format!("plugins/{}", self.name),
-                skill_count: self.skill_count,
-                has_hooks: self.has_hooks,
-                has_agents: self.has_agents,
-                has_mcp: self.has_mcp,
                 install_status: self.install_status.to_string(),
                 installed_version,
                 components: self.components,
@@ -6265,7 +6151,7 @@ mod tests {
                 component("test-driven-development", None),
             ],
             commands: vec![component("/brainstorm", Some("Start a brainstorm"))],
-            hooks: vec![component("PreToolUse", Some("Bash"))],
+            hooks: vec![component("pre_tool_use", Some("Bash"))],
             ..Default::default()
         }
     }
@@ -6296,23 +6182,9 @@ mod tests {
     }
 
     #[test]
-    fn marketplace_summary_ignores_legacy_fields() {
-        let plugin = TestPlugin {
-            name: "legacy",
-            skill_count: 3,
-            has_hooks: true,
-            has_mcp: true,
-            ..Default::default()
-        }
-        .build();
-        assert_eq!(marketplace_components_summary(&plugin), None);
-    }
-
-    #[test]
     fn marketplace_summary_url_entry_without_data_is_none() {
         let plugin = TestPlugin {
             name: "remote",
-            skill_count: 0,
             ..Default::default()
         }
         .build();
@@ -6324,7 +6196,6 @@ mod tests {
     fn marketplace_summary_local_entry_without_data_shows_nothing() {
         let mut plugin = TestPlugin {
             name: "bare",
-            skill_count: 0,
             ..Default::default()
         }
         .build();
@@ -6343,7 +6214,7 @@ mod tests {
                     "brainstorming, test-driven-development".to_string()
                 ),
                 ("commands".to_string(), "/brainstorm".to_string()),
-                ("hooks".to_string(), "PreToolUse".to_string()),
+                ("hooks".to_string(), "pre_tool_use".to_string()),
             ]
         );
     }
@@ -6562,40 +6433,14 @@ mod tests {
         use extension_types::PluginOrigin;
         for (origin, rank, key, label) in [
             (PluginOrigin::ProjectGrow, 0, "origin:project", "Project"),
-            (
-                PluginOrigin::ProjectClaude,
-                1,
-                "origin:project-claude",
-                "Project (Claude)",
-            ),
-            (PluginOrigin::UserGrow, 2, "origin:user", "User"),
-            (
-                PluginOrigin::UserClaude,
-                3,
-                "origin:user-claude",
-                "User (Claude)",
-            ),
-            (
-                PluginOrigin::ClaudeInstalled { marketplace: None },
-                3,
-                "origin:user-claude",
-                "User (Claude)",
-            ),
-            (
-                PluginOrigin::ClaudeMarketplace {
-                    marketplace: "mp".into(),
-                },
-                4,
-                "claude-mp:mp",
-                "mp",
-            ),
+            (PluginOrigin::UserGrow, 1, "origin:user", "User"),
             (
                 PluginOrigin::MarketplaceInstall {
                     source_name: Some("Featured Marketplace".into()),
                     git_url: Some("https://example.com/r.git".into()),
                 },
-                5,
-                "grow-mp:Featured Marketplace",
+                2,
+                "marketplace:Featured Marketplace",
                 "Featured Marketplace",
             ),
             (
@@ -6603,12 +6448,12 @@ mod tests {
                     source_name: None,
                     git_url: Some("https://example.com/r.git".into()),
                 },
-                6,
+                3,
                 "origin:direct",
                 "Direct installs",
             ),
-            (PluginOrigin::CliOverride, 7, "origin:cli", "CLI override"),
-            (PluginOrigin::ConfigPath, 8, "origin:config", "Custom paths"),
+            (PluginOrigin::CliOverride, 4, "origin:cli", "CLI override"),
+            (PluginOrigin::ConfigPath, 5, "origin:config", "Custom paths"),
         ] {
             let group = plugin_group(&make_plugin_with_origin("p", origin.clone()));
             assert_eq!(group.rank, rank, "{origin:?}");
@@ -6618,81 +6463,26 @@ mod tests {
     }
 
     #[test]
-    fn plugin_group_merges_claude_marketplace_and_installed() {
-        use extension_types::PluginOrigin;
-        let catalog = plugin_group(&make_plugin_with_origin(
-            "a",
-            PluginOrigin::ClaudeMarketplace {
-                marketplace: "mp".into(),
-            },
-        ));
-        let installed = plugin_group(&make_plugin_with_origin(
-            "b",
-            PluginOrigin::ClaudeInstalled {
-                marketplace: Some("mp".into()),
-            },
-        ));
-        assert_eq!(catalog, installed);
-    }
-
-    #[test]
-    fn plugin_group_fallback_without_origin() {
-        let mut project = make_plugin("proj");
-        project.scope = extension_types::PluginScope::Project;
-        assert_eq!(plugin_group(&project).key, "origin:project");
-
-        let user = make_plugin("plain");
-        assert_eq!(plugin_group(&user).key, "origin:user");
-
-        let mut cli = make_plugin("cli-tool");
-        cli.scope = extension_types::PluginScope::Cli;
-        assert_eq!(plugin_group(&cli).key, "origin:cli");
-
-        let mut config = make_plugin("cfg-tool");
-        config.scope = extension_types::PluginScope::Config;
-        assert_eq!(plugin_group(&config).key, "origin:config");
-
-        let mut mp = make_plugin("mp-tool");
-        mp.marketplace_source = Some("Featured Marketplace".into());
-        let group = plugin_group(&mp);
-        assert_eq!(group.key, "grow-mp:Featured Marketplace");
-        assert_eq!(group.label, "Featured Marketplace");
-
-        let mut direct = make_plugin("direct-tool");
-        direct.marketplace_source = Some("git: owner/repo".into());
-        assert_eq!(plugin_group(&direct).key, "origin:direct");
-    }
-
-    #[test]
-    fn plugin_group_unknown_origin_uses_scope_fallback() {
-        let mut unknown =
-            make_plugin_with_origin("future-tool", extension_types::PluginOrigin::Unknown);
-        assert_eq!(plugin_group(&unknown).key, "origin:user");
-
-        unknown.marketplace_source = Some("Featured Marketplace".into());
-        assert_eq!(plugin_group(&unknown).key, "grow-mp:Featured Marketplace");
-    }
-
-    #[test]
     fn plugins_render_groups_with_headers_in_rank_order() {
         use extension_types::PluginOrigin;
         let mut state = plugins_modal_state(vec![
             make_plugin_with_origin(
                 "mp-tool",
-                PluginOrigin::ClaudeMarketplace {
-                    marketplace: "claude-market".into(),
+                PluginOrigin::MarketplaceInstall {
+                    source_name: Some("community".into()),
+                    git_url: None,
                 },
             ),
             make_plugin_with_origin("user-tool", PluginOrigin::UserGrow),
-            make_plugin_with_origin("claude-tool", PluginOrigin::UserClaude),
+            make_plugin_with_origin("custom-tool", PluginOrigin::ConfigPath),
         ]);
         let buf = render_plugins_into_buffer(&mut state, 100, 40);
 
         assert_eq!(buffer_count(&buf, "User (1 plugin)"), 1);
-        assert_eq!(buffer_count(&buf, "User (Claude) (1 plugin)"), 1);
-        assert_eq!(buffer_count(&buf, "claude-market (1 plugin)"), 1);
+        assert_eq!(buffer_count(&buf, "Custom paths (1 plugin)"), 1);
+        assert_eq!(buffer_count(&buf, "community (1 plugin)"), 1);
         assert_eq!(buffer_count(&buf, "user-tool"), 1);
-        assert_eq!(buffer_count(&buf, "claude-tool"), 1);
+        assert_eq!(buffer_count(&buf, "custom-tool"), 1);
         assert_eq!(buffer_count(&buf, "mp-tool"), 1);
 
         assert_eq!(
@@ -6700,15 +6490,15 @@ mod tests {
             vec![
                 Some("origin:user".to_string()),
                 None,
-                Some("origin:user-claude".to_string()),
+                Some("marketplace:community".to_string()),
                 None,
-                Some("claude-mp:claude-market".to_string()),
+                Some("origin:config".to_string()),
                 None,
             ]
         );
         assert_eq!(
             state.entry_data_indices,
-            vec![None, Some(1), None, Some(2), None, Some(0)]
+            vec![None, Some(1), None, Some(0), None, Some(2)]
         );
     }
 
@@ -6719,21 +6509,23 @@ mod tests {
             make_plugin_with_origin("solo-tool", PluginOrigin::UserGrow),
             make_plugin_with_origin(
                 "catalog-tool",
-                PluginOrigin::ClaudeMarketplace {
-                    marketplace: "claude-market".into(),
+                PluginOrigin::MarketplaceInstall {
+                    source_name: Some("community".into()),
+                    git_url: None,
                 },
             ),
             make_plugin_with_origin(
                 "installed-tool",
-                PluginOrigin::ClaudeInstalled {
-                    marketplace: Some("claude-market".into()),
+                PluginOrigin::MarketplaceInstall {
+                    source_name: Some("community".into()),
+                    git_url: Some("https://example.com/community.git".into()),
                 },
             ),
         ]);
         let buf = render_plugins_into_buffer(&mut state, 100, 40);
 
         assert_eq!(
-            buffer_count(&buf, "claude-market (2 plugins)"),
+            buffer_count(&buf, "community (2 plugins)"),
             1,
             "catalog and installed entries for the same marketplace share one group"
         );
@@ -6745,7 +6537,7 @@ mod tests {
             vec![
                 Some("origin:user".to_string()),
                 None,
-                Some("claude-mp:claude-market".to_string()),
+                Some("marketplace:community".to_string()),
                 None,
                 None,
             ]
@@ -6758,7 +6550,7 @@ mod tests {
 
         state
             .plugins_collapsed_groups
-            .insert("claude-mp:claude-market".into());
+            .insert("marketplace:community".into());
         let buf = render_plugins_into_buffer(&mut state, 100, 40);
         assert_eq!(buffer_count(&buf, "catalog-tool"), 0);
         assert_eq!(buffer_count(&buf, "installed-tool"), 0);
@@ -6791,25 +6583,9 @@ mod tests {
     }
 
     #[test]
-    fn plugins_fallback_grouping_without_origin() {
-        let mut direct = make_plugin("direct-tool");
-        direct.marketplace_source = Some("git: owner/repo".into());
-        let mut mp = make_plugin("official-tool");
-        mp.marketplace_source = Some("Featured Marketplace".into());
-        let plain = make_plugin("plain-tool");
-
-        let mut state = plugins_modal_state(vec![direct, mp, plain]);
-        let buf = render_plugins_into_buffer(&mut state, 100, 40);
-
-        assert_eq!(buffer_count(&buf, "User (1 plugin)"), 1);
-        assert_eq!(buffer_count(&buf, "Featured Marketplace (1 plugin)"), 1);
-        assert_eq!(buffer_count(&buf, "Direct installs (1 plugin)"), 1);
-    }
-
-    #[test]
     fn plugins_status_filter_omits_empty_groups() {
         use extension_types::PluginOrigin;
-        let mut disabled = make_plugin_with_origin("off-tool", PluginOrigin::UserClaude);
+        let mut disabled = make_plugin_with_origin("off-tool", PluginOrigin::ConfigPath);
         disabled.enabled = false;
         let mut state = plugins_modal_state(vec![
             make_plugin_with_origin("user-tool", PluginOrigin::UserGrow),
@@ -6823,7 +6599,7 @@ mod tests {
             0,
             "group with no matching plugins must be omitted"
         );
-        assert_eq!(buffer_count(&buf, "User (Claude) (1 plugin)"), 1);
+        assert_eq!(buffer_count(&buf, "Custom paths (1 plugin)"), 1);
         assert_eq!(buffer_count(&buf, "off-tool"), 1);
         assert_eq!(buffer_count(&buf, "[disabled]"), 1);
     }
@@ -6834,10 +6610,6 @@ mod tests {
         source.plugins.truncate(2);
         source.plugins[0].components = Some(extension_types::PluginComponents::default());
         source.plugins[1].components = None;
-        source.plugins[1].skill_count = 0;
-        source.plugins[1].has_hooks = false;
-        source.plugins[1].has_agents = false;
-        source.plugins[1].has_mcp = false;
         assert!(source.plugins[1].remote_url.is_some());
         let mut state = marketplace_modal_state(source);
 

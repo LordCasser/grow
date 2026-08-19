@@ -261,7 +261,7 @@ impl SessionActor {
             .hook_registry
             .borrow()
             .as_ref()
-            .is_some_and(|r| r.has_enabled_hooks_for_canonical(event));
+            .is_some_and(|r| r.has_enabled_hooks(event));
         let has_client_hooks = self.client_hooks.borrow().contains_key(&event);
         if !has_file_hooks && !has_client_hooks {
             return StopGateDecision::AllowStop;

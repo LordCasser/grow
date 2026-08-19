@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use super::WorkspaceRpc;
 
-/// `workspace.discover_agents_md` — project-instruction files (AGENTS.md /
-/// Claude.md / `.grow/rules/*.md`) discovered from the workspace root up to
-/// the git root, plus `~/.grow` and compat dirs.
+/// `workspace.discover_agents_md` — `AGENTS.md` and `.grow/rules/*.md`
+/// discovered from the workspace root up to the git root, plus `$GROW_HOME`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiscoverAgentsMdReq {}
 
 impl WorkspaceRpc for DiscoverAgentsMdReq {
@@ -17,6 +17,7 @@ impl WorkspaceRpc for DiscoverAgentsMdReq {
 
 /// Mirrors the serde shape of `agent`'s `AgentConfigFile`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConfigFile {
     pub file_name: String,
     pub file_path: String,
@@ -46,14 +47,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_config_file_ignores_unknown_fields() {
+    fn agent_config_file_rejects_unknown_fields() {
         let raw = serde_json::json!({
-            "file_name": "Claude.md",
-            "file_path": "/repo/Claude.md",
+            "file_name": "AGENTS.md",
+            "file_path": "/repo/AGENTS.md",
             "content": "x",
             "brand_new_field": {"nested": true},
         });
-        let file: AgentConfigFile = serde_json::from_value(raw).unwrap();
-        assert_eq!(file.file_name, "Claude.md");
+        assert!(serde_json::from_value::<AgentConfigFile>(raw).is_err());
     }
 }

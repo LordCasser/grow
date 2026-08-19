@@ -237,7 +237,7 @@ pub enum LspTransport {
 ///
 /// Paths may be absolute or relative to the workspace root.
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceOpen {
     /// A single solution file, sent as `solution/open`.
     #[serde(default)]
@@ -248,6 +248,7 @@ pub struct WorkspaceOpen {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LspServerConfig {
     pub command: String,
     #[serde(default)]
@@ -256,27 +257,23 @@ pub struct LspServerConfig {
     pub transport: LspTransport,
     #[serde(default)]
     pub env: HashMap<String, String>,
-    #[serde(
-        default,
-        alias = "extensionToLanguage",
-        alias = "extensionToLanguageId"
-    )]
+    #[serde(default)]
     pub extensions: HashMap<String, String>,
-    #[serde(default, alias = "initializationOptions")]
+    #[serde(default)]
     pub initialization_options: Option<serde_json::Value>,
     #[serde(default)]
     pub settings: Option<serde_json::Value>,
-    #[serde(default, alias = "workspaceFolder")]
+    #[serde(default)]
     pub workspace_folder: Option<String>,
-    #[serde(default, alias = "workspaceOpen")]
+    #[serde(default)]
     pub workspace_open: Option<WorkspaceOpen>,
-    #[serde(default, alias = "startupTimeout")]
+    #[serde(default)]
     pub startup_timeout: Option<u64>,
-    #[serde(default, alias = "shutdownTimeout")]
+    #[serde(default)]
     pub shutdown_timeout: Option<u64>,
-    #[serde(default, alias = "restartOnCrash")]
+    #[serde(default)]
     pub restart_on_crash: Option<bool>,
-    #[serde(default, alias = "maxRestarts")]
+    #[serde(default)]
     pub max_restarts: Option<u32>,
 }
 
@@ -302,7 +299,7 @@ impl LspServerConfig {
     /// The directory this server should treat as its workspace: the per-server
     /// override if there is one, otherwise the session cwd. Everything that
     /// needs to name the server's root — `rootUri`, `workspaceFolders`,
-    /// `workspaceOpen` — resolves it here so they cannot drift apart.
+    /// `workspace_open` — resolves it here so they cannot drift apart.
     pub fn effective_root<'a>(
         &'a self,
         workspace_root: &'a std::path::Path,
@@ -370,5 +367,39 @@ mod tests {
         assert!(kept.contains_key("proj"));
         assert!(kept.contains_key("usr"));
         assert!(kept.contains_key("plug"));
+    }
+
+    #[test]
+    fn server_config_requires_canonical_snake_case_fields() {
+        let canonical: LspServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "rust-analyzer",
+            "initialization_options": {"cargo": {"allFeatures": true}},
+            "workspace_folder": "/repo",
+            "startup_timeout": 1000,
+            "restart_on_crash": true,
+            "max_restarts": 2
+        }))
+        .unwrap();
+        assert_eq!(canonical.command, "rust-analyzer");
+        assert_eq!(canonical.workspace_folder.as_deref(), Some("/repo"));
+
+        for obsolete in [
+            "extensionToLanguage",
+            "extensionToLanguageId",
+            "initializationOptions",
+            "workspaceFolder",
+            "workspaceOpen",
+            "startupTimeout",
+            "shutdownTimeout",
+            "restartOnCrash",
+            "maxRestarts",
+        ] {
+            let mut value = serde_json::json!({"command": "server"});
+            value[obsolete] = serde_json::json!({});
+            assert!(
+                serde_json::from_value::<LspServerConfig>(value).is_err(),
+                "obsolete field {obsolete} must be rejected"
+            );
+        }
     }
 }

@@ -40,7 +40,6 @@
                     duration_ms: 10,
                     tokens_used: 1,
                     output: None,
-                    will_wake: false,
                 },
             ),
             &mut app,
@@ -169,7 +168,7 @@
     }
 
     /// Fresh root restore discovers the direct child's durable transcript via
-    /// the parent's real `subagents/<subagent_id>/meta.json` ownership record.
+    /// the parent's canonical subagent spawn fact.
     /// The persisted eventId seeds the immediate-parent highwater, so the same
     /// lifecycle event flushed from the leader's ancestor-load live buffer is
     /// not projected a second time.
@@ -179,22 +178,7 @@
             let root_sid = "restore-root-owned";
             let child_sid = "restore-child-owned";
             let grandchild_sid = "restore-grandchild-owned";
-            let root_dir = home
-                .join("sessions")
-                .join(shell::util::grow_home::encode_cwd_dirname("/tmp"))
-                .join(root_sid);
-            let meta_dir = root_dir.join("subagents").join(child_sid);
-            std::fs::create_dir_all(&meta_dir).unwrap();
-            std::fs::write(
-                meta_dir.join("meta.json"),
-                serde_json::json!({
-                    "parent_session_id": root_sid,
-                    "child_session_id": child_sid,
-                    "child_cwd": "/tmp",
-                })
-                .to_string(),
-            )
-            .unwrap();
+            write_subagent_spawn_timeline(home, root_sid, child_sid, "restore child");
 
             let mut nested = SessionNotification {
                 session_id: acp::SessionId::new(child_sid),
@@ -274,8 +258,8 @@
             .subagent_views
             .get("child-auto")
             .expect("child view created");
-        assert!(child.session.auto_mode);
-        assert!(!child.session.yolo_mode);
+        assert!(child.session.is_auto());
+        assert!(!child.session.is_always_approve());
     }
 
     /// On resume, a replayed spawn+finish pair leaves the subagent terminal.
@@ -748,7 +732,7 @@
         });
     }
 
-    /// Regression (resume): with a meta.json task prompt AND a persisted child
+    /// Regression (resume): with a Timeline task prompt AND a persisted child
     /// transcript that echoes that prompt, opening after resume shows the task
     /// exactly once — the deferred open must dedup the replayed prompt echo.
     #[test]
@@ -757,7 +741,7 @@
             let parent_sid = "sess-parent";
             let child_sid = "child-resume-meta";
             let task = "scan src/ for auth";
-            write_subagent_meta_json(home, parent_sid, child_sid, task);
+            write_subagent_spawn_timeline(home, parent_sid, child_sid, task);
 
             let mut app = make_app_with_agent(parent_sid);
             app.agents
@@ -784,14 +768,14 @@
         });
     }
 
-    /// Regression: replayed user_message_chunk + meta prompt must not duplicate via injection.
+    /// Regression: replayed user_message_chunk + Timeline prompt must not duplicate via injection.
     #[test]
     fn subagent_spawn_replay_and_meta_prompt_shows_task_once() {
         with_replay_disk_home(|home| {
             let parent_sid = "sess-parent";
             let child_sid = "child-prompt-once";
             let task = "scan src/ for auth";
-            write_subagent_meta_json(home, parent_sid, child_sid, task);
+            write_subagent_spawn_timeline(home, parent_sid, child_sid, task);
 
             let mut app = make_app_with_agent(parent_sid);
             let updates = format!(
@@ -1070,7 +1054,7 @@
             make_ext_session_notification(
                 "sess-A",
                 GrowSessionUpdate::AutoCompactCompleted {
-                    tokens_before: Some(90_000),
+                    tokens_before: 90_000,
                     tokens_after: 25_000,
                     elapsed_ms: Some(300),
                     summary_preview: None,

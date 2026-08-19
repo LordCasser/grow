@@ -242,7 +242,7 @@ deny = ["Bash(rm -rf *)"]
 ```
 
 两个 permission timeout 都必须是正整数，`0` 是配置错误。它们只约束真正等待用户回答的提示；
-策略直接允许/拒绝、YOLO 和 auto-classifier 不受影响。超时会以 `permission_timed_out` 取消当前
+策略直接允许/拒绝、always-approve 和 auto-classifier 不受影响。超时会以 `permission_timed_out` 取消当前
 turn，不执行工具，也不会持久化迟到的授权。
 
 Permission 匹配、企业受管规则和 Always Approve 锁定见

@@ -8,14 +8,12 @@ use serde::de::DeserializeOwned;
 
 pub mod agents_md;
 pub mod code_nav;
-pub mod deploy;
 pub mod export_github;
 pub mod fs;
 pub mod git;
 pub mod hooks;
 pub mod hunks;
 pub mod search;
-pub mod session;
 pub mod skills;
 pub mod workspace;
 pub mod worktree;

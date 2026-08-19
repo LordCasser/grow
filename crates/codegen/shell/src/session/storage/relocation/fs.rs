@@ -259,50 +259,12 @@ pub(super) fn write_atomic_durable(
     result
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(super) fn rename_no_replace(source: &Path, target: &Path) -> Result<()> {
-    use nix::fcntl::{AT_FDCWD, RenameFlags, renameat2};
-    renameat2(
-        AT_FDCWD,
-        source,
-        AT_FDCWD,
-        target,
-        RenameFlags::RENAME_NOREPLACE,
-    )
-    .map_err(|error| match error {
-        nix::errno::Errno::EEXIST => RelocationError::Collision(target.to_path_buf()),
-        nix::errno::Errno::EINVAL | nix::errno::Errno::ENOSYS | nix::errno::Errno::EOPNOTSUPP => {
-            RelocationError::UnsupportedPublication
-        }
-        error => io_error("publish", target, io::Error::from(error)),
+    super::super::rename_no_replace(source, target).map_err(|error| match error.kind() {
+        io::ErrorKind::AlreadyExists => RelocationError::Collision(target.to_path_buf()),
+        io::ErrorKind::Unsupported => RelocationError::UnsupportedPublication,
+        _ => io_error("publish", target, error),
     })
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn rename_no_replace(source: &Path, target: &Path) -> Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let source_c = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| RelocationError::Inconsistent("source path contains NUL".into()))?;
-    let target_c = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| RelocationError::Inconsistent("target path contains NUL".into()))?;
-    // SAFETY: both pointers are live, NUL-terminated path strings for this call.
-    if unsafe { libc::renamex_np(source_c.as_ptr(), target_c.as_ptr(), libc::RENAME_EXCL) } == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::EEXIST) => Err(RelocationError::Collision(target.to_path_buf())),
-        Some(code) if code == libc::EINVAL || code == libc::ENOTSUP => {
-            Err(RelocationError::UnsupportedPublication)
-        }
-        _ => Err(io_error("publish", target, error)),
-    }
-}
-
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-pub(super) fn rename_no_replace(_source: &Path, _target: &Path) -> Result<()> {
-    Err(RelocationError::UnsupportedPublication)
 }
 
 fn create_new_dir_durable(path: &Path) -> Result<()> {

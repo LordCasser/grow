@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use super::skill::extract_skill_body;
 use super::types::{SkillInfo, SkillScope};
-use crate::types::compat::CompatConfig;
 
 pub const MAX_DESCRIPTION_LEN: usize = 1024;
 pub const MAX_NAME_LEN: usize = 64;
@@ -20,50 +19,8 @@ pub const MAX_SKILL_WALK_DEPTH: usize = 5;
 
 /// Subdirectory names that contain skill definitions.
 ///
-/// `skills` is the standard layout (`.grow/skills/`, `.claude/skills/`,
-/// `.cursor/skills/`). The product-specific `skills-cursor/` layout is no
-/// longer scanned — it pulled vendor default skills into Grow sessions.
+/// `skills` is the canonical layout below a configured Grow root.
 const SKILL_SUBDIRS: &[&str] = &["skills"];
-
-/// Cursor ships these default skills in `~/.cursor/skills-cursor/`
-/// (per its `.cursor-managed-skills-manifest.json` / `.sync-manifest.json`).
-/// They are vendor builtins, not user content, so we drop any skill with one
-/// of these names discovered under a `/.cursor/` path segment. The denylist is
-/// orthogonal to the per-vendor toggle and always applied.
-const CURSOR_DEFAULT_SKILLS: &[&str] = &[
-    "babysit",
-    "canvas",
-    "create-hook",
-    "create-rule",
-    "create-skill",
-    "create-subagent",
-    "loop",
-    "migrate-to-skills",
-    "sdk",
-    "shell",
-    "split-to-prs",
-    "statusline",
-    "update-cli-config",
-    "update-cursor-settings",
-];
-
-/// Vendor ships these default skills in-binary (the on-disk `~/.claude/skills`
-/// dir is typically empty, so this is best-effort). Any skill with one of these
-/// names discovered under a `/.claude/` path segment is dropped.
-const CLAUDE_DEFAULT_SKILLS: &[&str] = &["pdf", "docx", "xlsx", "pptx", "skill-creator"];
-
-/// Return true if `name` is a vendor-shipped default skill discovered under the
-/// matching vendor's config dir (`/.cursor/` or `/.claude/`).
-///
-/// The path check ensures a user's own skill that merely shares a denylisted
-/// name (e.g. `~/.grow/skills/shell`) is NOT dropped — only skills physically
-/// located under the vendor dir are treated as vendor builtins.
-fn is_vendor_default_skill(path: &str, name: &str) -> bool {
-    let in_cursor = path.contains("/.cursor/") || path.contains("\\.cursor\\");
-    let in_claude = path.contains("/.claude/") || path.contains("\\.claude\\");
-    (in_cursor && CURSOR_DEFAULT_SKILLS.contains(&name))
-        || (in_claude && CLAUDE_DEFAULT_SKILLS.contains(&name))
-}
 
 /// Find SKILL.md files inside `skills/` subdirectories, recursively.
 pub fn find_skill_paths(dir: &Path) -> Vec<PathBuf> {
@@ -667,10 +624,9 @@ fn extract_lead_block(body: &str, include_headings: bool) -> Option<String> {
 /// Parse a list of `(path, scope)` pairs into `SkillInfo` values.
 ///
 /// This is the single chokepoint for all skill parsing (startup, dynamic, and
-/// host-driven scans), so the vendor-default denylist is applied here to cover
-/// every path. See [`is_vendor_default_skill`].
+/// host-driven scans).
 pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillInfo> {
-    let mut skills: Vec<SkillInfo> = skill_files
+    let skills: Vec<SkillInfo> = skill_files
         .into_iter()
         .filter_map(|(path, scope)| {
             let path_str = path.to_string_lossy().to_string();
@@ -813,32 +769,21 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
         })
         .collect();
 
-    // Drop vendor-shipped default skills (vendor builtins) found under
-    // a `/.cursor/` or `/.claude/` path. Always applied, independent of the
-    // per-vendor toggle, so vendor builtins never leak into Grow.
-    skills.retain(|s| !is_vendor_default_skill(&s.path, &s.name));
-
     skills
 }
 
 /// Walk upward from accessed file paths toward cwd, discovering skill
-/// directories not found at startup.
+/// `.grow` skill directories not found at startup.
 ///
 /// For each path in `file_paths`, walks from `dirname(path)` upward toward
-/// `cwd` (exclusive). At each directory, checks for `.grow/skills/`,
-/// `.agents/skills/`, and (gated on `compat.claude.skills`) `.claude/skills/`.
+/// `cwd` (exclusive). At each directory, checks for `.grow/skills/`.
 /// Skips already-checked dirs.
 ///
 /// Skill/command roots are **not** filtered by `.gitignore`. Discovery only
-/// visits known config roots (`.grow`, `.agents`, `.claude`, …); those are
+/// visits the known `.grow` config root; those are
 /// local harness config (often intentionally gitignored), not tree content.
 /// Contrast with AGENTS.md discovery, which still respects gitignore. Use
-/// `[skills] ignore` to hide a path. Compat loaders likewise load project
-/// `.claude/commands` even when ignored.
-///
-/// `.cursor/` is intentionally NOT scanned in this dynamic path — it never was
-/// historically, and preserving that keeps default behavior byte-for-byte. The
-/// `.cursor` skills toggle only governs the startup discovery dir list.
+/// `[skills] ignore` to hide a path.
 ///
 /// Returns raw `SkillInfo` without surface-specific filtering.
 /// Ordering: deepest-first so deeper local skills take precedence.
@@ -847,14 +792,8 @@ pub fn discover_skills_for_paths(
     cwd: &Path,
     git_root: Option<&Path>,
     already_checked: &mut HashSet<PathBuf>,
-    compat: CompatConfig,
 ) -> Vec<SkillInfo> {
-    // `.grow` and `.agents` are always scanned; `.claude` is gated on the
-    // claude-vendor skills cell. (`.cursor` is excluded here by design — see fn docs.)
-    let mut config_dir_names: Vec<&str> = vec![".grow", ".agents"];
-    if compat.claude.skills {
-        config_dir_names.push(".claude");
-    }
+    let config_dir_names = [".grow"];
 
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
@@ -1374,153 +1313,40 @@ model: test-model
         assert_eq!(skills[0].name, "narrate-crash-video");
     }
 
-    // ── skills-cursor removal ──────────────────────────────
-
     #[test]
-    fn skill_subdirs_no_longer_includes_skills_cursor() {
+    fn skill_subdirs_is_canonical() {
         assert_eq!(SKILL_SUBDIRS, &["skills"]);
-        assert!(!SKILL_SUBDIRS.contains(&"skills-cursor"));
     }
 
     #[test]
-    fn find_skill_paths_ignores_skills_cursor_layout() {
+    fn find_skill_paths_uses_only_skills_subdirectory() {
         let tmp = tempfile::tempdir().unwrap();
-        let cursor_dir = tmp.path().join(".cursor");
-        // Cursor product layout: scanned no longer.
-        let legacy = cursor_dir.join("skills-cursor").join("babysit");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("SKILL.md"), "---\nname: babysit\n---\n").unwrap();
-        // Standard layout: still scanned.
-        let standard = cursor_dir.join("skills").join("mine");
+        let config_dir = tmp.path().join(".grow");
+        let unrelated = config_dir.join("skill-pack").join("ignored");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(unrelated.join("SKILL.md"), "---\nname: ignored\n---\n").unwrap();
+        let standard = config_dir.join("skills").join("mine");
         std::fs::create_dir_all(&standard).unwrap();
         std::fs::write(standard.join("SKILL.md"), "---\nname: mine\n---\n").unwrap();
 
-        let paths = find_skill_paths(&cursor_dir);
+        let paths = find_skill_paths(&config_dir);
         let strs: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-        assert!(
-            strs.iter().any(|p| p.contains("skills/mine")),
-            "standard skills/ layout must still be found: {strs:?}"
-        );
-        assert!(
-            !strs.iter().any(|p| p.contains("skills-cursor")),
-            "skills-cursor layout must no longer be scanned: {strs:?}"
-        );
-    }
-
-    // ── vendor-default skill denylist ──────────────────────
-
-    #[test]
-    fn is_vendor_default_skill_matches_builtins_under_vendor_dir() {
-        assert!(is_vendor_default_skill(
-            "/home/u/.cursor/skills/shell/SKILL.md",
-            "shell"
-        ));
-        assert!(is_vendor_default_skill(
-            "/home/u/.cursor/skills/create-rule/SKILL.md",
-            "create-rule"
-        ));
+        assert_eq!(strs.len(), 1);
+        assert!(strs[0].contains("skills/mine"));
     }
 
     #[test]
-    fn is_vendor_default_skill_matches_claude_builtins_under_claude_dir() {
-        assert!(is_vendor_default_skill(
-            "/home/u/.claude/skills/pdf/SKILL.md",
-            "pdf"
-        ));
-    }
-
-    #[test]
-    fn is_vendor_default_skill_spares_user_skill_outside_vendor_dir() {
-        // A user's own "shell" skill in ~/.grow is NOT a vendor builtin.
-        assert!(!is_vendor_default_skill(
-            "/home/u/.grow/skills/shell/SKILL.md",
-            "shell"
-        ));
-    }
-
-    #[test]
-    fn is_vendor_default_skill_spares_non_denylisted_name_under_vendor_dir() {
-        assert!(!is_vendor_default_skill(
-            "/home/u/.cursor/skills/my-cursor-skill/SKILL.md",
-            "my-cursor-skill"
-        ));
-    }
-
-    #[test]
-    fn is_vendor_default_skill_does_not_cross_vendors() {
-        // "shell" is a cursor-vendor builtin, not a claude-vendor one — under .claude it stays.
-        assert!(!is_vendor_default_skill(
-            "/home/u/.claude/skills/shell/SKILL.md",
-            "shell"
-        ));
-    }
-
-    #[test]
-    fn parse_skill_files_drops_denylisted_cursor_skill() {
+    fn discover_skills_for_paths_only_scans_grow_config() {
         let tmp = tempfile::tempdir().unwrap();
-        // Denylisted name under a /.cursor/ path → dropped.
-        let cursor_shell = tmp.path().join(".cursor").join("skills").join("shell");
-        std::fs::create_dir_all(&cursor_shell).unwrap();
-        std::fs::write(
-            cursor_shell.join("SKILL.md"),
-            "---\nname: shell\ndescription: cursor builtin\n---\n",
-        )
-        .unwrap();
-        // Same name under /.grow/ → kept (user content).
-        let shell = tmp.path().join(".grow").join("skills").join("shell");
-        std::fs::create_dir_all(&shell).unwrap();
-        std::fs::write(
-            shell.join("SKILL.md"),
-            "---\nname: shell\ndescription: user content\n---\n",
-        )
-        .unwrap();
-
-        let skills = parse_skill_files(vec![
-            (cursor_shell.join("SKILL.md"), SkillScope::User),
-            (shell.join("SKILL.md"), SkillScope::User),
-        ]);
-        assert_eq!(skills.len(), 1, "cursor builtin must be dropped");
-        assert!(skills[0].path.contains("/.grow/"));
-    }
-
-    #[test]
-    fn parse_skill_files_keeps_non_denylisted_cursor_skill() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cursor_skill = tmp
-            .path()
-            .join(".cursor")
-            .join("skills")
-            .join("my-cursor-skill");
-        std::fs::create_dir_all(&cursor_skill).unwrap();
-        std::fs::write(
-            cursor_skill.join("SKILL.md"),
-            "---\nname: my-cursor-skill\ndescription: user content\n---\n",
-        )
-        .unwrap();
-
-        let skills = parse_skill_files(vec![(cursor_skill.join("SKILL.md"), SkillScope::User)]);
-        assert_eq!(skills.len(), 1, "user cursor skill must be kept");
-    }
-
-    // ── discover_skills_for_paths vendor gating ────────────
-
-    #[test]
-    fn discover_skills_for_paths_gates_claude_dir() {
-        use crate::types::compat::CompatConfig;
-
-        let tmp = tempfile::tempdir().unwrap();
-        // `discover_skills_for_paths` takes `git_root` explicitly and only uses
-        // it as a path boundary, so no real git repo is needed here.
         let repo = dunce::canonicalize(tmp.path()).unwrap();
         let sub = repo.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
 
-        // A .claude skill and a .grow skill in an intermediate dir.
-        let claude_skill = sub.join(".claude").join("skills").join("claude-dyn");
-        std::fs::create_dir_all(&claude_skill).unwrap();
+        let foreign_skill = sub.join(".claude").join("skills").join("foreign-dyn");
+        std::fs::create_dir_all(&foreign_skill).unwrap();
         std::fs::write(
-            claude_skill.join("SKILL.md"),
-            "---\nname: claude-dyn\n---\n",
+            foreign_skill.join("SKILL.md"),
+            "---\nname: foreign-dyn\n---\n",
         )
         .unwrap();
         let grow_skill = sub.join(".grow").join("skills").join("grow-dyn");
@@ -1530,45 +1356,11 @@ model: test-model
         let file = sub.join("file.rs");
         std::fs::write(&file, "fn main() {}").unwrap();
 
-        // claude.skills ON → both discovered.
         let mut checked = HashSet::new();
-        let on = discover_skills_for_paths(
-            &[file.as_path()],
-            &repo,
-            Some(repo.as_path()),
-            &mut checked,
-            CompatConfig::default(),
-        );
-        let names_on: Vec<&str> = on.iter().map(|s| s.name.as_str()).collect();
-        assert!(
-            names_on.contains(&"grow-dyn"),
-            "grow-dyn missing: {names_on:?}"
-        );
-        assert!(
-            names_on.contains(&"claude-dyn"),
-            "claude-dyn should be found when claude.skills on: {names_on:?}"
-        );
-
-        // claude.skills OFF → only grow-dyn discovered.
-        let mut compat_off = CompatConfig::default();
-        compat_off.claude.skills = false;
-        let mut checked2 = HashSet::new();
-        let off = discover_skills_for_paths(
-            &[file.as_path()],
-            &repo,
-            Some(repo.as_path()),
-            &mut checked2,
-            compat_off,
-        );
-        let names_off: Vec<&str> = off.iter().map(|s| s.name.as_str()).collect();
-        assert!(
-            names_off.contains(&"grow-dyn"),
-            "grow-dyn missing: {names_off:?}"
-        );
-        assert!(
-            !names_off.contains(&"claude-dyn"),
-            "claude-dyn must be gated off: {names_off:?}"
-        );
+        let found =
+            discover_skills_for_paths(&[file.as_path()], &repo, Some(repo.as_path()), &mut checked);
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["grow-dyn"]);
     }
 
     #[test]

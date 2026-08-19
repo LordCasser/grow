@@ -102,8 +102,8 @@ impl Watchers {
         self.commands + self.monitors + self.loops + self.subagents + self.workflows
     }
 
-    /// Awaitable in-flight work — the kinds a blocking `wait_tasks` /
-    /// `get_task_output` wait can resolve on (commands, monitors, subagents;
+    /// Awaitable in-flight work — the kinds a blocking task-output wait can
+    /// resolve on (commands, monitors, subagents;
     /// scheduled `/loop` tasks and workflows are not task waits).
     pub fn awaitable_work(self) -> usize {
         self.commands + self.monitors + self.subagents
@@ -160,7 +160,6 @@ pub fn is_parkable_wait(activity: &Option<TurnActivity>) -> bool {
         activity,
         Some(TurnActivity::Waiting(
             WaitingReason::TaskOutput { waits: true, .. }
-                | WaitingReason::TasksComplete
                 | WaitingReason::Sleep
                 | WaitingReason::Subagent
         ))
@@ -858,9 +857,6 @@ mod tests {
             "instant polls are not blocking waits"
         );
         assert!(is_parkable_wait(&Some(TurnActivity::Waiting(
-            WaitingReason::TasksComplete
-        ))));
-        assert!(is_parkable_wait(&Some(TurnActivity::Waiting(
             WaitingReason::Sleep
         ))));
         assert!(!is_parkable_wait(&Some(TurnActivity::Waiting(
@@ -916,7 +912,6 @@ mod tests {
                 },
                 "compile release…",
             ),
-            (WaitingReason::TasksComplete, "Waiting on tasks…"),
             (WaitingReason::Sleep, "Sleeping…"),
         ];
         for (reason, expected) in cases {
@@ -1156,7 +1151,7 @@ mod tests {
     /// Invoke `render_turn_status` for a PARKED running turn (the stopped
     /// look) with the given watcher counts.
     fn render_parked_with_watchers(watchers: Watchers) -> String {
-        let activity = Some(TurnActivity::Waiting(WaitingReason::TasksComplete));
+        let activity = Some(TurnActivity::Waiting(WaitingReason::task_output()));
         let mut args = idle_args(watchers);
         args.state = &AgentState::TurnRunning;
         args.activity = &activity;
@@ -1416,7 +1411,7 @@ mod tests {
     #[test]
     fn parked_with_held_queue_renders_queued_hint() {
         // The queued hint replaces the interrupt copy (Enter = send-now).
-        let activity = Some(TurnActivity::Waiting(WaitingReason::TasksComplete));
+        let activity = Some(TurnActivity::Waiting(WaitingReason::task_output()));
         let mut args = idle_args(Watchers {
             commands: 1,
             ..Watchers::default()

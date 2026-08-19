@@ -1,7 +1,7 @@
 //! AgentBuilder — fluent construction API for building Agents.
 use crate::agent::Agent;
 use crate::compaction::CompactionPolicy;
-use crate::config::{AgentDefinition, BuiltinAgentName, PermissionMode, PromptComposition};
+use crate::config::{AgentDefinition, BuiltinAgentName, PromptComposition};
 use crate::config::{short_tool_name, tool_config_eq, tool_config_matches, tool_id_eq};
 use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
@@ -15,12 +15,6 @@ use tools::computer::types::{AsyncFileSystem, TerminalBackend};
 use tools::notification::ToolNotificationHandle;
 use tools::registry::types::SessionContext;
 use tools::types::tool::ToolKind;
-/// The Grow [`ToolKind`] a vendor-compat `tools:` allowlist entry resolves to, so
-/// a plugin's upstream allowlist still binds. Backed by the shared vendor-to-Grow
-/// tool registry in `tools` (also used by the hook matcher).
-fn claude_tool_kind(name: &str) -> Option<ToolKind> {
-    tools::types::kind_for(name)
-}
 /// Builds an Agent from an AgentDefinition + session context.
 ///
 /// Two main flows:
@@ -41,13 +35,12 @@ fn claude_tool_kind(name: &str) -> Option<ToolKind> {
 ///       .await?;
 pub struct AgentBuilder {
     working_directory: PathBuf,
-    /// Model-facing working directory for the system prompt `<user_info>` block.
+    /// Model-facing working directory for path-bearing runtime projections.
     ///
     /// In forked sessions, the real `working_directory` is an overlay/worktree
     /// path (e.g., `~/.grow/worktrees/project/fork-...-overlay`) that must stay
-    /// hidden from the model. When set, `PromptContext.working_directory` uses
-    /// this value instead of `self.working_directory`, so the system prompt
-    /// shows the original project path. Tool execution (`ToolContext.cwd`,
+    /// hidden from the model. When set, projections use this value instead of
+    /// `self.working_directory`, so they show the original project path. Tool execution (`ToolContext.cwd`,
     /// `SessionContext.cwd`) is unaffected and continues to use the real path.
     prompt_working_directory: Option<String>,
     terminal_backend: Arc<dyn TerminalBackend>,
@@ -59,28 +52,19 @@ pub struct AgentBuilder {
     /// The agent definition — set via from_definition() or built up
     /// via individual with_*() calls.
     definition: Option<AgentDefinition>,
-    /// Pre-rendered persona IO summaries for the task tool description.
-    persona_summaries: Vec<String>,
     /// Whether this builder produces a primary or subagent session prompt.
     prompt_audience: crate::prompt::context::PromptAudience,
-    /// Role instructions to inject into the system prompt.
-    role_instructions: Option<String>,
-    /// Persona instructions to inject into the system prompt.
-    persona_instructions: Option<String>,
     name: Option<String>,
     description: Option<String>,
     prompt_composition: PromptComposition,
     tools: Option<Vec<String>>,
     disallowed_tools: Vec<String>,
     skill_names: Vec<String>,
-    permission_mode: PermissionMode,
     agents_md: bool,
     custom_system_prompt: Option<String>,
     compaction_policy: CompactionPolicy,
     reminder_policy: ReminderPolicy,
     memory_enabled: bool,
-    memory_global_path: Option<String>,
-    memory_workspace_path: Option<String>,
     is_non_interactive: bool,
     system_prompt_label: String,
     session_env: Option<Arc<HashMap<String, String>>>,
@@ -97,10 +81,6 @@ pub struct AgentBuilder {
     subagent_toggle: HashMap<String, bool>,
     task_model_slugs: Vec<String>,
     skills_config: crate::prompt::skills::SkillsConfig,
-    /// Resolved vendor-compat config governing which vendor (`.claude`/`.cursor`)
-    /// dirs are scanned for skills / rules / AGENTS.md. Defaults to all-on,
-    /// which reproduces the historical behavior.
-    compat: tools::types::compat::CompatConfig,
     bash_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     ask_user_question_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     plugin_registry: Option<std::sync::Arc<crate::plugins::PluginRegistry>>,
@@ -112,9 +92,6 @@ pub struct AgentBuilder {
     /// only when that tier wins the precedence stack — see
     /// `resolve_max_mcp_output_bytes_for_cwd` in shell).
     mcp_max_output_bytes: Option<usize>,
-    /// System-reminder tag name for tool result text. Defaults to `"system-reminder"`.
-    /// IDE-compat agent_type should set this to `"system_reminder"`.
-    system_reminder_tag: &'static str,
     /// Persisted announced skill names from a previous session.
     /// When set, restored into the SkillManager before `seed()` so that
     /// `seed()` sees non-empty `announced_names` and skips the
@@ -199,24 +176,18 @@ impl AgentBuilder {
             owner_session_id: None,
             parent_scheduler_handle: None,
             definition: None,
-            persona_summaries: Vec::new(),
             prompt_audience: crate::prompt::context::PromptAudience::Primary,
-            role_instructions: None,
-            persona_instructions: None,
             name: None,
             description: None,
             prompt_composition: PromptComposition::Extend,
             tools: None,
             disallowed_tools: vec![],
             skill_names: vec![],
-            permission_mode: PermissionMode::Default,
             agents_md: true,
             custom_system_prompt: None,
             compaction_policy: CompactionPolicy::default(),
             reminder_policy: ReminderPolicy::default(),
             memory_enabled: false,
-            memory_global_path: None,
-            memory_workspace_path: None,
             is_non_interactive: false,
             system_prompt_label: crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
             session_env: None,
@@ -232,13 +203,11 @@ impl AgentBuilder {
             subagent_toggle: HashMap::new(),
             task_model_slugs: Vec::new(),
             skills_config: Default::default(),
-            compat: Default::default(),
             bash_params_json: None,
             ask_user_question_params_json: None,
             plugin_registry: None,
             context_window_tokens: None,
             mcp_max_output_bytes: None,
-            system_reminder_tag: tools::reminders::DEFAULT_REMINDER_TAG,
             persisted_announced_skill_names: None,
             preloaded_skills: None,
         }
@@ -271,25 +240,12 @@ impl AgentBuilder {
         self.definition = Some(def);
         self
     }
-    /// Set pre-rendered persona IO summaries for the task tool description.
-    pub fn with_persona_summaries(mut self, summaries: Vec<String>) -> Self {
-        self.persona_summaries = summaries;
-        self
-    }
     /// Set the prompt audience (Primary or Subagent).
     pub fn with_prompt_audience(
         mut self,
         audience: crate::prompt::context::PromptAudience,
     ) -> Self {
         self.prompt_audience = audience;
-        self
-    }
-    pub fn with_role_instructions(mut self, instructions: Option<String>) -> Self {
-        self.role_instructions = instructions;
-        self
-    }
-    pub fn with_persona_instructions(mut self, instructions: Option<String>) -> Self {
-        self.persona_instructions = instructions;
         self
     }
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -316,10 +272,6 @@ impl AgentBuilder {
         self.skill_names = skill_names;
         self
     }
-    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
-        self.permission_mode = mode;
-        self
-    }
     pub fn with_agents_md(mut self, enabled: bool) -> Self {
         self.agents_md = enabled;
         self
@@ -334,15 +286,6 @@ impl AgentBuilder {
     }
     pub fn with_memory_enabled(mut self, enabled: bool) -> Self {
         self.memory_enabled = enabled;
-        self
-    }
-    pub fn with_memory_paths(
-        mut self,
-        global_path: Option<String>,
-        workspace_path: Option<String>,
-    ) -> Self {
-        self.memory_global_path = global_path;
-        self.memory_workspace_path = workspace_path;
         self
     }
     /// Mark this session as non-interactive (headless / SDK / stdio /
@@ -442,15 +385,6 @@ impl AgentBuilder {
         self
     }
     /// Set the dynamic API key provider for tool HTTP clients.
-    /// Override the system-reminder tag name used in tool result text.
-    ///
-    /// Defaults to `"system-reminder"` (hyphen). Harnesses trained on a
-    /// different tag name (e.g. an underscore variant) should call this so
-    /// that reminders match the tag name their model was trained on.
-    pub fn with_system_reminder_tag(mut self, tag: &'static str) -> Self {
-        self.system_reminder_tag = tag;
-        self
-    }
     /// Enable or disable the `write` tool (default: enabled).
     pub fn with_write_file_enabled(mut self, enabled: bool) -> Self {
         self.write_file_enabled = enabled;
@@ -496,13 +430,6 @@ impl AgentBuilder {
         self.subagent_toggle = toggle;
         self
     }
-    /// Set the resolved vendor-compat config. Threaded into both startup
-    /// discovery (`list_skills_with_plugins` / `read_agents_config_with_paths`)
-    /// and the dynamic-discovery seeds (`SkillManager` / `AgentsMdTracker`).
-    pub fn with_compat_config(mut self, compat: tools::types::compat::CompatConfig) -> Self {
-        self.compat = compat;
-        self
-    }
     /// Set the skills config (custom paths, ignore globs) from config.toml.
     /// Without this, only auto-discovered skills (cwd/.grow/skills, ~/.grow/skills)
     /// are included — custom paths added via `grow/skills/add` would be ignored.
@@ -537,11 +464,8 @@ impl AgentBuilder {
         self.context_window_tokens = Some(tokens);
         self
     }
-    /// Override the working directory shown in the system prompt.
-    ///
-    /// When set, `PromptContext.working_directory` (and therefore the
-    /// `Workspace Path` in the `<user_info>` block) uses this value instead
-    /// of the real `working_directory`. Tool execution paths are unaffected.
+    /// Override the working directory shown in model-facing projections.
+    /// Tool execution paths are unaffected.
     ///
     /// Used by forked sessions so the model sees the original project path
     /// rather than the internal overlay/worktree path.
@@ -561,7 +485,6 @@ impl AgentBuilder {
             def.description = desc.clone();
         }
         def.prompt_composition = self.prompt_composition.clone();
-        def.permission_mode = self.permission_mode.clone();
         def.agents_md = self.agents_md;
         if let Some(ref prompt) = self.custom_system_prompt {
             def.prompt_body = Some(prompt.clone());
@@ -588,7 +511,6 @@ impl AgentBuilder {
                 Some(&working_dir_str),
                 &self.skills_config,
                 self.plugin_registry.as_deref(),
-                self.compat,
             )
             .await
         } else {
@@ -731,7 +653,7 @@ impl AgentBuilder {
             if !has_satisfier(ToolNamespace::Grow, "run_terminal_cmd", true)
                 && !has_satisfier(ToolNamespace::GrowConcise, "run_terminal_cmd", true)
             {
-                let lifecycle = ["get_task_output", "wait_tasks", "kill_task"];
+                let lifecycle = ["get_task_output", "kill_task"];
                 tool_config
                     .tools
                     .retain(|tc| !lifecycle.contains(&short_tool_name(&tc.id)));
@@ -772,10 +694,6 @@ impl AgentBuilder {
         }
         if !definition.tools.is_empty() {
             let registered_tool_ids = tool_bridge_builder.known_tool_ids();
-            let present_kinds: std::collections::HashSet<ToolKind> =
-                tool_config.tools.iter().filter_map(|tc| tc.kind).collect();
-            let mut allow_kinds: std::collections::HashSet<ToolKind> =
-                std::collections::HashSet::new();
             let mut unresolved: Vec<&str> = Vec::new();
             let mut recognized_but_unavailable: Vec<&str> = Vec::new();
             for t in &definition.tools {
@@ -785,18 +703,10 @@ impl AgentBuilder {
                 if tool_config.tools.iter().any(|tc| tool_config_eq(t, tc)) {
                     continue;
                 }
-                match claude_tool_kind(t) {
-                    Some(kind) => {
-                        if present_kinds.contains(&kind) {
-                            allow_kinds.insert(kind);
-                        } else {
-                            recognized_but_unavailable.push(t);
-                        }
-                    }
-                    None if registered_tool_ids.iter().any(|id| tool_id_eq(t, id)) => {
-                        recognized_but_unavailable.push(t);
-                    }
-                    None => unresolved.push(t),
+                if registered_tool_ids.iter().any(|id| tool_id_eq(t, id)) {
+                    recognized_but_unavailable.push(t);
+                } else {
+                    unresolved.push(t);
                 }
             }
             if !recognized_but_unavailable.is_empty() {
@@ -808,7 +718,6 @@ impl AgentBuilder {
             }
             tool_config.tools.retain(|tc| {
                 tool_config_matches(&definition.tools, tc)
-                    || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
                     || matches!(
                         tc.kind,
                         Some(
@@ -829,7 +738,7 @@ impl AgentBuilder {
         tool_config
             .tools
             .retain(|tc| definition.session_tools_allowed(tc));
-        let task_deps = ["task", "get_task_output", "kill_task", "wait_tasks"];
+        let task_deps = ["task", "get_task_output", "kill_task"];
         let task_enabled = tool_config
             .tools
             .iter()
@@ -868,7 +777,7 @@ impl AgentBuilder {
                 web_fetch_config: self.web_fetch_config,
                 lsp: self.lsp,
                 app_builder_deployer_config: self.app_builder_deployer_config,
-                system_reminder_tag: self.system_reminder_tag,
+                system_reminder_tag: tools::reminders::DEFAULT_REMINDER_TAG,
             },
         )
         .await
@@ -885,8 +794,7 @@ impl AgentBuilder {
             tool_bridge.restore_announced_skill_names(names).await;
         }
         let mut agents_md_files = if definition.agents_md {
-            crate::prompt::agents_md::read_agents_config_with_paths(&working_dir_str, self.compat)
-                .await
+            crate::prompt::agents_md::read_agents_config_with_paths(&working_dir_str).await
         } else {
             vec![]
         };
@@ -924,13 +832,7 @@ impl AgentBuilder {
                     .await;
             }
             tool_bridge
-                .seed_agents_md(
-                    initial_paths,
-                    git_root.clone(),
-                    chain,
-                    gitignore,
-                    self.compat,
-                )
+                .seed_agents_md(initial_paths, git_root.clone(), chain, gitignore)
                 .await;
             let listing_skills = if preloaded_skill_paths.is_empty() {
                 skill_info.clone()
@@ -941,7 +843,6 @@ impl AgentBuilder {
                     .cloned()
                     .collect()
             };
-            let skill_budget_percent: Option<f64> = None;
             let skill_discovery_cwd = if definition.discover_skills {
                 Some(self.working_directory.clone())
             } else {
@@ -954,43 +855,22 @@ impl AgentBuilder {
                     listing_skills,
                     self.prompt_working_directory.clone(),
                     self.context_window_tokens,
-                    skill_budget_percent,
-                    self.compat,
                 )
                 .await;
         }
-        let now = chrono::Utc::now();
         if let Some(ref display_cwd) = self.prompt_working_directory {
             for file in &mut agents_md_files {
                 file.file_path = file.file_path.replace(&working_dir_str, display_cwd);
             }
         }
-        let display_working_dir = self
-            .prompt_working_directory
-            .unwrap_or_else(|| self.working_directory.to_string_lossy().into_owned());
         let prompt_context = PromptContext {
-            version: 1,
             prompt_composition: definition.prompt_composition.clone(),
             audience: self.prompt_audience,
             prompt_body: definition.prompt_body.clone(),
             behavior_instructions: None,
             system_prompt: definition.system_prompt.clone(),
             agents_md_files,
-            persona_summaries: self.persona_summaries,
-            build_timestamp_utc: now.to_rfc3339(),
             memory_enabled: self.memory_enabled,
-            memory_global_path: self.memory_global_path,
-            memory_workspace_path: self.memory_workspace_path,
-            role_instructions: self.role_instructions,
-            persona_instructions: self.persona_instructions,
-            os_name: Some(std::env::consts::OS.to_string()),
-            shell_path: Some(resolve_shell_for_prompt()),
-            working_directory: Some(display_working_dir),
-            current_date: Some(
-                now.with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d")
-                    .to_string(),
-            ),
             is_non_interactive: self.is_non_interactive,
             system_prompt_label: self.system_prompt_label,
         };
@@ -1117,20 +997,6 @@ pub(crate) fn build_task_description(
     let mut description = tool_types::build_task_description(&descriptors, &TASK_TOOL_NAMING);
     description.push_str(&task_model_guidance(model_slugs));
     description
-}
-/// Resolve the shell name for the system prompt.
-///
-/// Unix: `$SHELL` env var (e.g. `/bin/zsh`).
-/// Windows: detected shell from the `detect_windows_shell` cascade.
-fn resolve_shell_for_prompt() -> String {
-    #[cfg(unix)]
-    {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
-    }
-    #[cfg(not(unix))]
-    {
-        config::shell::detect_windows_shell().name().to_string()
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -1526,8 +1392,8 @@ mod tests {
             .read_resource::<Params<AskUserQuestionParams>>()
             .await
             .expect("finalize must insert Params for the injected ask_user_question");
-        assert_eq!(applied.0.timeout_enabled, Some(false));
-        assert_eq!(applied.0.timeout_secs, Some(5));
+        assert!(!applied.0.timeout_enabled);
+        assert_eq!(applied.0.timeout_secs.get(), 5);
     }
     async fn build_with_tools(tools: Vec<String>, disallowed: Vec<String>) -> crate::agent::Agent {
         use tools::computer::local::LocalTerminalBackend;
@@ -1658,12 +1524,7 @@ mod tests {
         let mut tools: Vec<String> = AGENT_TOOLS_BASE.iter().map(|s| s.to_string()).collect();
         tools.push("spawn_subagent".into());
         tools.extend(
-            [
-                "get_command_or_subagent_output",
-                "kill_command_or_subagent",
-                "wait_commands_or_subagents",
-            ]
-            .map(str::to_owned),
+            ["get_command_or_subagent_output", "kill_command_or_subagent"].map(str::to_owned),
         );
         let mut definition = crate::config::AgentDefinition::default_grow_build();
         definition.tools = tools;
@@ -1728,11 +1589,14 @@ mod tests {
         assert_eq!(applied.0.max_timeout_secs, Some(36_000.0));
         assert!(!applied.0.allow_background_operator);
     }
-    /// Compat allowlist names (`Read`, `Bash`, `Grep`) map to their Grow
-    /// equivalents by `ToolKind` — a real restricted toolset, not zero tools.
+    /// Canonical tool names produce a real restricted toolset.
     #[tokio::test]
-    async fn claude_tool_names_map_to_grow_equivalents() {
-        let tools = vec!["Read".into(), "Bash".into(), "Grep".into()];
+    async fn canonical_tool_names_restrict_the_toolset() {
+        let tools = vec![
+            "read_file".into(),
+            "run_terminal_command".into(),
+            "grep".into(),
+        ];
         let agent = build_with_tools(tools, vec![]).await;
         let names: Vec<String> = agent
             .tool_definitions()
@@ -1742,40 +1606,31 @@ mod tests {
             .collect();
         assert!(
             names.contains(&"read_file".to_string()),
-            "Read→read_file; got: {names:?}"
+            "read_file missing; got: {names:?}"
         );
         assert!(
             names.contains(&"run_terminal_command".to_string()),
-            "Bash→run_terminal_command; got: {names:?}"
+            "run_terminal_command missing; got: {names:?}"
         );
         assert!(
             names.contains(&"grep".to_string()),
-            "Grep→grep; got: {names:?}"
+            "grep missing; got: {names:?}"
         );
         assert!(
             !names.contains(&"search_replace".to_string()),
-            "Edit must be excluded by the allowlist; got: {names:?}"
+            "search_replace must be excluded by the allowlist; got: {names:?}"
         );
     }
-    /// Shell, LSP, ask, and task-lifecycle tool names resolve to their grow
-    /// `ToolKind`, so those allowlists are honored instead of failing open.
-    #[test]
-    fn shell_lsp_ask_and_task_tool_names_map() {
-        assert_eq!(claude_tool_kind("PowerShell"), Some(ToolKind::Execute));
-        assert_eq!(claude_tool_kind("LSP"), Some(ToolKind::Lsp));
-        assert_eq!(claude_tool_kind("AskUserQuestion"), Some(ToolKind::AskUser));
-        for name in ["TaskOutput", "BashOutputTool", "AgentOutputTool"] {
-            assert_eq!(claude_tool_kind(name), Some(ToolKind::BackgroundTaskAction));
-        }
-        assert_eq!(claude_tool_kind("TaskStop"), Some(ToolKind::KillTaskAction));
-        assert_eq!(claude_tool_kind("PlanControl"), None);
-    }
-    /// `[Read, Edit, AskUserQuestion]` builds end-to-end: the allowlist is
+    /// A canonical allowlist builds end-to-end: the allowlist is
     /// honored (no full-toolset fallback) and `ask_user_question` stands
     /// alone after the injected plan-mode tools are dropped.
     #[tokio::test]
     async fn ask_user_question_allowlist_builds_without_plan_tools() {
-        let tools = vec!["Read".into(), "Edit".into(), "AskUserQuestion".into()];
+        let tools = vec![
+            "read_file".into(),
+            "search_replace".into(),
+            "ask_user_question".into(),
+        ];
         let agent = build_with_tools(tools, vec![]).await;
         let names: Vec<String> = agent
             .tool_definitions()
@@ -1809,16 +1664,15 @@ mod tests {
             "unmappable entries must not widen authority: {names:?}"
         );
     }
-    /// End-to-end: an on-disk plugin agent parsed via `from_file_frontmatter_only`
-    /// with a compat-style `tools:` allowlist gets the mapped toolset (not 0 tools).
+    /// End-to-end: an on-disk plugin agent uses canonical tool names.
     #[tokio::test]
-    async fn plugin_style_agent_file_maps_claude_tools() {
+    async fn plugin_agent_file_uses_canonical_tools() {
         use tools::computer::local::LocalTerminalBackend;
         use tools::notification::ToolNotificationHandle;
         const MD: &str = "---\n\
             name: test\n\
             description: test agent\n\
-            tools: Read, Bash, Grep\n\
+            tools: read_file, run_terminal_command, grep\n\
             ---\n\n\
             Test agent body.\n";
         let dir = tempfile::tempdir().unwrap();
@@ -1827,7 +1681,11 @@ mod tests {
         let def = crate::config::AgentDefinition::from_file_frontmatter_only(&path).unwrap();
         assert_eq!(
             def.tools,
-            vec!["Read".to_string(), "Bash".to_string(), "Grep".to_string()],
+            vec![
+                "read_file".to_string(),
+                "run_terminal_command".to_string(),
+                "grep".to_string()
+            ],
         );
         let agent = AgentBuilder::new(
             std::env::temp_dir(),
@@ -1846,27 +1704,26 @@ mod tests {
             .collect();
         assert!(
             names.contains(&"read_file".to_string()),
-            "Read→read_file; got: {names:?}"
+            "read_file missing; got: {names:?}"
         );
         assert!(
             names.contains(&"run_terminal_command".to_string()),
-            "Bash→run_terminal_command; got: {names:?}"
+            "run_terminal_command missing; got: {names:?}"
         );
         assert!(
             names.contains(&"grep".to_string()),
-            "Grep→grep; got: {names:?}"
+            "grep missing; got: {names:?}"
         );
         assert!(
             !names.contains(&"search_replace".to_string()),
-            "Edit must be excluded; got: {names:?}"
+            "search_replace must be excluded; got: {names:?}"
         );
     }
-    /// A restrictive allowlist must never strip MCP access. Compat allowlists
-    /// treat `mcp__*` as always-on, so grow keeps the MCP meta-tools
+    /// A restrictive allowlist must never strip MCP access. Grow keeps the MCP meta-tools
     /// (`search_tool` / `use_tool`) regardless of what the allowlist names.
     #[tokio::test]
     async fn restrictive_allowlist_keeps_mcp_access() {
-        let agent = build_with_tools(vec!["Read".into()], vec![]).await;
+        let agent = build_with_tools(vec!["read_file".into()], vec![]).await;
         let names: Vec<String> = agent
             .tool_definitions()
             .await
@@ -1875,7 +1732,7 @@ mod tests {
             .collect();
         assert!(
             names.contains(&"read_file".to_string()),
-            "Read→read_file; got: {names:?}"
+            "read_file missing; got: {names:?}"
         );
         assert!(
             names.contains(&"search_tool".to_string()) && names.contains(&"use_tool".to_string()),
@@ -1883,7 +1740,7 @@ mod tests {
         );
         assert!(
             !names.contains(&"search_replace".to_string()),
-            "Edit must be excluded; got: {names:?}"
+            "search_replace must be excluded; got: {names:?}"
         );
     }
     #[tokio::test]
@@ -1946,55 +1803,11 @@ mod tests {
             assert!(!names.contains(&excluded.to_string()), "got: {names:?}");
         }
     }
-    /// grow-build toolsets have no Skill tool — skills are read from
-    /// `SKILL.md` via `read_file` — so a compat `Skill` allowlist entry grants
-    /// toolset.
-    #[tokio::test]
-    async fn skill_allowlist_maps_to_read() {
-        let agent = build_with_tools(vec!["Skill".into()], vec![]).await;
-        let names: Vec<String> = agent
-            .tool_definitions()
-            .await
-            .iter()
-            .map(|d| d.function.name.clone())
-            .collect();
-        assert!(
-            names.contains(&"read_file".to_string()),
-            "Skill→read_file; got: {names:?}"
-        );
-        assert!(
-            names.contains(&"search_tool".to_string()) && names.contains(&"use_tool".to_string()),
-            "MCP access must be kept; got: {names:?}"
-        );
-        assert!(
-            !names.contains(&"search_replace".to_string())
-                && !names.contains(&"run_terminal_command".to_string()),
-            "no full-toolset fallback — unlisted tools must be excluded; got: {names:?}"
-        );
-    }
-    /// `Read` and `Skill` both map to `ToolKind::Read`, but the allowlist phase
-    /// `read_file` (plus always-on MCP access) without falling back to the full
-    /// single base `read_file` entry is kept exactly once, never double-registered.
-    #[tokio::test]
-    async fn read_and_skill_allowlist_keeps_single_read_file() {
-        let agent = build_with_tools(vec!["Read".into(), "Skill".into()], vec![]).await;
-        let names: Vec<String> = agent
-            .tool_definitions()
-            .await
-            .iter()
-            .map(|d| d.function.name.clone())
-            .collect();
-        let read_file_count = names.iter().filter(|n| *n == "read_file").count();
-        assert_eq!(
-            read_file_count, 1,
-            "read_file must be registered exactly once for tools: [Read, Skill]; got: {names:?}"
-        );
-    }
-    /// A compat-style `mcp__server__tool` allowlist entry is always allowed: it
+    /// A qualified `mcp__server__tool` allowlist entry is always allowed: it
     /// neither triggers the full-toolset fallback nor strips MCP access.
     #[tokio::test]
     async fn mcp_prefixed_allowlist_entry_keeps_mcp_access() {
-        let tools = vec!["mcp__github__create_issue".into(), "Read".into()];
+        let tools = vec!["mcp__github__create_issue".into(), "read_file".into()];
         let agent = build_with_tools(tools, vec![]).await;
         let names: Vec<String> = agent
             .tool_definitions()
@@ -2004,7 +1817,7 @@ mod tests {
             .collect();
         assert!(
             names.contains(&"read_file".to_string()),
-            "Read must be kept; got: {names:?}"
+            "read_file must be kept; got: {names:?}"
         );
         assert!(
             names.contains(&"search_tool".to_string()) && names.contains(&"use_tool".to_string()),
@@ -2016,12 +1829,11 @@ mod tests {
             "no full-toolset fallback — unlisted tools must be excluded; got: {names:?}"
         );
     }
-    /// Compat `ToolSearch` meta-tool maps to grow's `search_tool` (MCP
-    /// is a filter (`retain`) over a `HashSet` of kinds, not an inserter — so the
-    /// falling back to the full toolset.
+    /// The canonical MCP search meta-tool remains available without widening
+    /// the rest of the toolset.
     #[tokio::test]
-    async fn tool_search_allowlist_maps_to_search_tool() {
-        let agent = build_with_tools(vec!["ToolSearch".into()], vec![]).await;
+    async fn search_tool_allowlist_keeps_search_tool() {
+        let agent = build_with_tools(vec!["search_tool".into()], vec![]).await;
         let names: Vec<String> = agent
             .tool_definitions()
             .await
@@ -2030,11 +1842,11 @@ mod tests {
             .collect();
         assert!(
             names.contains(&"search_tool".to_string()),
-            "ToolSearch→search_tool; got: {names:?}"
+            "search_tool missing; got: {names:?}"
         );
         assert!(
             !names.contains(&"search_replace".to_string()),
-            "no full-toolset fallback — Edit must be excluded; got: {names:?}"
+            "no full-toolset fallback — search_replace must be excluded; got: {names:?}"
         );
     }
 }

@@ -180,29 +180,17 @@ impl SessionActor {
         behavior: crate::session::behavior::BehaviorSnapshot,
         goal: Option<crate::session::goal_tracker::GoalOrchestration>,
     ) -> std::io::Result<()> {
-        let (respond_to, deleted) = tokio::sync::oneshot::channel();
         let revision = self
             .control_revision
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .saturating_add(1);
         let state = crate::session::control::SessionControlSnapshot::new(revision, behavior, goal);
-        self.notifications
-            .persistence_tx
-            .send(
-                crate::session::persistence::PersistenceMsg::SessionControlAndAck {
-                    state,
-                    respond_to,
-                },
-            )
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "persistence actor closed")
-            })?;
-        deleted.await.map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "persistence actor dropped Goal deletion acknowledgement",
-            )
-        })?
+        let kind = state.timeline_kind()?;
+        self.chat_state_handle
+            .record_timeline_event_durably(kind)
+            .await
+            .map(|_| ())
+            .map_err(std::io::Error::other)
     }
 
     pub(super) async fn delete_goal_state_durably(&self) -> std::io::Result<()> {

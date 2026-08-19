@@ -520,7 +520,7 @@ fn measure_entries(entries: &[PickerEntry<'_>]) -> u16 {
 mod tests {
     use super::*;
     use pager::views::extensions_modal::ExtensionsModalState;
-    use pager::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};
+    use pager::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo};
     use ratatui::layout::Rect;
 
     fn agent() -> AgentView {
@@ -539,9 +539,7 @@ mod tests {
             tools: Vec::new(),
             enabled: true,
             source: "local".to_string(),
-            wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }
     }
 

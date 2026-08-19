@@ -1,5 +1,5 @@
-use super::{LEGACY_AGENTS_MD_REMINDER_PREFIX, conversation_has_project_instructions};
-use sampling_types::{ContentPart, ConversationItem, SyntheticReason, UserItem};
+use super::conversation_has_project_instructions;
+use sampling_types::{ContentPart, ConversationItem, SyntheticReason};
 
 /// A `User` item tagged `ProjectInstructions` is the canonical
 /// post-Task-1 representation and must be detected.
@@ -12,25 +12,6 @@ fn detects_tagged_project_instructions_item() {
     assert!(
         conversation_has_project_instructions(&conv),
         "tagged ProjectInstructions item must be recognised"
-    );
-}
-
-/// Older shells wrote AGENTS.md via `ConversationItem::user(...)` (no
-/// tag). Resumed sessions load that exact untagged shape. The
-/// structural-prefix branch must catch it so we don't double-insert on
-/// the next resume.
-#[test]
-fn detects_legacy_untagged_reminder_via_wrapper_prefix() {
-    let legacy = format!(
-        "{LEGACY_AGENTS_MD_REMINDER_PREFIX} (ordered from repo root to current directory - deeper files take precedence on conflicts):\n\n## From: /repo/AGENTS.md\n# stuff\n</system-reminder>"
-    );
-    let conv = vec![
-        ConversationItem::system("SP"),
-        ConversationItem::user(legacy),
-    ];
-    assert!(
-        conversation_has_project_instructions(&conv),
-        "untagged user item starting with the wrapper prefix must be recognised"
     );
 }
 
@@ -56,53 +37,6 @@ fn real_user_message_returns_false() {
     assert!(
         !conversation_has_project_instructions(&conv),
         "plain real user message must not match the legacy heuristic"
-    );
-}
-
-/// The heuristic must only inspect the FIRST content part. A user
-/// item whose [1] part happens to start with the wrapper prefix (e.g.
-/// a multi-part real message that pastes the prefix later) must not
-/// false-positive.
-#[test]
-fn wrapper_prefix_in_non_first_content_part_returns_false() {
-    let conv = vec![
-        ConversationItem::system("SP"),
-        ConversationItem::User(UserItem {
-            content: vec![
-                ContentPart::Text {
-                    text: "real user message".into(),
-                },
-                ContentPart::Text {
-                    text: format!("{LEGACY_AGENTS_MD_REMINDER_PREFIX} ...").into(),
-                },
-            ],
-            synthetic_reason: None,
-            permission_evidence: None,
-            ..Default::default()
-        }),
-    ];
-    assert!(
-        !conversation_has_project_instructions(&conv),
-        "wrapper prefix in a non-first content part must not match"
-    );
-}
-
-/// `starts_with` is required: a real user message that quotes the
-/// wrapper text somewhere in its body (e.g. "look at this:
-/// \n\n<system-reminder>\n...") must NOT match. Anything weaker
-/// (e.g. `contains`) would suppress legitimate inserts on resumed
-/// sessions where the user paraphrased AGENTS.md content into a real
-/// prompt.
-#[test]
-fn wrapper_prefix_mid_text_returns_false() {
-    let buried = format!("Hi! Look at this snippet:{LEGACY_AGENTS_MD_REMINDER_PREFIX}");
-    let conv = vec![
-        ConversationItem::system("SP"),
-        ConversationItem::user(buried),
-    ];
-    assert!(
-        !conversation_has_project_instructions(&conv),
-        "wrapper prefix appearing mid-text (not at start) must not match"
     );
 }
 

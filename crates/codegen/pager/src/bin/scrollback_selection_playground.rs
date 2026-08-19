@@ -30,7 +30,7 @@ const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
 const MAX_DISPLAY_TEXT_LEN: usize = 60;
 
 /// Playground highlight TTL (`hold`/`word_select` → 0; flash → 500ms for visibility).
-fn selection_highlight_duration_ms() -> u64 {
+fn selection_timeout_ms() -> u64 {
     const PLAYGROUND_FLASH_MS: u64 = 500;
     if pager::appearance::cache::load_keep_text_selection().holds() {
         0
@@ -41,7 +41,7 @@ fn selection_highlight_duration_ms() -> u64 {
 
 /// Whether double-click does terminal-like word/line selection (`word_select`)
 /// vs. fold toggle, per the unified `keep_text_selection` setting.
-fn double_click_action_label() -> &'static str {
+fn selection_action_label() -> &'static str {
     if pager::appearance::cache::load_keep_text_selection().selects_word() {
         "word_select"
     } else {
@@ -238,7 +238,7 @@ fn main() -> io::Result<()> {
 
     loop {
         // Auto-dismiss selection highlight after timeout.
-        let duration = selection_highlight_duration_ms();
+        let duration = selection_timeout_ms();
         if duration > 0
             && let Some(created) = app.selection_created_at
             && created.elapsed().as_millis() as u64 >= duration
@@ -315,14 +315,14 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
     .split(area);
 
     // -- Info / help panel --
-    let dbl_click = double_click_action_label();
+    let selection_action = selection_action_label();
     let info = Paragraph::new(vec![
         Line::from(Span::styled(
             "scrollback-selection-playground",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(format!(
-            "Ctrl-Q quit | Esc clear selection | double_click_action={dbl_click}"
+            "Ctrl-Q quit | Esc clear selection | selection_action={selection_action}"
         )),
         Line::from("Double-click: select word/URL | Triple-click: select line"),
     ])

@@ -173,7 +173,7 @@ async fn make_subagent_fixture_with_replies(
         None,
         vec![],
         vec![],
-        false,
+        diagnostics::enums::PermissionMode::Ask,
         None,
         false,
     );
@@ -201,7 +201,7 @@ async fn make_subagent_fixture_with_replies(
             None,
         )
         .expect("bind_local_session must succeed");
-    begin_test_causal_turn(&actor);
+    begin_test_causal_turn(&actor).await;
 
     (actor, event_rx, log, permission_events)
 }

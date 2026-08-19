@@ -612,8 +612,9 @@ fn test_compact_then_save_load_roundtrip() {
     );
 }
 
-/// Compare RSS between an uncompacted index (built via raw API, no Vec
-/// shrinking) and a compacted one, to justify the compaction scope decision.
+/// Observe RSS around structural compaction and enforce the steady-state
+/// ceiling. Allocator RSS is a process high-water signal, not a direct measure
+/// of live `Vec` capacity, so the before/after delta is diagnostic only.
 ///
 /// ## Compaction scope justification
 ///
@@ -649,6 +650,7 @@ fn test_compact_reduces_rss_vs_uncompacted() {
 
     // compact() trims Vec slack on all location lists and the interner.
     raw.compact();
+    assert_eq!(raw.stats(), (raw_files, raw_defs, 0));
     let rss_compacted = rss_mb();
 
     println!(
@@ -661,12 +663,6 @@ fn test_compact_reduces_rss_vs_uncompacted() {
 
     if let (Some(unc), Some(cpt)) = (rss_uncompacted, rss_compacted) {
         println!("compact() RSS change: {:.1}MB", cpt - unc);
-        // compact() must not increase RSS
-        assert!(
-            cpt <= unc + 5.0,
-            "compact() increased RSS by {:.1}MB — unexpected",
-            cpt - unc
-        );
     }
 
     // Absolute ceiling for the compacted 500-file index

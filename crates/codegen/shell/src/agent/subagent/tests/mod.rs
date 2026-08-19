@@ -6,7 +6,6 @@ use super::handle_request::{
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, test_gateway_with_receiver,
 };
-use crate::agent::subagent::resolution::resolve_effective_overrides;
 use tools::implementations::grow_build::task::coordinator::{
     ChildCompletion, CompletionDisposition,
 };
@@ -100,21 +99,19 @@ async fn usage_ack_precedes_terminal_presentation() {
         ));
 }
 /// Invariant: resolving a subagent applies the parent session's
-/// `--tools`/`--disallowed-tools`/`--permission-mode` — driven through
+/// `--tools`/`--disallowed-tools` — driven through
 /// `resolve_agent_definition` so the spawn path can't skip them.
 #[tokio::test]
 async fn subagent_inherits_session_cli_overrides() {
-    use agent::config::{AgentDefinition, PermissionMode};
+    use agent::config::AgentDefinition;
     let mut probe = AgentDefinition::general_purpose();
     probe.name = "session-override-probe".into();
-    probe.permission_mode = PermissionMode::DontAsk;
     probe.disallowed_tools = vec!["write".into()];
     let mut config = crate::agent::config::Config::default();
     config.cli_agents = vec![probe];
     config.cli_agent_overrides = crate::agent::config::CliAgentOverrides {
         tools: Some(vec!["read_file".into(), "grep".into()]),
         disallowed_tools: Some(vec!["search_docs".into(), "write".into()]),
-        permission_mode: Some(PermissionMode::AcceptEdits),
         ..Default::default()
     };
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
@@ -130,7 +127,6 @@ async fn subagent_inherits_session_cli_overrides() {
             Some(&["search_docs".into(), "write".into()][..])
         );
     assert_eq!(def.disallowed_tools, vec!["write"]);
-    assert_eq!(def.permission_mode, PermissionMode::AcceptEdits);
 }
 /// Persisted⇒stamped chokepoint for the subagent emitter: the
 /// `SessionCommand` persist hop and the live broadcast must carry the
@@ -154,7 +150,6 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
             duration_ms: 5,
             tokens_used: 0,
             output: None,
-            will_wake: false,
         },
         Some(&cmd_tx),
     );
@@ -205,7 +200,7 @@ fn resume_worktree_action_covers_three_outcomes() {
         );
     assert_eq!(
             resume_worktree_action(false, None),
-            ResumeWorktreeAction::Shared
+            ResumeWorktreeAction::Missing
         );
 }
 #[test]
@@ -220,16 +215,6 @@ fn subagent_inherits_parent_lsp_via_context() {
             Arc::as_ptr(&parent),
             Arc::as_ptr(ctx.lsp.as_ref().unwrap()),
             "child should inherit parent LSP via context"
-        );
-}
-#[test]
-fn subagent_inherits_managed_mcp_state_via_context() {
-    let handle = crate::session::managed_mcp::ManagedMcpStateHandle::default();
-    let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.managed_mcp_state = handle.clone();
-    assert!(
-            Arc::ptr_eq(&handle, &ctx.managed_mcp_state),
-            "child should share parent's managed MCP state (Arc identity)"
         );
 }
 #[test]
@@ -381,7 +366,6 @@ fn initializing_snapshot_is_running() {
         status: SubagentSnapshotStatus::Initializing,
         started_at_epoch_ms: 0,
         duration_ms: 0,
-        persona: None,
     };
     assert!(snap.is_running());
 }
@@ -393,399 +377,48 @@ fn persist_gate_only_persists_successful_nonempty_outputs() {
         output: std::sync::Arc::from("text"),
         ..Default::default()
     };
-    assert_eq!(
-            persist_subagent_output(dir.path(), &ok),
-            Some(dir.path().to_path_buf())
-        );
+    let output_ref = persist_subagent_output(dir.path(), &ok)
+        .expect("artifact write")
+        .expect("successful non-empty output has an artifact");
+    assert!(
+        output_ref
+            .path
+            .starts_with(dir.path().join("artifacts/subagent-output"))
+    );
+    assert!(
+        output_ref
+            .timeline_ref
+            .starts_with("artifact:subagent-output:blake3:")
+    );
     let empty = SubagentResult {
         success: true,
         ..Default::default()
     };
-    assert_eq!(persist_subagent_output(dir.path(), &empty), None);
+    assert_eq!(persist_subagent_output(dir.path(), &empty), Ok(None));
     let failed = SubagentResult {
         success: false,
         output: std::sync::Arc::from("partial"),
         ..Default::default()
     };
-    assert_eq!(persist_subagent_output(dir.path(), &failed), None);
+    assert_eq!(persist_subagent_output(dir.path(), &failed), Ok(None));
 }
 #[test]
-fn subagent_output_roundtrips_through_output_json() {
+fn subagent_output_roundtrips_through_immutable_artifact() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = "line one\nline two with unicode ✓";
-    assert!(write_subagent_output(dir.path(), output));
-    assert_eq!(read_subagent_output(dir.path()).as_deref(), Some(output));
+    let output_ref = write_subagent_output(dir.path(), output).expect("artifact write");
+    assert_eq!(
+        write_subagent_output(dir.path(), output).expect("idempotent artifact write"),
+        output_ref
+    );
+    assert_eq!(
+        read_subagent_output(&output_ref.path).as_deref(),
+        Some(output)
+    );
     assert_eq!(read_subagent_output(&dir.path().join("missing")), None);
-    std::fs::write(dir.path().join("output.json"), "not json").expect("corrupt file");
-    assert_eq!(read_subagent_output(dir.path()), None);
-}
-#[test]
-fn explicit_override_takes_precedence_over_role() {
-    let overrides = SubagentRuntimeOverrides {
-        model: Some("explicit-model".into()),
-        capability_mode: Some(tool_types::SubagentCapabilityMode::All),
-        ..Default::default()
-    };
-    let role = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test role".into(),
-        model: Some("role-model".into()),
-        default_capability_mode: Some("read-only".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        Some(&role),
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
-    assert_eq!(
-            resolved.capability_mode,
-            Some(tool_types::SubagentCapabilityMode::All)
-        );
-}
-#[test]
-fn role_default_used_when_no_explicit_override() {
-    let overrides = SubagentRuntimeOverrides::default();
-    let role = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test role".into(),
-        model: Some("role-model".into()),
-        default_capability_mode: Some("read-only".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        Some(&role),
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.model.as_deref(), Some("role-model"));
-    assert_eq!(
-            resolved.capability_mode,
-            Some(tool_types::SubagentCapabilityMode::ReadOnly)
-        );
-}
-#[test]
-fn no_role_no_override_returns_none() {
-    let overrides = SubagentRuntimeOverrides::default();
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        None,
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert!(resolved.model.is_none());
-    assert!(resolved.capability_mode.is_none());
-    assert!(resolved.reasoning_effort.is_none());
-}
-#[test]
-fn partial_override_fills_from_role() {
-    let overrides = SubagentRuntimeOverrides {
-        model: Some("explicit-model".into()),
-        ..Default::default()
-    };
-    let role = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test".into(),
-        default_capability_mode: Some("execute".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        Some(&role),
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
-    assert_eq!(
-            resolved.capability_mode,
-            Some(tool_types::SubagentCapabilityMode::Execute)
-        );
-}
-#[test]
-fn reasoning_effort_explicit_overrides_role() {
-    let overrides = SubagentRuntimeOverrides {
-        reasoning_effort: Some("high".into()),
-        ..Default::default()
-    };
-    let role = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test".into(),
-        reasoning_effort: Some("low".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        Some(&role),
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.reasoning_effort.as_deref(), Some("high"));
-}
-#[test]
-fn reasoning_effort_falls_back_to_role() {
-    let overrides = SubagentRuntimeOverrides::default();
-    let role = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test".into(),
-        reasoning_effort: Some("medium".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        Some(&role),
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.reasoning_effort.as_deref(), Some("medium"));
-}
-#[test]
-fn invalid_role_capability_mode_ignored() {
-    let overrides = SubagentRuntimeOverrides::default();
-    let role = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test".into(),
-        default_capability_mode: Some("invalid-mode".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        Some(&role),
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert!(
-            resolved.capability_mode.is_none(),
-            "invalid role mode should not produce a capability_mode"
-        );
-}
-#[test]
-fn persona_resolved_from_config() {
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("researcher".into()),
-        ..Default::default()
-    };
-    let mut personas = HashMap::new();
-    personas
-        .insert(
-            "researcher".to_string(),
-            crate::agent::subagent::resolution::config::SubagentPersona {
-                instructions: Some("Be thorough.".into()),
-                ..Default::default()
-            },
-        );
-    let resolved = resolve_effective_overrides(&overrides, None, &personas, None, None);
-    assert_eq!(resolved.persona.as_deref(), Some("researcher"));
-    assert_eq!(
-            resolved.persona_instructions.as_deref(),
-            Some("Be thorough.")
-        );
-}
-#[test]
-fn unknown_persona_produces_no_instructions() {
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("nonexistent".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        None,
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert_eq!(resolved.persona.as_deref(), Some("nonexistent"));
-    assert!(resolved.persona_instructions.is_none());
-}
-#[test]
-fn persona_inline_plus_file_merged_in_order() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("extra.md"), "File-based content.").unwrap();
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("combo".into()),
-        ..Default::default()
-    };
-    let mut personas = HashMap::new();
-    personas
-        .insert(
-            "combo".to_string(),
-            crate::agent::subagent::resolution::config::SubagentPersona {
-                instructions: Some("Inline first.".into()),
-                instructions_file: Some("extra.md".into()),
-                ..Default::default()
-            },
-        );
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        None,
-        &personas,
-        Some(tmp.path()),
-        None,
-    );
-    let pi = resolved.persona_instructions.as_deref().unwrap();
-    assert!(
-            pi.starts_with("Inline first."),
-            "inline should come first: {pi}"
-        );
-    assert!(
-            pi.contains("File-based content."),
-            "file content should be included: {pi}"
-        );
-}
-#[test]
-fn model_precedence_explicit_over_role_over_persona() {
-    let mut personas = HashMap::new();
-    personas
-        .insert(
-            "dev".to_string(),
-            crate::agent::subagent::resolution::config::SubagentPersona {
-                model: Some("persona-model".into()),
-                ..Default::default()
-            },
-        );
-    let role = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test".into(),
-        model: Some("role-model".into()),
-        ..Default::default()
-    };
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("dev".into()),
-        model: Some("explicit-model".into()),
-        ..Default::default()
-    };
-    let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-    assert_eq!(r.model.as_deref(), Some("explicit-model"));
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("dev".into()),
-        ..Default::default()
-    };
-    let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-    assert_eq!(r.model.as_deref(), Some("role-model"));
-    let role_no_model = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test".into(),
-        ..Default::default()
-    };
-    let r = resolve_effective_overrides(
-        &overrides,
-        Some(&role_no_model),
-        &personas,
-        None,
-        None,
-    );
-    assert_eq!(r.model.as_deref(), Some("persona-model"));
-    let overrides = SubagentRuntimeOverrides::default();
-    let r = resolve_effective_overrides(&overrides, None, &HashMap::new(), None, None);
-    assert!(r.model.is_none());
-}
-#[test]
-fn reasoning_effort_precedence_explicit_over_role_over_persona() {
-    let mut personas = HashMap::new();
-    personas
-        .insert(
-            "dev".to_string(),
-            crate::agent::subagent::resolution::config::SubagentPersona {
-                reasoning_effort: Some("low".into()),
-                ..Default::default()
-            },
-        );
-    let role = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test".into(),
-        reasoning_effort: Some("medium".into()),
-        ..Default::default()
-    };
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("dev".into()),
-        reasoning_effort: Some("high".into()),
-        ..Default::default()
-    };
-    let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-    assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("dev".into()),
-        ..Default::default()
-    };
-    let r = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-    assert_eq!(r.reasoning_effort.as_deref(), Some("medium"));
-    let role_no_re = crate::agent::subagent::resolution::config::SubagentRole {
-        description: "test".into(),
-        ..Default::default()
-    };
-    let r = resolve_effective_overrides(
-        &overrides,
-        Some(&role_no_re),
-        &personas,
-        None,
-        None,
-    );
-    assert_eq!(r.reasoning_effort.as_deref(), Some("low"));
-    let overrides = SubagentRuntimeOverrides::default();
-    let r = resolve_effective_overrides(&overrides, None, &HashMap::new(), None, None);
-    assert!(r.reasoning_effort.is_none());
-}
-#[test]
-fn persona_not_found_produces_error() {
-    let overrides = SubagentRuntimeOverrides {
-        persona: Some("missing".into()),
-        ..Default::default()
-    };
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        None,
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert!(resolved.persona_error.is_some());
-    assert!(
-            resolved
-                .persona_error
-                .as_deref()
-                .unwrap()
-                .contains("not found"),
-        );
-}
-#[test]
-fn prompt_assembly_ordering() {
-    let role_prompt = Some(
-        "<role-instructions>\nRole content\n</role-instructions>".to_string(),
-    );
-    let persona_instructions = Some(
-        "<persona>\nPersona content\n</persona>".to_string(),
-    );
-    let task = "Do the task";
-    let mut sections = Vec::new();
-    sections.push("<fork-context>...</fork-context>".to_string());
-    if let Some(ref rp) = role_prompt {
-        sections.push(rp.clone());
-    }
-    if let Some(ref pi) = persona_instructions {
-        sections.push(pi.clone());
-    }
-    sections.push(task.to_string());
-    let assembled = sections.join("\n\n");
-    let fork_pos = assembled.find("<fork-context>").unwrap();
-    let role_pos = assembled.find("<role-instructions>").unwrap();
-    let persona_pos = assembled.find("<persona>").unwrap();
-    let task_pos = assembled.find("Do the task").unwrap();
-    assert!(fork_pos < role_pos, "fork before role");
-    assert!(role_pos < persona_pos, "role before persona");
-    assert!(persona_pos < task_pos, "persona before task");
-}
-#[test]
-fn no_persona_produces_none() {
-    let overrides = SubagentRuntimeOverrides::default();
-    let resolved = resolve_effective_overrides(
-        &overrides,
-        None,
-        &HashMap::new(),
-        None,
-        None,
-    );
-    assert!(resolved.persona.is_none());
-    assert!(resolved.persona_instructions.is_none());
+    let corrupt = dir.path().join("corrupt-artifact");
+    std::fs::write(&corrupt, "not json").expect("corrupt fixture");
+    assert_eq!(read_subagent_output(&corrupt), None);
 }
 #[test]
 fn initial_context_source_new_is_default() {
@@ -807,9 +440,8 @@ fn forked_initial_context_normalizes_parent_history() {
             ConversationItem::user("UNIQUE_FORK_MARKER_abc123 implement multi-repo fix"),
             ConversationItem::assistant("noted"),
         ];
-    let ctx = forked_initial_context(items);
+    let ctx = forked_initial_context(items).unwrap();
     assert_eq!(ctx.source, InitialContextSource::Forked);
-    assert!(ctx.copy_error.is_none());
     assert_eq!(ctx.prefix_len, Some(2));
     assert_eq!(ctx.conversation.len(), 2);
     if let ConversationItem::User(ref u) = ctx.conversation[1] {
@@ -843,7 +475,7 @@ fn forked_initial_context_inherits_parent_across_reasoning() {
             )),
             ConversationItem::assistant("ack"),
         ];
-    let ctx = forked_initial_context(items);
+    let ctx = forked_initial_context(items).unwrap();
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert_eq!(ctx.prefix_len, Some(2));
     assert_eq!(ctx.conversation.len(), 2);
@@ -871,11 +503,8 @@ fn forked_initial_context_inherits_parent_across_reasoning() {
     }
 }
 #[test]
-fn forked_initial_context_empty_fails_open_to_new() {
-    let ctx = forked_initial_context(vec![]);
-    assert_eq!(ctx.source, InitialContextSource::New);
-    assert!(ctx.conversation.is_empty());
-    assert!(ctx.copy_error.is_some());
+fn forked_initial_context_empty_is_rejected() {
+    assert_eq!(forked_initial_context(vec![]).unwrap_err(), "empty parent Surface");
 }
 #[test]
 fn resume_vs_fork_helper_shapes_differ() {
@@ -886,7 +515,7 @@ fn resume_vs_fork_helper_shapes_differ() {
             ConversationItem::assistant("done"),
         ];
     let resumed = resume_initial_context(resume_items.clone());
-    let forked = forked_initial_context(resume_items);
+    let forked = forked_initial_context(resume_items).unwrap();
     assert_eq!(resumed.source, InitialContextSource::Resumed);
     assert_eq!(forked.source, InitialContextSource::Forked);
     assert!(resumed.conversation.len() > forked.conversation.len());
@@ -909,7 +538,7 @@ fn forked_initial_context_applies_fork_filter_before_normalize() {
             ConversationItem::assistant("complete asst"),
             ConversationItem::user("INCOMPLETE_TRAILING"),
         ];
-    let ctx = forked_initial_context(items);
+    let ctx = forked_initial_context(items).unwrap();
     assert_eq!(ctx.source, InitialContextSource::Forked);
     if let ConversationItem::User(ref u) = ctx.conversation[1] {
         let text: String = u
@@ -952,7 +581,7 @@ fn verbatim_fork_keeps_items_byte_for_byte_when_small() {
             )),
             ConversationItem::assistant("ack"),
         ];
-    let ctx = verbatim_or_normalize_fork(items, 256_000);
+    let ctx = verbatim_or_normalize_fork(items, 256_000).unwrap();
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(
             ctx.verbatim_fork,
@@ -1016,7 +645,7 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
                 reasoning_effort: None,
             }),
         ];
-    let ctx = verbatim_or_normalize_fork(items, 256_000);
+    let ctx = verbatim_or_normalize_fork(items, 256_000).unwrap();
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(
             !ctx.verbatim_fork,
@@ -1040,7 +669,7 @@ fn summarized_fork_is_not_a_verbatim_mirror() {
             ConversationItem::user("turn one UNIQUE_FORK_MARKER_TEST"),
             ConversationItem::assistant("ack"),
         ];
-    let ctx = verbatim_or_normalize_fork(items, 1);
+    let ctx = verbatim_or_normalize_fork(items, 1).unwrap();
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(!ctx.verbatim_fork);
     let verbatim_mirror_fork = ctx.source == InitialContextSource::Forked
@@ -1058,7 +687,7 @@ fn verbatim_fork_falls_back_to_summary_when_oversize() {
             ConversationItem::user("turn one UNIQUE_FORK_MARKER_TEST with some text"),
             ConversationItem::assistant("ack one"),
         ];
-    let ctx = verbatim_or_normalize_fork(items, 1);
+    let ctx = verbatim_or_normalize_fork(items, 1).unwrap();
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(
             !ctx.verbatim_fork,
@@ -1079,39 +708,25 @@ fn verbatim_fork_falls_back_to_summary_when_oversize() {
         );
 }
 #[test]
-fn verbatim_fork_empty_after_filter_fails_open_to_new() {
+fn verbatim_fork_empty_after_filter_is_rejected() {
     use sampling_types::conversation::ConversationItem;
     let items = vec![ConversationItem::user("/goal do the thing")];
-    let ctx = verbatim_or_normalize_fork(items, 256_000);
-    assert_eq!(ctx.source, InitialContextSource::New);
-    assert!(!ctx.verbatim_fork);
-    assert!(ctx.conversation.is_empty());
+    assert!(verbatim_or_normalize_fork(items, 256_000).is_err());
 }
 #[test]
-fn verbatim_or_normalize_fork_system_only_fails_open_to_new() {
+fn verbatim_or_normalize_fork_system_only_is_rejected() {
     use sampling_types::conversation::ConversationItem;
     for items in [
         vec![ConversationItem::system("sys")],
         vec![ConversationItem::system("a"), ConversationItem::system("b")],
     ] {
-        let ctx = verbatim_or_normalize_fork(items, 256_000);
-        assert_eq!(
-                ctx.source,
-                InitialContextSource::New,
-                "System-only fork must fail open to New"
-            );
-        assert!(!ctx.verbatim_fork);
-        assert!(ctx.conversation.is_empty());
+        assert!(verbatim_or_normalize_fork(items, 256_000).is_err());
     }
 }
 #[test]
-fn forked_initial_context_system_only_fails_open_to_new() {
+fn forked_initial_context_system_only_is_rejected() {
     use sampling_types::conversation::ConversationItem;
-    let ctx = forked_initial_context(vec![ConversationItem::system("sys")]);
-    assert_eq!(ctx.source, InitialContextSource::New);
-    assert!(!ctx.verbatim_fork);
-    assert!(ctx.conversation.is_empty());
-    assert!(ctx.copy_error.is_some());
+    assert!(forked_initial_context(vec![ConversationItem::system("sys")]).is_err());
 }
 #[test]
 fn fork_context_normalized_only_for_summarized() {
@@ -1136,7 +751,8 @@ fn fork_context_normalized_only_for_summarized() {
                 ConversationItem::assistant("a"),
             ],
         256_000,
-    );
+    )
+    .unwrap();
     assert!(verbatim.verbatim_fork);
     assert!(!fork_context_normalized(
             &verbatim.source,
@@ -1149,7 +765,8 @@ fn fork_context_normalized_only_for_summarized() {
                 ConversationItem::assistant("a"),
             ],
         1,
-    );
+    )
+    .unwrap();
     assert!(!summarized.verbatim_fork);
     assert!(fork_context_normalized(
             &summarized.source,
@@ -1182,56 +799,26 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
 async fn bootstrap_no_fork_is_new() {
     let req = bootstrap_test_request(false);
     let ctx = ctx_with_toggle(HashMap::new());
-    let child = SessionInfo {
-        id: acp::SessionId::new("child-boot"),
-        cwd: "/tmp".into(),
-    };
-    let out = bootstrap_initial_context(
-            &req,
-            None,
-            &ctx,
-            &child,
-            Path::new("/tmp"),
-            "m",
-            128_000,
-        )
-        .await;
+    let out = bootstrap_initial_context(&req, None, &ctx, 128_000).await;
     match out {
         BootstrapInitialContext::Ready(ic) => {
             assert_eq!(ic.source, InitialContextSource::New);
             assert!(ic.conversation.is_empty());
-            assert!(ic.copy_error.is_none());
         }
-        BootstrapInitialContext::ResumeAbort(m) => panic!("unexpected abort: {m}"),
+        BootstrapInitialContext::Abort(m) => panic!("unexpected abort: {m}"),
     }
 }
 #[tokio::test]
-async fn bootstrap_fork_without_parent_fails_open() {
+async fn bootstrap_fork_without_parent_fails_closed() {
     let req = bootstrap_test_request(true);
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.parent_chat_state = None;
     ctx.parent_session_info = None;
-    let child = SessionInfo {
-        id: acp::SessionId::new("child-boot2"),
-        cwd: "/tmp".into(),
-    };
-    let out = bootstrap_initial_context(
-            &req,
-            None,
-            &ctx,
-            &child,
-            Path::new("/tmp"),
-            "m",
-            128_000,
-        )
-        .await;
+    let out = bootstrap_initial_context(&req, None, &ctx, 128_000).await;
     match out {
-        BootstrapInitialContext::Ready(ic) => {
-            assert_eq!(ic.source, InitialContextSource::New);
-            assert!(ic.copy_error.is_some());
-        }
-        BootstrapInitialContext::ResumeAbort(m) => {
-            panic!("fork must fail open, not abort: {m}")
+        BootstrapInitialContext::Ready(_) => panic!("fork must not silently become a new child"),
+        BootstrapInitialContext::Abort(message) => {
+            assert!(message.contains("parent Surface is unavailable"));
         }
     }
 }
@@ -1242,33 +829,26 @@ async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
     let req = bootstrap_test_request(true);
     let mut ctx = ctx_with_toggle(HashMap::new());
     let chat = spawn_test_parent_chat_state("grow-4.5");
-    chat.replace_conversation(
+    let (_, source_surface_revision) = chat
+        .get_conversation_with_revision()
+        .await
+        .expect("test parent chat-state actor must be live");
+    chat.replace_context_durably(
         vec![
             ConversationItem::system("parent system"),
             ConversationItem::user(format!("{MARKER} implement multi-repo fix")),
             ConversationItem::assistant("noted the multi-repo work"),
         ],
-    );
+        source_surface_revision,
+    )
+    .await
+    .unwrap();
     ctx.parent_chat_state = Some(chat);
     ctx.parent_session_info = None;
-    let child = SessionInfo {
-        id: acp::SessionId::new("child-boot-live"),
-        cwd: "/tmp".into(),
-    };
-    let out = bootstrap_initial_context(
-            &req,
-            None,
-            &ctx,
-            &child,
-            Path::new("/tmp"),
-            "m",
-            128_000,
-        )
-        .await;
+    let out = bootstrap_initial_context(&req, None, &ctx, 128_000).await;
     match out {
         BootstrapInitialContext::Ready(ic) => {
             assert_eq!(ic.source, InitialContextSource::Forked);
-            assert!(ic.copy_error.is_none());
             assert!(
                     ic.verbatim_fork,
                     "small complete-tail parent must mirror verbatim"
@@ -1308,11 +888,11 @@ async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
                     "verbatim mirror must NOT wrap items in a background_context blob: {text}"
                 );
         }
-        BootstrapInitialContext::ResumeAbort(m) => panic!("unexpected abort: {m}"),
+        BootstrapInitialContext::Abort(m) => panic!("unexpected abort: {m}"),
     }
 }
 #[tokio::test]
-async fn copy_session_data_preserves_parent_chat_history() {
+async fn copy_session_data_preserves_parent_surface() {
     use crate::sampling::ConversationItem;
     use crate::session::storage::StorageAdapter;
     use crate::session::storage::jsonl::JsonlStorageAdapter;
@@ -1348,16 +928,13 @@ async fn copy_session_data_preserves_parent_chat_history() {
                 new_model_id: Some("test-model".to_string()),
                 session_kind: Some("subagent_fork".to_string()),
                 fork_context_source: Some("forked".to_string()),
-                copy_plan_state: false,
-                copy_session_control: false,
-                copy_signals: false,
-                copy_tool_state: false,
+                inherit_control: false,
                 fork_filter: true,
                 ..Default::default()
             },
         )
         .unwrap();
-    assert!(result.chat_messages_copied > 0, "should copy chat history");
+    assert!(result.surface_items_copied > 0, "should copy the Surface");
     let child_data = adapter.load_session(&child_info).await.unwrap();
     assert_eq!(
             child_data.summary.session_kind.as_deref(),
@@ -1371,9 +948,11 @@ async fn copy_session_data_preserves_parent_chat_history() {
             child_data.summary.parent_session_id.as_deref(),
             Some("parent-fork-test")
         );
+    let child_timeline =
+        chat_state::Timeline::from_events(child_data.timeline_events).unwrap();
     assert!(
-            !child_data.chat_history.is_empty(),
-            "child should have inherited parent chat history"
+            !child_timeline.surface().is_empty(),
+            "child should have inherited the parent Surface"
         );
 }
 fn make_validation_ctx(toggle: HashMap<String, bool>) -> SubagentValidationContext {
@@ -1510,32 +1089,25 @@ fn validate_subagent_type_recognizes_cli_agent_by_name() {
         ));
 }
 #[tokio::test]
-async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
+async fn committed_cancelled_completion_presents_one_finish() {
     let mut ctx = ctx_with_toggle(HashMap::new());
     let (parent_cmd_tx, mut parent_cmd_rx) = mpsc::unbounded_channel();
     ctx.parent_cmd_tx = Some(parent_cmd_tx);
-    let (child_cmd_tx, mut child_cmd_rx) = mpsc::unbounded_channel();
     let (gateway, mut gateway_rx) = test_gateway_with_receiver();
     let request = auto_wake_test_request("promote-cancel");
-    let meta_dir = tempfile::tempdir().expect("meta dir");
     let result = cancel_pending_shell_child(
-            &child_cmd_tx,
-            &request.id,
-            &acp::SessionId::new(request.id.clone()),
-            meta_dir.path(),
-            None,
-            false,
-            42,
-        )
-        .await;
-    assert!(matches!(
-            child_cmd_rx.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
+        &request.id,
+        &acp::SessionId::new(request.id.clone()),
+        None,
+        false,
+        42,
+    )
+    .await;
     assert!(result.cancelled);
     assert!(!result.success);
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     completion_data.spawned_notification_emitted = true;
+    completion_data.mark_terminal_committed();
     present_child_completion(
         ChildCompletion {
             request,
@@ -1582,22 +1154,14 @@ async fn run_promote_cancel_with_worktree(
     worktree: &Path,
     worktree_freshly_created: bool,
 ) {
-    let (child_cmd_tx, mut child_cmd_rx) = mpsc::unbounded_channel();
-    let meta_dir = tempfile::tempdir().expect("meta dir");
     let result = cancel_pending_shell_child(
-            &child_cmd_tx,
-            "worktree-cancel",
-            &acp::SessionId::new("worktree-cancel"),
-            meta_dir.path(),
-            Some(worktree),
-            worktree_freshly_created,
-            42,
-        )
-        .await;
-    assert!(matches!(
-            child_cmd_rx.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
+        "worktree-cancel",
+        &acp::SessionId::new("worktree-cancel"),
+        Some(worktree),
+        worktree_freshly_created,
+        42,
+    )
+    .await;
     assert!(result.cancelled);
 }
 /// A pending cancel removes a freshly-created worktree but preserves a
@@ -1666,8 +1230,6 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -1681,7 +1243,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
     }
 }
 #[test]
-fn fresh_tool_model_accepts_visible_key_and_internal_id() {
+fn fresh_tool_model_accepts_only_visible_catalog_id() {
     let mut models = indexmap::IndexMap::new();
     models.insert("grow-3".to_string(), test_model_entry("grow-3-2025-02-15"));
     assert!(
@@ -1696,16 +1258,16 @@ fn fresh_tool_model_accepts_visible_key_and_internal_id() {
             "key lookup should succeed"
         );
     assert!(
-            super::handle_request::task_model_override_error(
-                Some("grow-3-2025-02-15"),
-                ModelOverrideProvenance::Tool,
-                false,
-                &models,
-                false,
-            )
-            .is_none(),
-            "info().model lookup should succeed"
-        );
+        super::handle_request::task_model_override_error(
+            Some("grow-3-2025-02-15"),
+            ModelOverrideProvenance::Tool,
+            false,
+            &models,
+            false,
+        )
+        .is_some(),
+        "routing model names are not catalog identities"
+    );
 }
 #[test]
 fn fresh_tool_model_rejects_unavailable_exact_key_over_visible_slug_collision() {
@@ -1724,14 +1286,14 @@ fn fresh_tool_model_rejects_unavailable_exact_key_over_visible_slug_collision() 
             )
             .as_deref(),
             Some(
-                "Unknown Task.model slug 'collision'. Valid model slugs: visible-alias. \
+                "Unknown Task.model ID 'collision'. Valid model IDs: visible-alias. \
                  Omit `model` to inherit the parent model."
             ),
             "validation must inspect the unavailable exact-key entry selected by execution"
         );
 }
 #[test]
-fn fresh_tool_model_rejects_unavailable_first_slug_collision() {
+fn fresh_tool_model_rejects_routing_slug_even_when_a_visible_model_uses_it() {
     let mut models = indexmap::IndexMap::new();
     let mut unavailable_first = test_model_entry("shared-routing-slug");
     unavailable_first.info.user_selectable = false;
@@ -1747,10 +1309,10 @@ fn fresh_tool_model_rejects_unavailable_first_slug_collision() {
             )
             .as_deref(),
             Some(
-                "Unknown Task.model slug 'shared-routing-slug'. Valid model slugs: \
+                "Unknown Task.model ID 'shared-routing-slug'. Valid model IDs: \
                  visible-second. Omit `model` to inherit the parent model."
             ),
-            "validation must inspect the first routing-slug entry selected by execution"
+            "validation must never select by routing slug"
         );
 }
 #[test]
@@ -1786,7 +1348,7 @@ fn fresh_tool_model_rejects_unknown_and_nonavailable_entries() {
         assert_eq!(
                 error,
                 format!(
-                    "Unknown Task.model slug '{requested}'. Valid model slugs: alpha, alternate, zeta. \
+                    "Unknown Task.model ID '{requested}'. Valid model IDs: alpha, alternate, zeta. \
                      Omit `model` to inherit the parent model."
                 )
             );
@@ -1817,7 +1379,7 @@ fn fresh_tool_model_reports_empty_valid_list() {
             )
             .as_deref(),
             Some(
-                "Unknown Task.model slug 'anything'. No valid model slugs are currently \
+                "Unknown Task.model ID 'anything'. No valid model IDs are currently \
                  available. Omit `model` to inherit the parent model."
             )
         );
@@ -1922,13 +1484,12 @@ fn test_sampling_config(model_slug: &str) -> sampling_types::SamplingConfig {
     }
 }
 fn spawn_test_parent_chat_state(model_slug: &str) -> chat_state::ChatStateHandle {
-    let (mock, _persistence_rx) = chat_state::MockChatPersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     chat_state::ChatStateActor::spawn(
         vec![],
         test_sampling_config(model_slug),
-        Box::new(mock),
+        Box::new(chat_state::NullTimelinePersistence),
         event_tx,
         token,
     )

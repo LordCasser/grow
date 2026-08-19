@@ -213,146 +213,24 @@ mod login_shell_capture_tests {
     }
 }
 
-const ENV_SCHEDULER_BACKGROUND_LOOPS: &str = "GROW_SCHEDULER_BACKGROUND_LOOPS";
+/// Env overrides for `[toolset.ask_user_question]`.
+const ENV_ASK_USER_QUESTION_TIMEOUT_ENABLED: &str = "GROW_ASK_USER_QUESTION_TIMEOUT_ENABLED";
+const ENV_ASK_USER_QUESTION_TIMEOUT_SECS: &str = "GROW_ASK_USER_QUESTION_TIMEOUT_SECS";
 
-fn scheduler_background_loops_from_toml(v: Option<&TomlValue>) -> Option<bool> {
-    v?.get("scheduler")?.get("background_loops")?.as_bool()
-}
-
-/// Resolve whether scheduled task fires run in background loop subagents.
-///
-/// Precedence: requirements > env (`GROW_SCHEDULER_BACKGROUND_LOOPS`) > user
-/// `config.toml` `[scheduler] background_loops` > managed layers > remote
-/// settings > default `true`.
-pub fn resolve_scheduler_background_loops(remote: Option<bool>) -> bool {
-    let requirements = crate::config::load_merged_requirements();
-    let layers = match crate::config::ConfigLayers::load() {
-        Ok(l) => Some(l),
-        Err(e) => {
-            tracing::warn!(error = %e, "scheduler_background_loops: failed to load config layers");
+fn ask_user_question_timeout_secs_from_env() -> Option<u64> {
+    let raw = std::env::var(ENV_ASK_USER_QUESTION_TIMEOUT_SECS).ok()?;
+    match raw.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => Some(secs),
+        _ => {
+            tracing::warn!(
+                env = ENV_ASK_USER_QUESTION_TIMEOUT_SECS,
+                value = %raw,
+                "invalid timeout override; ignoring"
+            );
             None
         }
-    };
-    resolve_scheduler_background_loops_tiers(
-        requirements.as_ref(),
-        layers.as_ref().map(|l| &l.user),
-        layers.as_ref().map(|l| &l.managed),
-        layers.as_ref().map(|l| &l.system_managed),
-        remote,
-    )
-}
-
-fn resolve_scheduler_background_loops_tiers(
-    requirements: Option<&TomlValue>,
-    user: Option<&TomlValue>,
-    managed: Option<&TomlValue>,
-    system_managed: Option<&TomlValue>,
-    remote: Option<bool>,
-) -> bool {
-    use crate::agent::config::BoolFlag;
-    BoolFlag::env(ENV_SCHEDULER_BACKGROUND_LOOPS)
-        .requirement(scheduler_background_loops_from_toml(requirements))
-        .config(scheduler_background_loops_from_toml(user))
-        .managed(
-            scheduler_background_loops_from_toml(managed)
-                .or_else(|| scheduler_background_loops_from_toml(system_managed)),
-        )
-        .feature_flag(remote)
-        .default(true)
-        .resolve()
-        .value
-}
-
-#[cfg(test)]
-mod scheduler_background_loops_tests {
-    use super::{ENV_SCHEDULER_BACKGROUND_LOOPS, resolve_scheduler_background_loops_tiers};
-    use toml::Value as TomlValue;
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    fn guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var(ENV_SCHEDULER_BACKGROUND_LOOPS) };
-        g
-    }
-
-    fn cfg(enabled: bool) -> TomlValue {
-        toml::from_str(&format!("[scheduler]\nbackground_loops = {enabled}\n")).unwrap()
-    }
-
-    #[test]
-    fn defaults_on() {
-        let _g = guard();
-        assert!(resolve_scheduler_background_loops_tiers(
-            None, None, None, None, None
-        ));
-    }
-
-    #[test]
-    fn remote_flag_can_disable() {
-        let _g = guard();
-        assert!(!resolve_scheduler_background_loops_tiers(
-            None,
-            None,
-            None,
-            None,
-            Some(false)
-        ));
-    }
-
-    #[test]
-    fn user_config_beats_remote() {
-        let _g = guard();
-        assert!(resolve_scheduler_background_loops_tiers(
-            None,
-            Some(&cfg(true)),
-            None,
-            None,
-            Some(false)
-        ));
-        assert!(!resolve_scheduler_background_loops_tiers(
-            None,
-            Some(&cfg(false)),
-            None,
-            None,
-            Some(true)
-        ));
-    }
-
-    #[test]
-    fn env_beats_config_and_remote() {
-        let _g = guard();
-        unsafe { std::env::set_var(ENV_SCHEDULER_BACKGROUND_LOOPS, "0") };
-        let off = resolve_scheduler_background_loops_tiers(
-            None,
-            Some(&cfg(true)),
-            None,
-            None,
-            Some(true),
-        );
-        unsafe { std::env::remove_var(ENV_SCHEDULER_BACKGROUND_LOOPS) };
-        assert!(!off);
-    }
-
-    #[test]
-    fn requirements_win_outright() {
-        let _g = guard();
-        unsafe { std::env::set_var(ENV_SCHEDULER_BACKGROUND_LOOPS, "1") };
-        let off = resolve_scheduler_background_loops_tiers(
-            Some(&cfg(false)),
-            Some(&cfg(true)),
-            None,
-            None,
-            Some(true),
-        );
-        unsafe { std::env::remove_var(ENV_SCHEDULER_BACKGROUND_LOOPS) };
-        assert!(!off);
     }
 }
-
-/// Env override for `[toolset.ask_user_question] timeout_enabled` (parsed by
-/// the shared [`config::env_bool`] via `BoolFlag`). The secs env var
-/// lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
-const ENV_ASK_USER_QUESTION_TIMEOUT_ENABLED: &str = "GROW_ASK_USER_QUESTION_TIMEOUT_ENABLED";
 
 /// Extract `[toolset.ask_user_question] timeout_enabled` from one TOML layer.
 fn ask_user_question_timeout_enabled_from_toml(v: Option<&TomlValue>) -> Option<bool> {
@@ -432,8 +310,8 @@ fn resolve_ask_user_question_timeout_secs_from_tiers(
 
 /// Resolve `[toolset.ask_user_question] timeout_secs` (positive seconds).
 ///
-/// Precedence: requirements > env (`GROW_ASK_USER_QUESTION_TIMEOUT_SECS`,
-/// parsed by the tools crate's canonical parser) > user `config.toml` >
+/// Precedence: requirements > env (`GROW_ASK_USER_QUESTION_TIMEOUT_SECS`) >
+/// user `config.toml` >
 /// managed (user-level over system-managed, matching `effective_config()`) >
 /// remote settings > default 1800 (30 minutes).
 fn resolve_ask_user_question_timeout_secs(
@@ -445,7 +323,7 @@ fn resolve_ask_user_question_timeout_secs(
 ) -> u64 {
     resolve_ask_user_question_timeout_secs_from_tiers(
         ask_user_question_timeout_secs_from_toml(requirements),
-        tools::implementations::grow_build::ask_user_question::response_timeout_env_secs(),
+        ask_user_question_timeout_secs_from_env(),
         ask_user_question_timeout_secs_from_toml(user),
         ask_user_question_timeout_secs_from_toml(managed)
             .or_else(|| ask_user_question_timeout_secs_from_toml(system_managed)),
@@ -460,8 +338,7 @@ fn resolve_ask_user_question_timeout_secs(
 /// Reads the raw requirements / user / managed / system-managed layers from
 /// disk (raw layers, not the effective merge, so a managed-only value stays
 /// below env in the precedence); `remote` is the live remote tier. Both
-/// fields resolve to concrete values, so the tool's legacy env fallback only
-/// runs for consumers that skip this resolver.
+/// fields resolve to concrete values before the tool registry is finalized.
 pub(crate) fn resolve_ask_user_question_params_from_disk(
     remote: Option<&RemoteSettings>,
 ) -> tools::implementations::grow_build::ask_user_question::AskUserQuestionParams {
@@ -477,23 +354,22 @@ pub(crate) fn resolve_ask_user_question_params_from_disk(
     let managed = layers.as_ref().map(|l| &l.managed);
     let system_managed = layers.as_ref().map(|l| &l.system_managed);
     tools::implementations::grow_build::ask_user_question::AskUserQuestionParams {
-        timeout_enabled: Some(
-            resolve_ask_user_question_timeout_enabled(
-                requirements.as_ref(),
-                user,
-                managed,
-                system_managed,
-                remote.and_then(|r| r.ask_user_question_timeout_enabled),
-            )
-            .value,
-        ),
-        timeout_secs: Some(resolve_ask_user_question_timeout_secs(
+        timeout_enabled: resolve_ask_user_question_timeout_enabled(
+            requirements.as_ref(),
+            user,
+            managed,
+            system_managed,
+            remote.and_then(|r| r.ask_user_question_timeout_enabled),
+        )
+        .value,
+        timeout_secs: std::num::NonZeroU64::new(resolve_ask_user_question_timeout_secs(
             requirements.as_ref(),
             user,
             managed,
             system_managed,
             remote.and_then(|r| r.ask_user_question_timeout_secs),
-        )),
+        ))
+        .expect("ask-user timeout resolver always returns a positive value"),
     }
 }
 
@@ -501,7 +377,7 @@ pub(crate) fn resolve_ask_user_question_params_from_disk(
 mod ask_user_question_timeout_tests {
     use super::*;
     use crate::agent::config::ConfigSource;
-    use tools::implementations::grow_build::ask_user_question::RESPONSE_TIMEOUT_ENV;
+    const RESPONSE_TIMEOUT_ENV: &str = ENV_ASK_USER_QUESTION_TIMEOUT_SECS;
 
     // Both env vars are process-global (a dev exports the secs var for TUI
     // repro); serialize and force them unset so these tests can't go flaky.

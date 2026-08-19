@@ -1124,8 +1124,6 @@ impl RenderBlock {
                 join_searchable([
                     Some(b.description.clone()),
                     Some(b.subagent_type.clone()),
-                    b.persona.clone(),
-                    b.role.clone(),
                     b.model.clone(),
                     b.activity_label.clone(),
                     error,
@@ -1487,16 +1485,12 @@ mod searchable_text_tests {
         // Populate the metadata fields a failed background block leaves empty.
         if let RenderBlock::Subagent(b) = &mut block {
             b.subagent_type = "explore".into();
-            b.persona = Some("scout".into());
-            b.role = Some("researcher".into());
             b.model = Some("grow-test".into());
             b.activity_label = Some("Running: cargo build".into());
         }
         let text = block.searchable_text().expect("subagent text");
         assert!(text.contains("investigate flaky test"), "got: {text:?}");
         assert!(text.contains("explore"), "got: {text:?}");
-        assert!(text.contains("scout"), "got: {text:?}");
-        assert!(text.contains("researcher"), "got: {text:?}");
         assert!(text.contains("grow-test"), "got: {text:?}");
         assert!(text.contains("Running: cargo build"), "got: {text:?}");
         assert!(text.contains("panicked at assert"), "got: {text:?}");

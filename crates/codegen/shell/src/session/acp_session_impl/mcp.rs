@@ -58,7 +58,7 @@ impl SessionActor {
             let prefix = format!(
                 "{}{}",
                 server_name,
-                crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+                workspace_types::MCP_TOOL_NAME_DELIMITER
             );
             // Reconcile in-place on every parent eligibility generation. The
             // bridge object remains stable, but stale definitions and metadata
@@ -100,7 +100,7 @@ impl SessionActor {
         }
         self.refresh_mcp_snapshot_and_schedule_reminder().await;
         if !ui_tools.is_empty() {
-            self.emit_mcp_tools_changed_notifications(ui_tools);
+            self.emit_mcp_catalog_updates(ui_tools);
         }
     }
     pub(super) async fn register_mcp_tool(
@@ -129,7 +129,7 @@ impl SessionActor {
         let prefix = format!(
             "{}{}",
             server_name,
-            crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+            workspace_types::MCP_TOOL_NAME_DELIMITER
         );
         let unqualified = qualified_name
             .strip_prefix(&prefix)
@@ -196,15 +196,8 @@ impl SessionActor {
             );
         }
     }
-    /// Emit per-server `grow/mcp/tools_changed` notifications.
-    ///
-    /// Each emission carries the owning
-    /// `sessionId` so the pager can route via `find_session_match`
-    /// instead of falling back to `app.active_view`. Without that
-    /// field, a background-agent push would silently land on the
-    /// foregrounded agent's modal — the exact multi-agent bug this
-    /// routing is meant to close.
-    pub(super) fn emit_mcp_tools_changed_notifications(
+    /// Emit canonical per-server catalog deltas with the complete tool list.
+    pub(super) fn emit_mcp_catalog_updates(
         &self,
         ui_tools_by_server: std::collections::HashMap<
             String,
@@ -213,16 +206,19 @@ impl SessionActor {
     ) {
         let session_id = self.session_id_string();
         for (server_name, tools) in ui_tools_by_server {
-            let payload = crate::extensions::mcp::McpToolsChanged {
+            let payload = crate::extensions::mcp::McpServerStatusPayload {
                 session_id: session_id.clone(),
-                server_name,
-                tools,
+                name: server_name,
+                status: crate::extensions::mcp::McpServerStatus::Ready,
+                reason: crate::extensions::mcp::McpServerStatusReason::ConfigChanged,
+                detail: None,
+                tools: Some(tools),
             };
             if let Ok(params) = serde_json::value::to_raw_value(&payload) {
                 self.notifications
                     .gateway
                     .forward_fire_and_forget(acp::ExtNotification::new(
-                        crate::extensions::mcp::mcp_methods::TOOLS_CHANGED,
+                        crate::extensions::mcp::SERVER_STATUS_METHOD,
                         params.into(),
                     ));
             }
@@ -237,41 +233,22 @@ impl SessionActor {
     /// itself stays static (cacheable).
     pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder(&self) {
         let cwd = std::path::Path::new(&self.session_info.cwd);
-        let disabled_gateway_tools = crate::util::config::get_all_mcp_disabled_tools(cwd);
         // Keep the plan-mode gate's read-only classification in sync with the
         // config on every snapshot refresh (whole-set replace, same source as
         // the init-time load below).
         let server_scopes = crate::util::config::get_mcp_server_scopes(cwd);
         self.mcp_state.lock().await.mcp_server_scopes = server_scopes;
-        self.refresh_mcp_snapshot_and_schedule_reminder_with_disabled(&disabled_gateway_tools)
-            .await;
-    }
-    pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with_disabled(
-        &self,
-        disabled_gateway_tools: &std::collections::HashMap<
-            String,
-            std::collections::HashSet<String>,
-        >,
-    ) {
         let mcp_initialized = self.mcp_state.lock().await.is_initialized();
         refresh_mcp_snapshot_and_schedule_reminder_with(
             self.agent.borrow().tool_bridge().clone(),
             Arc::clone(&self.mcp_state),
-            self.managed_mcp_handle.clone(),
             self.tool_metadata_snapshot.clone(),
             Arc::clone(&self.mcp_reminder_dirty),
             mcp_initialized,
-            disabled_gateway_tools,
-            self.cursor_mcps_root(),
         )
         .await;
     }
-    /// `None` twin: descriptor materialization is unavailable in this build.
-    fn cursor_mcps_root(&self) -> Option<std::path::PathBuf> {
-        None
-    }
-    /// Snapshot both MCP and skill announcement tracking state and send it
-    /// to the persistence channel for atomic write to `announcement_state.json`.
+    /// Record the current MCP and skill announcement projection in Timeline.
     ///
     /// Called after MCP fingerprint changes, skill update effects, and
     /// compaction so that resumed sessions start with accurate tracking state.
@@ -284,10 +261,10 @@ impl SessionActor {
             ),
             announced_skill_names: skill_names,
         };
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::AnnouncementState(state));
+        match state.timeline_kind() {
+            Ok(kind) => self.chat_state_handle.record_timeline_event(kind),
+            Err(error) => tracing::error!(?error, "failed to encode announcement projection"),
+        }
     }
     /// Inject an MCP server system-reminder if the set changed since the
     /// last announcement. Idempotent — clears the dirty flag after injection,
@@ -349,8 +326,7 @@ impl SessionActor {
                         "connection failed".to_string()
                     };
                     let retries_on_use =
-                        matches!(cfg, acp::McpServer::Http(_) | acp::McpServer::Sse(_))
-                            && !name.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX);
+                        matches!(cfg, acp::McpServer::Http(_) | acp::McpServer::Sse(_));
                     let reason = if retries_on_use {
                         format!("{base} — retries automatically on next tool call")
                     } else {
@@ -451,14 +427,9 @@ impl SessionActor {
         !disabled.contains(server)
     }
     /// HTTP analog of [`Self::is_stdio_server_configured`]: `true` iff
-    /// `server` has an enabled, **non-managed** `Http` / `Sse` config entry.
+    /// `server` has an enabled `Http` / `Sse` config entry.
     /// Gates [`crate::session::mcp_restart::maybe_schedule_http_recovery`].
-    /// Managed connectors (`MANAGED_MCP_PREFIX`) are excluded — out of scope
-    /// for in-place recovery; this mirrors the dispatcher's filter.
     pub(crate) async fn is_http_server_configured(&self, server: &str) -> bool {
-        if server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX) {
-            return false;
-        }
         let mcp_state = self.mcp_state.lock().await;
         let is_http_in_configs = mcp_state
             .configs
@@ -518,11 +489,7 @@ impl SessionActor {
     /// Unregister `server`'s tools from the bridge after stdio restart
     /// exhaustion, so the model stops calling a now-absent client.
     pub(crate) fn unregister_server_tools(&self, server: &str) {
-        let prefix = format!(
-            "{}{}",
-            server,
-            crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-        );
+        let prefix = format!("{}{}", server, workspace_types::MCP_TOOL_NAME_DELIMITER);
         let removed = self
             .agent
             .borrow()
@@ -790,16 +757,8 @@ impl SessionActor {
             self.mcp_handshakes_done.notify_waiters();
             return;
         }
-        {
-            let _cwd = std::path::Path::new(&self.session_info.cwd);
-            crate::session::mcp_servers::build_config_resolved_event(&mcp_server_configs, _cwd);
-            let managed_count = mcp_server_configs
-                .iter()
-                .filter(|c| {
-                    mcp_server_name(c).starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-                })
-                .count() as u32;
-        }
+        let cwd = std::path::Path::new(&self.session_info.cwd);
+        crate::session::mcp_servers::build_config_resolved_event(&mcp_server_configs, cwd);
         let configs_to_start: Vec<_> = mcp_server_configs
             .iter()
             .filter(|c| !existing_client_names.contains(mcp_server_name(c)))
@@ -950,14 +909,9 @@ impl SessionActor {
         let tool_bridge = self.agent.borrow().tool_bridge().clone();
         let gateway = self.notifications.gateway.clone();
         let tool_snapshot = self.tool_metadata_snapshot.clone();
-        let managed_mcp_handle = self.managed_mcp_handle.clone();
         let mcp_reminder_dirty = Arc::clone(&self.mcp_reminder_dirty);
         let mcp_handshakes_done = Arc::clone(&self.mcp_handshakes_done);
         let session_id_owned = self.session_info.id.0.clone();
-        let mcps_root_bg = self.cursor_mcps_root();
-        let disabled_gateway_tools_bg = crate::util::config::get_all_mcp_disabled_tools(
-            std::path::Path::new(&self.session_info.cwd),
-        );
         let server_scopes_bg = crate::util::config::get_mcp_server_scopes(std::path::Path::new(
             &self.session_info.cwd,
         ));
@@ -1100,7 +1054,7 @@ impl SessionActor {
                                     let prefix = format!(
                                         "{}{}",
                                         server_name,
-                                        crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+                                        workspace_types::MCP_TOOL_NAME_DELIMITER
                                     );
                                     r.name.strip_prefix(&prefix).unwrap_or(&r.name).to_string()
                                 })
@@ -1110,7 +1064,7 @@ impl SessionActor {
                                 let prefix = format!(
                                     "{}{}",
                                     server_name,
-                                    crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+                                    workspace_types::MCP_TOOL_NAME_DELIMITER
                                 );
                                 let unqualified = qualified_name
                                     .strip_prefix(&prefix)
@@ -1323,7 +1277,7 @@ impl SessionActor {
                     let prefix = format!(
                         "{}{}",
                         server_name,
-                        crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+                        workspace_types::MCP_TOOL_NAME_DELIMITER
                     );
                     let unqualified = qualified_name
                         .strip_prefix(&prefix)
@@ -1365,23 +1319,23 @@ impl SessionActor {
             refresh_mcp_snapshot_and_schedule_reminder_with(
                 tool_bridge.clone(),
                 Arc::clone(&mcp_state_bg),
-                managed_mcp_handle.clone(),
                 tool_snapshot,
                 mcp_reminder_dirty,
                 true,
-                &disabled_gateway_tools_bg,
-                mcps_root_bg,
             )
             .await;
             for (server_name, tools) in ui_tools_by_server {
-                let payload = crate::extensions::mcp::McpToolsChanged {
+                let payload = crate::extensions::mcp::McpServerStatusPayload {
                     session_id: session_id_owned.to_string(),
-                    server_name,
-                    tools,
+                    name: server_name,
+                    status: crate::extensions::mcp::McpServerStatus::Ready,
+                    reason: crate::extensions::mcp::McpServerStatusReason::ConfigChanged,
+                    detail: None,
+                    tools: Some(tools),
                 };
                 if let Ok(params) = serde_json::value::to_raw_value(&payload) {
                     gateway.forward_fire_and_forget(acp::ExtNotification::new(
-                        crate::extensions::mcp::mcp_methods::TOOLS_CHANGED,
+                        crate::extensions::mcp::SERVER_STATUS_METHOD,
                         params.into(),
                     ));
                 }
@@ -1447,10 +1401,8 @@ impl SessionActor {
     /// `/context` accounting: the server listing plus the tool usage hint,
     /// as [`Self::maybe_inject_mcp_reminder`] injects in `Full` mode.
     ///
-    /// Returns `None` when no servers are connected, or when the active
-    /// template carries MCP in its first user message rather than in
-    /// reminders. Known approximations: the default reminder mode is
-    /// `Delta`, which injects incremental texts (each carrying its own
+    /// Returns `None` when no servers are connected. Known approximations: the
+    /// default reminder mode is `Delta`, which injects incremental texts (each carrying its own
     /// copy of the hint) rather than this full listing; and the transient
     /// failed or connecting sections and the `<system-reminder>` wrapper
     /// are not counted.

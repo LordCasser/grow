@@ -14,58 +14,28 @@ pub const DEFAULT_SESSION_RELATIONSHIP: &str = "primary";
 /// Default local-session event schema version.
 pub const DEFAULT_SCHEMA_VERSION: &str = "1.0";
 
-fn default_session_relationship() -> String {
-    DEFAULT_SESSION_RELATIONSHIP.to_owned()
-}
-
-fn default_schema_version() -> String {
-    DEFAULT_SCHEMA_VERSION.to_owned()
-}
-
 /// Payload for `before_turn` custom hooks.
 ///
 /// Sent by the harness before the agent loop begins a new turn.
 /// Recipients can use this to prepare state (clear caches, initialize
 /// tracking, etc.) but MUST NOT block — hooks are fire-and-forget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BeforeTurnPayload {
     /// Per-session user-turn counter, 0-based. Not strictly monotonic: a tool-result continuation keeps the issuing turn's number, and
     /// editing or regenerating an earlier message reuses that turn's number (consumers deduping on it treat a regenerate as the same turn).
     pub turn_number: u64,
     /// Model being used for this turn (e.g. "grow-3").
     pub model_id: String,
-    /// Whether the session is in YOLO / auto-approve mode.
-    #[serde(default)]
-    pub yolo_mode: bool,
-    // ── Extended fields (workspace mirrors these into `events.jsonl`);
-    // all `#[serde(default)]` for old-shell / old-workspace interop. ──
+    // Workspace mirrors these into `events.jsonl`.
     /// Mirrors `Event::TurnStarted::conversation_message_count`.
-    #[serde(default)]
     pub conversation_message_count: usize,
     /// Snake-case mirror of `Event::TurnStarted::session_relationship`
     /// (`"primary"` | `"subagent"`). Kept as a `String` so the protocol crate
     /// does not depend on workspace event types.
-    #[serde(default = "default_session_relationship")]
     pub session_relationship: String,
     /// Mirrors `Event::TurnStarted::schema_version`.
-    #[serde(default = "default_schema_version")]
     pub schema_version: String,
-}
-
-impl Default for BeforeTurnPayload {
-    /// Mirrors the per-field serde defaults so producers that don't yet track a
-    /// field (e.g. the server-side sampler for `conversation_message_count`) can
-    /// use `..Default::default()` instead of repeating literal stub values.
-    fn default() -> Self {
-        Self {
-            turn_number: 0,
-            model_id: String::new(),
-            yolo_mode: false,
-            conversation_message_count: 0,
-            session_relationship: default_session_relationship(),
-            schema_version: default_schema_version(),
-        }
-    }
 }
 
 /// Payload for `after_turn` custom hooks.
@@ -78,6 +48,7 @@ impl Default for BeforeTurnPayload {
 /// avoids unbounded growth on tool-heavy turns. `written_repo_paths` is the
 /// exception: bounded by distinct files edited, not tool-call volume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AfterTurnPayload {
     /// Same turn counter as the preceding `before_turn`.
     pub turn_number: u64,
@@ -93,7 +64,6 @@ pub struct AfterTurnPayload {
     pub model_id: String,
     /// Repo-relative agent writes, so proxy-mode workspaces can force-include
     /// gitignored edits. Empty in local mode.
-    #[serde(default)]
     pub written_repo_paths: Vec<String>,
     /// Snake-case mirror of `Event::TurnEnded::cancellation_category` (e.g.
     /// `"doom_loop_repetition"`). Carried as a `String` for the same
@@ -201,7 +171,6 @@ mod tests {
         let payload = BeforeTurnPayload {
             turn_number: 42,
             model_id: "grow-3".to_string(),
-            yolo_mode: true,
             conversation_message_count: 9,
             session_relationship: "subagent".to_string(),
             schema_version: "1.0".to_string(),
@@ -213,7 +182,6 @@ mod tests {
             json!({
                 "turn_number": 42,
                 "model_id": "grow-3",
-                "yolo_mode": true,
                 "conversation_message_count": 9,
                 "session_relationship": "subagent",
                 "schema_version": "1.0",
@@ -225,19 +193,17 @@ mod tests {
     }
 
     #[test]
-    fn before_turn_yolo_mode_defaults_false() {
+    fn before_turn_rejects_incomplete_payload() {
         let json = json!({
             "turn_number": 1,
             "model_id": "grow-3",
         });
-        let payload: BeforeTurnPayload = serde_json::from_value(json).unwrap();
-        assert!(!payload.yolo_mode);
+        assert!(serde_json::from_value::<BeforeTurnPayload>(json).is_err());
     }
 
     #[test]
     fn after_turn_round_trip() {
-        // Completed turn: both cancellation fields are `None` and therefore
-        // skip serialization — the wire shape is byte-identical to the legacy shape.
+        // Completed turns omit the optional cancellation fields.
         let payload = AfterTurnPayload {
             turn_number: 42,
             outcome: TurnHookOutcome::Completed,
@@ -267,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn after_turn_written_repo_paths_defaults_empty() {
+    fn after_turn_rejects_missing_written_paths() {
         let json = json!({
             "turn_number": 1,
             "outcome": "completed",
@@ -275,8 +241,7 @@ mod tests {
             "tool_call_count": 0,
             "model_id": "grow-3",
         });
-        let payload: AfterTurnPayload = serde_json::from_value(json).unwrap();
-        assert!(payload.written_repo_paths.is_empty());
+        assert!(serde_json::from_value::<AfterTurnPayload>(json).is_err());
     }
 
     #[test]
@@ -364,28 +329,13 @@ mod tests {
     }
 
     #[test]
-    fn extra_fields_ignored() {
+    fn extra_fields_rejected() {
         let json = json!({
             "turn_number": 1,
             "model_id": "grow-3",
             "future_field": "should be ignored",
         });
-        let payload: BeforeTurnPayload = serde_json::from_value(json).unwrap();
-        assert_eq!(payload.turn_number, 1);
-    }
-
-    #[test]
-    fn before_turn_yolo_false_serialized() {
-        let payload = BeforeTurnPayload {
-            turn_number: 1,
-            model_id: "grow-3".to_string(),
-            yolo_mode: false,
-            conversation_message_count: 0,
-            session_relationship: "primary".to_string(),
-            schema_version: "1.0".to_string(),
-        };
-        let serialized = serde_json::to_value(&payload).unwrap();
-        assert_eq!(serialized["yolo_mode"], json!(false));
+        assert!(serde_json::from_value::<BeforeTurnPayload>(json).is_err());
     }
 
     #[test]
@@ -398,7 +348,6 @@ mod tests {
         let req = TurnHookRequest::Before(BeforeTurnPayload {
             turn_number: 7,
             model_id: "grow-3".to_string(),
-            yolo_mode: true,
             conversation_message_count: 0,
             session_relationship: "primary".to_string(),
             schema_version: "1.0".to_string(),
@@ -410,7 +359,6 @@ mod tests {
                 "phase": "before",
                 "turn_number": 7,
                 "model_id": "grow-3",
-                "yolo_mode": true,
                 "conversation_message_count": 0,
                 "session_relationship": "primary",
                 "schema_version": "1.0",
@@ -516,31 +464,25 @@ mod tests {
         );
     }
 
-    /// Back-compat: a `before_turn` payload from an OLD shell (without the extended fields)
-    /// must still deserialize, with the new fields taking their serde defaults.
     #[test]
-    fn before_turn_legacy_payload_defaults_new_fields() {
+    fn before_turn_missing_contract_fields_is_rejected() {
         let json = json!({
             "turn_number": 3,
             "model_id": "grow-3",
-            "yolo_mode": true,
         });
-        let payload: BeforeTurnPayload = serde_json::from_value(json).unwrap();
-        assert_eq!(payload.conversation_message_count, 0);
-        assert_eq!(payload.session_relationship, DEFAULT_SESSION_RELATIONSHIP);
-        assert_eq!(payload.schema_version, DEFAULT_SCHEMA_VERSION);
+        assert!(serde_json::from_value::<BeforeTurnPayload>(json).is_err());
     }
 
-    /// Back-compat: an `after_turn` payload from an OLD shell (without the
-    /// cancellation fields) must still deserialize, defaulting both to `None`.
+    /// Cancellation detail remains optional for a completed turn.
     #[test]
-    fn after_turn_legacy_payload_defaults_new_fields() {
+    fn after_turn_completed_payload_omits_cancellation_detail() {
         let json = json!({
             "turn_number": 3,
             "outcome": "completed",
             "duration_ms": 10,
             "tool_call_count": 0,
             "model_id": "grow-3",
+            "written_repo_paths": [],
         });
         let payload: AfterTurnPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.cancellation_category, None);

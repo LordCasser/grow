@@ -155,26 +155,6 @@ mod init_metrics_tests {
             &[("path", "swap")]
         ));
         assert!(has(
-            "grow_workspace_rewind_checkpoint_capture_total",
-            &[("domain", "fs"), ("outcome", "completed")]
-        ));
-        assert!(has(
-            "grow_workspace_rewind_checkpoint_finalize_total",
-            &[("outcome", "completed")]
-        ));
-        assert!(has(
-            "grow_workspace_rewind_restore_total",
-            &[("domain", "git"), ("result", "failure")]
-        ));
-        assert!(has(
-            "grow_workspace_rewind_checkpoint_duration_seconds",
-            &[("domain", "hunk")]
-        ));
-        assert!(has(
-            "grow_workspace_rewind_non_completed_finalize_total",
-            &[("outcome", "cancelled")]
-        ));
-        assert!(has(
             "grow_workspace_toolset_swap_total",
             &[
                 ("trigger", "update_tool_config"),

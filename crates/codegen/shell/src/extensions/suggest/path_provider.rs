@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 
 use super::shell_token::{CurrentToken, build_insert_token, parse_current_token};
-use super::{RankedSuggestion, SuggestContext, SuggestionSource, splice_token_into_line};
+use super::{RankedSuggestion, SuggestContext, SuggestionSource};
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 const MAX_RESULTS: usize = 10;
@@ -26,9 +26,7 @@ impl PathProvider {
         let token_range = (tok.start, ctx.prefix().len());
 
         let cache = get_or_refresh_path_cache().await;
-        let mut results = filter_executables(&tok, token_range, &cache.executables);
-        splice_token_into_line(&mut results, &ctx.text, token_range);
-        results
+        filter_executables(&tok, token_range, &cache.executables)
     }
 }
 
@@ -71,13 +69,12 @@ fn filter_executables(
             display: exe.clone(),
             // Re-quoted like filenames: an executable named `zz;echo PWNED`
             // must insert as ONE word, never a second command.
-            insert_text: build_insert_token(tok, "", exe, false),
+            replacement: build_insert_token(tok, "", exe, false),
             description: String::new(),
             source: SuggestionSource::Path,
             priority: 0,
             is_ghost_candidate: false,
-            replace_range: Some(token_range),
-            token_text: None,
+            replace_range: token_range,
             truncated: false,
         });
     }
@@ -256,7 +253,7 @@ mod tests {
         ];
         let results = filter_executables(&tok("gr"), (0, 2), &exes);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].insert_text, "grep");
+        assert_eq!(results[0].replacement, "grep");
     }
 
     #[test]
@@ -304,8 +301,8 @@ mod tests {
         let t = extract_command_token("ls | gr").unwrap();
         let exes = vec!["grep".into()];
         let results = filter_executables(&t, (t.start, 7), &exes);
-        assert_eq!(results[0].replace_range, Some((5, 7)));
-        assert_eq!(results[0].insert_text, "grep");
+        assert_eq!(results[0].replace_range, (5, 7));
+        assert_eq!(results[0].replacement, "grep");
     }
 
     /// Metacharacter executable names insert as ONE word — accepting
@@ -315,7 +312,7 @@ mod tests {
         let exes = vec!["zz;echo PWNED".into()];
         let results = filter_executables(&tok("zz"), (0, 2), &exes);
         assert_eq!(results[0].display, "zz;echo PWNED");
-        assert_eq!(results[0].insert_text, "zz\\;echo\\ PWNED");
+        assert_eq!(results[0].replacement, "zz\\;echo\\ PWNED");
     }
 
     /// A quoted command prefix completes inside its quote style.
@@ -323,7 +320,7 @@ mod tests {
     fn filter_requotes_quoted_command_prefix() {
         let exes = vec!["grep".into()];
         let results = filter_executables(&tok("\"gr"), (0, 3), &exes);
-        assert_eq!(results[0].insert_text, "\"grep\"");
+        assert_eq!(results[0].replacement, "\"grep\"");
     }
 
     // --- scan_path_from ---

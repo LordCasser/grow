@@ -10,32 +10,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use tracing::{Level, info};
 
-use fast_worktree::{BtrfsMode, IgnoredFilesMode, WorkingTreeMode, WorktreeBuilder};
-
-/// CLI enum for BTRFS mode selection
-#[derive(Clone, Debug, Default, ValueEnum)]
-enum CliBtrfsMode {
-    /// Auto-detect: use BTRFS snapshot if source is on a BTRFS subvolume
-    #[default]
-    Auto,
-    /// Force BTRFS snapshot (error if not available)
-    Force,
-    /// Disable BTRFS snapshot, always use file-by-file copy
-    Disabled,
-}
-
-impl From<CliBtrfsMode> for BtrfsMode {
-    fn from(mode: CliBtrfsMode) -> Self {
-        match mode {
-            CliBtrfsMode::Auto => BtrfsMode::Auto,
-            CliBtrfsMode::Force => BtrfsMode::Force,
-            CliBtrfsMode::Disabled => BtrfsMode::Disabled,
-        }
-    }
-}
+use fast_worktree::{IgnoredFilesMode, WorkingTreeMode, WorktreeBuilder};
 
 #[derive(Parser)]
 #[command(name = "fast-worktree")]
@@ -84,10 +62,6 @@ enum Commands {
         #[arg(long)]
         skip: Vec<String>,
 
-        /// BTRFS snapshot mode (Linux only): auto, force, or disabled
-        #[arg(long, value_enum, default_value = "auto")]
-        btrfs: CliBtrfsMode,
-
         /// Create a standalone repo copy instead of a linked worktree.
         /// The copy has its own .git/ (CoW'd) and can be promoted via rename.
         #[arg(long, short = 's')]
@@ -119,7 +93,6 @@ fn main() -> Result<()> {
             parallelism,
             ignored_parallelism,
             skip,
-            btrfs,
             standalone,
         } => {
             let start = Instant::now();
@@ -131,7 +104,6 @@ fn main() -> Result<()> {
                 dirty = dirty,
                 ignored = ignored,
                 parallelism = parallelism,
-                btrfs = ?btrfs,
                 standalone = standalone,
                 "Creating worktree"
             );
@@ -157,7 +129,6 @@ fn main() -> Result<()> {
                 .channel_buffer(1024)
                 .working_tree_mode(working_tree)
                 .ignored_files_mode(ignored_files)
-                .btrfs_mode(btrfs.into())
                 .standalone(standalone)
                 .create()?;
 

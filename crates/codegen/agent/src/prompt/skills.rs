@@ -10,9 +10,6 @@ use std::path::{Path, PathBuf};
 use crate::plugins::discovery::PluginScope;
 use tools::implementations::skills::types::skill_name_from_path;
 pub use tools::implementations::skills::types::{SkillInfo, SkillScope};
-/// Re-export so agent-side discovery (and the shell) can name the resolved
-/// vendor-compat config without reaching into `tools` directly.
-pub use tools::types::compat::CompatConfig;
 
 use tools::implementations::skills::discovery::{
     find_command_paths, find_skill_md_paths, find_skill_paths, is_valid_skill_name,
@@ -48,8 +45,8 @@ pub struct SkillsConfig {
 
 /// List all discovered skills with their metadata.
 ///
-/// Priority order: Local (cwd/.grow/skills, cwd/.agents/skills, cwd/.claude/skills) → Intermediate dirs →
-/// Repo (repo_root/.grow/skills, repo_root/.agents/skills, repo_root/.claude/skills) → User (`~/.grow/skills`)
+/// Priority order: Local (`cwd/.grow/skills`) → Intermediate dirs →
+/// Repo (`repo_root/.grow/skills`) → User (`~/.grow/skills`)
 /// → additional paths from `config.paths`
 /// → Server (injected `config.server_skill_dirs`)
 /// → Bundled (injected `config.bundled_skill_dirs` + `~/.grow/bundled`; lowest precedence).
@@ -59,14 +56,8 @@ pub struct SkillsConfig {
 ///
 /// When `working_directory` is `None`, only User-scoped skills are returned.
 ///
-/// `compat` gates which vendor (`.claude`/`.cursor`) dirs are scanned; pass
-/// `CompatConfig::default()` to preserve the historical all-vendors behavior.
-pub async fn list_skills(
-    working_directory: Option<&str>,
-    config: &SkillsConfig,
-    compat: CompatConfig,
-) -> Vec<SkillInfo> {
-    list_skills_with_plugins(working_directory, config, None, compat).await
+pub async fn list_skills(working_directory: Option<&str>, config: &SkillsConfig) -> Vec<SkillInfo> {
+    list_skills_with_plugins(working_directory, config, None).await
 }
 
 /// List all discovered skills including plugin-provided skills.
@@ -80,7 +71,6 @@ pub async fn list_skills_with_plugins(
     working_directory: Option<&str>,
     config: &SkillsConfig,
     plugins: Option<&crate::plugins::PluginRegistry>,
-    compat: CompatConfig,
 ) -> Vec<SkillInfo> {
     let _skill_discovery_timer = crate::timing::timer("skill_discovery");
     let workspace_user_dir = crate::prompt::workspace_user::optional_workspace_user_dir();
@@ -90,7 +80,6 @@ pub async fn list_skills_with_plugins(
         working_directory,
         workspace_user_dir.as_deref(),
         &user_roots,
-        compat,
     )
     .await;
 
@@ -145,7 +134,6 @@ pub fn collect_skill_config_dirs(
     workspace_user_dir: Option<&Path>,
     user_roots: &[PathBuf],
     config_paths: &[String],
-    compat: CompatConfig,
 ) -> Vec<PathBuf> {
     let git_root = cwd.and_then(|c| {
         git2::Repository::discover(c)
@@ -167,10 +155,7 @@ pub fn collect_skill_config_dirs(
         }
     };
 
-    // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat
-    // config; `.grow` and `.agents` are always present. When all cells are on
-    // this list equals the historical `[".grow", ".agents", ".claude", ".cursor"]`.
-    let config_dir_names = compat.skill_config_dirs();
+    let config_dir_names = [".grow"];
 
     // Priority 1 & 2: Walk from cwd up to the git root.
     if let Some(cwd) = cwd {
@@ -223,7 +208,7 @@ pub fn collect_skill_config_dirs(
 /// Determine the skill scope for a config directory based on its location
 /// relative to `cwd`, `git_root`, and the user's home directory.
 fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>) -> SkillScope {
-    // Home-level dirs (e.g. ~/.grow/, ~/.agents/, ~/.claude/) are User scope.
+    // Home-level `~/.grow/` is User scope.
     #[allow(deprecated)]
     if let Some(home) = std::env::home_dir()
         && dir.parent() == Some(home.as_path())
@@ -251,7 +236,7 @@ fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>)
 /// Collect paths into `out`, deduplicating by canonical path.
 ///
 /// Skill/command discovery does **not** consult `.gitignore`. Auto-discovery
-/// only visits known config roots (`.grow`, `.agents`, `.claude`, `.cursor`),
+/// only visits the known `.grow` config root,
 /// which teams often gitignore as local-only config while still expecting them
 /// to load. Hiding a skill uses `[skills] ignore` in config, not repo ignore
 /// rules. AGENTS.md discovery still honors gitignore — that is content, not
@@ -279,13 +264,11 @@ async fn list_skills_with_options(
     working_directory: Option<&str>,
     workspace_user_dir: Option<&Path>,
     global_dir: &Path,
-    compat: CompatConfig,
 ) -> Vec<SkillInfo> {
     list_skills_with_roots(
         working_directory,
         workspace_user_dir,
         &[global_dir.to_path_buf()],
-        compat,
     )
     .await
 }
@@ -294,7 +277,6 @@ async fn list_skills_with_roots(
     working_directory: Option<&str>,
     workspace_user_dir: Option<&Path>,
     user_roots: &[PathBuf],
-    compat: CompatConfig,
 ) -> Vec<SkillInfo> {
     let cwd = working_directory.map(PathBuf::from);
 
@@ -305,7 +287,7 @@ async fn list_skills_with_roots(
     });
 
     let config_dirs =
-        collect_skill_config_dirs(cwd.as_deref(), workspace_user_dir, user_roots, &[], compat);
+        collect_skill_config_dirs(cwd.as_deref(), workspace_user_dir, user_roots, &[]);
 
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
@@ -754,13 +736,8 @@ mod tests {
             server_skill_dirs: vec![server.path().to_string_lossy().into_owned()],
             ..Default::default()
         };
-        let skills = list_skills_with_plugins(
-            Some(&cwd.path().to_string_lossy()),
-            &config,
-            None,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills =
+            list_skills_with_plugins(Some(&cwd.path().to_string_lossy()), &config, None).await;
 
         let server_only = skills
             .iter()
@@ -790,13 +767,8 @@ mod tests {
             bundled_skill_dirs: vec![bundled.path().to_string_lossy().into_owned()],
             ..Default::default()
         };
-        let skills = list_skills_with_plugins(
-            Some(&cwd.path().to_string_lossy()),
-            &config,
-            None,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills =
+            list_skills_with_plugins(Some(&cwd.path().to_string_lossy()), &config, None).await;
 
         let helper = skills
             .iter()
@@ -822,13 +794,8 @@ mod tests {
             bundled_skill_dirs: vec![bundled.path().to_string_lossy().into_owned()],
             ..Default::default()
         };
-        let skills = list_skills_with_plugins(
-            Some(&cwd.path().to_string_lossy()),
-            &config,
-            None,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills =
+            list_skills_with_plugins(Some(&cwd.path().to_string_lossy()), &config, None).await;
 
         let shared: Vec<_> = skills.iter().filter(|s| s.name == "shared").collect();
         assert_eq!(shared.len(), 1, "shared should appear once");
@@ -1335,7 +1302,6 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             Some(&user_dir),
             tmp.path(),
-            CompatConfig::default(),
         )
         .await;
 
@@ -1365,7 +1331,6 @@ mod tests {
             Some(user_dir.to_str().unwrap()),
             Some(&user_dir),
             tmp.path(),
-            CompatConfig::default(),
         )
         .await;
 
@@ -1389,13 +1354,8 @@ mod tests {
         );
 
         // Pass None — simulates env vars not set
-        let skills = list_skills_with_options(
-            Some(repo_root.to_str().unwrap()),
-            None,
-            tmp.path(),
-            CompatConfig::default(),
-        )
-        .await;
+        let skills =
+            list_skills_with_options(Some(repo_root.to_str().unwrap()), None, tmp.path()).await;
 
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(
@@ -1421,7 +1381,6 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             Some(&user_dir),
             tmp.path(),
-            CompatConfig::default(),
         )
         .await;
 
@@ -1803,12 +1762,7 @@ mod tests {
             bundled_skill_dirs: vec![],
         };
 
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills(Some(repo_root.to_str().unwrap()), &config).await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"custom-skill"),
@@ -1836,12 +1790,7 @@ mod tests {
             bundled_skill_dirs: vec![],
         };
 
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills(Some(repo_root.to_str().unwrap()), &config).await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"wanted"), "wanted not found: {names:?}");
         assert!(
@@ -1876,12 +1825,7 @@ mod tests {
             bundled_skill_dirs: vec![],
         };
 
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills(Some(repo_root.to_str().unwrap()), &config).await;
         let count = skills.iter().filter(|s| s.name == "dup-skill").count();
 
         assert_eq!(count, 1, "dup-skill should only be loaded once");
@@ -1912,12 +1856,7 @@ mod tests {
             ..Default::default()
         };
 
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills(Some(repo_root.to_str().unwrap()), &config).await;
 
         let overlaps: Vec<&SkillInfo> = skills
             .iter()
@@ -1997,12 +1936,7 @@ mod tests {
             bundled_skill_dirs: vec![],
         };
 
-        let skills = list_skills(
-            Some(cwd.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills(Some(cwd.to_str().unwrap()), &config).await;
         let same_skills: Vec<&SkillInfo> = skills.iter().filter(|s| s.name == "same").collect();
 
         assert_eq!(
@@ -2048,12 +1982,7 @@ mod tests {
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
         };
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills(Some(repo_root.to_str().unwrap()), &config).await;
 
         let commit = skills.iter().find(|s| s.name == "commit");
         let review = skills.iter().find(|s| s.name == "review");
@@ -2092,12 +2021,7 @@ mod tests {
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
         };
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &config,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills(Some(repo_root.to_str().unwrap()), &config).await;
         assert!(
             skills.iter().all(|s| s.enabled),
             "all skills should be enabled when disabled list is empty"
@@ -2120,13 +2044,7 @@ mod tests {
             "commit",
         );
 
-        let skills = list_skills_with_options(
-            Some(repo_root.to_str().unwrap()),
-            None,
-            &home,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills_with_options(Some(repo_root.to_str().unwrap()), None, &home).await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"commit"),
@@ -2154,13 +2072,7 @@ mod tests {
         )
         .unwrap();
 
-        let raw = list_skills_with_options(
-            Some(repo_root.to_str().unwrap()),
-            None,
-            &home,
-            CompatConfig::default(),
-        )
-        .await;
+        let raw = list_skills_with_options(Some(repo_root.to_str().unwrap()), None, &home).await;
 
         // Both are discovered at the list_skills_with_options level (different canonical paths)
         assert_eq!(
@@ -2195,25 +2107,19 @@ mod tests {
 
     // ── Command file discovery ────────────────────────────────────────
 
-    /// Regression: project `.claude/commands` often sits under a full `.claude/**`
-    /// gitignore with only `!.claude/skills/**` re-included (local-only vendor
-    /// config). User-scoped `~/.claude/commands` still loaded; project commands
-    /// did not — so `/frontend` never appeared for the large multi-package repo.
+    /// Grow skill roots remain discoverable when local configuration is
+    /// gitignored. `[skills] ignore` is the canonical exclusion mechanism.
     #[tokio::test]
-    async fn project_claude_commands_load_even_when_gitignored() {
+    async fn project_grow_commands_load_even_when_gitignored() {
         let tmp = tempfile::tempdir().expect("create tempdir");
         let repo_root = tmp.path().join("repo");
         fs::create_dir_all(&repo_root).expect("create repo dir");
         init_git_repo(&repo_root);
 
-        // Mirror the multi-package-repo-style ignore: ignore all of .claude, re-include skills only.
-        fs::write(
-            repo_root.join(".gitignore"),
-            "**/.claude\n**/.claude/**\n!.claude/\n!.claude/skills/\n!.claude/skills/**\n",
-        )
-        .expect("write gitignore");
+        fs::write(repo_root.join(".gitignore"), "**/.grow\n**/.grow/**\n")
+            .expect("write gitignore");
 
-        let commands = repo_root.join(".claude").join("commands");
+        let commands = repo_root.join(".grow").join("commands");
         fs::create_dir_all(&commands).expect("create commands dir");
         fs::write(
             commands.join("frontend.md"),
@@ -2221,25 +2127,22 @@ mod tests {
         )
         .expect("write frontend.md");
 
-        // Skill under the force-included path must still load too.
         write_skill_md(
-            &repo_root.join(".claude").join("skills").join("bp-deltas"),
+            &repo_root.join(".grow").join("skills").join("bp-deltas"),
             "bp-deltas",
         );
 
         let repo_str = repo_root.to_str().unwrap_or_default();
-        let skills =
-            list_skills_with_options(Some(repo_str), None, tmp.path(), CompatConfig::default())
-                .await;
+        let skills = list_skills_with_options(Some(repo_str), None, tmp.path()).await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
 
         assert!(
             names.contains(&"frontend"),
-            "gitignored project .claude/commands/frontend.md must load as a slash skill, got: {names:?}"
+            "gitignored project .grow/commands/frontend.md must load as a slash skill, got: {names:?}"
         );
         assert!(
             names.contains(&"bp-deltas"),
-            "project .claude/skills still loads, got: {names:?}"
+            "project .grow/skills still loads, got: {names:?}"
         );
 
         let frontend = skills
@@ -2294,9 +2197,9 @@ mod tests {
         fs::create_dir_all(&repo_root).expect("create repo dir");
         init_git_repo(&repo_root);
 
-        let claude_dir = repo_root.join(".claude");
-        write_skill_md(&claude_dir.join("skills").join("deploy"), "deploy");
-        let commands = claude_dir.join("commands");
+        let grow_dir = repo_root.join(".grow");
+        write_skill_md(&grow_dir.join("skills").join("deploy"), "deploy");
+        let commands = grow_dir.join("commands");
         fs::create_dir_all(&commands).expect("create commands dir");
         fs::write(
             commands.join("deploy.md"),
@@ -2305,9 +2208,7 @@ mod tests {
         .expect("write deploy.md command");
 
         let repo_str = repo_root.to_str().unwrap_or_default();
-        let raw =
-            list_skills_with_options(Some(repo_str), None, tmp.path(), CompatConfig::default())
-                .await;
+        let raw = list_skills_with_options(Some(repo_str), None, tmp.path()).await;
 
         let deploy_entries: Vec<_> = raw.iter().filter(|s| s.name == "deploy").collect();
         assert_eq!(deploy_entries.len(), 2);
@@ -2425,13 +2326,7 @@ mod tests {
         // Create <home>/bundled/ but no skills/ subdirectory
         fs::create_dir_all(home.join("bundled")).unwrap();
 
-        let skills = list_skills_with_options(
-            Some(repo_root.to_str().unwrap()),
-            None,
-            &home,
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills_with_options(Some(repo_root.to_str().unwrap()), None, &home).await;
         let bundled: Vec<_> = skills
             .iter()
             .filter(|s| s.path.contains("/bundled/"))
@@ -2443,10 +2338,8 @@ mod tests {
         );
     }
 
-    // ── collect_skill_config_dirs vendor gating ────────────
-
     #[test]
-    fn collect_skill_config_dirs_gates_vendor_dirs() {
+    fn collect_skill_config_dirs_uses_only_grow_root() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         // Not a git repo → falls to the cwd-only branch (no upward walk).
@@ -2456,28 +2349,20 @@ mod tests {
 
         let ends_with = |dirs: &[PathBuf], suffix: &str| dirs.iter().any(|d| d.ends_with(suffix));
 
-        // All on → both vendor dirs present (byte-for-byte legacy behavior).
-        let all = collect_skill_config_dirs(
-            Some(cwd),
-            None,
-            &[tmp.path().to_path_buf()],
-            &[],
-            CompatConfig::default(),
+        let dirs = collect_skill_config_dirs(Some(cwd), None, &[tmp.path().to_path_buf()], &[]);
+        assert!(ends_with(&dirs, ".grow"), "grow must remain: {dirs:?}");
+        assert!(
+            !ends_with(&dirs, ".agents"),
+            "foreign root leaked: {dirs:?}"
         );
-        assert!(ends_with(&all, ".claude"), "claude missing: {all:?}");
-        assert!(ends_with(&all, ".cursor"), "cursor missing: {all:?}");
-
-        // cursor.skills off → .cursor dropped, .claude kept.
-        let mut compat = CompatConfig::default();
-        compat.cursor.skills = false;
-        let dirs =
-            collect_skill_config_dirs(Some(cwd), None, &[tmp.path().to_path_buf()], &[], compat);
+        assert!(
+            !ends_with(&dirs, ".claude"),
+            "foreign root leaked: {dirs:?}"
+        );
         assert!(
             !ends_with(&dirs, ".cursor"),
-            "cursor must be gated off: {dirs:?}"
+            "foreign root leaked: {dirs:?}"
         );
-        assert!(ends_with(&dirs, ".claude"), "claude must remain: {dirs:?}");
-        assert!(ends_with(&dirs, ".grow"), "grow must remain: {dirs:?}");
     }
 
     // ── Same-scope frontmatter-name collisions (copied skill dirs) ──────
@@ -2578,9 +2463,9 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_same_scope_cross_harness_loser_resurfaces() {
-        // A `.claude` skill claiming a `.grow`-owned name (both User scope)
-        // was silently hidden before; it now re-keys to its dir basename.
+    fn dedupe_same_scope_cross_root_loser_resurfaces() {
+        // A custom-root skill claiming a `.grow`-owned name at the same scope
+        // re-keys to its directory basename.
         let out = dedupe_skills(vec![
             named_skill(
                 "review",
@@ -2589,7 +2474,7 @@ mod tests {
             ),
             named_skill(
                 "review",
-                "/u/.claude/skills/my-review/SKILL.md",
+                "/u/custom-skills/my-review/SKILL.md",
                 SkillScope::User,
             ),
         ]);
@@ -2614,14 +2499,14 @@ mod tests {
             ),
             named_skill(
                 "japandi2",
-                "/u/.claude/skills/japandi2/SKILL.md",
+                "/u/custom-skills/japandi2/SKILL.md",
                 SkillScope::User,
             ),
         ]);
         let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["japandi", "japandi2"]);
         let owner = &out[1];
-        assert_eq!(owner.path, "/u/.claude/skills/japandi2/SKILL.md");
+        assert_eq!(owner.path, "/u/custom-skills/japandi2/SKILL.md");
         assert_eq!(owner.display_name, None, "genuine owner, not a re-key");
     }
 
@@ -2643,8 +2528,8 @@ mod tests {
 
     #[test]
     fn dedupe_same_scope_same_basename_still_drops() {
-        // Same name AND same dir basename across two same-scope roots
-        // (e.g. ~/.grow/skills and ~/.agents/skills): first-seen wins.
+        // Same name AND same dir basename across two same-scope roots:
+        // first-seen wins.
         let out = dedupe_skills(vec![
             named_skill(
                 "japandi",
@@ -2653,7 +2538,7 @@ mod tests {
             ),
             named_skill(
                 "japandi",
-                "/u/.agents/skills/japandi/SKILL.md",
+                "/u/custom-skills/japandi/SKILL.md",
                 SkillScope::User,
             ),
         ]);
@@ -2680,12 +2565,7 @@ mod tests {
             "zz-copyfix-japandi",
         );
 
-        let skills = list_skills(
-            Some(repo_root.to_str().unwrap()),
-            &SkillsConfig::default(),
-            CompatConfig::default(),
-        )
-        .await;
+        let skills = list_skills(Some(repo_root.to_str().unwrap()), &SkillsConfig::default()).await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"zz-copyfix-japandi"),

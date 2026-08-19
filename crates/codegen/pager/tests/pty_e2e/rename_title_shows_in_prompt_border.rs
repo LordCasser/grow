@@ -186,8 +186,8 @@ async fn rename_title_shows_in_prompt_border() {
     quit_gracefully(harness);
 }
 
-/// The border title survives quit → `--continue`: manual-ness is persisted in
-/// `summary.json` (`title_is_manual`) and re-hydrated into `display_name` on
+/// The border title survives quit → `--continue`: a user-authored
+/// `session/title` event is projected into `summary.json` and re-hydrated into `display_name` on
 /// resume. The inverse holds too: a session that was never renamed resumes
 /// with a plain top border (auto titles never show on the border).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

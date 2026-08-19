@@ -77,7 +77,7 @@ impl GatePreflight {
         matches!(self.policy_decision(), Some(Decision::Ask))
     }
 
-    /// An `Ask` from either bash gate; blocks the YOLO fast path.
+    /// An `Ask` from either bash gate; blocks the always-approve fast path.
     pub(crate) fn shell_forced_prompt(&self) -> bool {
         self.bash_command.as_ref().is_some_and(GateDecision::is_ask)
             || self.shell_file_forced_prompt()

@@ -3,7 +3,6 @@
 //! Tracking state for spawned child sessions. [`SubagentInfo`] is the single
 //! source of truth — used by both the subagent pane (display) and the
 //! permission view (provenance labels).
-use serde::Deserialize;
 use shell::session::storage::{ReplayEmission, stream_replay_updates_at};
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,8 +17,6 @@ pub struct SubagentInfo {
     pub child_session_id: Arc<str>,
     pub description: Arc<str>,
     pub subagent_type: Arc<str>,
-    pub persona: Option<Arc<str>>,
-    pub role: Option<Arc<str>>,
     pub model: Option<Arc<str>>,
     /// "new" or "resumed".
     pub context_source: Option<Arc<str>>,
@@ -113,21 +110,6 @@ impl SubagentInfo {
         }
     }
 }
-/// Minimal pager-side view of the shell's on-disk `SubagentMeta`.
-#[derive(Debug, Deserialize)]
-struct SubagentMetaSlice {
-    #[serde(default)]
-    parent_session_id: Option<String>,
-    #[serde(default)]
-    child_session_id: Option<String>,
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default)]
-    child_cwd: Option<String>,
-    #[serde(default)]
-    worktree_path: Option<String>,
-}
-
 fn session_dir_at(
     grow_home: &std::path::Path,
     cwd: &std::path::Path,
@@ -142,64 +124,36 @@ fn session_dir_at(
 }
 
 /// Resolve the immediate durable children owned by `parent_session_id`.
-/// Ownership lives under the parent's `subagents/<subagent_id>/meta.json`;
-/// child transcripts themselves live in their normal cwd/session directory.
-/// Reading this mapping prevents a global child-session lookup from attaching
-/// a copied or otherwise unrelated lifecycle log to the wrong root view.
+/// Ownership and child location come exclusively from parent Timeline spawn
+/// facts; child transcripts live in their normal cwd/session directory.
 fn durable_child_session_dirs(
     grow_home: &std::path::Path,
     parent_session_id: &str,
     parent_session_dir: &std::path::Path,
 ) -> std::collections::BTreeMap<String, std::path::PathBuf> {
-    let subagents_dir = parent_session_dir.join("subagents");
-    let Ok(entries) = std::fs::read_dir(&subagents_dir) else {
+    let Ok(timeline) = shell::session::storage::read_timeline_in_session_dir(parent_session_dir)
+    else {
         return std::collections::BTreeMap::new();
     };
-    let mut meta_paths = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
-            (file_type.is_dir() && !file_type.is_symlink()).then(|| entry.path().join("meta.json"))
-        })
-        .collect::<Vec<_>>();
-    meta_paths.sort();
-
     let mut children = std::collections::BTreeMap::new();
-    for meta_path in meta_paths {
-        let meta = match std::fs::read_to_string(&meta_path)
-            .ok()
-            .and_then(|content| serde_json::from_str::<SubagentMetaSlice>(&content).ok())
-        {
-            Some(meta) => meta,
-            None => {
-                tracing::debug!(path = %meta_path.display(), "skipping unreadable subagent ownership metadata");
-                continue;
-            }
-        };
-        if meta.parent_session_id.as_deref() != Some(parent_session_id) {
-            tracing::debug!(
-                path = %meta_path.display(),
-                expected_parent = parent_session_id,
-                actual_parent = meta.parent_session_id.as_deref(),
-                "skipping subagent metadata owned by another parent"
-            );
-            continue;
-        }
-        let (Some(child_session_id), Some(child_cwd)) = (meta.child_session_id, meta.child_cwd)
+    for event in timeline.events() {
+        let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
+            &event.kind
         else {
-            tracing::debug!(path = %meta_path.display(), "skipping incomplete subagent ownership metadata");
             continue;
         };
-        if child_session_id.is_empty() || child_cwd.is_empty() {
-            continue;
-        }
         let child_dir = session_dir_at(
             grow_home,
-            std::path::Path::new(&child_cwd),
-            &child_session_id,
+            std::path::Path::new(&spawn.child_cwd),
+            &spawn.child_session_id,
         );
-        children.insert(child_session_id, child_dir);
+        children.insert(spawn.child_session_id.clone(), child_dir);
     }
+    tracing::trace!(
+        parent_session_id,
+        children = children.len(),
+        "projected durable child ownership from Timeline"
+    );
     children
 }
 /// Grow home for the replay path. In production this is just `grow_home()`; the
@@ -226,41 +180,40 @@ fn effective_grow_home() -> std::path::PathBuf {
     }
     shell::util::grow_home::grow_home()
 }
-/// Best-effort enrichment from the shell's on-disk `meta.json`.
-pub(crate) fn enrich_from_meta(
+/// Best-effort enrichment from the parent's canonical spawn fact.
+pub(crate) fn enrich_from_timeline(
     info: &mut SubagentInfo,
     parent_cwd: &std::path::Path,
     parent_session_id: &str,
 ) {
-    enrich_from_meta_with_home(info, &effective_grow_home(), parent_cwd, parent_session_id);
+    enrich_from_timeline_with_home(info, &effective_grow_home(), parent_cwd, parent_session_id);
 }
-fn enrich_from_meta_with_home(
+fn enrich_from_timeline_with_home(
     info: &mut SubagentInfo,
     grow_home: &std::path::Path,
     parent_cwd: &std::path::Path,
     parent_session_id: &str,
 ) {
-    let meta_path = session_dir_at(grow_home, parent_cwd, parent_session_id)
-        .join("subagents")
-        .join(info.subagent_id.as_ref())
-        .join("meta.json");
-    let content = match std::fs::read_to_string(&meta_path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!(error = %e, "meta.json not found");
-            return;
-        }
+    let parent_dir = session_dir_at(grow_home, parent_cwd, parent_session_id);
+    let Ok(timeline) = shell::session::storage::read_timeline_in_session_dir(&parent_dir) else {
+        return;
     };
-    let meta: SubagentMetaSlice = match serde_json::from_str(&content) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::debug!(error = %e, "meta.json parse failed");
-            return;
-        }
+    let Some(spawn) =
+        timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) if spawn.subagent_id == info.subagent_id.as_ref() => Some(spawn),
+                _ => None,
+            })
+    else {
+        return;
     };
-    info.prompt = meta.prompt.map(Arc::from);
-    info.child_cwd = meta.child_cwd.map(Arc::from);
-    info.worktree_path = meta.worktree_path.map(Arc::from);
+    info.prompt = Some(Arc::from(spawn.prompt.as_str()));
+    info.child_cwd = Some(Arc::from(spawn.child_cwd.as_str()));
+    info.worktree_path = spawn.worktree_path.as_deref().map(Arc::from);
 }
 /// Best-effort replay of a child's inherited conversation, streamed one typed
 /// update at a time so a large inherited transcript is not materialized as a
@@ -475,40 +428,6 @@ fn join_meta_parts(parts: &[Option<&str>]) -> String {
         non_empty.join(" \u{00b7} ")
     }
 }
-/// Collapse `(persona, role)` to a single label when both refer to the same
-/// title. Comparison is case-insensitive after trimming surrounding whitespace.
-///
-/// Behavior:
-/// - Either side that is `Some(s)` where `s.trim().is_empty()` is treated as
-///   `None` first, so a stray empty/whitespace-only string never sneaks into
-///   the joined output as a leading separator.
-/// - Both present and titles match -> returns `(Some(persona), None)` so
-///   callers render only the persona once.
-/// - Both present and titles differ -> returns the inputs unchanged.
-/// - Either or both absent -> returns the inputs unchanged.
-///
-/// ASCII-only comparison is intentional: persona/role identifiers in this
-/// codebase are ASCII slugs (lowercase names from the bundle registry).
-/// `eq_ignore_ascii_case` is allocation-free; switching to Unicode case
-/// folding would allocate per render and is not needed here.
-///
-/// Lifetimes on `persona` and `role` are independent (`'a`, `'b`) so the two
-/// inputs do not need to share a borrow scope.
-///
-/// This is the single source of truth for the role/persona dedup in subagent
-/// metadata strings; the scrollback `(persona · role · model)` parenthetical
-/// funnels through it via [`format_subagent_meta`].
-fn dedup_persona_role<'a, 'b>(
-    persona: Option<&'a str>,
-    role: Option<&'b str>,
-) -> (Option<&'a str>, Option<&'b str>) {
-    let persona = persona.filter(|s| !s.trim().is_empty());
-    let role = role.filter(|s| !s.trim().is_empty());
-    match (persona, role) {
-        (Some(p), Some(r)) if p.trim().eq_ignore_ascii_case(r.trim()) => (Some(p), None),
-        _ => (persona, role),
-    }
-}
 pub(crate) fn format_type_label(subagent_type: &str) -> &str {
     match subagent_type {
         "general-purpose" => "general",
@@ -539,41 +458,22 @@ fn parse_tag_prefix(description: &str) -> (Option<&str>, &str) {
 }
 /// Single consolidated label + display description for a subagent row.
 ///
-/// Precedence for the label (highest first):
-/// 1. `persona` — semantic, parent-supplied at spawn time.
-/// 2. `role`    — config-defined preset.
-/// 3. `subagent_type` (only when **not** `general-purpose`) — `explore`,
+/// Precedence for the label:
+/// 1. `subagent_type` (only when **not** `general-purpose`) — `explore`,
 ///    `plan`, or any custom type carries real signal.
-/// 4. `[tag]` parsed from the description — fallback when nothing above
+/// 2. `[tag]` parsed from the description — fallback when nothing above
 ///    identifies the agent and `subagent_type` is the meaningless default.
-/// 5. `"general"` — final fallback when `subagent_type == "general-purpose"`
-///    and no persona / role / tag is present.
+/// 3. `"general"` — final fallback.
 ///
 /// The returned label has its first character capitalized for display
-/// (e.g. `explore` → `Explore`, `implementer` → `Implementer`). Personas,
-/// roles, and tags are conventionally lowercase ASCII slugs, so callers
-/// expect the rendering to do the title-casing.
+/// (e.g. `explore` → `Explore`).
 ///
 /// The returned description always has any leading `[tag]` prefix stripped,
 /// regardless of whether the tag was used as the label, so callers never
 /// render `[tag]` bracket noise inline.
 pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
     let (tag, clean_desc) = parse_tag_prefix(&info.description);
-    let raw_label = if let Some(p) = info
-        .persona
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        p.to_string()
-    } else if let Some(r) = info
-        .role
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        r.to_string()
-    } else if info.subagent_type.as_ref() != "general-purpose" {
+    let raw_label = if info.subagent_type.as_ref() != "general-purpose" {
         format_type_label(&info.subagent_type).to_string()
     } else if let Some(tag) = tag {
         tag.to_string()
@@ -598,13 +498,8 @@ pub(crate) fn format_subagent_title(info: &SubagentInfo) -> String {
         format!("{label} {description}")
     }
 }
-pub(crate) fn format_subagent_meta(
-    persona: Option<&str>,
-    role: Option<&str>,
-    model: Option<&str>,
-) -> String {
-    let (persona, role) = dedup_persona_role(persona, role);
-    let bare = join_meta_parts(&[persona, role, model]);
+pub(crate) fn format_subagent_meta(model: Option<&str>) -> String {
+    let bare = join_meta_parts(&[model]);
     if bare.is_empty() {
         bare
     } else {
@@ -677,8 +572,6 @@ mod tests {
             child_session_id: "cs-1".into(),
             description: "test task".into(),
             subagent_type: "explore".into(),
-            persona: None,
-            role: None,
             model: None,
             context_source: None,
             resumed_from: None,
@@ -728,8 +621,7 @@ mod tests {
             forked_from: None,
             pending_prompts: VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -908,21 +800,11 @@ mod tests {
     }
     #[test]
     fn subagent_meta_empty() {
-        assert_eq!(format_subagent_meta(None, None, None), "");
+        assert_eq!(format_subagent_meta(None), "");
     }
     #[test]
-    fn subagent_meta_all_fields() {
-        assert_eq!(
-            format_subagent_meta(Some("researcher"), Some("analyst"), Some("grow-3")),
-            " (researcher \u{00b7} analyst \u{00b7} grow-3)"
-        );
-    }
-    #[test]
-    fn subagent_meta_partial_skips_nones() {
-        assert_eq!(
-            format_subagent_meta(Some("researcher"), None, Some("grow-3")),
-            " (researcher \u{00b7} grow-3)"
-        );
+    fn subagent_meta_model() {
+        assert_eq!(format_subagent_meta(Some("grow-3")), " (grow-3)");
     }
     #[test]
     fn type_label_abbreviates_general_purpose() {
@@ -960,59 +842,6 @@ mod tests {
         assert_eq!(format_context_badge(&make_info()), "");
     }
     #[test]
-    fn subagent_meta_collapses_duplicate_persona_role() {
-        assert_eq!(
-            format_subagent_meta(Some("reviewer"), Some("reviewer"), Some("grow-3")),
-            " (reviewer \u{00b7} grow-3)"
-        );
-    }
-    #[test]
-    fn subagent_meta_keeps_distinct_persona_role() {
-        assert_eq!(
-            format_subagent_meta(Some("researcher"), Some("analyst"), None),
-            " (researcher \u{00b7} analyst)"
-        );
-    }
-    #[test]
-    fn subagent_meta_only_role_when_persona_absent() {
-        assert_eq!(
-            format_subagent_meta(None, Some("reviewer"), None),
-            " (reviewer)"
-        );
-    }
-    #[test]
-    fn subagent_meta_only_persona_when_role_absent() {
-        assert_eq!(
-            format_subagent_meta(Some("reviewer"), None, None),
-            " (reviewer)"
-        );
-    }
-    #[test]
-    fn subagent_meta_drops_both_empty_persona_role() {
-        assert_eq!(
-            format_subagent_meta(Some(""), Some(" "), Some("grow-3")),
-            " (grow-3)"
-        );
-    }
-    #[test]
-    fn label_uses_persona_when_set() {
-        let mut info = make_info();
-        info.persona = Some("implementer".into());
-        info.role = Some("any".into());
-        info.subagent_type = "general-purpose".into();
-        let (label, desc) = format_subagent_label(&info);
-        assert_eq!(label, "Implementer");
-        assert_eq!(desc, "test task");
-    }
-    #[test]
-    fn label_falls_back_to_role_when_no_persona() {
-        let mut info = make_info();
-        info.role = Some("analyst".into());
-        info.subagent_type = "general-purpose".into();
-        let (label, _) = format_subagent_label(&info);
-        assert_eq!(label, "Analyst");
-    }
-    #[test]
     fn label_uses_subagent_type_when_meaningful() {
         let mut info = make_info();
         info.subagent_type = "explore".into();
@@ -1042,21 +871,11 @@ mod tests {
     #[test]
     fn label_strips_tag_prefix_even_when_unused() {
         let mut info = make_info();
-        info.persona = Some("reviewer".into());
         info.subagent_type = "general-purpose".into();
         info.description = "[review] check the diff".into();
         let (label, desc) = format_subagent_label(&info);
-        assert_eq!(label, "Reviewer");
+        assert_eq!(label, "Review");
         assert_eq!(desc, "check the diff");
-    }
-    #[test]
-    fn label_treats_whitespace_persona_as_absent() {
-        let mut info = make_info();
-        info.persona = Some("   ".into());
-        info.role = Some("analyst".into());
-        info.subagent_type = "general-purpose".into();
-        let (label, _) = format_subagent_label(&info);
-        assert_eq!(label, "Analyst");
     }
     #[test]
     fn label_treats_empty_tag_as_absent() {
@@ -1083,19 +902,47 @@ mod tests {
         let (label, _) = format_subagent_label(&info);
         assert_eq!(label, "Custom-agent");
     }
-    #[test]
-    fn label_preserves_already_capitalized_persona() {
-        let mut info = make_info();
-        info.persona = Some("Reviewer".into());
-        let (label, _) = format_subagent_label(&info);
-        assert_eq!(label, "Reviewer");
+    fn write_spawn_timeline(
+        dir: &std::path::Path,
+        subagent_id: &str,
+        child_session_id: &str,
+        prompt: &str,
+        child_cwd: &str,
+        worktree_path: Option<&str>,
+    ) {
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                    subagent_id: subagent_id.into(),
+                    child_session_id: child_session_id.into(),
+                    subagent_type: "general-purpose".into(),
+                    description: "task".into(),
+                    prompt: prompt.into(),
+                    context_source: chat_state::SubagentContextSource::New,
+                    source_ref: None,
+                    context_normalized: false,
+                    resumed_from: None,
+                    parent_prompt_id: None,
+                    capability_mode: None,
+                    permission_mode: None,
+                    effective_permission_mode: None,
+                    workflow_run_id: None,
+                    goal_id: None,
+                    child_cwd: child_cwd.into(),
+                    worktree_path: worktree_path.map(str::to_owned),
+                    effective_model_id: "grow-3".into(),
+                }),
+            ))
+            .unwrap();
+        let mut bytes = Vec::new();
+        for event in timeline.events() {
+            serde_json::to_writer(&mut bytes, event).unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(dir.join("timeline.jsonl"), bytes).unwrap();
     }
-    fn write_meta_json(dir: &std::path::Path, subagent_id: &str, json: &str) {
-        let meta_dir = dir.join("subagents").join(subagent_id);
-        std::fs::create_dir_all(&meta_dir).unwrap();
-        std::fs::write(meta_dir.join("meta.json"), json).unwrap();
-    }
-    /// Build a session dir matching the path formula used by `enrich_from_meta_with_home`.
+    /// Build a session dir matching the canonical session path formula.
     fn setup_enrichment_dir(
         grow_home: &std::path::Path,
         cwd: &std::path::Path,
@@ -1109,24 +956,30 @@ mod tests {
         sessions_dir
     }
     #[test]
-    fn enrich_from_meta_populates_fields() {
+    fn enrich_from_timeline_populates_fields() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = std::path::Path::new("/home/user/project");
         let session_id = "sess-abc";
         let session_dir = setup_enrichment_dir(tmp.path(), cwd, session_id);
-        let json = r#"{"prompt":"do stuff","child_cwd":"/tmp/work","worktree_path":"/tmp/wt"}"#;
-        write_meta_json(&session_dir, "sa-1", json);
+        write_spawn_timeline(
+            &session_dir,
+            "sa-1",
+            "child-1",
+            "do stuff",
+            "/tmp/work",
+            Some("/tmp/wt"),
+        );
         let mut info = make_info();
-        enrich_from_meta_with_home(&mut info, tmp.path(), cwd, session_id);
+        enrich_from_timeline_with_home(&mut info, tmp.path(), cwd, session_id);
         assert_eq!(info.prompt.as_deref(), Some("do stuff"));
         assert_eq!(info.child_cwd.as_deref(), Some("/tmp/work"));
         assert_eq!(info.worktree_path.as_deref(), Some("/tmp/wt"));
     }
     #[test]
-    fn enrich_from_meta_missing_file_is_noop() {
+    fn enrich_from_timeline_missing_file_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let mut info = make_info();
-        enrich_from_meta_with_home(
+        enrich_from_timeline_with_home(
             &mut info,
             tmp.path(),
             std::path::Path::new("/nowhere"),
@@ -1137,34 +990,14 @@ mod tests {
         assert!(info.worktree_path.is_none());
     }
     #[test]
-    fn enrich_from_meta_malformed_json_is_noop() {
+    fn enrich_from_timeline_malformed_json_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = std::path::Path::new("/home/user");
         let session_dir = setup_enrichment_dir(tmp.path(), cwd, "sess-x");
-        write_meta_json(&session_dir, "sa-1", "not json{{{");
+        std::fs::write(session_dir.join("timeline.jsonl"), "not json{{{\n").unwrap();
         let mut info = make_info();
-        enrich_from_meta_with_home(&mut info, tmp.path(), cwd, "sess-x");
+        enrich_from_timeline_with_home(&mut info, tmp.path(), cwd, "sess-x");
         assert!(info.prompt.is_none());
-    }
-    #[test]
-    fn deserialize_meta_slice_ignores_unknown_fields() {
-        let json = r#"{"prompt":"hi","unknown_field":42,"nested":{"a":1}}"#;
-        let meta: SubagentMetaSlice = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.prompt.as_deref(), Some("hi"));
-        assert!(meta.child_cwd.is_none());
-        assert!(meta.worktree_path.is_none());
-    }
-    #[test]
-    fn enrich_from_meta_partial_fields() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = std::path::Path::new("/home/user");
-        let session_dir = setup_enrichment_dir(tmp.path(), cwd, "sess-p");
-        write_meta_json(&session_dir, "sa-1", r#"{"prompt":"only prompt"}"#);
-        let mut info = make_info();
-        enrich_from_meta_with_home(&mut info, tmp.path(), cwd, "sess-p");
-        assert_eq!(info.prompt.as_deref(), Some("only prompt"));
-        assert!(info.child_cwd.is_none());
-        assert!(info.worktree_path.is_none());
     }
     #[test]
     fn activity_label_thinking() {

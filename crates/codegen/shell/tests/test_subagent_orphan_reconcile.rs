@@ -1,14 +1,12 @@
 //! End-to-end test for subagent orphan reconciliation on session resume.
 //!
-//! When a process dies mid-subagent, the subagent's `meta.json` is left
-//! `status: "running"` with no `SubagentFinished` — so on resume the client
-//! shows it Running forever. `MvpAgent::load_session` heals this: it scans the
-//! session's `subagents/` dir and flips any stale `running` meta (not tracked by
-//! the live coordinator) to `cancelled` (mechanism A, the meta pass).
+//! When a process dies after the parent Timeline commits a subagent spawn but
+//! before it commits the terminal, resume must close that open spawn before it
+//! emits a finished projection.
 //!
-//! This test spawns a real `grow agent stdio` process, seeds an orphaned
-//! `running` meta on disk, resumes the session, and asserts the meta was
-//! reconciled to `cancelled`.
+//! This test spawns a real `grow agent stdio` process, seeds an orphaned parent
+//! spawn fact, resumes the session, and asserts a terminal fact was appended to
+//! the same canonical Timeline.
 //!
 //! Run locally (needs a pre-built binary):
 //! ```bash
@@ -65,29 +63,45 @@ async fn resume_reconciles_orphaned_running_subagent() {
         let shared_sandbox = writer.take_sandbox();
         drop(writer);
 
-        // Simulate a crash: inject a subagent meta left `running` on disk (no
-        // terminal write, no SubagentFinished) — exactly what a dead process
-        // leaves behind.
+        // Simulate a crash: append a parent spawn with no child result or
+        // parent terminal.
         let grow_home = shared_sandbox.grow_home().to_path_buf();
         let session_dir = locate_session_dir(&grow_home, session_id.0.as_ref());
         let sub_id = "sa-orphan";
-        let meta_path = session_dir.join("subagents").join(sub_id).join("meta.json");
-        std::fs::create_dir_all(meta_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &meta_path,
-            serde_json::json!({
-                "subagent_id": sub_id,
-                "parent_session_id": session_id.0.as_ref(),
-                "child_session_id": "child-orphan",
-                "subagent_type": "general-purpose",
-                "description": "stuck task",
-                "prompt": "do work",
-                "status": "running",
-                "started_at": chrono::Utc::now().to_rfc3339(),
-            })
-            .to_string(),
-        )
-        .unwrap();
+        let mut timeline = shell::session::storage::read_timeline_in_session_dir(&session_dir)
+            .expect("read parent Timeline");
+        let spawn = timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                    subagent_id: sub_id.into(),
+                    child_session_id: "child-orphan".into(),
+                    subagent_type: "general-purpose".into(),
+                    description: "stuck task".into(),
+                    prompt: "do work".into(),
+                    context_source: chat_state::SubagentContextSource::New,
+                    source_ref: None,
+                    context_normalized: false,
+                    resumed_from: None,
+                    parent_prompt_id: None,
+                    capability_mode: None,
+                    permission_mode: None,
+                    effective_permission_mode: None,
+                    workflow_run_id: None,
+                    goal_id: None,
+                    child_cwd: workdir.workspace().to_string_lossy().into_owned(),
+                    worktree_path: None,
+                    effective_model_id: "test-model".into(),
+                }),
+            ))
+            .expect("record orphan spawn");
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(session_dir.join("timeline.jsonl"))
+            .unwrap();
+        serde_json::to_writer(&mut file, &spawn).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
 
         // Phase 2: resume in a fresh process. `load_session` runs the reconcile.
         let reader =
@@ -97,15 +111,21 @@ async fn resume_reconciles_orphaned_running_subagent() {
             .load_session_with_timeout(&session_id, workdir.workspace())
             .await;
 
-        // The orphan's on-disk meta must now be terminal (cancelled), not running.
-        let reread: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&meta_path).expect("read orphan meta"))
-                .expect("parse orphan meta");
-        assert_eq!(
-            reread.get("status").and_then(|s| s.as_str()),
-            Some("cancelled"),
-            "resume must reconcile the orphaned running subagent to cancelled\nstderr:\n{}",
-            stderr_tail(&reader.stderr(), 2000)
+        let reread = shell::session::storage::read_timeline_in_session_dir(&session_dir)
+            .expect("read reconciled Timeline");
+        assert!(
+            reread.events().iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(end))
+                    if end.subagent_id == sub_id
+                        && matches!(
+                            end.outcome,
+                            chat_state::SubagentOutcome::Failed
+                                | chat_state::SubagentOutcome::Cancelled
+                        )
+            )),
+            "resume must close the orphaned spawn in Timeline\nstderr:\n{}",
+            stderr_tail(&reader.stderr(), 2000),
         );
     })
     .await;

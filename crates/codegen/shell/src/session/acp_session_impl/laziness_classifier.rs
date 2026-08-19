@@ -22,7 +22,7 @@ pub(crate) const LAZINESS_DEFAULT_IDLE_THRESHOLD_MS: u64 = 10_000;
 /// Defaults to 0.7 — clearly-better-than-coin-flip.
 pub(crate) const LAZINESS_DEFAULT_MIN_CONFIDENCE: f32 = 0.7;
 
-/// Baseline chat-history window — the classifier sees AT LEAST the
+/// Baseline Surface window — the classifier sees AT LEAST the
 /// last N items (tool calls + tool results included). The window can
 /// extend further back if the per-kind minimums below haven't been
 /// satisfied yet. Uses a 30-message baseline window.
@@ -446,7 +446,6 @@ pub(crate) fn neutralize_transcript_user_text(s: &str) -> String {
 /// Recency window (conversation-item count) for the auto-mode classifier
 /// transcript SEED at session spawn. Smaller than the per-permission refresh:
 /// the spawn seed only primes the first classify, before any tool has run.
-pub(crate) const CLASSIFIER_SPAWN_SEED_TURNS: usize = 12;
 
 /// Recency window (conversation-item count) for the per-permission classifier
 /// transcript REFRESH. Larger than the spawn seed so a mid-session classify sees

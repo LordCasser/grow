@@ -75,7 +75,7 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let stale = home.path().join("sessions").join("sess-old");
         std::fs::create_dir_all(&stale).unwrap();
-        std::fs::write(stale.join("tool_state.json"), b"{}").unwrap();
+        std::fs::write(stale.join("resources_state.json"), b"{}").unwrap();
         // Guarantee `age > Duration::ZERO` regardless of mtime resolution.
         tokio::time::sleep(Duration::from_millis(15)).await;
 
@@ -93,7 +93,7 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let fresh = home.path().join("sessions").join("sess-new");
         std::fs::create_dir_all(&fresh).unwrap();
-        std::fs::write(fresh.join("tool_state.json"), b"{}").unwrap();
+        std::fs::write(fresh.join("resources_state.json"), b"{}").unwrap();
 
         cleanup_stale_sessions(home.path(), Duration::from_secs(3600)).await;
 
@@ -102,7 +102,7 @@ mod tests {
             "a session dir younger than max_age must be kept"
         );
         assert!(
-            fresh.join("tool_state.json").exists(),
+            fresh.join("resources_state.json").exists(),
             "a kept session dir must retain its contents"
         );
     }

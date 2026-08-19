@@ -1411,9 +1411,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "group_tool_verbs" => {
             let _ = dispatch(Action::SetGroupToolVerbs(false), app);
         }
-        "collapsed_edit_blocks" => {
-            let _ = dispatch(Action::SetCollapsedEditBlocks(true), app);
-        }
         "prompt_suggestions" => {
             let _ = dispatch(Action::SetPromptSuggestions(false), app);
         }
@@ -1528,8 +1525,7 @@ fn set_simple_mode_propagates_to_every_agent() {
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -2094,82 +2090,7 @@ fn set_group_tool_verbs_flip_resets_stale_group_expansion() {
     }
     crate::appearance::cache::set_group_tool_verbs(true);
 }
-#[test]
-fn set_collapsed_edit_blocks_applies_persists_and_rolls_back() {
-    crate::appearance::cache::set_collapsed_edit_blocks(false);
-    let mut app = test_app_with_agent();
-    let effects = dispatch(Action::SetCollapsedEditBlocks(true), &mut app);
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::PersistSetting {
-                key: "collapsed_edit_blocks",
-                value: crate::settings::SettingValue::Bool(true),
-                rollback_value: crate::settings::SettingValue::Bool(false),
-            }]
-        ),
-        "expected exactly one PersistSetting effect, got {effects:?}",
-    );
-    assert!(crate::appearance::cache::load_collapsed_edit_blocks());
-    let effects = dispatch(Action::SetCollapsedEditBlocks(true), &mut app);
-    assert!(effects.is_empty(), "redundant set must be a no-op");
-    let _ = apply_setting_rollback(
-        &mut app,
-        "collapsed_edit_blocks",
-        &crate::settings::SettingValue::Bool(false),
-    );
-    assert!(
-        !crate::appearance::cache::load_collapsed_edit_blocks(),
-        "rollback must restore cache",
-    );
-}
-/// Toggling the flag re-materializes on-default Edit rows in the live
-/// transcript (no restart) — the dispatch-level pin of
-/// `apply_collapsed_edit_blocks_flip`'s agent walk.
-#[test]
-fn set_collapsed_edit_blocks_refolds_live_edit_rows() {
-    use crate::scrollback::block::RenderBlock;
-    use crate::scrollback::blocks::tool::{EditToolCallBlock, ToolCallBlock};
-    use crate::scrollback::types::DisplayMode;
-    crate::appearance::cache::set_collapsed_edit_blocks(false);
-    let mut app = test_app_with_agent();
-    let id = {
-        let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
-        sb.push_block(RenderBlock::ToolCall(ToolCallBlock::Edit(
-            EditToolCallBlock::new("f.rs", vec![]),
-        )))
-    };
-    assert_eq!(
-        app.agents[&AgentId(0)]
-            .scrollback
-            .get_by_id(id)
-            .unwrap()
-            .display_mode,
-        DisplayMode::Expanded,
-        "flag off materializes expanded"
-    );
-    let _ = dispatch(Action::SetCollapsedEditBlocks(true), &mut app);
-    assert_eq!(
-        app.agents[&AgentId(0)]
-            .scrollback
-            .get_by_id(id)
-            .unwrap()
-            .display_mode,
-        DisplayMode::Collapsed,
-        "toggle on must collapse the on-default Edit row immediately"
-    );
-    let _ = dispatch(Action::SetCollapsedEditBlocks(false), &mut app);
-    assert_eq!(
-        app.agents[&AgentId(0)]
-            .scrollback
-            .get_by_id(id)
-            .unwrap()
-            .display_mode,
-        DisplayMode::Expanded,
-        "toggle off must restore the expanded default"
-    );
-    crate::appearance::cache::set_collapsed_edit_blocks(false);
-}
+
 #[test]
 fn set_show_thinking_blocks_hides_and_restores_existing_thinking_height() {
     use crate::scrollback::block::RenderBlock;
@@ -2676,7 +2597,11 @@ fn set_scroll_lines_updates_cache_and_clamps() {
 fn non_permission_rollback_preserves_session_auto_mode() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().session.auto_mode = true;
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .permission_mode = shell::util::config::PermissionMode::Auto;
     app.current_ui.permission_mode = Some("ask".into());
     apply_setting_rollback(&mut app, "show_tips", &SettingValue::Bool(true));
     assert!(
@@ -2694,8 +2619,8 @@ fn rollback_permission_mode_reverts_state_no_effect() {
         Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
         &mut app,
     );
-    assert!(!app.agents[&AgentId(0)].session.is_yolo());
-    assert!(app.default_yolo);
+    assert!(!app.agents[&AgentId(0)].session.is_always_approve());
+    assert!(app.default_permission_mode.is_always_approve());
     assert_eq!(
         app.current_ui.permission_mode.as_deref(),
         Some("always-approve")
@@ -2713,10 +2638,10 @@ fn rollback_permission_mode_reverts_state_no_effect() {
         "rollback path MUST NOT emit any Effect (would loop on persistent failure)",
     );
     assert!(
-        !app.agents[&AgentId(0)].session.is_yolo(),
+        !app.agents[&AgentId(0)].session.is_always_approve(),
         "persistent-default rollback must not mutate the active session"
     );
-    assert!(!app.default_yolo);
+    assert!(!app.default_permission_mode.is_always_approve());
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
     let toast = app.agents[&AgentId(0)]
         .toast
@@ -2755,15 +2680,6 @@ fn action_for_reset_permission_mode_dispatches_default_setter_for_each_canonical
             panic!(
                 "action_for_reset(permission_mode, 'always-approve') must produce \
                  Action::SetDefaultPermissionMode(AlwaysApprove), got {other:?}"
-            )
-        }
-    }
-    match action_for_reset("permission_mode", &SettingValue::Enum("default")) {
-        Some(Action::SetDefaultPermissionMode(PermissionModeKind::Default)) => {}
-        other => {
-            panic!(
-                "action_for_reset(permission_mode, 'default') must produce \
-                 Action::SetDefaultPermissionMode(Default), got {other:?}"
             )
         }
     }

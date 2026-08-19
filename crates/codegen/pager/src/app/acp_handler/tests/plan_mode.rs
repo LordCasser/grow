@@ -153,7 +153,7 @@
     #[test]
     fn plan_approval_shows_overlay() {
         let mut app = make_app_with_agent("sess-A");
-        assert!(!app.agents.get(&AgentId(0)).unwrap().session.is_yolo());
+        assert!(!app.agents.get(&AgentId(0)).unwrap().session.is_always_approve());
 
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         let ext_req = crate::views::plan_approval_view::PlanApprovalExtRequest {
@@ -182,14 +182,18 @@
     }
 
     #[test]
-    fn plan_approval_shows_overlay_even_in_yolo() {
+    fn plan_approval_shows_overlay_even_in_always_approve() {
         let mut app = make_app_with_agent("sess-A");
-        app.agents.get_mut(&AgentId(0)).unwrap().session.yolo_mode = true;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
 
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         let ext_req = crate::views::plan_approval_view::PlanApprovalExtRequest {
             session_id: "sess-A".into(),
-            tool_call_id: "tc-yolo".into(),
+            tool_call_id: "tc-always-approve".into(),
             plan_content: "# Plan\nDo stuff".into(),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
@@ -200,7 +204,7 @@
 
         let affected = handle(msg, &mut app);
 
-        assert!(affected, "overlay should open even in yolo mode");
+        assert!(affected, "overlay should open even in always-approve mode");
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
             agent.plan_approval_view.is_some(),

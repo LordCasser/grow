@@ -46,39 +46,12 @@ pub enum NormalizedEntry {
 #[error("{0}")]
 pub struct NormalizeError(pub String);
 
-/// Cache-key namespace per harness profile. Enum (not `bool`) so
-/// future variants land in a fresh slot rather than colliding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HarnessVariant {
-    Default,
-    Cursor,
-}
-
-impl HarnessVariant {
-    pub fn from_is_cursor(is_cursor: bool) -> Self {
-        if is_cursor {
-            Self::Cursor
-        } else {
-            Self::Default
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct CacheKey {
-    content: [u8; 32],
-    harness: HarnessVariant,
-}
-
-fn cache_key(raw_bytes: &[u8], harness: HarnessVariant) -> CacheKey {
-    CacheKey {
-        content: content_fingerprint_bytes(raw_bytes),
-        harness,
-    }
+fn cache_key(raw_bytes: &[u8]) -> [u8; 32] {
+    content_fingerprint_bytes(raw_bytes)
 }
 
 pub struct NormalizeCache {
-    inner: Cache<CacheKey, NormalizedEntry>,
+    inner: Cache<[u8; 32], NormalizedEntry>,
     enabled: AtomicBool,
 }
 
@@ -118,7 +91,6 @@ impl NormalizeCache {
     pub async fn get_or_try_insert_with<F, Fut>(
         &self,
         raw_bytes: Vec<u8>,
-        harness: HarnessVariant,
         compute: F,
     ) -> Result<NormalizedEntry, Arc<NormalizeError>>
     where
@@ -128,21 +100,17 @@ impl NormalizeCache {
         if !self.is_enabled() {
             return compute(raw_bytes).await.map_err(Arc::new);
         }
-        let key = cache_key(&raw_bytes, harness);
+        let key = cache_key(&raw_bytes);
         self.inner.try_get_with(key, compute(raw_bytes)).await
     }
 
     #[cfg(test)]
-    pub(crate) async fn get_for_tests(
-        &self,
-        raw_bytes: &[u8],
-        harness: HarnessVariant,
-    ) -> Option<NormalizedEntry> {
-        self.inner.get(&cache_key(raw_bytes, harness)).await
+    pub(crate) async fn get_for_tests(&self, raw_bytes: &[u8]) -> Option<NormalizedEntry> {
+        self.inner.get(&cache_key(raw_bytes)).await
     }
 }
 
-fn weigh_entry(_k: &CacheKey, v: &NormalizedEntry) -> u32 {
+fn weigh_entry(_k: &[u8; 32], v: &NormalizedEntry) -> u32 {
     let (bytes_len, mime_len) = match v {
         NormalizedEntry::Unchanged { bytes, mime }
         | NormalizedEntry::Compressed { bytes, mime, .. }
@@ -202,7 +170,7 @@ mod tests {
         for _ in 0..2 {
             let c = counter.clone();
             let entry = cache
-                .get_or_try_insert_with(raw.clone(), HarnessVariant::Default, move |_| async move {
+                .get_or_try_insert_with(raw.clone(), move |_| async move {
                     c.fetch_add(1, Ordering::SeqCst);
                     Ok(fake_unchanged(b"out"))
                 })
@@ -222,27 +190,7 @@ mod tests {
         for raw in [b"alpha".to_vec(), b"beta".to_vec()] {
             let c = counter.clone();
             cache
-                .get_or_try_insert_with(raw, HarnessVariant::Default, move |_| async move {
-                    c.fetch_add(1, Ordering::SeqCst);
-                    Ok(fake_unchanged(b"out"))
-                })
-                .await
-                .expect("compute ok");
-        }
-
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn miss_on_different_harness_flag() {
-        let cache = enabled_cache(CACHE_MAX_BYTES);
-        let counter = Arc::new(AtomicUsize::new(0));
-        let raw = b"same".to_vec();
-
-        for harness in [HarnessVariant::Default, HarnessVariant::Cursor] {
-            let c = counter.clone();
-            cache
-                .get_or_try_insert_with(raw.clone(), harness, move |_| async move {
+                .get_or_try_insert_with(raw, move |_| async move {
                     c.fetch_add(1, Ordering::SeqCst);
                     Ok(fake_unchanged(b"out"))
                 })
@@ -266,7 +214,7 @@ mod tests {
             let raw = raw.clone();
             handles.push(tokio::spawn(async move {
                 cache
-                    .get_or_try_insert_with(raw, HarnessVariant::Default, move |_| async move {
+                    .get_or_try_insert_with(raw, move |_| async move {
                         counter.fetch_add(1, Ordering::SeqCst);
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         Ok(fake_unchanged(b"out"))
@@ -291,7 +239,7 @@ mod tests {
 
         let ec = err_counter.clone();
         let err = cache
-            .get_or_try_insert_with(raw.clone(), HarnessVariant::Default, move |_| async move {
+            .get_or_try_insert_with(raw.clone(), move |_| async move {
                 ec.fetch_add(1, Ordering::SeqCst);
                 Err(NormalizeError("boom".into()))
             })
@@ -302,7 +250,7 @@ mod tests {
 
         let oc = ok_counter.clone();
         let ok = cache
-            .get_or_try_insert_with(raw, HarnessVariant::Default, move |_| async move {
+            .get_or_try_insert_with(raw, move |_| async move {
                 oc.fetch_add(1, Ordering::SeqCst);
                 Ok(fake_unchanged(b"out"))
             })
@@ -326,16 +274,12 @@ mod tests {
         for tag in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
             let payload = big_payload.clone();
             cache
-                .get_or_try_insert_with(
-                    tag.to_vec(),
-                    HarnessVariant::Default,
-                    move |_| async move {
-                        Ok(NormalizedEntry::Unchanged {
-                            bytes: payload,
-                            mime: Cow::Borrowed("image/png"),
-                        })
-                    },
-                )
+                .get_or_try_insert_with(tag.to_vec(), move |_| async move {
+                    Ok(NormalizedEntry::Unchanged {
+                        bytes: payload,
+                        mime: Cow::Borrowed("image/png"),
+                    })
+                })
                 .await
                 .expect("compute ok");
             cache.inner.run_pending_tasks().await;
@@ -343,7 +287,7 @@ mod tests {
 
         let a_counter = AtomicUsize::new(0);
         cache
-            .get_or_try_insert_with(b"a".to_vec(), HarnessVariant::Default, |_| async {
+            .get_or_try_insert_with(b"a".to_vec(), |_| async {
                 a_counter.fetch_add(1, Ordering::SeqCst);
                 Ok(fake_unchanged(b"refilled"))
             })
@@ -357,7 +301,7 @@ mod tests {
 
         let c_counter = AtomicUsize::new(0);
         cache
-            .get_or_try_insert_with(b"c".to_vec(), HarnessVariant::Default, |_| async {
+            .get_or_try_insert_with(b"c".to_vec(), |_| async {
                 c_counter.fetch_add(1, Ordering::SeqCst);
                 Ok(fake_unchanged(b"recomputed-c"))
             })
@@ -379,7 +323,7 @@ mod tests {
         let expected_ptr = payload.as_ptr();
 
         let first = cache
-            .get_or_try_insert_with(raw.clone(), HarnessVariant::Default, move |_| async move {
+            .get_or_try_insert_with(raw.clone(), move |_| async move {
                 Ok(NormalizedEntry::Unchanged {
                     bytes: payload_for_closure,
                     mime: Cow::Borrowed("image/png"),
@@ -390,9 +334,7 @@ mod tests {
         assert_eq!(payload_bytes(&first).as_ptr(), expected_ptr);
 
         let second = cache
-            .get_or_try_insert_with(raw, HarnessVariant::Default, |_| async {
-                panic!("must not recompute on hit")
-            })
+            .get_or_try_insert_with(raw, |_| async { panic!("must not recompute on hit") })
             .await
             .expect("hit ok");
         assert_eq!(
@@ -417,23 +359,9 @@ mod tests {
     #[test]
     fn blake3_key_derivation_stable() {
         let raw = b"deterministic";
-        let k1 = cache_key(raw, HarnessVariant::Default);
-        let k2 = cache_key(raw, HarnessVariant::Default);
-        assert_eq!(k1.content, k2.content);
+        let k1 = cache_key(raw);
+        let k2 = cache_key(raw);
         assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn blake3_key_per_harness() {
-        let raw = b"deterministic";
-        assert_ne!(
-            cache_key(raw, HarnessVariant::Default),
-            cache_key(raw, HarnessVariant::Cursor),
-        );
-        assert_eq!(
-            cache_key(raw, HarnessVariant::Cursor),
-            cache_key(raw, HarnessVariant::Cursor),
-        );
     }
 
     #[tokio::test]
@@ -445,7 +373,7 @@ mod tests {
         for _ in 0..2 {
             let c = counter.clone();
             cache
-                .get_or_try_insert_with(raw.clone(), HarnessVariant::Default, move |_| async move {
+                .get_or_try_insert_with(raw.clone(), move |_| async move {
                     c.fetch_add(1, Ordering::SeqCst);
                     Ok(fake_unchanged(b"out"))
                 })
@@ -466,7 +394,7 @@ mod tests {
         let payload_for_closure = payload.clone();
 
         let entry = cache
-            .get_or_try_insert_with(raw, HarnessVariant::Default, move |_| async move {
+            .get_or_try_insert_with(raw, move |_| async move {
                 Ok(NormalizedEntry::Unchanged {
                     bytes: payload_for_closure,
                     mime: Cow::Borrowed("image/png"),
@@ -494,7 +422,7 @@ mod tests {
         for _ in 0..2 {
             let c = counter.clone();
             cache
-                .get_or_try_insert_with(raw.clone(), HarnessVariant::Default, move |_| async move {
+                .get_or_try_insert_with(raw.clone(), move |_| async move {
                     c.fetch_add(1, Ordering::SeqCst);
                     Ok(fake_unchanged(b"out"))
                 })
@@ -507,7 +435,7 @@ mod tests {
         for _ in 0..2 {
             let c = counter.clone();
             cache
-                .get_or_try_insert_with(raw.clone(), HarnessVariant::Default, move |_| async move {
+                .get_or_try_insert_with(raw.clone(), move |_| async move {
                     c.fetch_add(1, Ordering::SeqCst);
                     Ok(fake_unchanged(b"out"))
                 })
@@ -523,9 +451,10 @@ mod tests {
         let raw = b"err-passthrough".to_vec();
 
         let err = cache
-            .get_or_try_insert_with(raw, HarnessVariant::Default, move |_| async move {
-                Err(NormalizeError("boom".into()))
-            })
+            .get_or_try_insert_with(
+                raw,
+                move |_| async move { Err(NormalizeError("boom".into())) },
+            )
             .await
             .expect_err("compute err");
         assert_eq!(err.0, "boom");

@@ -70,7 +70,6 @@ fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool
         | "get_command_or_subagent_output"
         | "get_task_or_subagent_output"
         | "get_terminal_command_output" => tool_types::task_output_waits_from_json(args),
-        "wait_tasks" | "wait_commands_or_subagents" | "wait_tasks_or_subagents" => true,
         "Await" | "AwaitShell" => true,
         _ => false,
     }
@@ -162,7 +161,7 @@ impl Drop for AwaitingApprovalGuard<'_> {
             controller.set_approval_pending(false);
         }
         drop(controller);
-        self.actor.persist_behavior_state();
+        self.actor.record_control_snapshot();
     }
 }
 pub(super) fn is_plan_control_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
@@ -1167,20 +1166,6 @@ impl SessionActor {
                 outcome = <&'static str>::from(tool_outcome),
             )
             .in_scope(|| {});
-            if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
-                tracing::info_span!(
-                    "compaction.segment_read",
-                    session_id = %self.session_info.id.0,
-                    tool_name = %prepared.tool_name,
-                    artifact = %artifact,
-                    // i64: redact drops u64 (serializes as string). None ⇒ field omitted.
-                    segment_index = artifact.segment_index().map(|i| i as i64),
-                    success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
-                    duration_ms = duration_ms as i64,
-                    tool_result_size_bytes = tool_result_size_bytes,
-                )
-                .in_scope(|| {});
-            }
             match &tool_loop {
                 ToolLoop::PermissionReject { .. }
                 | ToolLoop::Cancelled
@@ -1219,7 +1204,7 @@ impl SessionActor {
             .then(|| {
                 early_raw_input
                     .as_ref()
-                    .and_then(|v| v.get("run_in_background").or_else(|| v.get("background")))
+                    .and_then(|v| v.get("run_in_background"))
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true)
             });
@@ -1368,7 +1353,7 @@ impl SessionActor {
             }
         }
         let admitted_behavior = *self.turn_behavior.lock();
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let session_dir = &self.session_dir;
         let cwd = self.tool_context.cwd.as_path();
         let display_cwd = self.display_cwd.get().map(std::path::Path::new);
         let saved_workflow_write = saved_workflow_definition_write(&access_kind, cwd, display_cwd);
@@ -2226,7 +2211,7 @@ impl SessionActor {
             _ => {
                 tracing::info!("plan_control resume: no candidate plan; clearing approval state");
                 self.behavior.lock().set_approval_pending(false);
-                self.persist_behavior_state();
+                self.record_control_snapshot();
                 return;
             }
         };
@@ -2320,7 +2305,6 @@ impl SessionActor {
             None,
             None,
             respond_to,
-            None,
             None,
         )
         .await;
@@ -2425,19 +2409,6 @@ impl SessionActor {
                 };
                 (label, acp::ToolKind::Other, vec![], vec![])
             }
-            ToolInput::WaitTasks(wait) => (
-                format!(
-                    "Wait tasks: {} ids, mode={}",
-                    wait.task_ids.len(),
-                    match wait.mode {
-                        tool_types::WaitMode::WaitAny => "wait_any",
-                        tool_types::WaitMode::WaitAll => "wait_all",
-                    }
-                ),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
             ToolInput::KillTask(kill_task) => (
                 format!("Kill task: {}", kill_task.task_id),
                 acp::ToolKind::Other,
@@ -2484,6 +2455,15 @@ impl SessionActor {
             }
             ToolInput::MemoryGet(mg) => (
                 format!("Memory read: {}", mg.path),
+                acp::ToolKind::Read,
+                vec![],
+                vec![],
+            ),
+            ToolInput::ContextFetch(input) => (
+                format!(
+                    "Restore compacted context: {}#{} (offset {})",
+                    input.timeline_id, input.first_seq, input.offset
+                ),
                 acp::ToolKind::Read,
                 vec![],
                 vec![],
@@ -2680,7 +2660,7 @@ impl SessionActor {
     /// matching `consumed_ids`. Called after every successful tool result
     /// so that queued auto-wake synthetic prompts for a task/subagent the
     /// model already learned about are dropped before they get flushed to
-    /// chat history (which would surface as a trailing
+    /// canonical Surface (which would appear as a trailing
     /// `<system-reminder>` with no assistant reply).
     ///
     /// The ID list comes from
@@ -2951,7 +2931,6 @@ impl SessionActor {
         {
             let path = tool_parsed_args
                 .get("target_file")
-                .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
             use crate::session::image_normalize::{InlineAttachVerdict, inline_attach_verdict};
@@ -3002,7 +2981,7 @@ impl SessionActor {
                 .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
                 .collect();
             let mut norm_result =
-                crate::session::image_normalize::normalize_images(acp_images, false).await;
+                crate::session::image_normalize::normalize_images(acp_images).await;
             if !norm_result.re_encode_fallbacks.is_empty() {
                 tracing::warn!(
                     session_id = %self.session_info.id,
@@ -3012,7 +2991,6 @@ impl SessionActor {
             }
             if let Some((notice, notes)) = crate::session::image_normalize::dropped_to_envelope(
                 std::mem::take(&mut norm_result.dropped),
-                false,
             ) {
                 deferred_followups.push(ConversationItem::user(notice));
                 self.send_grow_notification(GrowSessionUpdate::ImageDropped { notes })
@@ -3939,10 +3917,6 @@ mod wait_interrupt_tests {
         ));
         assert!(!is_interruptible_wait_tool(
             "get_task_output",
-            &serde_json::json!({"task_ids": ["t"]})
-        ));
-        assert!(is_interruptible_wait_tool(
-            "wait_commands_or_subagents",
             &serde_json::json!({"task_ids": ["t"]})
         ));
         assert!(!is_interruptible_wait_tool(

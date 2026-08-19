@@ -1,36 +1,22 @@
 # Bringing existing project context
 
-Fear not — your settings, rules, and skills come with you. Grow
-reads the same project conventions other agents use, and imports the rest.
+Grow deliberately uses one canonical configuration model. Existing material can be migrated explicitly instead of being scanned through a second runtime path.
 
-## Picked up automatically
+## Canonical destinations
 
-- **Rules & instructions** — `AGENTS.md`,
-  `CLAUDE.md` (including nested ones), and `*.md` rules under
-  `.claude/rules/` and `.cursor/rules/`.
-- **Skills & custom commands** — `~/.claude/skills/`, `~/.claude/commands/`,
-  `~/.cursor/skills/`, and their project-level twins. Flat command `.md`
-  files become slash commands here too.
-- **MCP servers** — from `~/.claude.json`, `.cursor/mcp.json`, and project
-  `.mcp.json`.
-- **Hooks** — from `.claude/settings.json`, including matcher aliases like
-  `Bash`, so most hooks run unchanged.
+- **Directory instructions:** `AGENTS.md`
+- **Rule collections:** `.grow/rules/*.md`
+- **Skills:** `.grow/skills/<name>/SKILL.md`
+- **User-invocable command Markdown:** `.grow/commands/*.md`
+- **MCP servers:** `[mcp_servers.<name>]` in `~/.grow/config.toml` or project `.grow/config.toml`
+- **Hooks:** `$GROW_HOME/hooks/*.json`, project `.grow/hooks/*.json`, or the native `[hooks]` TOML section
+- **Permission rules:** `[permission]` in Grow configuration
+- **Agent roles:** `.grow/agents/**/*.md`
 
-## One-step import
+Copy the source content once, translate it to the canonical schema, then remove the old source from the Grow workflow. There is no background vendor-directory scan or import marker.
 
-**`/import-claude`** scans your `~/.claude` settings — permissions, env
-vars, MCP servers, hooks — and shows a checkbox preview; confirming
-writes the items you selected into your `.grow` config. Re-run it anytime.
+Run `grow inspect` inside the repository to verify the exact instructions, skills, hooks, Agents, plugins, and MCP servers that the session will see.
 
-## Check what was discovered
+Other useful surfaces: `/btw` asks a side question without interrupting the current task, `/rewind` restores file snapshots and conversation state, and the Trajectory page exposes the durable Timeline used for recovery.
 
-Run **`grow inspect`** in a repo to see every rules file, skill, and MCP
-server Grow picked up, tagged with where it came from. Each compat source
-can be toggled in `[compat.claude]` / `[compat.cursor]` config sections.
-Grow does not scan or resume sessions created by those tools.
-
-And a few things you might have missed elsewhere: `/btw` asks a side
-question without interrupting the current task, and `/rewind` restores
-actual file snapshots, not just chat history.
-
-*Go deeper: `/docs Project Rules (AGENTS.md)`, `/docs Skills`, or `/docs MCP Servers`*
+*Go deeper: `/docs Project Instructions (AGENTS.md)`, `/docs Skills`, or `/docs MCP Servers`*

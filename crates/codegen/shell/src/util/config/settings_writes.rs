@@ -209,22 +209,9 @@ pub async fn set_group_tool_verbs(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.group_tool_verbs = Some(value)).await
 }
 
-/// Persist `[ui].collapsed_edit_blocks` via `update_config`.
-pub async fn set_collapsed_edit_blocks(value: bool) -> Result<()> {
-    update_config(|cfg| cfg.ui.collapsed_edit_blocks = Some(value)).await
-}
-
 /// Persist `[ui].keep_text_selection` (`flash` | `hold` | `word_select`).
-/// Clears the legacy `selection_highlight_duration_ms` and the retired
-/// `double_click_action` keys it supersedes so the two can never drift (one-shot
-/// disk migration away from the legacy key on any Settings write).
 pub async fn set_keep_text_selection(value: String) -> Result<()> {
-    update_config(|cfg| {
-        cfg.ui.keep_text_selection = Some(value);
-        cfg.ui.selection_highlight_duration_ms = None;
-        cfg.ui.double_click_action = None;
-    })
-    .await
+    update_config(|cfg| cfg.ui.keep_text_selection = Some(value)).await
 }
 
 /// Persist `[ui].render_mermaid` via `update_config`. Value is one of the

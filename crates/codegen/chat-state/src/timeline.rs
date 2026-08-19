@@ -9,7 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sampling_types::{ConversationItem, DanglingToolCallReason};
 use serde::{Deserialize, Serialize};
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 2;
+use crate::SidebandSpawnEvent;
+
+pub const TIMELINE_SCHEMA_VERSION: u8 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -45,15 +47,30 @@ mod turn_id_serde {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StepId {
     pub turn: TurnId,
     pub index: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SurfaceId {
     pub event: EventSeq,
     pub item: u32,
+}
+
+/// Exact, replay-stable range on the current model-visible Surface.
+///
+/// `start` and `end` are convenient boundaries. `shadowed` is authoritative:
+/// it proves that a replacement covered every current item in between and
+/// prevents an old range plan from being applied to a rewritten Surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceRange {
+    pub start: SurfaceId,
+    pub end: SurfaceId,
+    pub shadowed: Vec<SurfaceId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,12 +87,12 @@ pub enum MessageCause {
     ImageRewrite,
     SystemPrompt,
     MemoryContext,
-    SessionRestore,
+    ContextRebuild,
     Rewind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SurfaceOp {
     Append,
     Replace {
@@ -86,22 +103,56 @@ pub enum SurfaceOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MessageEvent {
     pub cause: MessageCause,
     pub items: Vec<ConversationItem>,
     pub surface: SurfaceOp,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnIdentity {
+    pub origin: String,
+    pub turn_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnTerminal {
+    pub stop_reason: String,
+    pub completion_kind: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnInputKind {
+    Prompt,
+    Bash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptRecord {
+    pub prompt_index: usize,
+    pub text: String,
+    pub input_kind: TurnInputKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnEvent {
     Started {
         id: TurnId,
-        origin: String,
+        identity: TurnIdentity,
         model_id: String,
         input_message_count: usize,
-        prompt_index: Option<usize>,
-        prompt_text: Option<String>,
+        prompt_index: usize,
+        prompt_text: String,
+        input_kind: TurnInputKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_kind: Option<String>,
     },
@@ -110,6 +161,7 @@ pub enum TurnEvent {
         outcome: String,
         duration_ms: u64,
         tool_count: u32,
+        terminal: TurnTerminal,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cancellation_category: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,7 +170,7 @@ pub enum TurnEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StepEvent {
     Started {
         id: StepId,
@@ -131,6 +183,7 @@ pub enum StepEvent {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequestUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -143,7 +196,7 @@ pub struct RequestUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RequestEvent {
     Started {
         id: String,
@@ -185,7 +238,7 @@ pub enum RequestEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolEvent {
     Started {
         call_id: String,
@@ -206,12 +259,25 @@ pub enum ToolEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompactionEvent {
     Started {
         id: String,
         source_items: usize,
         prompt_index: usize,
+    },
+    /// The summary model call completed. Content remains single-sourced in the
+    /// referenced Sideband result; this governance fact links it to the frozen
+    /// parent input before the Surface replacement commits.
+    Summary {
+        id: String,
+        input_ref: crate::TimelineRangeRef,
+        result_ref: crate::TimelineRangeRef,
+        /// Exact Surface range summarized by `result_ref` and subsequently
+        /// shadowed by the compaction replacement.
+        target: SurfaceRange,
+        source_tokens: u64,
+        summary_chars: usize,
     },
     Completed {
         id: String,
@@ -227,6 +293,7 @@ pub enum CompactionEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryEvent {
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +304,7 @@ pub struct RecoveryEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservationEvent {
     pub scope: String,
     pub name: String,
@@ -248,8 +316,154 @@ pub struct ObservationEvent {
     pub data: Option<serde_json::Value>,
 }
 
+/// Durable Behavior/Goal control-plane state.
+///
+/// The payload stays shell-owned, while Timeline owns its identity, ordering,
+/// durability and revision monotonicity. This keeps the core crate independent
+/// of concrete Behavior and Goal types without creating a second state file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "event", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+pub struct ControlEvent {
+    pub revision: u64,
+    pub snapshot: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionTitleSource {
+    User,
+    Generated {
+        sideband_id: String,
+        result_seq: u64,
+    },
+    Fallback {
+        sideband_id: String,
+        terminal_seq: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTitleEvent {
+    pub title: String,
+    pub source: SessionTitleSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentContextSource {
+    New,
+    Forked,
+    Resumed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentSpawnEvent {
+    pub subagent_id: String,
+    pub child_session_id: String,
+    pub subagent_type: String,
+    pub description: String,
+    pub prompt: String,
+    pub context_source: SubagentContextSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<crate::TimelineRangeRef>,
+    pub context_normalized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_prompt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
+    pub child_cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    pub effective_model_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentTerminalEvent {
+    pub subagent_id: String,
+    pub child_session_id: String,
+    pub outcome: SubagentOutcome,
+    pub duration_ms: u64,
+    pub tool_calls: u32,
+    pub turns: u32,
+    pub tokens_used: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_ref: Option<crate::TimelineRangeRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "state",
+    content = "event",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum SubagentEvent {
+    Spawned(SubagentSpawnEvent),
+    Ended(SubagentTerminalEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentSeedEvent {
+    pub parent_timeline_id: String,
+    pub parent_spawn_seq: u64,
+    pub subagent_id: String,
+    pub context_source: SubagentContextSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<crate::TimelineRangeRef>,
+    pub normalized: bool,
+}
+
+/// Terminal fact owned by the child entity. The parent closes its spawn only
+/// by referencing this exact event; result content lives in an immutable
+/// content-addressed artifact referenced by `output_ref`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentResultEvent {
+    pub subagent_id: String,
+    pub outcome: SubagentOutcome,
+    pub duration_ms: u64,
+    pub tool_calls: u32,
+    pub turns: u32,
+    pub tokens_used: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "event",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum TimelineEventKind {
     Messages(MessageEvent),
     Turn(TurnEvent),
@@ -259,15 +473,52 @@ pub enum TimelineEventKind {
     Compaction(CompactionEvent),
     Recovery(RecoveryEvent),
     Observation(ObservationEvent),
+    Control(ControlEvent),
+    SessionTitle(SessionTitleEvent),
+    Sideband(SidebandSpawnEvent),
+    Subagent(SubagentEvent),
+    SubagentSeed(SubagentSeedEvent),
+    SubagentResult(SubagentResultEvent),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TimelineEvent {
     pub version: u8,
     pub seq: EventSeq,
     pub at_ms: i64,
     #[serde(flatten)]
     pub kind: TimelineEventKind,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineEventWire {
+    version: u8,
+    seq: EventSeq,
+    at_ms: i64,
+    #[serde(rename = "type")]
+    event_type: String,
+    event: serde_json::Value,
+}
+
+impl<'de> Deserialize<'de> for TimelineEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = TimelineEventWire::deserialize(deserializer)?;
+        let kind = serde_json::from_value(serde_json::json!({
+            "type": wire.event_type,
+            "event": wire.event,
+        }))
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            version: wire.version,
+            seq: wire.seq,
+            at_ms: wire.at_ms,
+            kind,
+        })
+    }
 }
 
 impl TimelineEvent {
@@ -290,7 +541,17 @@ struct LifecycleFold {
     seen_compactions: BTreeSet<String>,
     open_requests: BTreeMap<String, (TurnId, StepId)>,
     open_tools: BTreeMap<String, (TurnId, StepId, String)>,
-    open_compaction: Option<String>,
+    open_compaction: Option<OpenCompaction>,
+    control_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct OpenCompaction {
+    id: String,
+    source_items: usize,
+    summaries: u8,
+    replacements: u8,
+    target: Option<SurfaceRange>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -298,7 +559,7 @@ pub struct Timeline {
     events: Vec<TimelineEvent>,
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
-    replace_generation: u64,
+    surface_revision: u64,
     lifecycle: LifecycleFold,
 }
 
@@ -320,10 +581,14 @@ pub enum TimelineError {
     IncompleteShadowSet,
     #[error("surface item count exceeds u32 identity capacity")]
     TooManyItems,
+    #[error("rewind target {0} has no branch-local user prompt marker")]
+    MissingPromptMarker(usize),
     #[error("tool-result prune must replace exactly one tool result")]
     InvalidToolResultPrune,
     #[error("tool-result prune changed fields other than content")]
     ToolResultIdentityChanged,
+    #[error("control revision {actual} must be greater than the previous revision {previous}")]
+    NonMonotonicControlRevision { previous: u64, actual: u64 },
     #[error("turn {actual:?} cannot start while {active:?} is active")]
     TurnAlreadyActive { active: TurnId, actual: TurnId },
     #[error("turn {0:?} already has a start event")]
@@ -364,6 +629,70 @@ pub enum TimelineError {
     CompactionAlreadySeen(String),
     #[error("compaction {0} has no matching start event")]
     CompactionNotOpen(String),
+    #[error("compaction {0} recorded more than one summary")]
+    DuplicateCompactionSummary(String),
+    #[error("compaction replacement occurred before its summary was recorded")]
+    CompactionReplacementBeforeSummary,
+    #[error("compaction {0} has an invalid summary reference")]
+    InvalidCompactionSummary(String),
+    #[error("compaction replacement does not match its summarized Surface range")]
+    CompactionTargetMismatch,
+    #[error("compaction replacement requires an explicit stable Surface range")]
+    CompactionRangeRequired,
+    #[error("compaction replacement has no active compaction transaction")]
+    CompactionReplacementNotOpen,
+    #[error("compaction {0} recorded more than one replacement")]
+    DuplicateCompactionReplacement(String),
+    #[error("compaction {0} completed without exactly one replacement")]
+    MissingCompactionReplacement(String),
+    #[error("compaction {0} failed after its replacement was already committed")]
+    FailedCompactionHasReplacement(String),
+    #[error("timeline event {0} is not a compaction summary context reference")]
+    InvalidContextReference(u64),
+    #[error("compaction {0} has not completed, so its shadowed context cannot be fetched")]
+    IncompleteCompactionContext(String),
+    #[error("compaction context references missing Surface item {0:?}")]
+    MissingCompactionContextItem(SurfaceId),
+    #[error("non-compaction replacement occurred while compaction {0} was active")]
+    ReplacementDuringCompaction(String),
+    #[error("context rebuild requires a branch with no prompt turns")]
+    ContextRebuildAfterTurn,
+    #[error("invalid sideband spawn: {0}")]
+    InvalidSideband(#[from] crate::SidebandError),
+    #[error("sideband {0} already has a spawn fact")]
+    DuplicateSidebandSpawn(String),
+    #[error("session title must be non-empty and at most 160 characters")]
+    InvalidSessionTitle,
+    #[error("generated session title cannot replace a user title")]
+    GeneratedTitleAfterUserTitle,
+    #[error("generated session title source must identify a valid sideband result")]
+    InvalidSessionTitleSource,
+    #[error("invalid subagent lifecycle event")]
+    InvalidSubagent,
+    #[error("subagent {0} already has a spawn fact")]
+    DuplicateSubagentSpawn(String),
+    #[error("child session {0} is already owned by another subagent spawn")]
+    DuplicateSubagentChild(String),
+    #[error("subagent {0} has no open spawn fact")]
+    SubagentNotOpen(String),
+    #[error("subagent {0} already has a terminal fact")]
+    SubagentAlreadyEnded(String),
+    #[error("subagent terminal child session differs from its spawn fact")]
+    SubagentChildMismatch,
+    #[error("child Timeline already has a subagent seed-source fact")]
+    DuplicateSubagentSeed,
+    #[error("child Timeline has no subagent seed-source fact")]
+    MissingSubagentSeed,
+    #[error("child Timeline is closed by its subagent result fact")]
+    SubagentTimelineEnded,
+    #[error("child Timeline has no subagent result fact")]
+    MissingSubagentResult,
+    #[error("child result differs from its seed-source fact")]
+    SubagentSeedMismatch,
+    #[error("child seed-source does not match the parent spawn fact")]
+    InvalidSubagentSeedLink,
+    #[error("parent terminal does not match the referenced child result fact")]
+    InvalidSubagentResultLink,
 }
 
 impl Timeline {
@@ -377,7 +706,14 @@ impl Timeline {
 
     pub fn from_seed(items: Vec<ConversationItem>) -> Result<Self, TimelineError> {
         let mut timeline = Self::default();
-        for item in items {
+        for mut item in items {
+            // Prompt coordinates are local to a live lineage. Inherited users
+            // are an immutable seed prefix, not prompts in the child branch;
+            // retaining the parent's indices makes child prompt 0 collide with
+            // an inherited marker during rewind.
+            if let ConversationItem::User(user) = &mut item {
+                user.prompt_index = None;
+            }
             timeline.append(item, MessageCause::Seed)?;
         }
         Ok(timeline)
@@ -391,29 +727,158 @@ impl Timeline {
         EventSeq(self.events.len() as u64)
     }
 
-    pub fn replace_generation(&self) -> u64 {
-        self.replace_generation
+    /// Monotonic revision of the model-visible Surface. Unlike the Timeline
+    /// sequence, lifecycle and observability events do not advance it.
+    pub fn surface_revision(&self) -> u64 {
+        self.surface_revision
     }
 
     pub fn surface(&self) -> &[ConversationItem] {
         &self.surface
     }
 
-    pub fn transcript(&self) -> Vec<ConversationItem> {
-        self.events
+    pub fn surface_ids(&self) -> &[SurfaceId] {
+        &self.surface_ids
+    }
+
+    /// Reproject the exact original Surface items shadowed by one completed
+    /// compaction. The reference points at the compaction's summary event;
+    /// that event owns the stable, possibly non-contiguous `SurfaceId` set.
+    /// This is a pure read and never expands or otherwise mutates Surface.
+    pub fn compacted_context(
+        &self,
+        summary_seq: u64,
+    ) -> Result<Vec<ConversationItem>, TimelineError> {
+        let summary_index = usize::try_from(summary_seq)
+            .map_err(|_| TimelineError::InvalidContextReference(summary_seq))?;
+        let Some(summary_event) = self.events.get(summary_index) else {
+            return Err(TimelineError::InvalidContextReference(summary_seq));
+        };
+        let TimelineEventKind::Compaction(CompactionEvent::Summary { id, target, .. }) =
+            &summary_event.kind
+        else {
+            return Err(TimelineError::InvalidContextReference(summary_seq));
+        };
+
+        let completed = self.events[summary_index + 1..].iter().any(|event| {
+            matches!(
+                &event.kind,
+                TimelineEventKind::Compaction(CompactionEvent::Completed {
+                    id: completed_id,
+                    ..
+                }) if completed_id == id
+            )
+        });
+        if !completed {
+            return Err(TimelineError::IncompleteCompactionContext(id.clone()));
+        }
+
+        target
+            .shadowed
             .iter()
-            .filter_map(TimelineEvent::messages)
-            .filter(|messages| matches!(messages.surface, SurfaceOp::Append))
-            .flat_map(|messages| messages.items.iter().cloned())
+            .map(|surface_id| {
+                let event_index = usize::try_from(surface_id.event.get())
+                    .map_err(|_| TimelineError::MissingCompactionContextItem(*surface_id))?;
+                let item_index = usize::try_from(surface_id.item)
+                    .map_err(|_| TimelineError::MissingCompactionContextItem(*surface_id))?;
+                self.events
+                    .get(event_index)
+                    .and_then(TimelineEvent::messages)
+                    .and_then(|messages| messages.items.get(item_index))
+                    .cloned()
+                    .ok_or(TimelineError::MissingCompactionContextItem(*surface_id))
+            })
             .collect()
     }
 
-    /// Build the uncompressed current branch and cut it before prompt `target`.
+    pub fn session_title(&self) -> Option<(EventSeq, &SessionTitleEvent)> {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                TimelineEventKind::SessionTitle(title) => Some((event.seq, title)),
+                _ => None,
+            })
+    }
+
+    /// Validate the causal half of a parent-spawn/child-seed pair. This is
+    /// deliberately a cross-ledger operation: each Timeline remains an
+    /// independently archivable entity, and callers resolve the other entity
+    /// only when they need to dereference the link.
+    pub fn validate_subagent_seed_link(
+        &self,
+        parent_timeline_id: &str,
+        parent_spawn_seq: EventSeq,
+        spawn: &SubagentSpawnEvent,
+    ) -> Result<(), TimelineError> {
+        let seed = self.events.iter().find_map(|event| match &event.kind {
+            TimelineEventKind::SubagentSeed(seed) => Some(seed),
+            _ => None,
+        });
+        let Some(seed) = seed else {
+            return Err(TimelineError::MissingSubagentSeed);
+        };
+        if seed.parent_timeline_id != parent_timeline_id
+            || seed.parent_spawn_seq != parent_spawn_seq.get()
+            || seed.subagent_id != spawn.subagent_id
+            || seed.context_source != spawn.context_source
+            || seed.source_ref != spawn.source_ref
+            || seed.normalized != spawn.context_normalized
+        {
+            return Err(TimelineError::InvalidSubagentSeedLink);
+        }
+        Ok(())
+    }
+
+    /// Resolve and validate the child result referenced by a parent terminal.
+    /// A syntactically valid range is insufficient: its exact event and every
+    /// parent-owned terminal projection must agree with the child fact.
+    pub fn validate_subagent_result_link(
+        &self,
+        parent_timeline_id: &str,
+        parent_spawn_seq: EventSeq,
+        spawn: &SubagentSpawnEvent,
+        terminal: &SubagentTerminalEvent,
+    ) -> Result<&SubagentResultEvent, TimelineError> {
+        self.validate_subagent_seed_link(parent_timeline_id, parent_spawn_seq, spawn)?;
+        let result_ref = terminal
+            .result_ref
+            .as_ref()
+            .ok_or(TimelineError::MissingSubagentResult)?;
+        let result_index = usize::try_from(result_ref.first_seq)
+            .map_err(|_| TimelineError::InvalidSubagentResultLink)?;
+        let Some(event) = self.events.get(result_index) else {
+            return Err(TimelineError::MissingSubagentResult);
+        };
+        let TimelineEventKind::SubagentResult(result) = &event.kind else {
+            return Err(TimelineError::InvalidSubagentResultLink);
+        };
+        if result_ref.timeline_id != spawn.child_session_id
+            || result_ref.first_seq != result_ref.last_seq
+            || event.seq.get() != result_ref.first_seq
+            || terminal.subagent_id != spawn.subagent_id
+            || terminal.child_session_id != spawn.child_session_id
+            || result.subagent_id != spawn.subagent_id
+            || result.outcome != terminal.outcome
+            || result.duration_ms != terminal.duration_ms
+            || result.tool_calls != terminal.tool_calls
+            || result.turns != terminal.turns
+            || result.tokens_used != terminal.tokens_used
+            || result.error != terminal.error
+        {
+            return Err(TimelineError::InvalidSubagentResultLink);
+        }
+        Ok(result)
+    }
+
+    /// Build the uncompressed transcript for the currently selected branch.
     ///
-    /// Compaction and content-only rewrites shadow Surface nodes but do not
-    /// erase rewind history. A Rewind replacement is different: it selects a
-    /// new branch root, so earlier discarded appends must not reappear.
-    pub fn rewind_surface(&self, target: usize) -> Vec<ConversationItem> {
+    /// Compaction and content rewrites only change the model-facing Surface;
+    /// they never erase canonical conversation facts. Rewind is the sole
+    /// branch-selection operation, so it replaces the branch accumulated so
+    /// far. This projection is the source for history/search features that
+    /// need original text without resurrecting a rewound-away branch.
+    pub fn branch_transcript(&self) -> Vec<ConversationItem> {
         let mut branch = Vec::new();
         for event in &self.events {
             let TimelineEventKind::Messages(messages) = &event.kind else {
@@ -427,9 +892,15 @@ impl Timeline {
                 (SurfaceOp::Replace { .. }, MessageCause::IntegrityRepair) => {
                     let _ = crate::compaction_utils::repair_history(&mut branch);
                 }
+                (SurfaceOp::Replace { .. }, MessageCause::ContextRebuild) => {
+                    // ContextRebuild is accepted only before the first turn. It
+                    // finalizes the deferred session preamble as one atomic
+                    // projection, so the branch must adopt the whole result.
+                    branch.clone_from(&messages.items);
+                }
                 (
                     SurfaceOp::Replace { .. },
-                    MessageCause::SystemPrompt | MessageCause::SessionRestore,
+                    MessageCause::SystemPrompt | MessageCause::MemoryContext,
                 ) => {
                     if let Some(system) = messages
                         .items
@@ -450,22 +921,46 @@ impl Timeline {
                 (SurfaceOp::Replace { .. }, _) => {}
             }
         }
-        let keep = sampling_types::conversation_truncate_for_prompt(&branch, target);
-        branch.truncate(keep);
         branch
     }
 
-    /// Raw prompt texts for the selected branch, indexed by prompt number.
-    pub fn prompt_texts(&self) -> Vec<String> {
-        let mut prompts = BTreeMap::<usize, String>::new();
+    /// Build the uncompressed current branch and cut it before prompt `target`.
+    ///
+    /// Compaction and content-only rewrites shadow Surface nodes but do not
+    /// erase rewind history. A Rewind replacement is different: it selects a
+    /// new branch root, so earlier discarded appends must not reappear.
+    pub fn rewind_surface(&self, target: usize) -> Result<Vec<ConversationItem>, TimelineError> {
+        let mut branch = self.branch_transcript();
+        if !branch.iter().any(|item| {
+            matches!(item, ConversationItem::User(user) if user.prompt_index == Some(target))
+        }) {
+            return Err(TimelineError::MissingPromptMarker(target));
+        }
+        let keep = sampling_types::conversation_truncate_for_prompt(&branch, target);
+        branch.truncate(keep);
+        Ok(branch)
+    }
+
+    /// User-authored inputs for the selected branch, indexed by prompt number.
+    pub fn prompt_records(&self) -> Vec<PromptRecord> {
+        let mut prompts = BTreeMap::<usize, PromptRecord>::new();
         for event in &self.events {
             match &event.kind {
                 TimelineEventKind::Turn(TurnEvent::Started {
-                    prompt_index: Some(index),
-                    prompt_text: Some(text),
+                    identity,
+                    prompt_index: index,
+                    prompt_text: text,
+                    input_kind,
                     ..
-                }) => {
-                    prompts.insert(*index, text.clone());
+                }) if identity.origin == "user" => {
+                    prompts.insert(
+                        *index,
+                        PromptRecord {
+                            prompt_index: *index,
+                            text: text.clone(),
+                            input_kind: *input_kind,
+                        },
+                    );
                 }
                 TimelineEventKind::Messages(MessageEvent {
                     cause: MessageCause::Rewind,
@@ -485,11 +980,52 @@ impl Timeline {
                 _ => {}
             }
         }
-        let mut result = Vec::new();
-        while let Some(text) = prompts.remove(&result.len()) {
-            result.push(text);
+        prompts.into_values().collect()
+    }
+
+    pub fn prompt_texts(&self) -> Vec<String> {
+        self.prompt_records()
+            .into_iter()
+            .map(|record| record.text)
+            .collect()
+    }
+
+    /// Next branch-local prompt coordinate, derived only from accepted turn
+    /// starts and rewind branch selections. Every v2 turn start carries both
+    /// its coordinate and prompt text; this fold consumes only the coordinate.
+    pub fn next_prompt_index(&self) -> usize {
+        let mut prompts = BTreeMap::<usize, ()>::new();
+        for event in &self.events {
+            match &event.kind {
+                TimelineEventKind::Turn(TurnEvent::Started {
+                    prompt_index: index,
+                    ..
+                }) => {
+                    prompts.insert(*index, ());
+                }
+                TimelineEventKind::Messages(MessageEvent {
+                    cause: MessageCause::Rewind,
+                    items,
+                    ..
+                }) => {
+                    let next = items
+                        .iter()
+                        .filter_map(|item| match item {
+                            ConversationItem::User(user) => user.prompt_index,
+                            _ => None,
+                        })
+                        .max()
+                        .map_or(0, |index| index.saturating_add(1));
+                    prompts.retain(|index, _| *index < next);
+                }
+                _ => {}
+            }
         }
-        result
+        let mut next = 0;
+        while prompts.remove(&next).is_some() {
+            next += 1;
+        }
+        next
     }
 
     pub fn last_completed_compaction_prompt_index(&self) -> Option<usize> {
@@ -519,16 +1055,38 @@ impl Timeline {
         latest
     }
 
+    /// Whether the ledger proves that the named Goal's final report reached a
+    /// successful terminal. This closes the crash window between committing
+    /// the turn terminal and committing the subsequent Control receipt.
+    pub fn has_successful_goal_finalization(&self, goal_id: &str) -> bool {
+        let mut identities = BTreeMap::new();
+        for event in &self.events {
+            match &event.kind {
+                TimelineEventKind::Turn(TurnEvent::Started { id, identity, .. }) => {
+                    identities.insert(*id, identity);
+                }
+                TimelineEventKind::Turn(TurnEvent::Ended { id, terminal, .. }) => {
+                    if identities.get(id).is_some_and(|identity| {
+                        identity.origin == "goal_finalization"
+                            && identity.goal_id.as_deref() == Some(goal_id)
+                    }) && terminal.stop_reason == "end_turn"
+                        && terminal.completion_kind == "completed"
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub fn surface_len(&self) -> usize {
         self.surface.len()
     }
 
     pub fn surface_item(&self, index: usize) -> Option<&ConversationItem> {
         self.surface.get(index)
-    }
-
-    pub(crate) fn current_surface_ids(&self) -> &[SurfaceId] {
-        &self.surface_ids
     }
 
     pub fn active_turn(&self) -> Option<TurnId> {
@@ -580,7 +1138,7 @@ impl Timeline {
             details: Some(serde_json::json!({
                 "requests": &requests,
                 "tools": tools.iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                "compaction": &compaction,
+                "compaction": compaction.as_ref().map(|open| &open.id),
             })),
         }))?;
         for id in requests {
@@ -601,13 +1159,23 @@ impl Timeline {
                 details: Some(serde_json::json!({ "recovered": true })),
             }))?;
         }
-        if let Some(id) = compaction {
-            let duration_ms = duration_since(self.compaction_started_at(&id), now);
-            self.record(TimelineEventKind::Compaction(CompactionEvent::Failed {
-                id,
-                duration_ms,
-                error: "process_interrupted".into(),
-            }))?;
+        if let Some(open) = compaction {
+            let duration_ms = duration_since(self.compaction_started_at(&open.id), now);
+            let terminal = if open.summaries == 1 && open.replacements == 1 {
+                CompactionEvent::Completed {
+                    id: open.id,
+                    source_items: open.source_items,
+                    result_items: self.surface.len(),
+                    duration_ms,
+                }
+            } else {
+                CompactionEvent::Failed {
+                    id: open.id,
+                    duration_ms,
+                    error: "process_interrupted".into(),
+                }
+            };
+            self.record(TimelineEventKind::Compaction(terminal))?;
         }
         if let Some((step, started)) = self
             .lifecycle
@@ -630,6 +1198,10 @@ impl Timeline {
                 outcome: "interrupted".into(),
                 duration_ms: duration_since(started, now),
                 tool_count: 0,
+                terminal: TurnTerminal {
+                    stop_reason: "interrupted".into(),
+                    completion_kind: "recovered_interruption".into(),
+                },
                 cancellation_category: Some("process_interrupted".into()),
                 details: Some(serde_json::json!({ "recovered": true })),
             }))?;
@@ -846,6 +1418,9 @@ impl Timeline {
         items: Vec<ConversationItem>,
         cause: MessageCause,
     ) -> Result<TimelineEvent, TimelineError> {
+        if cause == MessageCause::Compaction {
+            return Err(TimelineError::CompactionRangeRequired);
+        }
         if self.surface.is_empty() {
             return self.append_many(items, cause);
         }
@@ -859,6 +1434,9 @@ impl Timeline {
         items: Vec<ConversationItem>,
         cause: MessageCause,
     ) -> Result<TimelineEvent, TimelineError> {
+        if cause == MessageCause::Compaction {
+            return Err(TimelineError::CompactionRangeRequired);
+        }
         let Some(start) = self.surface_ids.get(start_index).copied() else {
             return Err(TimelineError::StaleReplacementBoundary);
         };
@@ -880,6 +1458,24 @@ impl Timeline {
         }))
     }
 
+    /// Replace an externally planned range using its stable Surface identity.
+    /// The normal message validator proves that the range is still current.
+    pub fn replace_compaction_range(
+        &mut self,
+        target: SurfaceRange,
+        items: Vec<ConversationItem>,
+    ) -> Result<TimelineEvent, TimelineError> {
+        self.record(TimelineEventKind::Messages(MessageEvent {
+            cause: MessageCause::Compaction,
+            items,
+            surface: SurfaceOp::Replace {
+                start: target.start,
+                end: target.end,
+                shadowed: target.shadowed,
+            },
+        }))
+    }
+
     pub fn accept(&mut self, event: TimelineEvent) -> Result<(), TimelineError> {
         let lifecycle = self.validate(&event)?;
         if let TimelineEventKind::Messages(messages) = &event.kind {
@@ -891,6 +1487,13 @@ impl Timeline {
     }
 
     fn validate(&self, event: &TimelineEvent) -> Result<LifecycleFold, TimelineError> {
+        if self
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, TimelineEventKind::SubagentResult(_)))
+        {
+            return Err(TimelineError::SubagentTimelineEnded);
+        }
         if event.version != TIMELINE_SCHEMA_VERSION {
             return Err(TimelineError::UnsupportedVersion {
                 expected: TIMELINE_SCHEMA_VERSION,
@@ -910,8 +1513,277 @@ impl Timeline {
 
         let mut lifecycle = self.lifecycle.clone();
         lifecycle.accept(&event.kind)?;
+        if let TimelineEventKind::Compaction(CompactionEvent::Summary {
+            id,
+            input_ref,
+            result_ref,
+            target,
+            summary_chars,
+            ..
+        }) = &event.kind
+        {
+            input_ref.validate()?;
+            result_ref.validate()?;
+            crate::validate_sideband_id(&result_ref.timeline_id)?;
+            if result_ref.first_seq != result_ref.last_seq || *summary_chars == 0 {
+                return Err(TimelineError::InvalidCompactionSummary(id.clone()));
+            }
+            let spawn = self.events.iter().find_map(|event| match &event.kind {
+                TimelineEventKind::Sideband(spawn)
+                    if spawn.sideband_id == result_ref.timeline_id =>
+                {
+                    Some(spawn)
+                }
+                _ => None,
+            });
+            if !spawn.is_some_and(|spawn| {
+                spawn.purpose == crate::SidebandPurpose::CompactionSummary
+                    && spawn.input_refs.iter().any(|source| source == input_ref)
+            }) {
+                return Err(TimelineError::InvalidCompactionSummary(id.clone()));
+            }
+            self.validate_surface_range(target)?;
+        }
         if let TimelineEventKind::Messages(messages) = &event.kind {
+            if messages.cause == MessageCause::ContextRebuild && self.next_prompt_index() != 0 {
+                return Err(TimelineError::ContextRebuildAfterTurn);
+            }
             self.validate_messages(messages)?;
+        }
+        if let TimelineEventKind::Sideband(sideband) = &event.kind {
+            sideband.validate()?;
+            if self.events.iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    TimelineEventKind::Sideband(existing)
+                        if existing.sideband_id == sideband.sideband_id
+                )
+            }) {
+                return Err(TimelineError::DuplicateSidebandSpawn(
+                    sideband.sideband_id.clone(),
+                ));
+            }
+            for input_ref in &sideband.input_refs {
+                if input_ref.last_seq >= event.seq.get() {
+                    return Err(TimelineError::InvalidSideband(
+                        crate::SidebandError::FutureInputRef {
+                            last: input_ref.last_seq,
+                            spawn: event.seq.get(),
+                        },
+                    ));
+                }
+            }
+        }
+        if let TimelineEventKind::SessionTitle(title) = &event.kind {
+            let normalized = title.title.trim();
+            if normalized.is_empty() || normalized.chars().count() > 160 {
+                return Err(TimelineError::InvalidSessionTitle);
+            }
+            match &title.source {
+                SessionTitleSource::User => {}
+                SessionTitleSource::Generated {
+                    sideband_id,
+                    result_seq,
+                } => {
+                    if crate::validate_sideband_id(sideband_id).is_err() || *result_seq == 0 {
+                        return Err(TimelineError::InvalidSessionTitleSource);
+                    }
+                    if self.events.iter().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::SessionTitle(SessionTitleEvent {
+                                source: SessionTitleSource::User,
+                                ..
+                            })
+                        )
+                    }) {
+                        return Err(TimelineError::GeneratedTitleAfterUserTitle);
+                    }
+                    if !self.events.iter().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::Sideband(spawn)
+                                if spawn.sideband_id == *sideband_id
+                                    && spawn.purpose == crate::SidebandPurpose::SessionTitle
+                        )
+                    }) {
+                        return Err(TimelineError::InvalidSessionTitleSource);
+                    }
+                }
+                SessionTitleSource::Fallback {
+                    sideband_id,
+                    terminal_seq,
+                } => {
+                    if crate::validate_sideband_id(sideband_id).is_err() || *terminal_seq == 0 {
+                        return Err(TimelineError::InvalidSessionTitleSource);
+                    }
+                    if self.events.iter().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::SessionTitle(SessionTitleEvent {
+                                source: SessionTitleSource::User,
+                                ..
+                            })
+                        )
+                    }) {
+                        return Err(TimelineError::GeneratedTitleAfterUserTitle);
+                    }
+                    if !self.events.iter().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::Sideband(spawn)
+                                if spawn.sideband_id == *sideband_id
+                                    && spawn.purpose == crate::SidebandPurpose::SessionTitle
+                        )
+                    }) {
+                        return Err(TimelineError::InvalidSessionTitleSource);
+                    }
+                }
+            }
+        }
+        if let TimelineEventKind::Subagent(subagent) = &event.kind {
+            match subagent {
+                SubagentEvent::Spawned(spawn) => {
+                    if spawn.subagent_id.trim().is_empty()
+                        || spawn.child_session_id.trim().is_empty()
+                        || spawn.subagent_type.trim().is_empty()
+                        || spawn.description.trim().is_empty()
+                        || spawn.prompt.trim().is_empty()
+                        || spawn.child_cwd.trim().is_empty()
+                        || spawn.effective_model_id.trim().is_empty()
+                    {
+                        return Err(TimelineError::InvalidSubagent);
+                    }
+                    if let Some(source_ref) = &spawn.source_ref {
+                        source_ref.validate()?;
+                    }
+                    if [
+                        spawn.parent_prompt_id.as_deref(),
+                        spawn.capability_mode.as_deref(),
+                        spawn.permission_mode.as_deref(),
+                        spawn.effective_permission_mode.as_deref(),
+                        spawn.workflow_run_id.as_deref(),
+                        spawn.goal_id.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.trim().is_empty())
+                    {
+                        return Err(TimelineError::InvalidSubagent);
+                    }
+                    if self.events.iter().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::Subagent(SubagentEvent::Spawned(existing))
+                                if existing.subagent_id == spawn.subagent_id
+                        )
+                    }) {
+                        return Err(TimelineError::DuplicateSubagentSpawn(
+                            spawn.subagent_id.clone(),
+                        ));
+                    }
+                    if self.events.iter().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::Subagent(SubagentEvent::Spawned(existing))
+                                if existing.child_session_id == spawn.child_session_id
+                        )
+                    }) {
+                        return Err(TimelineError::DuplicateSubagentChild(
+                            spawn.child_session_id.clone(),
+                        ));
+                    }
+                }
+                SubagentEvent::Ended(end) => {
+                    let spawn = self.events.iter().find_map(|event| match &event.kind {
+                        TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn))
+                            if spawn.subagent_id == end.subagent_id =>
+                        {
+                            Some(spawn)
+                        }
+                        _ => None,
+                    });
+                    let Some(spawn) = spawn else {
+                        return Err(TimelineError::SubagentNotOpen(end.subagent_id.clone()));
+                    };
+                    if spawn.child_session_id != end.child_session_id {
+                        return Err(TimelineError::SubagentChildMismatch);
+                    }
+                    if let Some(result_ref) = &end.result_ref {
+                        result_ref.validate()?;
+                        if result_ref.timeline_id != end.child_session_id
+                            || result_ref.first_seq != result_ref.last_seq
+                        {
+                            return Err(TimelineError::SubagentChildMismatch);
+                        }
+                    } else if end.outcome == SubagentOutcome::Completed {
+                        return Err(TimelineError::InvalidSubagent);
+                    }
+                    if self.events.iter().any(|event| {
+                        matches!(
+                            &event.kind,
+                            TimelineEventKind::Subagent(SubagentEvent::Ended(existing))
+                                if existing.subagent_id == end.subagent_id
+                        )
+                    }) {
+                        return Err(TimelineError::SubagentAlreadyEnded(end.subagent_id.clone()));
+                    }
+                    let error_valid = match end.outcome {
+                        SubagentOutcome::Completed => end.error.is_none(),
+                        SubagentOutcome::Failed | SubagentOutcome::Cancelled => end
+                            .error
+                            .as_deref()
+                            .is_some_and(|error| !error.trim().is_empty()),
+                    };
+                    if !error_valid {
+                        return Err(TimelineError::InvalidSubagent);
+                    }
+                }
+            }
+        }
+        if let TimelineEventKind::SubagentSeed(seed) = &event.kind {
+            let already_seeded = self
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, TimelineEventKind::SubagentSeed(_)));
+            if already_seeded {
+                return Err(TimelineError::DuplicateSubagentSeed);
+            }
+            if seed.parent_timeline_id.trim().is_empty() || seed.subagent_id.trim().is_empty() {
+                return Err(TimelineError::InvalidSubagent);
+            }
+            if let Some(source_ref) = &seed.source_ref {
+                source_ref.validate()?;
+            }
+        }
+        if let TimelineEventKind::SubagentResult(result) = &event.kind {
+            let seed = self.events.iter().find_map(|event| match &event.kind {
+                TimelineEventKind::SubagentSeed(seed) => Some(seed),
+                _ => None,
+            });
+            let Some(seed) = seed else {
+                return Err(TimelineError::MissingSubagentSeed);
+            };
+            if seed.subagent_id != result.subagent_id {
+                return Err(TimelineError::SubagentSeedMismatch);
+            }
+            let error_valid = match result.outcome {
+                SubagentOutcome::Completed => result.error.is_none(),
+                SubagentOutcome::Failed | SubagentOutcome::Cancelled => result
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| !error.trim().is_empty()),
+            };
+            let output_valid = result.output_ref.as_deref().is_none_or(|output_ref| {
+                output_ref
+                    .strip_prefix("artifact:subagent-output:blake3:")
+                    .is_some_and(|hash| {
+                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+            });
+            if !error_valid || !output_valid {
+                return Err(TimelineError::InvalidSubagent);
+            }
         }
         Ok(lifecycle)
     }
@@ -949,6 +1821,22 @@ impl Timeline {
         Ok(())
     }
 
+    fn validate_surface_range(&self, target: &SurfaceRange) -> Result<(), TimelineError> {
+        let Some(start_index) = self.surface_ids.iter().position(|id| id == &target.start) else {
+            return Err(TimelineError::StaleReplacementBoundary);
+        };
+        let Some(end_index) = self.surface_ids.iter().position(|id| id == &target.end) else {
+            return Err(TimelineError::StaleReplacementBoundary);
+        };
+        if start_index > end_index {
+            return Err(TimelineError::ReversedReplacement);
+        }
+        if self.surface_ids[start_index..=end_index] != target.shadowed {
+            return Err(TimelineError::IncompleteShadowSet);
+        }
+        Ok(())
+    }
+
     fn apply_messages(&mut self, event_seq: EventSeq, messages: &MessageEvent) {
         let item_count = u32::try_from(messages.items.len())
             .expect("message item capacity was checked during validation");
@@ -981,9 +1869,9 @@ impl Timeline {
                         item,
                     }),
                 );
-                self.replace_generation = self.replace_generation.saturating_add(1);
             }
         }
+        self.surface_revision = self.surface_revision.saturating_add(1);
     }
 }
 
@@ -1130,24 +2018,126 @@ impl LifecycleFold {
                     });
                 }
             }
-            TimelineEventKind::Compaction(CompactionEvent::Started { id, .. }) => {
+            TimelineEventKind::Compaction(CompactionEvent::Started {
+                id, source_items, ..
+            }) => {
                 if !self.seen_compactions.insert(id.clone()) {
                     return Err(TimelineError::CompactionAlreadySeen(id.clone()));
                 }
-                if let Some(active) = self.open_compaction.replace(id.clone()) {
-                    return Err(TimelineError::CompactionAlreadyOpen(active));
+                if let Some(active) = self.open_compaction.replace(OpenCompaction {
+                    id: id.clone(),
+                    source_items: *source_items,
+                    summaries: 0,
+                    replacements: 0,
+                    target: None,
+                }) {
+                    return Err(TimelineError::CompactionAlreadyOpen(active.id));
                 }
             }
-            TimelineEventKind::Compaction(CompactionEvent::Completed { id, .. })
-            | TimelineEventKind::Compaction(CompactionEvent::Failed { id, .. }) => {
-                if self.open_compaction.as_deref() != Some(id.as_str()) {
+            TimelineEventKind::Compaction(CompactionEvent::Summary { id, target, .. }) => {
+                let Some(open) = self.open_compaction.as_mut() else {
                     return Err(TimelineError::CompactionNotOpen(id.clone()));
+                };
+                if open.id != *id {
+                    return Err(TimelineError::CompactionNotOpen(id.clone()));
+                }
+                if open.summaries != 0 {
+                    return Err(TimelineError::DuplicateCompactionSummary(id.clone()));
+                }
+                open.summaries = 1;
+                open.target = Some(target.clone());
+            }
+            TimelineEventKind::Compaction(CompactionEvent::Completed { id, .. }) => {
+                let Some(open) = self.open_compaction.as_ref() else {
+                    return Err(TimelineError::CompactionNotOpen(id.clone()));
+                };
+                if open.id != *id {
+                    return Err(TimelineError::CompactionNotOpen(id.clone()));
+                }
+                if open.replacements != 1 {
+                    return Err(TimelineError::MissingCompactionReplacement(id.clone()));
                 }
                 self.open_compaction = None;
             }
+            TimelineEventKind::Compaction(CompactionEvent::Failed { id, .. }) => {
+                let Some(open) = self.open_compaction.as_ref() else {
+                    return Err(TimelineError::CompactionNotOpen(id.clone()));
+                };
+                if open.id != *id {
+                    return Err(TimelineError::CompactionNotOpen(id.clone()));
+                }
+                if open.replacements != 0 {
+                    return Err(TimelineError::FailedCompactionHasReplacement(id.clone()));
+                }
+                self.open_compaction = None;
+            }
+            TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Compaction,
+                surface:
+                    SurfaceOp::Replace {
+                        start,
+                        end,
+                        shadowed,
+                    },
+                ..
+            }) => {
+                let Some(open) = self.open_compaction.as_mut() else {
+                    return Err(TimelineError::CompactionReplacementNotOpen);
+                };
+                if open.summaries != 1 {
+                    return Err(TimelineError::CompactionReplacementBeforeSummary);
+                }
+                if open.replacements != 0 {
+                    return Err(TimelineError::DuplicateCompactionReplacement(
+                        open.id.clone(),
+                    ));
+                }
+                if open.target.as_ref()
+                    != Some(&SurfaceRange {
+                        start: *start,
+                        end: *end,
+                        shadowed: shadowed.clone(),
+                    })
+                {
+                    return Err(TimelineError::CompactionTargetMismatch);
+                }
+                open.replacements = 1;
+            }
+            TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Compaction,
+                ..
+            }) => return Err(TimelineError::CompactionReplacementNotOpen),
+            TimelineEventKind::Messages(MessageEvent {
+                surface: SurfaceOp::Replace { .. },
+                ..
+            }) if self.open_compaction.is_some() => {
+                return Err(TimelineError::ReplacementDuringCompaction(
+                    self.open_compaction
+                        .as_ref()
+                        .expect("guarded by is_some")
+                        .id
+                        .clone(),
+                ));
+            }
             TimelineEventKind::Messages(_)
             | TimelineEventKind::Recovery(_)
-            | TimelineEventKind::Observation(_) => {}
+            | TimelineEventKind::Observation(_)
+            | TimelineEventKind::SessionTitle(_)
+            | TimelineEventKind::Sideband(_)
+            | TimelineEventKind::Subagent(_)
+            | TimelineEventKind::SubagentSeed(_)
+            | TimelineEventKind::SubagentResult(_) => {}
+            TimelineEventKind::Control(control) => {
+                if let Some(previous) = self.control_revision
+                    && control.revision <= previous
+                {
+                    return Err(TimelineError::NonMonotonicControlRevision {
+                        previous,
+                        actual: control.revision,
+                    });
+                }
+                self.control_revision = Some(control.revision);
+            }
         }
         Ok(())
     }
@@ -1171,20 +2161,33 @@ fn validate_tool_result_prune(
     replaced: &[ConversationItem],
     replacement: &MessageEvent,
 ) -> Result<(), TimelineError> {
-    if replaced.len() != 1 || replacement.items.len() != 1 {
+    if replaced.len() != replacement.items.len() {
         return Err(TimelineError::InvalidToolResultPrune);
     }
-    let ConversationItem::ToolResult(before) = &replaced[0] else {
+    let mut content_changed = false;
+    for (before, after) in replaced.iter().zip(&replacement.items) {
+        match (before, after) {
+            (ConversationItem::ToolResult(before), ConversationItem::ToolResult(after)) => {
+                let before_images =
+                    serde_json::to_value(&before.images).expect("conversation images serialize");
+                let after_images =
+                    serde_json::to_value(&after.images).expect("conversation images serialize");
+                if before.tool_call_id != after.tool_call_id || before_images != after_images {
+                    return Err(TimelineError::ToolResultIdentityChanged);
+                }
+                content_changed |= before.content != after.content;
+            }
+            _ => {
+                let before = serde_json::to_value(before).expect("conversation item serializes");
+                let after = serde_json::to_value(after).expect("conversation item serializes");
+                if before != after {
+                    return Err(TimelineError::InvalidToolResultPrune);
+                }
+            }
+        }
+    }
+    if !content_changed {
         return Err(TimelineError::InvalidToolResultPrune);
-    };
-    let ConversationItem::ToolResult(after) = &replacement.items[0] else {
-        return Err(TimelineError::InvalidToolResultPrune);
-    };
-    let before_images =
-        serde_json::to_value(&before.images).expect("conversation images serialize");
-    let after_images = serde_json::to_value(&after.images).expect("conversation images serialize");
-    if before.tool_call_id != after.tool_call_id || before_images != after_images {
-        return Err(TimelineError::ToolResultIdentityChanged);
     }
     Ok(())
 }
@@ -1193,16 +2196,93 @@ fn validate_tool_result_prune(
 mod tests {
     use super::*;
 
-    fn record_prompt(timeline: &mut Timeline, id: u64, index: usize, text: &str) {
+    fn record_compaction_summary_for(
+        timeline: &mut Timeline,
+        id: &str,
+        target: SurfaceRange,
+    ) -> SurfaceRange {
+        let input_ref = crate::TimelineRangeRef {
+            timeline_id: "test-timeline".into(),
+            first_seq: 0,
+            last_seq: timeline.next_seq().get() - 1,
+        };
+        let sideband_id = "00000000-0000-0000-0000-000000000001";
+        timeline
+            .record(TimelineEventKind::Sideband(crate::SidebandSpawnEvent {
+                sideband_id: sideband_id.into(),
+                purpose: crate::SidebandPurpose::CompactionSummary,
+                input_refs: vec![input_ref.clone()],
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Summary {
+                id: id.into(),
+                input_ref,
+                result_ref: crate::TimelineRangeRef {
+                    timeline_id: sideband_id.into(),
+                    first_seq: 2,
+                    last_seq: 2,
+                },
+                target: target.clone(),
+                source_tokens: 100,
+                summary_chars: 7,
+            }))
+            .unwrap();
+        target
+    }
+
+    fn record_compaction_summary(timeline: &mut Timeline, id: &str) -> SurfaceRange {
+        let target = SurfaceRange {
+            start: *timeline.surface_ids().first().expect("non-empty Surface"),
+            end: *timeline.surface_ids().last().expect("non-empty Surface"),
+            shadowed: timeline.surface_ids().to_vec(),
+        };
+        record_compaction_summary_for(timeline, id, target)
+    }
+
+    fn user_identity() -> TurnIdentity {
+        TurnIdentity {
+            origin: "user".into(),
+            turn_kind: "user".into(),
+            goal_id: None,
+            stage_id: None,
+        }
+    }
+
+    fn completed_terminal() -> TurnTerminal {
+        TurnTerminal {
+            stop_reason: "end_turn".into(),
+            completion_kind: "completed".into(),
+        }
+    }
+
+    fn goal_identity(goal_id: &str) -> TurnIdentity {
+        TurnIdentity {
+            origin: "goal_finalization".into(),
+            turn_kind: "internal".into(),
+            goal_id: Some(goal_id.into()),
+            stage_id: Some(4),
+        }
+    }
+
+    fn record_input(
+        timeline: &mut Timeline,
+        id: u64,
+        index: usize,
+        text: &str,
+        identity: TurnIdentity,
+        input_kind: TurnInputKind,
+    ) {
         let turn = TurnId(id);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
-                origin: "user".into(),
+                identity,
                 model_id: "model".into(),
                 input_message_count: timeline.surface_len(),
-                prompt_index: Some(index),
-                prompt_text: Some(text.into()),
+                prompt_index: index,
+                prompt_text: text.into(),
+                input_kind,
                 redirect_kind: None,
             }))
             .unwrap();
@@ -1215,10 +2295,103 @@ mod tests {
                 outcome: "completed".into(),
                 duration_ms: 1,
                 tool_count: 0,
+                terminal: completed_terminal(),
                 cancellation_category: None,
                 details: None,
             }))
             .unwrap();
+    }
+
+    fn record_prompt(timeline: &mut Timeline, id: u64, index: usize, text: &str) {
+        record_input(
+            timeline,
+            id,
+            index,
+            text,
+            user_identity(),
+            TurnInputKind::Prompt,
+        );
+    }
+
+    #[test]
+    fn control_revision_must_increase() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 7,
+                snapshot: serde_json::json!({ "control_revision": 7 }),
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Control(ControlEvent {
+                revision: 7,
+                snapshot: serde_json::json!({ "control_revision": 7 }),
+            })),
+            Err(TimelineError::NonMonotonicControlRevision {
+                previous: 7,
+                actual: 7
+            })
+        ));
+    }
+
+    #[test]
+    fn goal_finalization_requires_matching_identity_and_success_terminal() {
+        let mut timeline = Timeline::default();
+        let failed = TurnId(1);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: failed,
+                identity: goal_identity("goal-1"),
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "finalize".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: failed,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: TurnTerminal {
+                    stop_reason: "refusal".into(),
+                    completion_kind: "completed".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        assert!(!timeline.has_successful_goal_finalization("goal-1"));
+
+        let succeeded = TurnId(2);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: succeeded,
+                identity: goal_identity("goal-1"),
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 1,
+                prompt_text: "finalize again".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: succeeded,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        assert!(timeline.has_successful_goal_finalization("goal-1"));
+        assert!(!timeline.has_successful_goal_finalization("goal-2"));
     }
 
     #[test]
@@ -1230,18 +2403,82 @@ mod tests {
         ])
         .unwrap();
         timeline
-            .replace_range(
-                1,
-                2,
-                vec![ConversationItem::user("summary")],
-                MessageCause::Compaction,
-            )
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 3,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = SurfaceRange {
+            start: timeline.surface_ids()[1],
+            end: timeline.surface_ids()[2],
+            shadowed: timeline.surface_ids()[1..=2].to_vec(),
+        };
+        record_compaction_summary_for(&mut timeline, "compact", target.clone());
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact".into(),
+                source_items: 3,
+                result_items: 2,
+                duration_ms: 1,
+            }))
             .unwrap();
 
-        assert_eq!(timeline.events().len(), 4);
+        assert_eq!(timeline.events().len(), 8);
         assert_eq!(timeline.surface_len(), 2);
-        assert_eq!(timeline.transcript().len(), 3);
+        assert_eq!(timeline.branch_transcript().len(), 3);
         assert_eq!(timeline.surface()[1].text_content(), "summary");
+    }
+
+    #[test]
+    fn completed_compaction_reprojects_its_exact_shadowed_items() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("old question"),
+            ConversationItem::assistant("old answer"),
+            ConversationItem::user("tail"),
+        ])
+        .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 4,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = SurfaceRange {
+            start: timeline.surface_ids()[1],
+            end: timeline.surface_ids()[2],
+            shadowed: timeline.surface_ids()[1..=2].to_vec(),
+        };
+        record_compaction_summary_for(&mut timeline, "compact", target.clone());
+        let summary_seq = timeline.next_seq().get() - 1;
+
+        assert!(matches!(
+            timeline.compacted_context(summary_seq),
+            Err(TimelineError::IncompleteCompactionContext(id)) if id == "compact"
+        ));
+
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact".into(),
+                source_items: 4,
+                result_items: 3,
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        let restored = timeline.compacted_context(summary_seq).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].text_content(), "old question");
+        assert_eq!(restored[1].text_content(), "old answer");
+        assert_eq!(timeline.surface().len(), 3);
     }
 
     #[test]
@@ -1252,11 +2489,12 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
-                origin: "user".into(),
+                identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 1,
-                prompt_index: Some(0),
-                prompt_text: Some("prompt".into()),
+                prompt_index: 0,
+                prompt_text: "prompt".into(),
+                input_kind: TurnInputKind::Prompt,
                 redirect_kind: None,
             }))
             .unwrap();
@@ -1290,11 +2528,12 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
-                origin: "user".into(),
+                identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 1,
-                prompt_index: Some(0),
-                prompt_text: Some("prompt".into()),
+                prompt_index: 0,
+                prompt_text: "prompt".into(),
+                input_kind: TurnInputKind::Prompt,
                 redirect_kind: None,
             }))
             .unwrap();
@@ -1304,6 +2543,7 @@ mod tests {
                 outcome: "completed".into(),
                 duration_ms: 1,
                 tool_count: 0,
+                terminal: completed_terminal(),
                 cancellation_category: None,
                 details: None,
             }))
@@ -1312,11 +2552,12 @@ mod tests {
         assert!(matches!(
             timeline.record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
-                origin: "user".into(),
+                identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 1,
-                prompt_index: Some(0),
-                prompt_text: Some("prompt".into()),
+                prompt_index: 0,
+                prompt_text: "prompt".into(),
+                input_kind: TurnInputKind::Prompt,
                 redirect_kind: None,
             })),
             Err(TimelineError::TurnAlreadySeen(TurnId(7)))
@@ -1332,6 +2573,44 @@ mod tests {
             Timeline::from_events(events),
             Err(TimelineError::UnsupportedVersion { .. })
         ));
+    }
+
+    #[test]
+    fn prompt_records_keep_typed_user_inputs_and_skip_synthetic_gaps() {
+        let mut timeline = Timeline::default();
+        record_prompt(&mut timeline, 1, 0, "explain this");
+        record_input(
+            &mut timeline,
+            2,
+            1,
+            "internal continuation",
+            goal_identity("goal-1"),
+            TurnInputKind::Prompt,
+        );
+        record_input(
+            &mut timeline,
+            3,
+            2,
+            "cargo check -p shell --lib",
+            user_identity(),
+            TurnInputKind::Bash,
+        );
+
+        assert_eq!(
+            timeline.prompt_records(),
+            vec![
+                PromptRecord {
+                    prompt_index: 0,
+                    text: "explain this".into(),
+                    input_kind: TurnInputKind::Prompt,
+                },
+                PromptRecord {
+                    prompt_index: 2,
+                    text: "cargo check -p shell --lib".into(),
+                    input_kind: TurnInputKind::Bash,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1356,11 +2635,12 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
-                origin: "user".into(),
+                identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 0,
-                prompt_index: Some(0),
-                prompt_text: Some("prompt".into()),
+                prompt_index: 0,
+                prompt_text: "prompt".into(),
+                input_kind: TurnInputKind::Prompt,
                 redirect_kind: None,
             }))
             .unwrap();
@@ -1451,13 +2731,14 @@ mod tests {
                 prompt_index: 3,
             }))
             .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact");
         timeline
-            .replace_all(
+            .replace_compaction_range(
+                target,
                 vec![
                     ConversationItem::system("system"),
                     ConversationItem::user("summary"),
                 ],
-                MessageCause::Compaction,
             )
             .unwrap();
         timeline
@@ -1472,7 +2753,7 @@ mod tests {
 
         assert_eq!(timeline.prompt_texts(), vec!["p0", "p1", "p2", "p3"]);
         assert_eq!(timeline.last_completed_compaction_prompt_index(), Some(3));
-        let rewound = timeline.rewind_surface(2);
+        let rewound = timeline.rewind_surface(2).unwrap();
         assert_eq!(
             rewound
                 .iter()
@@ -1485,5 +2766,753 @@ mod tests {
         record_prompt(&mut timeline, 14, 2, "new-p2");
         assert_eq!(timeline.prompt_texts(), vec!["p0", "p1", "new-p2"]);
         assert_eq!(timeline.last_completed_compaction_prompt_index(), None);
+    }
+
+    #[test]
+    fn pre_turn_context_rebuild_finalizes_the_rewind_preamble() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("draft")]).unwrap();
+        timeline
+            .replace_all(
+                vec![
+                    ConversationItem::system("system"),
+                    ConversationItem::user("user-info"),
+                    ConversationItem::project_instructions("instructions"),
+                ],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        record_prompt(&mut timeline, 1, 0, "prompt");
+
+        let rewound = timeline.rewind_surface(0).unwrap();
+        assert_eq!(
+            rewound
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            vec!["system", "user-info", "instructions"]
+        );
+        assert!(matches!(
+            timeline.replace_all(timeline.surface().to_vec(), MessageCause::ContextRebuild),
+            Err(TimelineError::ContextRebuildAfterTurn)
+        ));
+
+        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        timeline
+            .replace_all(
+                vec![
+                    ConversationItem::system("rebuilt"),
+                    ConversationItem::user("new-user-info"),
+                ],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        assert_eq!(
+            timeline
+                .branch_transcript()
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            vec!["rebuilt", "new-user-info"]
+        );
+    }
+
+    #[test]
+    fn memory_context_updates_preamble_without_erasing_uncompressed_branch() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("user-info"),
+        ])
+        .unwrap();
+        record_prompt(&mut timeline, 1, 0, "prompt");
+        let mut memory_surface = timeline.surface().to_vec();
+        memory_surface[0] = ConversationItem::system("system + memory");
+        timeline
+            .replace_all(memory_surface, MessageCause::MemoryContext)
+            .unwrap();
+
+        let rewound = timeline.rewind_surface(0).unwrap();
+        assert_eq!(
+            rewound
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            vec!["system + memory", "user-info"]
+        );
+    }
+
+    #[test]
+    fn child_prompt_zero_does_not_collide_with_inherited_seed_markers() {
+        let mut inherited = ConversationItem::user("parent prompt");
+        inherited.set_prompt_index(0);
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            inherited,
+            ConversationItem::assistant("parent answer"),
+        ])
+        .unwrap();
+        record_prompt(&mut timeline, 1, 0, "child prompt");
+
+        let rewound = timeline.rewind_surface(0).unwrap();
+
+        assert_eq!(
+            rewound
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            vec!["system", "parent prompt", "parent answer"]
+        );
+        assert!(matches!(
+            &timeline.surface()[1],
+            ConversationItem::User(user) if user.prompt_index.is_none()
+        ));
+    }
+
+    #[test]
+    fn compaction_requires_exactly_one_replacement() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact".into(),
+                source_items: 1,
+                result_items: 1,
+                duration_ms: 1,
+            })),
+            Err(TimelineError::MissingCompactionReplacement(id)) if id == "compact"
+        ));
+
+        let target = record_compaction_summary(&mut timeline, "compact");
+
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .unwrap();
+        let current_target = SurfaceRange {
+            start: timeline.surface_ids()[0],
+            end: timeline.surface_ids()[0],
+            shadowed: timeline.surface_ids().to_vec(),
+        };
+        assert!(matches!(
+            timeline.replace_compaction_range(
+                current_target,
+                vec![ConversationItem::user("second summary")],
+            ),
+            Err(TimelineError::DuplicateCompactionReplacement(id)) if id == "compact"
+        ));
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact".into(),
+                source_items: 1,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+    }
+
+    #[test]
+    fn compaction_replacement_requires_a_linked_summary() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+
+        let target = SurfaceRange {
+            start: timeline.surface_ids()[0],
+            end: timeline.surface_ids()[0],
+            shadowed: timeline.surface_ids().to_vec(),
+        };
+        assert!(matches!(
+            timeline.replace_compaction_range(
+                target,
+                vec![ConversationItem::user("unlinked summary")],
+            ),
+            Err(TimelineError::CompactionReplacementBeforeSummary)
+        ));
+    }
+
+    #[test]
+    fn compaction_replacement_must_match_the_summarized_range() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::user("old"),
+            ConversationItem::assistant("tail"),
+        ])
+        .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 2,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        record_compaction_summary(&mut timeline, "compact");
+        let wrong_target = SurfaceRange {
+            start: timeline.surface_ids()[1],
+            end: timeline.surface_ids()[1],
+            shadowed: vec![timeline.surface_ids()[1]],
+        };
+
+        assert!(matches!(
+            timeline
+                .replace_compaction_range(wrong_target, vec![ConversationItem::user("summary")],),
+            Err(TimelineError::CompactionTargetMismatch)
+        ));
+        assert_eq!(timeline.surface().len(), 2);
+    }
+
+    #[test]
+    fn compaction_summary_requires_its_sideband_spawn() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Compaction(CompactionEvent::Summary {
+                id: "compact".into(),
+                input_ref: crate::TimelineRangeRef {
+                    timeline_id: "test-timeline".into(),
+                    first_seq: 0,
+                    last_seq: 1,
+                },
+                result_ref: crate::TimelineRangeRef {
+                    timeline_id: "00000000-0000-0000-0000-000000000001".into(),
+                    first_seq: 2,
+                    last_seq: 2,
+                },
+                target: SurfaceRange {
+                    start: timeline.surface_ids()[0],
+                    end: timeline.surface_ids()[0],
+                    shadowed: vec![timeline.surface_ids()[0]],
+                },
+                source_tokens: 100,
+                summary_chars: 7,
+            })),
+            Err(TimelineError::InvalidCompactionSummary(id)) if id == "compact"
+        ));
+    }
+
+    #[test]
+    fn compaction_rejects_a_second_summary() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        record_compaction_summary(&mut timeline, "compact");
+        let duplicate = timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                TimelineEventKind::Compaction(summary @ CompactionEvent::Summary { .. }) => {
+                    Some(summary.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Compaction(duplicate)),
+            Err(TimelineError::DuplicateCompactionSummary(id)) if id == "compact"
+        ));
+    }
+
+    #[test]
+    fn committed_compaction_cannot_be_relabelled_failed() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact");
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .unwrap();
+
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Compaction(CompactionEvent::Failed {
+                id: "compact".into(),
+                duration_ms: 1,
+                error: "too large".into(),
+            })),
+            Err(TimelineError::FailedCompactionHasReplacement(id)) if id == "compact"
+        ));
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact".into(),
+                source_items: 1,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+    }
+
+    #[test]
+    fn recovery_completes_a_compaction_whose_replacement_was_committed() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact");
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+            .unwrap();
+
+        let repairs = timeline.recover_interrupted().unwrap();
+        assert!(repairs.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id,
+                source_items: 1,
+                result_items: 1,
+                ..
+            }) if id == "compact"
+        )));
+    }
+
+    #[test]
+    fn user_title_supersedes_generated_title_in_one_timeline() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Sideband(SidebandSpawnEvent {
+                sideband_id: "018f0000-0000-7000-8000-000000000001".into(),
+                purpose: crate::SidebandPurpose::SessionTitle,
+                input_refs: Vec::new(),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+                title: "Generated title".into(),
+                source: SessionTitleSource::Generated {
+                    sideband_id: "018f0000-0000-7000-8000-000000000001".into(),
+                    result_seq: 2,
+                },
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+                title: "User title".into(),
+                source: SessionTitleSource::User,
+            }))
+            .unwrap();
+
+        let (seq, title) = timeline.session_title().unwrap();
+        assert_eq!(seq.get(), 2);
+        assert_eq!(title.title, "User title");
+        assert_eq!(title.source, SessionTitleSource::User);
+    }
+
+    #[test]
+    fn automatic_title_cannot_race_past_a_user_title() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+                title: "User title".into(),
+                source: SessionTitleSource::User,
+            }))
+            .unwrap();
+
+        let generated = timeline.record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+            title: "Late generated title".into(),
+            source: SessionTitleSource::Generated {
+                sideband_id: "018f0000-0000-7000-8000-000000000001".into(),
+                result_seq: 2,
+            },
+        }));
+        assert!(matches!(
+            generated,
+            Err(TimelineError::GeneratedTitleAfterUserTitle)
+        ));
+        let fallback = timeline.record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+            title: "Late fallback".into(),
+            source: SessionTitleSource::Fallback {
+                sideband_id: "018f0000-0000-7000-8000-000000000001".into(),
+                terminal_seq: 3,
+            },
+        }));
+        assert!(matches!(
+            fallback,
+            Err(TimelineError::GeneratedTitleAfterUserTitle)
+        ));
+        assert_eq!(timeline.events().len(), 1);
+        assert_eq!(timeline.session_title().unwrap().1.title, "User title");
+    }
+
+    #[test]
+    fn invalid_title_payloads_fail_without_mutating_timeline() {
+        let mut timeline = Timeline::default();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+                title: "   ".into(),
+                source: SessionTitleSource::User,
+            })),
+            Err(TimelineError::InvalidSessionTitle)
+        ));
+        assert!(matches!(
+            timeline.record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+                title: "title".into(),
+                source: SessionTitleSource::Generated {
+                    sideband_id: "not-a-uuid".into(),
+                    result_seq: 0,
+                },
+            })),
+            Err(TimelineError::InvalidSessionTitleSource)
+        ));
+        assert!(timeline.events().is_empty());
+    }
+
+    #[test]
+    fn automatic_title_requires_one_prior_session_title_sideband() {
+        let sideband_id = "018f0000-0000-7000-8000-000000000001";
+        let mut timeline = Timeline::default();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+                title: "unproven".into(),
+                source: SessionTitleSource::Generated {
+                    sideband_id: sideband_id.into(),
+                    result_seq: 2,
+                },
+            })),
+            Err(TimelineError::InvalidSessionTitleSource)
+        ));
+
+        timeline
+            .record(TimelineEventKind::Sideband(SidebandSpawnEvent {
+                sideband_id: sideband_id.into(),
+                purpose: crate::SidebandPurpose::PermissionJudgment,
+                input_refs: Vec::new(),
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+                title: "wrong purpose".into(),
+                source: SessionTitleSource::Generated {
+                    sideband_id: sideband_id.into(),
+                    result_seq: 2,
+                },
+            })),
+            Err(TimelineError::InvalidSessionTitleSource)
+        ));
+    }
+
+    #[test]
+    fn sideband_spawn_identity_is_unique_per_timeline() {
+        let spawn = SidebandSpawnEvent {
+            sideband_id: "018f0000-0000-7000-8000-000000000001".into(),
+            purpose: crate::SidebandPurpose::PermissionJudgment,
+            input_refs: Vec::new(),
+        };
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Sideband(spawn.clone()))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Sideband(spawn)),
+            Err(TimelineError::DuplicateSidebandSpawn(_))
+        ));
+        assert_eq!(timeline.events().len(), 1);
+    }
+
+    fn subagent_spawn(id: &str, child: &str) -> SubagentSpawnEvent {
+        SubagentSpawnEvent {
+            subagent_id: id.into(),
+            child_session_id: child.into(),
+            subagent_type: "explore".into(),
+            description: "inspect architecture".into(),
+            prompt: "trace the canonical state".into(),
+            context_source: SubagentContextSource::Forked,
+            source_ref: None,
+            context_normalized: false,
+            resumed_from: None,
+            parent_prompt_id: None,
+            capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
+            workflow_run_id: None,
+            goal_id: None,
+            child_cwd: "/workspace".into(),
+            worktree_path: None,
+            effective_model_id: "grow-3".into(),
+        }
+    }
+
+    #[test]
+    fn subagent_parent_and_child_ledgers_close_through_exact_result_ref() {
+        let mut parent = Timeline::default();
+        let spawn = parent
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                subagent_spawn("sa-1", "child-1"),
+            )))
+            .unwrap();
+        let mut child = Timeline::default();
+        child
+            .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "parent-1".into(),
+                parent_spawn_seq: spawn.seq.get(),
+                subagent_id: "sa-1".into(),
+                context_source: SubagentContextSource::Forked,
+                source_ref: None,
+                normalized: false,
+            }))
+            .unwrap();
+        let result = child
+            .record(TimelineEventKind::SubagentResult(SubagentResultEvent {
+                subagent_id: "sa-1".into(),
+                outcome: SubagentOutcome::Completed,
+                duration_ms: 25,
+                tool_calls: 2,
+                turns: 1,
+                tokens_used: 90,
+                error: None,
+                output_ref: Some(format!(
+                    "artifact:subagent-output:blake3:{}",
+                    "a".repeat(64)
+                )),
+            }))
+            .unwrap();
+        let terminal = SubagentTerminalEvent {
+            subagent_id: "sa-1".into(),
+            child_session_id: "child-1".into(),
+            outcome: SubagentOutcome::Completed,
+            duration_ms: 25,
+            tool_calls: 2,
+            turns: 1,
+            tokens_used: 90,
+            error: None,
+            result_ref: Some(crate::TimelineRangeRef {
+                timeline_id: "child-1".into(),
+                first_seq: result.seq.get(),
+                last_seq: result.seq.get(),
+            }),
+            snapshot_ref: None,
+        };
+        child
+            .validate_subagent_result_link(
+                "parent-1",
+                spawn.seq,
+                &subagent_spawn("sa-1", "child-1"),
+                &terminal,
+            )
+            .unwrap();
+        parent
+            .record(TimelineEventKind::Subagent(SubagentEvent::Ended(terminal)))
+            .unwrap();
+    }
+
+    #[test]
+    fn one_child_timeline_can_belong_to_only_one_parent_spawn() {
+        let mut parent = Timeline::default();
+        parent
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                subagent_spawn("sa-1", "child-1"),
+            )))
+            .unwrap();
+
+        assert!(matches!(
+            parent.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                subagent_spawn("sa-2", "child-1"),
+            ))),
+            Err(TimelineError::DuplicateSubagentChild(child)) if child == "child-1"
+        ));
+        assert_eq!(parent.events().len(), 1);
+    }
+
+    #[test]
+    fn cross_timeline_link_rejects_a_foreign_seed_and_terminal_drift() {
+        let spawn = subagent_spawn("sa-1", "child-1");
+        let mut child = Timeline::default();
+        child
+            .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "other-parent".into(),
+                parent_spawn_seq: 7,
+                subagent_id: "sa-1".into(),
+                context_source: SubagentContextSource::Forked,
+                source_ref: None,
+                normalized: false,
+            }))
+            .unwrap();
+        let result = child
+            .record(TimelineEventKind::SubagentResult(SubagentResultEvent {
+                subagent_id: "sa-1".into(),
+                outcome: SubagentOutcome::Completed,
+                duration_ms: 5,
+                tool_calls: 1,
+                turns: 1,
+                tokens_used: 8,
+                error: None,
+                output_ref: None,
+            }))
+            .unwrap();
+        let mut terminal = SubagentTerminalEvent {
+            subagent_id: "sa-1".into(),
+            child_session_id: "child-1".into(),
+            outcome: SubagentOutcome::Completed,
+            duration_ms: 5,
+            tool_calls: 1,
+            turns: 1,
+            tokens_used: 8,
+            error: None,
+            result_ref: Some(crate::TimelineRangeRef {
+                timeline_id: "child-1".into(),
+                first_seq: result.seq.get(),
+                last_seq: result.seq.get(),
+            }),
+            snapshot_ref: None,
+        };
+        assert!(matches!(
+            child.validate_subagent_result_link("parent-1", EventSeq(7), &spawn, &terminal),
+            Err(TimelineError::InvalidSubagentSeedLink)
+        ));
+
+        let mut linked_child = Timeline::default();
+        linked_child
+            .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "parent-1".into(),
+                parent_spawn_seq: 7,
+                subagent_id: "sa-1".into(),
+                context_source: SubagentContextSource::Forked,
+                source_ref: None,
+                normalized: false,
+            }))
+            .unwrap();
+        let linked_result = linked_child
+            .record(TimelineEventKind::SubagentResult(SubagentResultEvent {
+                subagent_id: "sa-1".into(),
+                outcome: SubagentOutcome::Completed,
+                duration_ms: 5,
+                tool_calls: 1,
+                turns: 1,
+                tokens_used: 8,
+                error: None,
+                output_ref: None,
+            }))
+            .unwrap();
+        terminal.result_ref = Some(crate::TimelineRangeRef {
+            timeline_id: "child-1".into(),
+            first_seq: linked_result.seq.get(),
+            last_seq: linked_result.seq.get(),
+        });
+        terminal.tokens_used = 9;
+        assert!(matches!(
+            linked_child.validate_subagent_result_link("parent-1", EventSeq(7), &spawn, &terminal),
+            Err(TimelineError::InvalidSubagentResultLink)
+        ));
+    }
+
+    #[test]
+    fn schema_v5_rejects_unknown_event_fields() {
+        let event = Timeline::default()
+            .record(TimelineEventKind::Observation(ObservationEvent {
+                scope: "test".into(),
+                name: "strict-schema".into(),
+                turn: None,
+                step: None,
+                data: None,
+            }))
+            .unwrap();
+
+        let mut nested = serde_json::to_value(&event).unwrap();
+        nested["event"]["legacy_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<TimelineEvent>(nested).is_err());
+
+        let mut envelope = serde_json::to_value(&event).unwrap();
+        envelope["legacy_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<TimelineEvent>(envelope).is_err());
+    }
+
+    #[test]
+    fn child_result_requires_one_matching_seed_and_closes_the_timeline() {
+        let result = SubagentResultEvent {
+            subagent_id: "sa-1".into(),
+            outcome: SubagentOutcome::Cancelled,
+            duration_ms: 1,
+            tool_calls: 0,
+            turns: 0,
+            tokens_used: 0,
+            error: Some("cancelled".into()),
+            output_ref: None,
+        };
+        let mut child = Timeline::default();
+        assert!(matches!(
+            child.record(TimelineEventKind::SubagentResult(result.clone())),
+            Err(TimelineError::MissingSubagentSeed)
+        ));
+        child
+            .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "parent-1".into(),
+                parent_spawn_seq: 4,
+                subagent_id: "sa-1".into(),
+                context_source: SubagentContextSource::New,
+                source_ref: None,
+                normalized: false,
+            }))
+            .unwrap();
+        child
+            .record(TimelineEventKind::SubagentResult(result.clone()))
+            .unwrap();
+        assert!(matches!(
+            child.record(TimelineEventKind::SubagentResult(result)),
+            Err(TimelineError::SubagentTimelineEnded)
+        ));
+        assert!(matches!(
+            child.record(TimelineEventKind::Observation(ObservationEvent {
+                scope: "late".into(),
+                name: "must-not-append".into(),
+                turn: None,
+                step: None,
+                data: None,
+            })),
+            Err(TimelineError::SubagentTimelineEnded)
+        ));
+    }
+
+    #[test]
+    fn completed_parent_terminal_requires_child_result_reference() {
+        let mut parent = Timeline::default();
+        parent
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                subagent_spawn("sa-1", "child-1"),
+            )))
+            .unwrap();
+        assert!(matches!(
+            parent.record(TimelineEventKind::Subagent(SubagentEvent::Ended(
+                SubagentTerminalEvent {
+                    subagent_id: "sa-1".into(),
+                    child_session_id: "child-1".into(),
+                    outcome: SubagentOutcome::Completed,
+                    duration_ms: 1,
+                    tool_calls: 0,
+                    turns: 1,
+                    tokens_used: 1,
+                    error: None,
+                    result_ref: None,
+                    snapshot_ref: None,
+                },
+            ))),
+            Err(TimelineError::InvalidSubagent)
+        ));
+        assert_eq!(parent.events().len(), 1);
     }
 }

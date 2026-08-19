@@ -37,7 +37,7 @@ pub use api::gc::effective_max_age;
 #[cfg(feature = "metadata")]
 pub use api::gc::{GcOptions, GcReport, gc_worktrees, gc_worktrees_with_delegate};
 pub use api::{
-    BtrfsDelegate, BtrfsMode, CleanupReport, CopyReport, CreationMode, DelegateSnapshotResult,
+    BtrfsDelegate, CleanupReport, CopyReport, CreationMode, DelegateSnapshotResult,
     DirtyFilesReport, ENOSPC_OS_MESSAGE, IgnoredFilesMode, OUT_OF_DISK_CONTEXT, RemoveReport,
     WorkingTreeMode, WorktreeBuilder, WorktreeReport, cleanup_worktrees_in,
     cleanup_worktrees_in_with_delegate, remove_worktree, remove_worktree_with_delegate,

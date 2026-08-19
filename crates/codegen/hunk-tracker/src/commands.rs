@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 
 use crate::types::{
     FileContentEntry, FileHunkData, Hunk, HunkAction, HunkActionError, HunkId, HunkSourceFilter,
-    HunkTrackerSnapshot, HunkTurnDelta, SessionSummary, TrackingMode,
+    HunkTrackerSnapshot, SessionSummary, TrackingMode,
 };
 
 /// Commands sent to the HunkTrackerActor via mpsc channel.
@@ -145,12 +145,6 @@ pub enum HunkTrackerCommand {
     /// session kill/reload cycles.
     SnapshotState {
         reply: oneshot::Sender<HunkTrackerSnapshot>,
-    },
-
-    /// Incremental single-turn delta for the rewind checkpoint store.
-    SnapshotTurnDelta {
-        prompt_index: usize,
-        reply: oneshot::Sender<HunkTurnDelta>,
     },
 
     /// Restore a previously snapshotted state. Replaces all current file

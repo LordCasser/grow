@@ -3,7 +3,7 @@
 //! These are stateless functions that operate on conversation data only —
 //! no I/O, no actor state. They live in `chat-state` so that both
 //! this crate and `shell` can share them without duplication.
-use sampling_types::{ContentPart, ConversationItem, ToolResultItem};
+use sampling_types::{ContentPart, ConversationItem};
 use std::collections::BTreeSet;
 /// Drops tool results and flattens assistant `tool_calls` into
 /// `[Called tools: ...]` text annotations.
@@ -89,12 +89,6 @@ pub fn prepare_conversation_for_summarization(
     strip_images(strip_reasoning_blocks(
         strip_tool_messages_for_conversation_item(conversation),
     ))
-}
-/// Segment-store prep (`segments` mode): keep tool I/O verbatim, strip only images + reasoning.
-pub fn prepare_conversation_for_segment(
-    conversation: Vec<ConversationItem>,
-) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(conversation))
 }
 /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
 pub fn truncate_trailing_incomplete_tool_call(
@@ -241,9 +235,11 @@ fn truncate_text_to_bytes(s: &str, max_bytes: usize) -> Option<std::sync::Arc<st
 }
 /// Tags injected by the runtime that should be stripped from user queries.
 const SYSTEM_TAGS: &[&str] = &[
+    "runtime_context",
     "user_info",
     "project_layout",
     "git_status",
+    "jj_status",
     "fork-context",
     "system-reminder",
     "agent-memory",
@@ -315,10 +311,6 @@ Pick up the last task as if the break never happened."#;
 /// response is already in conversation history as the last assistant turn --
 /// this prompt simply asks the model to continue.
 pub const TRUNCATION_CONTINUE_PROMPT: &str = r#"Your previous response was interrupted. Continue from where you left off. Do not repeat what you already said. Resume directly."#;
-/// `false` twin: no preset in this build injects a bootstrap note.
-fn is_bootstrap_reminder_text(_text: &str) -> bool {
-    false
-}
 /// Return `true` when the *extracted* query text represents a synthetic
 /// session-internal turn rather than a real human-authored prompt.
 ///
@@ -331,14 +323,11 @@ fn is_bootstrap_reminder_text(_text: &str) -> bool {
 ///   the conversation after auto-compaction so the agent keeps progressing.
 ///   `extract_user_query` returns this as-is (no tags to strip), so it must
 ///   be explicitly excluded to avoid counting it as a real user query.
-/// - A synthetic bootstrap tool-availability note wrapped in
-///   `<system_reminder>` tags (optional presets only).
 pub fn is_synthetic_extracted_query(text: &str) -> bool {
     text.is_empty()
         || text == "__auto_continue__"
         || text == AUTO_CONTINUE_PROMPT
         || text == TRUNCATION_CONTINUE_PROMPT
-        || is_bootstrap_reminder_text(text)
 }
 /// Classify whether a `ConversationItem` is a **real** user turn for
 /// compaction purposes.
@@ -375,6 +364,132 @@ pub fn is_real_user_turn(item: &ConversationItem) -> bool {
         _ => false,
     }
 }
+
+/// A contiguous, identity-stable Surface range selected for summary
+/// compaction. Indices are only used to materialize the frozen input; the
+/// durable transaction commits [`crate::SurfaceRange`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionRangePlan {
+    pub target: crate::SurfaceRange,
+    pub start_index: usize,
+    pub end_index: usize,
+    pub source_tokens: u64,
+}
+
+/// Select one old Surface range while retaining a recent verbatim tail.
+///
+/// The normal path shadows complete old user turns and starts the retained
+/// tail at a real user message. For a single very long turn, it can instead
+/// shadow older completed response groups after that user; the retained tail
+/// starts only at a complete response-group boundary, never at a
+/// `ToolResult` or in the middle of a
+/// `[Reasoning, BackendToolCall, ..., Assistant]` group. `SurfaceId` is the
+/// sole range identity—no parallel message-ID registry is introduced.
+pub fn plan_compaction_range(
+    surface: &[ConversationItem],
+    surface_ids: &[crate::SurfaceId],
+    retain_tokens: u64,
+    min_source_tokens: u64,
+) -> Option<CompactionRangePlan> {
+    if surface.len() != surface_ids.len() || surface.len() < 2 {
+        return None;
+    }
+
+    let mut suffix_tokens = vec![0u64; surface.len() + 1];
+    for index in (0..surface.len()).rev() {
+        suffix_tokens[index] =
+            suffix_tokens[index + 1].saturating_add(estimate_item_tokens(&surface[index]));
+    }
+    let range_tokens = |start: usize, end: usize| {
+        suffix_tokens[start].saturating_sub(suffix_tokens[end.saturating_add(1)])
+    };
+    let real_users = surface
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| is_real_user_turn(item).then_some(index))
+        .collect::<Vec<_>>();
+    let first_user = *real_users.first()?;
+    let last_user = *real_users.last()?;
+
+    // Prefer complete old turns. Walk backwards until the retained suffix has
+    // the desired budget, then keep everything from that user message onward.
+    let mut tail_start = last_user;
+    for &candidate in real_users.iter().rev() {
+        tail_start = candidate;
+        if suffix_tokens[candidate] >= retain_tokens {
+            break;
+        }
+    }
+    if tail_start > first_user {
+        let end = tail_start - 1;
+        let source_tokens = range_tokens(first_user, end);
+        if source_tokens >= min_source_tokens {
+            return range_plan(surface_ids, first_user, end, source_tokens);
+        }
+    }
+
+    // A single active turn can itself exceed the window. Keep its real user
+    // prompt and newest response groups verbatim, and summarize only older
+    // completed response groups. A valid boundary is the first item in a
+    // model response group, not merely any assistant-role item.
+    let start = last_user.saturating_add(1);
+    if start >= surface.len() {
+        return None;
+    }
+    let mut boundary = None;
+    for index in (start + 1..surface.len()).rev() {
+        if suffix_tokens[index] < retain_tokens {
+            continue;
+        }
+        if is_response_group_start(surface, start, index) {
+            boundary = Some(index);
+            break;
+        }
+    }
+    let end = boundary?.checked_sub(1)?;
+    let source_tokens = range_tokens(start, end);
+    (source_tokens >= min_source_tokens)
+        .then(|| range_plan(surface_ids, start, end, source_tokens))?
+}
+
+fn is_response_group_start(surface: &[ConversationItem], body_start: usize, index: usize) -> bool {
+    if index < body_start || index >= surface.len() {
+        return false;
+    }
+    if !matches!(
+        &surface[index],
+        ConversationItem::Assistant(_)
+            | ConversationItem::Reasoning(_)
+            | ConversationItem::BackendToolCall(_)
+    ) {
+        return false;
+    }
+    index == body_start
+        || !matches!(
+            &surface[index - 1],
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+        )
+}
+
+fn range_plan(
+    surface_ids: &[crate::SurfaceId],
+    start_index: usize,
+    end_index: usize,
+    source_tokens: u64,
+) -> Option<CompactionRangePlan> {
+    let start = *surface_ids.get(start_index)?;
+    let end = *surface_ids.get(end_index)?;
+    Some(CompactionRangePlan {
+        target: crate::SurfaceRange {
+            start,
+            end,
+            shadowed: surface_ids.get(start_index..=end_index)?.to_vec(),
+        },
+        start_index,
+        end_index,
+        source_tokens,
+    })
+}
 /// Extract all *real* user queries from a conversation, in order.
 ///
 /// "Real" means the item passes [`is_real_user_turn`] — it has no
@@ -403,73 +518,6 @@ pub fn extract_last_real_user_query(conversation: &[ConversationItem]) -> Option
         .rev()
         .find(|item| is_real_user_turn(item))
         .map(|item| extract_user_query(&item.text_content()))
-}
-/// Extract messages since the last user message in the conversation.
-///
-/// Walks backward from the end, collecting `Assistant` and `ToolResult` items
-/// until a `User` item is hit. Tool results have their content replaced with
-/// a placeholder to save space.
-///
-/// Returns the items in chronological order (reversed from the backward walk).
-///
-/// **Note**: This uses the raw `User` boundary which includes synthetic items
-/// (system reminders, auto-continue prompts). For compaction, prefer
-/// [`extract_messages_since_last_real_user`] which skips synthetic boundaries.
-pub fn extract_messages_since_last_user(
-    conversation: &[ConversationItem],
-) -> Vec<ConversationItem> {
-    let mut messages: Vec<_> = conversation
-        .iter()
-        .rev()
-        .take_while(|item| !matches!(item, ConversationItem::User(_)))
-        .filter_map(|item| match item {
-            ConversationItem::Assistant(a) => Some(ConversationItem::Assistant(a.clone())),
-            ConversationItem::ToolResult(t) => Some(ConversationItem::ToolResult(ToolResultItem {
-                tool_call_id: t.tool_call_id.clone(),
-                content: std::sync::Arc::<str>::from("Tool call omitted..."),
-                images: Vec::new(),
-            })),
-            _ => None,
-        })
-        .collect();
-    messages.reverse();
-    messages
-}
-/// Extract messages since the last **real** user turn in the conversation.
-///
-/// Like [`extract_messages_since_last_user`], but the boundary is the last
-/// item that passes [`is_real_user_turn`] — synthetic injections (system
-/// warnings, auto-continue prompts) do NOT reset the boundary.
-///
-/// This prevents compaction from splitting an assistant/tool-result pair
-/// that spans across a synthetic user injection, which would create an
-/// orphaned `ToolResult` in the compacted history.
-///
-/// Tool results have their content replaced with a placeholder to save space.
-/// Synthetic `User` items within the tail are omitted from the output.
-///
-/// Returns the items in chronological order.  Falls back to whole-tail
-/// extraction (excluding system) if no real user turn exists.
-pub fn extract_messages_since_last_real_user(
-    conversation: &[ConversationItem],
-) -> Vec<ConversationItem> {
-    let boundary_idx = conversation.iter().rposition(is_real_user_turn);
-    let start = match boundary_idx {
-        Some(idx) => idx + 1,
-        None => 0,
-    };
-    conversation[start..]
-        .iter()
-        .filter_map(|item| match item {
-            ConversationItem::Assistant(a) => Some(ConversationItem::Assistant(a.clone())),
-            ConversationItem::ToolResult(t) => Some(ConversationItem::ToolResult(ToolResultItem {
-                tool_call_id: t.tool_call_id.clone(),
-                content: std::sync::Arc::<str>::from("Tool call omitted..."),
-                images: Vec::new(),
-            })),
-            _ => None,
-        })
-        .collect()
 }
 /// Summary of a running subagent for compaction context.
 ///
@@ -541,14 +589,10 @@ pub struct TodoSummary {
 /// handled by the consumer (e.g. `shell`), which has access to
 /// memory backends and other shell-specific dependencies.
 pub struct CompactionStateContext {
-    /// Monotonic cwd generation; zero preserves the legacy compaction shape.
+    /// Monotonic cwd generation; zero means the session has not relocated.
     pub cwd_generation: u64,
     /// Project instructions resolved for the latest destination cwd.
     pub destination_project_instructions: Option<String>,
-    /// Messages since the last **real** user turn (assistant + omitted tool
-    /// results).  Synthetic user injections (system reminders) do not reset
-    /// the boundary, preventing orphaned ToolResults in the compacted output.
-    pub recent_messages: Vec<ConversationItem>,
     /// The last real user query text (skips synthetic injections and
     /// auto-continue prompts).
     pub last_user_query: Option<String>,
@@ -579,14 +623,13 @@ pub struct CompactionInputs {
 impl CompactionStateContext {
     /// Build the state context from current session state.
     ///
-    /// Uses real-user-aware helpers so that synthetic user injections
-    /// (system reminders, auto-continue prompts) do not corrupt the
-    /// compaction boundary.
+    /// Captures only live state which must be appended to the range summary.
+    /// Transcript ownership remains with the Timeline and is never copied
+    /// into this side context.
     pub async fn build(conversation: &[ConversationItem], inputs: CompactionInputs) -> Self {
         Self {
             cwd_generation: inputs.cwd_generation,
             destination_project_instructions: inputs.destination_project_instructions,
-            recent_messages: extract_messages_since_last_real_user(conversation),
             last_user_query: extract_last_real_user_query(conversation),
             agent_edited_paths: inputs.agent_edited_paths.into_iter().collect(),
             running_tasks: inputs.running_tasks,
@@ -609,285 +652,10 @@ impl CompactionStateContext {
             tool_name,
         }
     }
-    /// Return the **compaction view** of this context: a copy with
-    /// `recent_messages` dropped, all other live state preserved verbatim.
-    ///
-    /// For a sub-agent with
-    /// a single real user turn, `recent_messages` is the ENTIRE working
-    /// transcript, and keeping it frees almost nothing while re-cueing the
-    /// model to re-read the same files. grow-build retains
-    /// `recent_messages` so the model keeps verbatim tool context.
-    pub fn for_compaction(&self) -> Self {
-        Self {
-            cwd_generation: self.cwd_generation,
-            destination_project_instructions: self.destination_project_instructions.clone(),
-            recent_messages: Vec::new(),
-            last_user_query: self.last_user_query.clone(),
-            agent_edited_paths: self.agent_edited_paths.clone(),
-            running_tasks: self.running_tasks.clone(),
-            running_subagents: self.running_subagents.clone(),
-            connected_mcp_servers: self.connected_mcp_servers.clone(),
-            todos: self.todos.clone(),
-        }
-    }
 }
-/// Clean the compaction model's raw output into the plain-text `Summary:`
-/// block that seeds the next turn.
-///
-/// Drafting scratchpad (a top-level `<analysis>` block, or a nested
-/// `<analysis>`/`<summary>` wrapper / untagged markdown "**Analysis**" header
-/// inside the summary) is stripped; control tokens echoed *within* the body
-/// (the model sometimes quotes its own instruction under section 6) are
-/// neutralized so they can't prime the next turn to re-emit a `<summary>`
-/// block. A summary that already leads with a numbered section is preserved
-/// verbatim even when it quotes `</analysis>`/`<summary>` in a later section.
-pub fn format_compact_summary(summary: &str) -> String {
-    let mut result = summary.to_string();
-    while let Some(start) = result.find("<analysis>") {
-        let is_leading = match result.find("<summary>") {
-            Some(sp) => start < sp || result[sp + "<summary>".len()..start].trim().is_empty(),
-            None => result[..start].trim().is_empty(),
-        };
-        if !is_leading {
-            break;
-        }
-        match result[start..].find("</analysis>") {
-            Some(rel) => {
-                let end = start + rel + "</analysis>".len();
-                result = format!("{}{}", &result[..start], &result[end..]);
-            }
-            None => {
-                let drop_to = result[start..]
-                    .find("<summary>")
-                    .map_or(result.len(), |rel| start + rel);
-                result = format!("{}{}", &result[..start], &result[drop_to..]);
-                break;
-            }
-        }
-    }
-    if let Some(start) = result.find("<summary>")
-        && let Some(end) = result.rfind("</summary>")
-        && end > start
-    {
-        let before = result[..start].to_string();
-        let after = result[end + "</summary>".len()..].to_string();
-        let inner = strip_leading_scratchpad(result[start + "<summary>".len()..end].trim());
-        result = format!("{before}Summary:\n{inner}{after}");
-    }
-    result = neutralize_compaction_control_tokens(&result);
-    while result.contains("\n\n\n") {
-        result = result.replace("\n\n\n", "\n\n");
-    }
-    result.trim().to_string()
-}
-/// Peel leading drafting scratchpad off an extracted `<summary>` block.
-///
-/// A markdown "**Analysis**"-style header has no opening `<analysis>` tag for
-/// step 1 to catch; it ends at an orphan `</analysis>`. Everything up to and
-/// including the *last* `</analysis>` is dropped, so a scratchpad that itself
-/// quotes `</analysis>` mid-reasoning is still removed whole. The peel is
-/// skipped when the block already starts with a numbered section — including a
-/// markdown-decorated one like `## 1.` or `**1.**` — so a `</analysis>` merely
-/// echoed inside a real section never truncates the summary. Any leftover
-/// leading `<summary>` wrapper is then unwrapped.
-fn strip_leading_scratchpad(inner: &str) -> String {
-    let mut s = inner.trim();
-    let lead = s.trim_start_matches(['#', '*', '-', '>', ' ', '\t']);
-    if !lead.starts_with(|c: char| c.is_ascii_digit())
-        && let Some(pos) = s.rfind("</analysis>")
-    {
-        s = s[pos + "</analysis>".len()..].trim_start();
-    }
-    if let Some(rest) = s.strip_prefix("<summary>") {
-        s = rest.trim_start();
-    }
-    s.to_string()
-}
-/// Defuse compaction-control tokens echoed inside a summary body by inserting
-/// a zero-width space after `<`, so they can't be read as live tags by the next
-/// turn. Mirrors `sanitize_evidence` in `goal_classifier.rs`. Closers first so
-/// the inserted sentinel never re-matches.
-fn neutralize_compaction_control_tokens(text: &str) -> String {
-    text.replace("</summary>", "<\u{200b}/summary>")
-        .replace("<summary>", "<\u{200b}summary>")
-        .replace("</analysis>", "<\u{200b}/analysis>")
-        .replace("<analysis>", "<\u{200b}analysis>")
-        .replace("</summary_request>", "<\u{200b}/summary_request>")
-        .replace("<summary_request>", "<\u{200b}summary_request>")
-}
-/// Clean tags via [`format_compact_summary`] and prepend the continuation
-/// preamble. This is the user message content that replaces the compacted
-/// conversation.
-pub fn format_compact_summary_content(raw_summary: &str) -> String {
-    let cleaned = format_compact_summary(raw_summary);
-    format!(
-        "This session is being continued from a previous conversation that ran out of context. \
-         The summary below covers the earlier portion of the conversation.\n\n{cleaned}"
-    )
-}
-/// Floor for the cleaned seed (degenerate band observed at 75–264
-/// chars; smallest healthy prod summary observed at 3,242 chars).
-const MIN_SUMMARY_SEED_CHARS: usize = 500;
-/// True when the cleaned summary seed is too small to plausibly carry the
-/// task state of the conversation it would replace. Callers should
-/// retry like a transient failure.
-pub fn is_degenerate_summary(raw_summary: &str) -> bool {
-    format_compact_summary(raw_summary).chars().count() < MIN_SUMMARY_SEED_CHARS
-}
-/// Cap (in `char`s) for the rejected-summary text captured on
-/// [`CompactionAttempt::summary`].
-pub const MAX_CAPTURED_SUMMARY_CHARS: usize = 8_192;
-/// Bound captured text for the request artifact: whole when within `max_chars`,
-/// else head + tail around an elision marker. Splits on `char` boundaries.
-pub fn bound_captured_output(s: &str, max_chars: usize) -> String {
-    let total = s.chars().count();
-    if total <= max_chars {
-        return s.to_string();
-    }
-    let head = max_chars / 2;
-    let tail = max_chars - head;
-    let head_str: String = s.chars().take(head).collect();
-    let tail_str: String = s.chars().skip(total - tail).collect();
-    let elided = total - head - tail;
-    format!("{head_str}\n\n…[{elided} chars elided]…\n\n{tail_str}")
-}
-/// Diagnostics for a single compaction model call (one retry-loop iteration),
-/// persisted in order on the request artifact's `attempt_details` so a degraded
-/// retry (a thinking-trace or hallucinated tools instead of a real summary)
-/// isn't bumped invisibly.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CompactionAttempt {
-    /// 1-based attempt index, cumulative across input-ladder stages.
-    pub attempt: u32,
-    /// `"success"`, `"degenerate"`, `"deterministic"`, or `"transient"`.
-    pub outcome: String,
-    /// Raw char count of the content produced this attempt; `0` if none.
-    pub summary_chars: u64,
-    /// Raw rejected summary text on a degenerate attempt (bounded by
-    /// [`bound_captured_output`]). `None` otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    /// Error detail on a failed (`deterministic` / `transient`) attempt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-/// Render a `<transcript_location>` pointer block.
-///
-/// The summary carrier embeds this XML pointer to the full raw transcript so
-/// the model can re-read exact pre-compaction detail on demand instead of
-/// carrying the working transcript in context. Carriers that include this
-/// block splice it in right after `</summary_content>`. Carries its own
-/// leading blank line.
-pub fn format_transcript_location(path: &str) -> String {
-    format!(
-        "\n\n<transcript_location>\n\
-         The full, unsummarized transcript of this conversation is saved at:\n{path}\n\
-         If you need details that were dropped from the summary above (exact code, \
-         error text, file contents, or earlier tool output), read this file to \
-         recover them.\n\
-         </transcript_location>"
-    )
-}
-/// Wrap text in `<user_query>...</user_query>` tags.
-///
-/// This is the canonical wrapping used for user messages that contain
-/// a query or compaction summary. Centralised here so both
-/// `chat-state` and `shell` share the same format.
-pub fn wrap_user_query(text: impl Into<String>) -> String {
-    let text = text.into();
-    format!("<user_query>\n{text}\n</user_query>")
-}
-/// Input data for building a compacted conversation history.
-///
-/// All fields are plain data — no I/O, no network, no shell dependencies.
-/// The caller is responsible for:
-/// - Generating the `compaction_summary` via the LLM.
-/// - Rendering the optional `system_reminder` (which may depend on
-///   shell-specific backends such as memory search).
-/// - Providing the `user_message_prefix` (e.g. `<user_info>` block).
-pub struct CompactedHistoryInput<'a> {
-    /// The original system message from the conversation.
-    pub system_message: ConversationItem,
-    /// The user-info / project-layout prefix (not wrapped in `<user_query>`).
-    pub user_message_prefix: String,
-    /// Pre-rendered AGENTS.md `<system-reminder>` block to re-inject after the
-    /// user prefix. `None` means no project instructions to re-inject.
-    /// This preserves project instructions verbatim across compaction.
-    pub agents_md_reminder: Option<String>,
-    /// State context snapshot taken before compaction cleared the conversation.
-    pub state_context: &'a CompactionStateContext,
-    /// The LLM-generated compaction summary text.
-    pub compaction_summary: String,
-    /// An optional pre-rendered `<system-reminder>` block to append after the
-    /// summary. `None` means no state reminder is appended.
-    pub system_reminder: Option<String>,
-    /// When `true`, emit the compaction summary *before* recent messages.
-    /// When `false` (the default), recent messages come first (grow-build
-    /// ordering).
-    pub summary_before_recent: bool,
-    /// Pre-built transcript hint appended to the summary (caller builds it via
-    /// [`crate::CompactionMode::transcript_hint`] or
-    /// [`format_transcript_location`]). `None` to omit. Appended to BOTH the
-    /// carrier and the grow-build summary.
-    pub transcript_hint: Option<String>,
-    /// Number of summaries generated so far for this user query, *including*
-    /// the one being built. Rendered verbatim into the carrier's
-    /// "Total summaries generated so far …" footer. Ignored by the grow-build
-    /// (`summary_before_recent == false`) path. Callers that don't track a
-    /// counter pass `1`.
-    pub summary_count: u64,
-}
-/// `None` twin: the alternate carrier format is not compiled in.
-fn summary_before_recent_carrier(_input: &CompactedHistoryInput<'_>) -> Option<String> {
-    None
-}
-/// This is a pure function with no I/O. It mirrors exactly what
-/// `run_compact_inner` in `shell` assembles inline, but is
-/// independently testable.
-pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<ConversationItem> {
-    let carrier = summary_before_recent_carrier(&input);
-    let summary_first = carrier.is_some();
-    let summary_item = carrier.map(ConversationItem::user_meta).unwrap_or_else(|| {
-        let mut formatted_summary = format_compact_summary_content(&input.compaction_summary);
-        if let Some(ref hint) = input.transcript_hint {
-            formatted_summary.push_str(hint);
-        }
-        ConversationItem::user_meta(formatted_summary)
-    });
-    let mut compacted: Vec<ConversationItem> = vec![
-        input.system_message,
-        ConversationItem::user_meta(input.user_message_prefix),
-    ];
-    let project_instructions = if input.state_context.cwd_generation == 0 {
-        input.agents_md_reminder.as_ref()
-    } else {
-        input
-            .state_context
-            .destination_project_instructions
-            .as_ref()
-    };
-    if let Some(reminder) = project_instructions {
-        compacted.push(ConversationItem::project_instructions(reminder.clone()));
-    }
-    if let Some(ref last_query) = input.state_context.last_user_query {
-        compacted.push(ConversationItem::user(wrap_user_query(last_query)));
-    }
-    if summary_first {
-        compacted.push(summary_item);
-        for msg in input.state_context.recent_messages.iter().cloned() {
-            compacted.push(msg);
-        }
-    } else {
-        for msg in input.state_context.recent_messages.iter().cloned() {
-            compacted.push(msg);
-        }
-        compacted.push(summary_item);
-    }
-    if let Some(ref reminder) = input.system_reminder {
-        compacted.push(ConversationItem::system_reminder(reminder.clone()));
-    }
-    compacted
-}
+pub use compaction::{
+    format_compact_summary, format_compact_summary_content, is_degenerate_summary, wrap_user_query,
+};
 /// Result of sanitizing a compacted conversation history.
 pub struct SanitizeResult {
     /// The sanitized conversation items.
@@ -915,9 +683,7 @@ pub fn validate_compacted_history(items: &[ConversationItem]) -> Vec<String> {
                     seen_ids.insert(&tc.id);
                 }
             }
-            ConversationItem::ToolResult(tr)
-                if !seen_ids.contains(tr.tool_call_id.as_str()) =>
-            {
+            ConversationItem::ToolResult(tr) if !seen_ids.contains(tr.tool_call_id.as_str()) => {
                 invalid_ids.push(tr.tool_call_id.clone());
             }
             _ => {}
@@ -1057,52 +823,89 @@ pub fn strip_displaced_tool_results(items: &mut Vec<ConversationItem>) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sampling_types::SyntheticReason;
-    #[test]
-    fn compaction_attempt_serde_roundtrip_and_skips_none() {
-        let attempt = CompactionAttempt {
-            attempt: 2,
-            outcome: "degenerate".to_string(),
-            summary_chars: 47,
-            summary: Some("Now I will summarize: I'll do X, then Y, then Z.".to_string()),
-            error: None,
-        };
-        let json = serde_json::to_value(&attempt).unwrap();
-        assert_eq!(json["attempt"], 2);
-        assert_eq!(json["outcome"], "degenerate");
-        assert_eq!(json["summary_chars"], 47);
-        assert_eq!(
-            json["summary"],
-            "Now I will summarize: I'll do X, then Y, then Z."
-        );
-        assert!(json.get("error").is_none());
-        let parsed: CompactionAttempt = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, attempt);
+
+    fn surface_with_ids(
+        items: Vec<ConversationItem>,
+    ) -> (Vec<ConversationItem>, Vec<crate::SurfaceId>) {
+        let timeline = crate::Timeline::from_seed(items).unwrap();
+        (timeline.surface().to_vec(), timeline.surface_ids().to_vec())
     }
+
     #[test]
-    fn compaction_attempt_defaults_optional_fields_for_old_artifacts() {
-        let json = serde_json::json!({
-            "attempt": 1,
-            "outcome": "transient",
-            "summary_chars": 0,
-        });
-        let parsed: CompactionAttempt = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.summary, None);
-        assert_eq!(parsed.error, None);
+    fn partial_compaction_preserves_prefix_and_recent_user_turn() {
+        let (surface, ids) = surface_with_ids(vec![
+            ConversationItem::system("system"),
+            ConversationItem::project_instructions("rules"),
+            ConversationItem::user("old task"),
+            ConversationItem::assistant("x".repeat(800)),
+            ConversationItem::user("recent task"),
+            ConversationItem::assistant("y".repeat(800)),
+        ]);
+
+        let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
+        assert_eq!((plan.start_index, plan.end_index), (2, 3));
+        assert_eq!(plan.target.shadowed, ids[2..=3]);
+        assert_eq!(plan.target.start, ids[2]);
+        assert_eq!(plan.target.end, ids[3]);
     }
+
     #[test]
-    fn bound_captured_output_returns_short_text_whole() {
-        let s = "Now I will do X, Y, Z.";
-        assert_eq!(bound_captured_output(s, MAX_CAPTURED_SUMMARY_CHARS), s);
+    fn partial_compaction_of_long_turn_keeps_tool_pair_whole() {
+        let (surface, ids) = surface_with_ids(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("one long task"),
+            ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }]),
+            ConversationItem::tool_result("call-1", "x".repeat(800)),
+            ConversationItem::assistant("newest response".repeat(80)),
+        ]);
+
+        let plan = plan_compaction_range(&surface, &ids, 100, 1).unwrap();
+        assert_eq!((plan.start_index, plan.end_index), (2, 3));
+        assert!(matches!(
+            surface[plan.start_index],
+            ConversationItem::Assistant(_)
+        ));
+        assert!(matches!(
+            surface[plan.end_index],
+            ConversationItem::ToolResult(_)
+        ));
     }
+
     #[test]
-    fn bound_captured_output_keeps_head_and_tail_on_char_boundaries() {
-        let s: String = "λ".repeat(100);
-        let bounded = bound_captured_output(&s, 10);
-        assert!(bounded.starts_with("λλλλλ"));
-        assert!(bounded.ends_with("λλλλλ"));
-        assert!(bounded.contains("[90 chars elided]"));
-        assert_eq!(bounded.matches('λ').count(), 10);
+    fn partial_compaction_keeps_reasoning_with_its_assistant_response() {
+        let (surface, ids) = surface_with_ids(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("one long task"),
+            ConversationItem::assistant("older response".repeat(80)),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "newest reasoning",
+            )),
+            ConversationItem::assistant("newest response"),
+        ]);
+
+        let plan = plan_compaction_range(&surface, &ids, 1, 1).unwrap();
+        assert_eq!((plan.start_index, plan.end_index), (2, 2));
+        assert!(matches!(
+            surface[plan.end_index + 1],
+            ConversationItem::Reasoning(_)
+        ));
+        assert!(matches!(
+            surface[plan.end_index + 2],
+            ConversationItem::Assistant(_)
+        ));
+    }
+
+    #[test]
+    fn partial_compaction_rejects_mismatched_identity_projection() {
+        let surface = vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ];
+        assert!(plan_compaction_range(&surface, &[], 1, 1).is_none());
     }
     #[test]
     fn test_extract_user_query_with_tags() {
@@ -1132,6 +935,22 @@ OS Version: macos
 
 some plain text"#;
         assert_eq!(extract_user_query(input), "some plain text");
+    }
+    #[test]
+    fn test_extract_user_query_runtime_snapshot_is_empty() {
+        let input = r#"<runtime_context>
+<user_info>
+OS Version: macos
+Shell: /bin/zsh
+Workspace Path: /workspace
+Today's date: 2026-08-18
+</user_info>
+
+<jj_status>
+Working copy changes:
+</jj_status>
+</runtime_context>"#;
+        assert_eq!(extract_user_query(input), "");
     }
     #[test]
     fn test_extract_user_query_plain_text() {
@@ -1418,56 +1237,6 @@ actual user question";
         );
     }
     #[test]
-    fn extract_messages_since_last_user_finds_assistant_and_tool() {
-        let conv = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("q1"),
-            ConversationItem::assistant("a1"),
-            ConversationItem::tool_result("c1", "long result data"),
-            ConversationItem::assistant("a2"),
-        ];
-        let msgs = extract_messages_since_last_user(&conv);
-        assert_eq!(msgs.len(), 3);
-        if let ConversationItem::ToolResult(ref tr) = msgs[1] {
-            assert_eq!(tr.content.as_ref(), "Tool call omitted...");
-        } else {
-            panic!("expected ToolResult");
-        }
-    }
-    #[test]
-    fn extract_messages_since_last_user_stops_at_user() {
-        let conv = vec![
-            ConversationItem::user("q1"),
-            ConversationItem::assistant("a1"),
-            ConversationItem::user("q2"),
-            ConversationItem::assistant("a2"),
-        ];
-        let msgs = extract_messages_since_last_user(&conv);
-        assert_eq!(msgs.len(), 1);
-    }
-    #[test]
-    fn extract_messages_since_last_user_empty_conversation() {
-        let conv: Vec<ConversationItem> = vec![];
-        let msgs = extract_messages_since_last_user(&conv);
-        assert!(msgs.is_empty());
-    }
-    #[test]
-    fn extract_messages_since_last_user_only_system() {
-        let conv = vec![ConversationItem::system("sys")];
-        let msgs = extract_messages_since_last_user(&conv);
-        assert!(msgs.is_empty());
-    }
-    #[test]
-    fn extract_messages_since_last_user_ends_with_user() {
-        let conv = vec![
-            ConversationItem::user("q1"),
-            ConversationItem::assistant("a1"),
-            ConversationItem::user("q2"),
-        ];
-        let msgs = extract_messages_since_last_user(&conv);
-        assert!(msgs.is_empty());
-    }
-    #[test]
     fn is_real_user_turn_true_for_real_user() {
         let item = ConversationItem::user("<user_query>\nfix the auth bug\n</user_query>");
         assert!(is_real_user_turn(&item));
@@ -1492,6 +1261,10 @@ actual user question";
     #[test]
     fn is_real_user_turn_false_for_empty_bootstrap() {
         let item = ConversationItem::user("<user_info>OS: macos</user_info>");
+        assert!(!is_real_user_turn(&item));
+        let item = ConversationItem::user(
+            "<runtime_context><user_info>OS: macos</user_info></runtime_context>",
+        );
         assert!(!is_real_user_turn(&item));
     }
     #[test]
@@ -1530,23 +1303,6 @@ actual user question";
         );
     }
     #[test]
-    fn extract_messages_since_last_real_user_anchors_on_image_only_user() {
-        let conv = vec![
-            ConversationItem::user("<user_query>\nold task\n</user_query>"),
-            ConversationItem::assistant("old response"),
-            ConversationItem::user_with_parts(vec![ContentPart::Image {
-                url: "data:image/png;base64,screenshot".into(),
-            }]),
-            ConversationItem::assistant("I see the image"),
-        ];
-        let msgs = extract_messages_since_last_real_user(&conv);
-        assert_eq!(
-            msgs.len(),
-            1,
-            "only the assistant after the image-only user should be included"
-        );
-    }
-    #[test]
     fn extract_last_real_user_query_skips_system_reminder_by_metadata() {
         let conv = vec![
             ConversationItem::user("<user_query>\nimplement feature X\n</user_query>"),
@@ -1558,110 +1314,6 @@ actual user question";
             extract_last_real_user_query(&conv),
             Some("implement feature X".to_string()),
         );
-    }
-    #[test]
-    fn extract_messages_since_last_real_user_ignores_synthetic_boundary() {
-        use sampling_types::ToolCall;
-        let conv = vec![
-            ConversationItem::user("<user_query>\ndo stuff\n</user_query>"),
-            ConversationItem::assistant_tool_calls(vec![ToolCall {
-                id: "call_AAA".into(),
-                name: "search_replace".to_string(),
-                arguments: "{}".into(),
-            }]),
-            ConversationItem::tool_result("call_AAA", "ok"),
-            ConversationItem::system_reminder("⚠️ SYSTEM REMINDER"),
-            ConversationItem::assistant_tool_calls(vec![ToolCall {
-                id: "call_BBB".into(),
-                name: "search_replace".to_string(),
-                arguments: "{}".into(),
-            }]),
-            ConversationItem::tool_result("call_BBB", "cancelled"),
-        ];
-        let msgs = extract_messages_since_last_real_user(&conv);
-        assert_eq!(msgs.len(), 4, "both assistant/tool pairs must be included");
-        let tool_ids: Vec<&str> = msgs
-            .iter()
-            .filter_map(|m| match m {
-                ConversationItem::ToolResult(tr) => Some(tr.tool_call_id.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            tool_ids.contains(&"call_AAA"),
-            "call_AAA must not be orphaned"
-        );
-        assert!(tool_ids.contains(&"call_BBB"));
-    }
-    #[test]
-    fn extract_messages_since_last_real_user_stops_at_real_user() {
-        let conv = vec![
-            ConversationItem::user("<user_query>\nfirst\n</user_query>"),
-            ConversationItem::assistant("a1"),
-            ConversationItem::user("<user_query>\nsecond\n</user_query>"),
-            ConversationItem::assistant("a2"),
-        ];
-        let msgs = extract_messages_since_last_real_user(&conv);
-        assert_eq!(msgs.len(), 1);
-    }
-    #[test]
-    fn extract_messages_since_last_real_user_fallback_no_real_user() {
-        let conv = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::assistant("greeting"),
-        ];
-        let msgs = extract_messages_since_last_real_user(&conv);
-        assert_eq!(msgs.len(), 1);
-    }
-    #[tokio::test]
-    async fn compaction_state_context_build_uses_real_user_and_real_tail() {
-        use sampling_types::ToolCall;
-        let conversation = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user(
-                "<user_info>OS: macos</user_info>\n\n<user_query>\nfix the bug\n</user_query>",
-            ),
-            ConversationItem::assistant_tool_calls(vec![ToolCall {
-                id: "call_X".into(),
-                name: "edit".to_string(),
-                arguments: "{}".into(),
-            }]),
-            ConversationItem::tool_result("call_X", "done"),
-            ConversationItem::system_reminder("⚠️ SYSTEM REMINDER"),
-            ConversationItem::assistant_tool_calls(vec![ToolCall {
-                id: "call_Y".into(),
-                name: "edit".to_string(),
-                arguments: "{}".into(),
-            }]),
-            ConversationItem::tool_result("call_Y", "cancelled"),
-        ];
-        let ctx = CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
-        assert_eq!(ctx.last_user_query, Some("fix the bug".to_string()));
-        assert_eq!(
-            ctx.recent_messages.len(),
-            4,
-            "both assistant/tool pairs must survive synthetic-user boundary"
-        );
-        let assistant_ids: std::collections::HashSet<String> = ctx
-            .recent_messages
-            .iter()
-            .filter_map(|m| match m {
-                ConversationItem::Assistant(a) => {
-                    Some(a.tool_calls.iter().map(|tc| tc.id.as_ref().to_owned()))
-                }
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        for msg in &ctx.recent_messages {
-            if let ConversationItem::ToolResult(tr) = msg {
-                assert!(
-                    assistant_ids.contains(&tr.tool_call_id),
-                    "tool_result {} must have a matching assistant tool_call",
-                    tr.tool_call_id
-                );
-            }
-        }
     }
     #[tokio::test]
     async fn test_compaction_state_context_build() {
@@ -1691,7 +1343,6 @@ actual user question";
         )
         .await;
         assert_eq!(ctx.last_user_query, Some("fix the bug".to_string()));
-        assert_eq!(ctx.recent_messages.len(), 2);
         assert_eq!(ctx.agent_edited_paths, vec!["src/main.rs".to_string()]);
         assert_eq!(ctx.running_tasks.len(), 1);
         assert_eq!(ctx.running_tasks[0].command, "cargo test");
@@ -1723,7 +1374,7 @@ actual user question";
         assert_eq!(ctx.running_subagents[0].elapsed_ms, 10_000);
     }
     #[tokio::test]
-    async fn build_stores_and_for_compaction_preserves_todos() {
+    async fn build_stores_todos() {
         let conversation = vec![
             ConversationItem::user("<user_query>\ntask\n</user_query>"),
             ConversationItem::assistant("working"),
@@ -1751,84 +1402,7 @@ actual user question";
         assert_eq!(ctx.todos.len(), 2);
         assert_eq!(ctx.todos[0].id, "1");
         assert_eq!(ctx.todos[0].status, TodoSummaryStatus::InProgress);
-        let compacted = ctx.for_compaction();
-        assert!(compacted.recent_messages.is_empty());
-        assert_eq!(
-            compacted.todos.len(),
-            2,
-            "todos must survive for_compaction() like other live state"
-        );
-        assert_eq!(compacted.todos[1].content, "do the other thing");
-    }
-    /// The compaction view drops the working transcript (`recent_messages`)
-    /// while preserving the last real user query and all other live state.
-    /// Built from a sub-agent-shaped conversation (ONE real user turn followed
-    /// by assistant/tool turns) so the dropped tail is genuinely non-empty AND
-    /// contains tool results — i.e. this would NOT pass if `for_compaction` were
-    /// a no-op.
-    #[tokio::test]
-    async fn for_compaction_drops_recent_messages_preserves_query() {
-        use sampling_types::ToolCall;
-        let conversation = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user(
-                "<user_info>OS: macos</user_info>\n\n<user_query>\nimplement feature X\n</user_query>",
-            ),
-            ConversationItem::assistant_tool_calls(vec![ToolCall {
-                id: "tc1".into(),
-                name: "read_file".to_string(),
-                arguments: "{}".into(),
-            }]),
-            ConversationItem::tool_result("tc1", "a".repeat(5000).as_str()),
-            ConversationItem::assistant_tool_calls(vec![ToolCall {
-                id: "tc2".into(),
-                name: "search_replace".to_string(),
-                arguments: "{}".into(),
-            }]),
-            ConversationItem::tool_result("tc2", "ok"),
-            ConversationItem::assistant("done"),
-        ];
-        let mut edited = BTreeSet::new();
-        edited.insert("src/x.rs".to_string());
-        let running = vec![CompactionStateContext::task_summary(
-            "t1".to_string(),
-            "cargo test".to_string(),
-            "running",
-            None,
-        )];
-        let full = CompactionStateContext::build(
-            &conversation,
-            CompactionInputs {
-                running_tasks: running,
-                agent_edited_paths: edited,
-                ..Default::default()
-            },
-        )
-        .await;
-        assert_eq!(
-            full.recent_messages.len(),
-            5,
-            "sub-agent: everything since the one real user turn is retained pre-fix"
-        );
-        assert!(
-            full.recent_messages
-                .iter()
-                .any(|m| matches!(m, ConversationItem::ToolResult(_))),
-            "the retained tail must contain tool results for this test to be meaningful"
-        );
-        let compacted = full.for_compaction();
-        assert!(
-            compacted.recent_messages.is_empty(),
-            "for_compaction must drop the entire working transcript"
-        );
-        assert_eq!(
-            compacted.last_user_query,
-            Some("implement feature X".to_string())
-        );
-        assert_eq!(compacted.agent_edited_paths, vec!["src/x.rs".to_string()]);
-        assert_eq!(compacted.running_tasks.len(), 1);
-        assert_eq!(compacted.running_tasks[0].command, "cargo test");
-        assert_eq!(full.recent_messages.len(), 5);
+        assert_eq!(ctx.todos[1].content, "do the other thing");
     }
     #[test]
     fn degenerate_one_liner_rejected() {
@@ -2192,19 +1766,6 @@ actual user question";
         assert!(!result.contains("<analysis>"));
         assert!(!result.contains("<summary>"));
     }
-    /// D2: the transcript pointer is a `<transcript_location>` block that
-    /// embeds the given path verbatim, so the trained model can re-read the
-    /// raw transcript on demand.
-    #[test]
-    fn format_transcript_location_wraps_path_in_block() {
-        let block = format_transcript_location("/sessions/abc/updates.jsonl");
-        assert!(block.contains("<transcript_location>"));
-        assert!(block.contains("</transcript_location>"));
-        assert!(
-            block.contains("/sessions/abc/updates.jsonl"),
-            "must embed the transcript path verbatim, got: {block}"
-        );
-    }
     #[test]
     fn format_compact_summary_neutralizes_section6_instruction_echo() {
         let input = "<summary>\n\
@@ -2510,571 +2071,7 @@ actual user question";
         let result = wrap_user_query("line 1\nline 2");
         assert_eq!(result, "<user_query>\nline 1\nline 2\n</user_query>");
     }
-    #[tokio::test]
-    async fn build_compacted_history_full_scenario() {
-        let conversation = vec![
-            ConversationItem::system("You are a helpful assistant."),
-            ConversationItem::user(
-                "<user_info>OS: macos</user_info>\n\n<user_query>\nfix the login bug\n</user_query>",
-            ),
-            ConversationItem::assistant("Let me look."),
-            ConversationItem::tool_result("tc1", "file contents here"),
-            ConversationItem::assistant("Found the bug, fixing."),
-        ];
-        let mut edited = BTreeSet::new();
-        edited.insert("src/auth.rs".to_string());
-        let running_tasks = vec![BackgroundTaskSummary {
-            task_id: "task1".into(),
-            command: "cargo test".into(),
-            status: "running".into(),
-            tool_name: Some("run_terminal_command".into()),
-        }];
-        let state_context = CompactionStateContext::build(
-            &conversation,
-            CompactionInputs {
-                running_tasks,
-                agent_edited_paths: edited,
-                ..Default::default()
-            },
-        )
-        .await;
-        let system_reminder =
-            "<system-reminder>\n## Files Edited This Session\n- src/auth.rs\n</system-reminder>"
-                .to_string();
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system("You are a helpful assistant."),
-            user_message_prefix: "<user_info>OS: macos</user_info>".to_string(),
-            agents_md_reminder: None,
-            state_context: &state_context,
-            compaction_summary: "Summary: fixed login bug.".to_string(),
-            system_reminder: Some(system_reminder.clone()),
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        assert_eq!(compacted.len(), 8);
-        assert_eq!(compacted[0].text_content(), "You are a helpful assistant.");
-        let prefix = compacted[1].text_content();
-        assert_eq!(prefix, "<user_info>OS: macos</user_info>");
-        assert!(!prefix.contains("<user_query>"));
-        let query = compacted[2].text_content();
-        assert_eq!(query, "<user_query>\nfix the login bug\n</user_query>");
-        assert_eq!(compacted[3].text_content(), "Let me look.");
-        assert_eq!(compacted[4].text_content(), "Tool call omitted...");
-        assert_eq!(compacted[5].text_content(), "Found the bug, fixing.");
-        let summary = compacted[6].text_content();
-        assert!(
-            !summary.contains("<user_query>"),
-            "summary should NOT be wrapped in <user_query> tags"
-        );
-        assert!(
-            summary.starts_with("This session is being continued"),
-            "summary should start with the preamble"
-        );
-        assert!(summary.contains("Summary: fixed login bug."));
-        assert!(
-            !summary.contains("<system-reminder>"),
-            "system-reminder should NOT be in the summary message"
-        );
-        let reminder = compacted[7].text_content();
-        assert!(reminder.contains("<system-reminder>"));
-        assert!(reminder.contains("Files Edited This Session"));
-        if let ConversationItem::User(u) = &compacted[1] {
-            assert_eq!(
-                u.synthetic_reason,
-                Some(SyntheticReason::CompactionMeta),
-                "user_message_prefix should be tagged CompactionMeta"
-            );
-        }
-        if let ConversationItem::User(u) = &compacted[6] {
-            assert_eq!(
-                u.synthetic_reason,
-                Some(SyntheticReason::CompactionMeta),
-                "compaction summary should be tagged CompactionMeta"
-            );
-        }
-        if let ConversationItem::User(u) = &compacted[7] {
-            assert_eq!(
-                u.synthetic_reason,
-                Some(SyntheticReason::SystemReminder),
-                "system-reminder should be tagged SystemReminder"
-            );
-        }
-    }
-    #[tokio::test]
-    async fn build_compacted_history_minimal_no_reminder() {
-        let conversation = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("<user_query>\nhello\n</user_query>"),
-            ConversationItem::assistant("Hi!"),
-        ];
-        let state_context =
-            CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system("sys"),
-            user_message_prefix: "<user_info>OS: linux</user_info>".to_string(),
-            agents_md_reminder: None,
-            state_context: &state_context,
-            compaction_summary: "Summary: user said hello.".to_string(),
-            system_reminder: None,
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        assert_eq!(compacted.len(), 5);
-        let summary = compacted[4].text_content();
-        assert!(
-            summary.starts_with("This session is being continued"),
-            "summary should start with preamble (no <user_query> wrapping)"
-        );
-        assert!(
-            summary.contains("Summary: user said hello."),
-            "summary should contain the original summary text"
-        );
-        assert!(
-            !summary.contains("<user_query>"),
-            "summary should NOT contain <user_query> tags"
-        );
-        assert!(!summary.contains("<system-reminder>"));
-    }
-    #[tokio::test]
-    async fn build_compacted_history_no_user_query() {
-        let conversation = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::assistant("proactive greeting"),
-        ];
-        let state_context =
-            CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
-        assert!(state_context.last_user_query.is_none());
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system("sys"),
-            user_message_prefix: "prefix".to_string(),
-            agents_md_reminder: None,
-            state_context: &state_context,
-            compaction_summary: "Summary".to_string(),
-            system_reminder: None,
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        assert_eq!(compacted.len(), 4);
-        assert_eq!(compacted[2].text_content(), "proactive greeting");
-    }
-    #[tokio::test]
-    async fn build_compacted_history_transcript_hint() {
-        let conversation = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("<user_query>\nfix the bug\n</user_query>"),
-            ConversationItem::assistant("Fixed it."),
-        ];
-        let state_context =
-            CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
-        let input = |path: Option<String>| CompactedHistoryInput {
-            system_message: ConversationItem::system("sys"),
-            user_message_prefix: "prefix".to_string(),
-            agents_md_reminder: None,
-            state_context: &state_context,
-            compaction_summary: "Summary of work.".to_string(),
-            system_reminder: None,
-            summary_before_recent: false,
-            transcript_hint: crate::CompactionMode::Transcript.transcript_hint(path.as_deref()),
-            summary_count: 1,
-        };
-        let summary = build_compacted_history(input(Some(
-            "/home/user/.grow/sessions/abc/updates.jsonl".to_string(),
-        )))
-        .last()
-        .unwrap()
-        .text_content();
-        assert!(summary.contains("/home/user/.grow/sessions/abc/updates.jsonl"));
-        let summary = build_compacted_history(input(None))
-            .last()
-            .unwrap()
-            .text_content();
-        assert!(!summary.contains("transcript"));
-    }
-    /// Full multi-turn conversation with parallel tool calls, then compaction.
-    ///
-    /// Simulates the exact conversation shape produced by shell:
-    ///
-    /// Turn 1: user_query → assistant(2 tool calls) → 2 tool results
-    /// Turn 2: user_query → assistant(2 tool calls) → 2 tool results
-    /// → compaction fires
-    ///
-    /// Verifies the exact structure and content of the compacted output,
-    /// including how `<user_query>` tags appear and how tool calls/results
-    /// are preserved or omitted.
-    #[tokio::test]
-    async fn build_compacted_history_multi_turn_with_parallel_tool_calls() {
-        use sampling_types::{AssistantItem, ToolCall};
-        let conversation = vec![
-            // [0] System prompt
-            ConversationItem::system("You are a helpful coding assistant."),
-            // [1] User info prefix (no <user_query> tags — this is the initial message)
-            ConversationItem::user(
-                "<user_info>\nOS Version: macos\nShell: /bin/bash\nWorkspace Path: /Users/dev/project\n</user_info>\n\n<project_layout>\n/Users/dev/project/\n  src/\n    main.rs\n    lib.rs\n</project_layout>",
-            ),
-            // ── Turn 1 ──────────────────────────────────────────────────
-            // [2] User query (wrapped in <user_query> tags by parse_prompt)
-            ConversationItem::user(
-                "<user_query>\nRead main.rs and lib.rs and tell me what they do\n</user_query>",
-            ),
-            // [3] Assistant with 2 parallel tool calls
-            ConversationItem::Assistant(AssistantItem {
-                content: "I'll read both files for you.".into(),
-                tool_calls: vec![
-                    ToolCall {
-                        id: "call_1".into(),
-                        name: "read_file".to_string(),
-                        arguments: r#"{"target_file":"src/main.rs"}"#.into(),
-                    },
-                    ToolCall {
-                        id: "call_2".into(),
-                        name: "read_file".to_string(),
-                        arguments: r#"{"target_file":"src/lib.rs"}"#.into(),
-                    },
-                ],
-                model_id: Some("grow-3".to_string()),
-                model_fingerprint: None,
-                reasoning_effort: None,
-            }),
-            // [4] Tool result for call_1
-            ConversationItem::tool_result(
-                "call_1",
-                "fn main() {\n    println!(\"hello world\");\n}",
-            ),
-            // [5] Tool result for call_2
-            ConversationItem::tool_result(
-                "call_2",
-                "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}",
-            ),
-            // [6] Assistant summary after reading both files
-            ConversationItem::assistant(
-                "main.rs prints hello world. lib.rs has an `add` function.",
-            ),
-            // ── Turn 2 ──────────────────────────────────────────────────
-            // [7] User query (second turn)
-            ConversationItem::user(
-                "<user_query>\nNow fix the typo in main.rs and run the tests\n</user_query>",
-            ),
-            // [8] Assistant with 2 parallel tool calls
-            ConversationItem::Assistant(AssistantItem {
-                content: "I'll fix the typo and run tests.".into(),
-                tool_calls: vec![
-                    ToolCall {
-                        id: "call_3".into(),
-                        name: "edit_file".to_string(),
-                        arguments: r#"{"target_file":"src/main.rs","new_string":"Hello, world!"}"#
-                            .into(),
-                    },
-                    ToolCall {
-                        id: "call_4".into(),
-                        name: "run_terminal_cmd".to_string(),
-                        arguments: r#"{"command":"cargo test"}"#.into(),
-                    },
-                ],
-                model_id: Some("grow-3".to_string()),
-                model_fingerprint: None,
-                reasoning_effort: None,
-            }),
-            // [9] Tool result for call_3
-            ConversationItem::tool_result("call_3", "File edited successfully."),
-            // [10] Tool result for call_4
-            ConversationItem::tool_result(
-                "call_4",
-                "running 1 test\ntest tests::test_add ... ok\n\ntest result: ok. 1 passed",
-            ),
-            // [11] Assistant final response
-            ConversationItem::assistant("Fixed the typo and all tests pass!"),
-        ];
-        let mut edited = BTreeSet::new();
-        edited.insert("src/main.rs".to_string());
-        let state_context = CompactionStateContext::build(
-            &conversation,
-            CompactionInputs {
-                agent_edited_paths: edited,
-                ..Default::default()
-            },
-        )
-        .await;
-        assert_eq!(
-            state_context.last_user_query,
-            Some("Now fix the typo in main.rs and run the tests".to_string()),
-            "should extract the last user query (turn 2)"
-        );
-        assert_eq!(
-            state_context.recent_messages.len(),
-            4,
-            "should have 4 recent messages (assistant + 2 tool results + assistant)"
-        );
-        let system_reminder =
-            "<system-reminder>\n## Files Edited\n- src/main.rs\n</system-reminder>".to_string();
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system(
-                "You are a helpful coding assistant.",
-            ),
-            user_message_prefix: "<user_info>\nOS Version: macos\nShell: /bin/bash\nWorkspace Path: /Users/dev/project\n</user_info>"
-                .to_string(),
-            agents_md_reminder: None,
-            state_context: &state_context,
-            compaction_summary: "The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs has an add function. The user then asked to fix a typo in main.rs and run tests. The typo was fixed and tests passed."
-                .to_string(),
-            system_reminder: Some(system_reminder),
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        assert_eq!(compacted.len(), 9, "compacted history should have 9 items");
-        assert!(
-            matches!(&compacted[0], ConversationItem::System(s) if s.content.as_ref() == "You are a helpful coding assistant.")
-        );
-        let prefix = compacted[1].text_content();
-        assert!(
-            prefix.contains("<user_info>"),
-            "item[1] should be the user_info prefix"
-        );
-        assert!(
-            !prefix.contains("<user_query>"),
-            "item[1] prefix should NOT have <user_query> tags"
-        );
-        let last_query = compacted[2].text_content();
-        assert_eq!(
-            last_query,
-            "<user_query>\nNow fix the typo in main.rs and run the tests\n</user_query>",
-            "item[2] should be the last user query wrapped in <user_query> tags"
-        );
-        match &compacted[3] {
-            ConversationItem::Assistant(a) => {
-                assert_eq!(a.content.as_ref(), "I'll fix the typo and run tests.");
-                assert_eq!(a.tool_calls.len(), 2, "should preserve both tool calls");
-                assert_eq!(a.tool_calls[0].name, "edit_file");
-                assert_eq!(a.tool_calls[1].name, "run_terminal_cmd");
-            }
-            other => panic!("item[3] should be Assistant, got {:?}", other),
-        }
-        match &compacted[4] {
-            ConversationItem::ToolResult(tr) => {
-                assert_eq!(tr.tool_call_id, "call_3");
-                assert_eq!(
-                    tr.content.as_ref(),
-                    "Tool call omitted...",
-                    "tool result content should be replaced with placeholder"
-                );
-            }
-            other => panic!("item[4] should be ToolResult, got {:?}", other),
-        }
-        match &compacted[5] {
-            ConversationItem::ToolResult(tr) => {
-                assert_eq!(tr.tool_call_id, "call_4");
-                assert_eq!(tr.content.as_ref(), "Tool call omitted...");
-            }
-            other => panic!("item[5] should be ToolResult, got {:?}", other),
-        }
-        assert_eq!(
-            compacted[6].text_content(),
-            "Fixed the typo and all tests pass!"
-        );
-        let summary = compacted[7].text_content();
-        assert!(
-            !summary.contains("<user_query>"),
-            "summary should NOT be wrapped in <user_query> tags"
-        );
-        assert!(
-            summary.contains("The user asked to read main.rs"),
-            "summary should contain the compaction text"
-        );
-        assert!(
-            !summary.contains("<system-reminder>"),
-            "system-reminder should NOT be in the summary message"
-        );
-        assert!(
-            summary.starts_with("This session is being continued from a previous conversation"),
-            "summary should start with the continuation preamble"
-        );
-        let expected_summary = "\
-This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
 
-The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs has an add function. The user then asked to fix a typo in main.rs and run tests. The typo was fixed and tests passed.";
-        assert_eq!(
-            summary, expected_summary,
-            "summary item should match expected format with preamble"
-        );
-        let reminder = compacted[8].text_content();
-        assert!(
-            reminder.contains("<system-reminder>"),
-            "reminder message should contain <system-reminder>"
-        );
-        assert!(
-            reminder.contains("## Files Edited"),
-            "system-reminder should contain files edited"
-        );
-        assert!(
-            reminder.contains("src/main.rs"),
-            "system-reminder should list edited files"
-        );
-    }
-    /// Generation zero ignores relocation-only fields and preserves legacy output.
-    #[test]
-    fn generation_zero_compaction_keeps_legacy_project_instructions() {
-        let state_context = CompactionStateContext {
-            cwd_generation: 0,
-            destination_project_instructions: Some("destination rules".into()),
-            recent_messages: vec![],
-            last_user_query: None,
-            agent_edited_paths: vec![],
-            running_tasks: vec![],
-            running_subagents: vec![],
-            connected_mcp_servers: vec![],
-            todos: vec![],
-        };
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system("sys"),
-            user_message_prefix: "prefix".into(),
-            agents_md_reminder: Some("startup rules".into()),
-            state_context: &state_context,
-            compaction_summary: "summary".into(),
-            system_reminder: None,
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        assert_eq!(compacted[2].text_content(), "startup rules");
-    }
-    #[test]
-    fn relocated_compaction_uses_destination_project_instructions() {
-        let state_context = CompactionStateContext {
-            cwd_generation: 1,
-            destination_project_instructions: Some("destination rules".into()),
-            recent_messages: vec![],
-            last_user_query: None,
-            agent_edited_paths: vec![],
-            running_tasks: vec![],
-            running_subagents: vec![],
-            connected_mcp_servers: vec![],
-            todos: vec![],
-        };
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system("sys"),
-            user_message_prefix: "prefix".into(),
-            agents_md_reminder: Some("startup rules".into()),
-            state_context: &state_context,
-            compaction_summary: "summary".into(),
-            system_reminder: None,
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        assert_eq!(compacted[2].text_content(), "destination rules");
-    }
-    #[test]
-    fn relocated_compaction_does_not_restore_source_instructions_when_destination_has_none() {
-        let state_context = CompactionStateContext {
-            cwd_generation: 1,
-            destination_project_instructions: None,
-            recent_messages: vec![],
-            last_user_query: None,
-            agent_edited_paths: vec![],
-            running_tasks: vec![],
-            running_subagents: vec![],
-            connected_mcp_servers: vec![],
-            todos: vec![],
-        };
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system("sys"),
-            user_message_prefix: "prefix".into(),
-            agents_md_reminder: Some("source rules".into()),
-            state_context: &state_context,
-            compaction_summary: "summary".into(),
-            system_reminder: None,
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        assert!(!compacted.iter().any(|item| {
-            matches!(item, ConversationItem::User(user) if user.synthetic_reason == Some(SyntheticReason::ProjectInstructions))
-        }));
-    }
-    /// The AGENTS.md slot must use the structural project-instructions tag.
-    #[test]
-    fn build_compacted_history_tags_agents_md_with_project_instructions() {
-        let state_context = CompactionStateContext {
-            cwd_generation: 0,
-            destination_project_instructions: None,
-            recent_messages: vec![],
-            last_user_query: None,
-            agent_edited_paths: vec![],
-            running_tasks: vec![],
-            running_subagents: vec![],
-            connected_mcp_servers: vec![],
-            todos: vec![],
-        };
-        let reminder = "some AGENTS.md body".to_string();
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system("sys"),
-            user_message_prefix: "<user_info>OS: macos</user_info>".to_string(),
-            agents_md_reminder: Some(reminder.clone()),
-            state_context: &state_context,
-            compaction_summary: "Summary body.".to_string(),
-            system_reminder: None,
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        let ConversationItem::User(u) = &compacted[2] else {
-            panic!("compacted[2] should be the AGENTS.md User slot");
-        };
-        assert_eq!(
-            u.synthetic_reason,
-            Some(SyntheticReason::ProjectInstructions),
-            "AGENTS.md slot must be tagged ProjectInstructions so the \
-             spawn-time idempotence guard skips re-insertion on resume \
-             from the compacted jsonl"
-        );
-        assert_eq!(
-            compacted[2].text_content(),
-            reminder,
-            "AGENTS.md slot must carry the reminder text verbatim"
-        );
-    }
-    /// When `agents_md_reminder` is `None`, no `ProjectInstructions`-tagged
-    /// item is emitted in the compacted history.
-    #[test]
-    fn build_compacted_history_omits_agents_md_when_none() {
-        let state_context = CompactionStateContext {
-            cwd_generation: 0,
-            destination_project_instructions: None,
-            recent_messages: vec![],
-            last_user_query: None,
-            agent_edited_paths: vec![],
-            running_tasks: vec![],
-            running_subagents: vec![],
-            connected_mcp_servers: vec![],
-            todos: vec![],
-        };
-        let compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: ConversationItem::system("sys"),
-            user_message_prefix: "<user_info>OS: macos</user_info>".to_string(),
-            agents_md_reminder: None,
-            state_context: &state_context,
-            compaction_summary: "Summary body.".to_string(),
-            system_reminder: None,
-            summary_before_recent: false,
-            transcript_hint: None,
-            summary_count: 1,
-        });
-        let has_project_instructions = compacted.iter().any(|item| {
-            matches!(
-                item,
-                ConversationItem::User(u)
-                    if u.synthetic_reason == Some(SyntheticReason::ProjectInstructions)
-            )
-        });
-        assert!(
-            !has_project_instructions,
-            "no ProjectInstructions-tagged item should appear when \
-             agents_md_reminder is None"
-        );
-    }
     #[test]
     fn conversation_item_drops_tool_results() {
         let result = strip_tool_messages_for_conversation_item(vec![
@@ -3415,51 +2412,6 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             }
             _ => panic!("expected User item"),
         }
-    }
-    /// The segment view must KEEP verbatim tool I/O (calls + results) — that's
-    /// what lets the model recover exact outputs — while the summary view drops
-    /// it. Guards against anyone collapsing the two preps into one.
-    #[test]
-    fn prepare_conversation_for_segment_keeps_tool_io_unlike_summary() {
-        use sampling_types::ToolCall;
-        let mut user = ConversationItem::user("read a.rs");
-        user.add_image("data:image/png;base64,iVBORw0KGgo=");
-        let conv = vec![
-            ConversationItem::system("sys"),
-            user,
-            ConversationItem::assistant_tool_calls(vec![ToolCall {
-                id: "c1".into(),
-                name: "read_file".to_string(),
-                arguments: r#"{"target_file":"a.rs"}"#.into(),
-            }]),
-            ConversationItem::tool_result("c1", "fn main() {}"),
-        ];
-        let has_tool_calls = |items: &[ConversationItem]| {
-            items
-                .iter()
-                .any(|i| matches!(i, ConversationItem::Assistant(a) if !a.tool_calls.is_empty()))
-        };
-        let has_tool_result = |items: &[ConversationItem]| {
-            items
-                .iter()
-                .any(|i| matches!(i, ConversationItem::ToolResult(_)))
-        };
-        let has_image = |items: &[ConversationItem]| {
-            items.iter().any(|i| {
-                matches!(i, ConversationItem::User(u)
-                    if u.content.iter().any(|p| matches!(p, ContentPart::Image { .. })))
-            })
-        };
-        let seg = prepare_conversation_for_segment(conv.clone());
-        assert!(
-            has_tool_calls(&seg),
-            "segment view must keep structured tool calls"
-        );
-        assert!(has_tool_result(&seg), "segment view must keep tool results");
-        assert!(!has_image(&seg), "segment view must strip base64 images");
-        let summ = prepare_conversation_for_summarization(conv);
-        assert!(!has_tool_calls(&summ), "summary view flattens tool calls");
-        assert!(!has_tool_result(&summ), "summary view drops tool results");
     }
     /// Verbatim view keeps tool calls (with arguments) and results — no flattening, no dropped results.
     #[test]

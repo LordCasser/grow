@@ -34,8 +34,8 @@ use pager::client_identity::PAGER_CLIENT_VERSION;
 use shell::agent::app::{run_leader, run_stdio_agent};
 use shell::agent::config::Config as AgentConfig;
 use shell::leader::{
-    ClientCapabilities, ClientMode, ControlCommand, LeaderCapabilities, LeaderDescriptor,
-    LeaderRegistration, LeaderTarget, leader_is_older_than,
+    ClientCapabilities, ClientMode, ControlCommand, LeaderDescriptor, LeaderRegistration,
+    LeaderTarget, leader_is_older_than,
 };
 use shell::leader::{ControlPayload, LeaderClient, connect_or_spawn};
 use std::env;
@@ -195,24 +195,15 @@ async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
         }
         LeaderMgmtCommand::Info { target, json } => {
             let (descriptor, client) = connect_to_leader(&target).await?;
-            let info = match ensure_control_caps(client.registration()) {
-                Ok(_) => client
-                    .send_control(ControlCommand::GetLeaderInfo)
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok()),
-                Err(_) => None,
-            };
+            let info = client
+                .send_control(ControlCommand::GetLeaderInfo)
+                .await?
+                .map_err(|error| anyhow::anyhow!(error.message))?;
             if json {
-                let payload = leader_info_json(&descriptor, client.registration(), info.as_ref())?;
+                let payload = leader_info_json(&descriptor, client.registration(), &info)?;
                 println!("{}", serde_json::to_string(&payload)?);
-            } else if let Some(info) = info {
-                println!("{info:#?}");
             } else {
-                print_leader_descriptor(&descriptor);
-                eprintln!(
-                    "  (detailed info unavailable — leader does not advertise control capabilities)"
-                );
+                println!("{info:#?}");
             }
             client.cancel();
             Ok(())
@@ -312,19 +303,12 @@ fn leader_descriptor_json(d: &LeaderDescriptor) -> serde_json::Value {
 fn leader_info_json(
     d: &LeaderDescriptor,
     reg: &LeaderRegistration,
-    info: Option<&shell::leader::ControlPayload>,
+    info: &shell::leader::ControlPayload,
 ) -> Result<serde_json::Value> {
     let mut val = leader_descriptor_json(d);
     val["clientId"] = serde_json::json!(reg.client_id);
-    if let Some(info) = info {
-        val["info"] = serde_json::to_value(info)?;
-    }
+    val["info"] = serde_json::to_value(info)?;
     Ok(val)
-}
-fn ensure_control_caps(reg: &LeaderRegistration) -> Result<&LeaderCapabilities> {
-    reg.leader_capabilities
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Leader does not advertise capabilities (legacy version)"))
 }
 fn env_flag_enabled(value: &str) -> bool {
     !matches!(
@@ -397,10 +381,7 @@ fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState
         "session/load" => {
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(params) = json.get("params") {
-                let sid = params
-                    .get("sessionId")
-                    .or_else(|| params.get("session_id"))
-                    .and_then(|v| v.as_str());
+                let sid = params.get("sessionId").and_then(|v| v.as_str());
                 if let Some(sid) = sid {
                     let cached = CachedSession {
                         load_request_json: Some(msg.to_string()),
@@ -434,7 +415,7 @@ fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState
         "grow/session/close" | "_grow/session/close" => {
             if let Some(sid) = json
                 .get("params")
-                .and_then(|p| p.get("sessionId").or_else(|| p.get("session_id")))
+                .and_then(|p| p.get("sessionId"))
                 .and_then(|v| v.as_str())
             {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -450,7 +431,7 @@ fn cache_incoming_session_id(msg: &str, state: &std::sync::Mutex<StdioReplayStat
     };
     if let Some(sid) = json
         .get("result")
-        .and_then(|r| r.get("sessionId").or_else(|| r.get("session_id")))
+        .and_then(|r| r.get("sessionId"))
         .and_then(|v| v.as_str())
     {
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -774,20 +755,14 @@ async fn run_agent_command(
         .reasoning_effort
         .as_deref()
         .and_then(shell::sampling::types::parse_canonical_effort_token);
-    let launch_yolo = shell::util::config::effective_yolo_for_launch(
-        agent_args.yolo,
+    let launch_permission = shell::util::config::effective_permission_mode_for_launch(
         permission_mode_flag.as_deref(),
         None,
     );
-    if let Some(warning) = launch_yolo.blocked_warning {
+    if let Some(warning) = launch_permission.blocked_warning {
         eprintln!("grow: {warning}");
     }
-    agent_config.default_yolo_mode = launch_yolo.yolo;
-    agent_config.default_auto_mode = shell::util::config::effective_auto_for_launch(
-        agent_args.yolo,
-        permission_mode_flag.as_deref(),
-        None,
-    );
+    agent_config.default_permission_mode = launch_permission.mode;
     agent_config.agent_profile_path = agent_args
         .agent_profile
         .as_deref()
@@ -803,9 +778,8 @@ async fn run_agent_command(
     agent_config.resolve_runtime_fields(&shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
         remote_settings: remote_settings.as_ref(),
-        is_headless: !is_leader,
         cli_subagents: None,
-        cli_session_summary_model: None,
+        cli_session_title_model: None,
         cli_experimental_memory: false,
         cli_no_memory: false,
         todo_gate: false,
@@ -876,8 +850,7 @@ async fn run_agent_command(
             .or(agent_config.models.default.clone());
         let client_type = std::env::args().collect::<Vec<_>>().join(" ");
         let capabilities = ClientCapabilities {
-            yolo_mode: launch_yolo.yolo,
-            auto_mode: agent_config.default_auto_mode && !launch_yolo.yolo,
+            permission_mode: launch_permission.mode,
             default_model,
             client_version: Some(PAGER_CLIENT_VERSION.to_string()),
             code_nav_enabled: false,
@@ -930,7 +903,7 @@ async fn run_agent_command(
                     loop {
                         match rx.recv().await {
                             Some(ref msg) => {
-                                if msg.contains("\"sessionId\"") || msg.contains("\"session_id\"") {
+                                if msg.contains("\"sessionId\"") {
                                     cache_incoming_session_id(msg, &replay_state);
                                 }
                                 if stdout.write_all(msg.as_bytes()).await.is_err()
@@ -1474,12 +1447,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     // before any TLS client is built (see diagnostics::tls).
     diagnostics::tls::install_ring_provider_once();
     let mut args = args.apply_cwd()?;
-    if let Some(ref mode) = args.compaction_mode {
-        unsafe { std::env::set_var("GROW_COMPACTION_MODE", mode) };
-    }
-    if let Some(ref detail) = args.compaction_detail {
-        unsafe { std::env::set_var("GROW_COMPACTION_DETAIL", detail) };
-    }
     if let Some(ref socket) = args.leader_socket {
         unsafe { std::env::set_var(shell::leader::LEADER_SOCKET_ENV, socket) };
     }
@@ -1679,12 +1646,11 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     if let Some(prompt) = headless_prompt {
         init_tracing_simple(HEADLESS_ENTRYPOINT);
         enforce_version_policy_or_exit();
-        let launch_yolo = shell::util::config::effective_yolo_for_launch(
-            args.yolo,
+        let launch_permission = shell::util::config::effective_permission_mode_for_launch(
             args.permission_mode_flag.as_deref(),
             None,
         );
-        if let Some(warning) = launch_yolo.blocked_warning {
+        if let Some(warning) = launch_permission.blocked_warning {
             eprintln!("grow: {warning}");
         }
         let json_schema = args
@@ -1700,10 +1666,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             args.verbatim,
             pager::headless::HeadlessOptions {
                 session_id: args.session_id.clone(),
-                resume: args.resume_session.or(args.load_session),
+                resume: args.resume_session,
                 resume_title_pinned: args.resume_target_pinned,
                 cwd: args.cwd,
-                yolo: launch_yolo.yolo,
+                permission_mode: launch_permission.mode,
                 trust: args.trust,
                 output_format: args.output_format,
                 include_partial_messages: args.include_partial_messages,
@@ -1722,7 +1688,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 allow_rules: args.allow_rules.clone(),
                 deny_rules: args.deny_rules.clone(),
                 max_turns: args.max_turns,
-                permission_mode_flag: args.permission_mode_flag.clone(),
                 reasoning_effort: args.reasoning_effort.clone(),
                 wait_for_background: !args.no_wait_for_background,
                 background_wait_timeout: std::time::Duration::from_secs(
@@ -1958,10 +1923,6 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
                 continue;
             }
         };
-        if !client.registration().supports_relaunch() {
-            client.cancel();
-            continue;
-        }
         match client
             .send_control(ControlCommand::RelaunchForUpdate {
                 to_version: installed_version.to_string(),

@@ -16,8 +16,7 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 
 /// Concise variant of `ReadFileTool`.
 ///
-/// Delegates to `run_read_file()`, then swaps `content_concise` into `content`
-/// (no line-number padding).
+/// Delegates to the canonical numbered read implementation.
 #[derive(Debug, Default)]
 pub struct ReadFileConciseTool;
 
@@ -82,17 +81,7 @@ impl tool_runtime::Tool for ReadFileConciseTool {
         // `None`: the concise tool does not stream, so it needs no
         // text-path streamability signal (see `run_read_file`).
         let invoking = crate::types::tool_metadata::invoking_param_names(&ctx);
-        let result = run_read_file(input, cwd_override, None, resources, None, &invoking).await?;
-
-        match result {
-            ReadFileOutput::FileContent(mut fc) => {
-                if let Some(concise) = fc.content_concise.take() {
-                    fc.content = concise;
-                }
-                Ok(ReadFileOutput::FileContent(fc))
-            }
-            other => Ok(other),
-        }
+        run_read_file(input, cwd_override, resources, None, &invoking).await
     }
 }
 

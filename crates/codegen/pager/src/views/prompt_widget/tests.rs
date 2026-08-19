@@ -4142,21 +4142,19 @@
 
     // -- completion accept / splice application ---------------------------------
 
-    /// Wire-shaped token item: whole-line `insert_text`, `token_text` span
-    /// replacement (what a range-emitting shell sends).
+    /// Wire-shaped atomic token edit.
     fn token_completion(
-        line: &str,
+        _line: &str,
         token: &str,
         range: std::ops::Range<usize>,
     ) -> crate::views::suggestion_controller::CompletionItemParsed {
         crate::views::suggestion_controller::CompletionItemParsed {
             display: token.to_owned(),
             description: String::new(),
-            insert_text: line.to_owned(),
+            replacement: token.to_owned(),
             source: SuggestionSource::PathExecutable,
             priority: 0,
-            replace_range: Some(range),
-            token_text: Some(token.to_owned()),
+            replace_range: range,
             truncated: false,
         }
     }
@@ -4166,7 +4164,7 @@
         let mut pw = PromptWidget::new();
         pw.textarea.insert_str("ls | gr");
 
-        assert!(pw.apply_completion_splice(CompletionSplice::Token(5..7, "grep".into())));
+        assert!(pw.apply_completion_splice(CompletionSplice::Edit(5..7, "grep".into())));
         assert_eq!(pw.text(), "ls | grep");
         assert_eq!(pw.cursor(), "ls | grep".len());
     }
@@ -4178,7 +4176,7 @@
         pw.textarea.insert_str("cat hel | wc -l");
         pw.textarea.set_cursor(7);
 
-        assert!(pw.apply_completion_splice(CompletionSplice::Token(4..7, "hello.txt".into())));
+        assert!(pw.apply_completion_splice(CompletionSplice::Edit(4..7, "hello.txt".into())));
         assert_eq!(pw.text(), "cat hello.txt | wc -l");
         assert_eq!(pw.cursor(), "cat hello.txt".len());
     }
@@ -4188,7 +4186,8 @@
         let mut pw = PromptWidget::new();
         pw.textarea.insert_str("git st");
 
-        assert!(pw.apply_completion_splice(CompletionSplice::WholeLine(
+        assert!(pw.apply_completion_splice(CompletionSplice::Edit(
+            0..6,
             "git status --porcelain".into()
         )));
         assert_eq!(pw.text(), "git status --porcelain");
@@ -4215,7 +4214,7 @@
 
         assert_eq!(
             pw.completion_dropdown_accept(),
-            Some(CompletionSplice::Token(5..7, "grep".into()))
+            Some(CompletionSplice::Edit(5..7, "grep".into()))
         );
     }
 
@@ -4262,7 +4261,7 @@
         let text_before = pw.textarea.text().to_owned();
 
         let clipping = chip.start..chip.start + 2;
-        assert!(!pw.apply_completion_splice(CompletionSplice::Token(
+        assert!(!pw.apply_completion_splice(CompletionSplice::Edit(
             clipping.clone(),
             "src/main.rs".into()
         )));
@@ -4272,7 +4271,7 @@
 
         // An abutting range (outside the element) still splices normally.
         pw.textarea.insert_str_at(chip.end, "tail");
-        assert!(pw.apply_completion_splice(CompletionSplice::Token(
+        assert!(pw.apply_completion_splice(CompletionSplice::Edit(
             chip.end..chip.end + 4,
             "notes.md".into()
         )));

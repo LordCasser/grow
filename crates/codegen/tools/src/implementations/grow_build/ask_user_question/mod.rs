@@ -10,13 +10,10 @@
 //!
 //! 1. The agent calls `AskUserQuestion` with an array of structured questions
 //!    (each with options, optional preview, optional multi_select).
-//! 2. The tool sends a `UserQuestionAsked` **notification** to the gateway/client
-//!    carrying the full question payload as JSON.
-//! 3. The tool returns `AskUserQuestionOutput::QuestionsSent` to the model as
-//!    an immediate confirmation.
-//! 4. The client presents the question UI, collects user answers, and injects
-//!    them back into the conversation as the tool result. This client-side
-//!    round-trip is handled by the orchestration layer, not by this tool.
+//! 2. The tool sends the structured request to the session coordinator and
+//!    blocks on the response.
+//! 3. The client presents the question UI and returns a typed response.
+//! 4. The tool formats that response as the completed tool result.
 //!
 //! ## Plan-Mode Interview Actions
 //!
@@ -39,14 +36,8 @@ pub use types::{
 use crate::notification::types::UserQuestionAsked;
 use crate::types::output::AskUserQuestionOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::{NotificationHandle, SharedResources};
+use crate::types::resources::NotificationHandle;
 use crate::types::tool::{ToolKind, ToolNamespace};
-
-/// Migration fallback: when `true`, a missing `UserQuestionSender` falls
-/// back to the old fire-and-forget `QuestionsSent` behavior with a warning.
-/// Set to `false` (or delete entirely) once the shell coordinator is wired
-/// up in TS-03 and confirmed working.
-const MIGRATION_FALLBACK: bool = true;
 
 /// Default max time to wait for the user to answer the questionnaire (all
 /// questions in this tool call share one timer): 30 minutes. On expiry the
@@ -54,10 +45,7 @@ const MIGRATION_FALLBACK: bool = true;
 /// (`CANCEL_TEXT`), not a tool failure.
 ///
 /// The shell resolves `[toolset.ask_user_question]` across its config tiers
-/// and injects the result as [`AskUserQuestionParams`]; when no resolved
-/// params are injected, `GROW_ASK_USER_QUESTION_TIMEOUT_SECS` (positive
-/// integer seconds) still overrides this default directly —
-/// e.g. `GROW_ASK_USER_QUESTION_TIMEOUT_SECS=8` for tests / TUI repro.
+/// and injects the result as [`AskUserQuestionParams`].
 pub const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// Default for `timeout_enabled` across every resolver tier and settings
@@ -66,53 +54,30 @@ pub const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// settings registry both anchor on this const.
 pub const DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED: bool = true;
 
-/// Env var: override [`RESPONSE_TIMEOUT`] with a duration in **seconds**.
-pub const RESPONSE_TIMEOUT_ENV: &str = "GROW_ASK_USER_QUESTION_TIMEOUT_SECS";
-
-/// Parse the [`RESPONSE_TIMEOUT_ENV`] override (positive integer seconds).
-/// Invalid or non-positive values are warned and treated as unset. Single
-/// source for this parse — the shell's env tier calls it too, so the two
-/// resolutions can't drift.
-pub fn response_timeout_env_secs() -> Option<u64> {
-    let raw = std::env::var(RESPONSE_TIMEOUT_ENV).ok()?;
-    match raw.trim().parse::<u64>() {
-        Ok(secs) if secs > 0 => Some(secs),
-        _ => {
-            tracing::warn!(
-                env = RESPONSE_TIMEOUT_ENV,
-                value = %raw,
-                "invalid timeout override; ignoring"
-            );
-            None
-        }
-    }
-}
-
-/// Effective wait budget for one questionnaire (env override or default).
-pub fn response_timeout() -> std::time::Duration {
-    response_timeout_env_secs()
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(RESPONSE_TIMEOUT)
-}
-
 /// Runtime-configurable parameters for the `ask_user_question` tool,
 /// injected via `Params<AskUserQuestionParams>` in `SharedResources`.
 ///
 /// The shell resolves `[toolset.ask_user_question]` across requirements >
 /// env > user `config.toml` > managed > remote feature config and injects the
-/// concrete result. All fields are optional — `None` means "unset", which
-/// preserves the legacy env→default budget, so registry consumers that never
-/// resolve config (workspace toolset) keep today's behavior.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// concrete result. Registry consumers that do not inject an override receive
+/// the same concrete defaults through [`Default`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AskUserQuestionParams {
-    /// `Some(false)` disarms the questionnaire timer entirely (wait forever
-    /// for an answer). `None`/`Some(true)` keep the timer armed.
-    #[serde(default)]
-    pub timeout_enabled: Option<bool>,
+    /// `false` disarms the questionnaire timer entirely.
+    pub timeout_enabled: bool,
     /// Wait budget in seconds when the timer is armed (positive integer).
-    /// `None` falls back to the env override / [`RESPONSE_TIMEOUT`].
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
+    pub timeout_secs: std::num::NonZeroU64,
+}
+
+impl Default for AskUserQuestionParams {
+    fn default() -> Self {
+        Self {
+            timeout_enabled: DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED,
+            timeout_secs: std::num::NonZeroU64::new(RESPONSE_TIMEOUT.as_secs())
+                .expect("default timeout is non-zero"),
+        }
+    }
 }
 
 crate::register_resource!("grow_build", "AskUserQuestion", AskUserQuestionParams);
@@ -120,29 +85,16 @@ crate::register_resource!("grow_build", "AskUserQuestion", AskUserQuestionParams
 impl AskUserQuestionParams {
     /// Effective wait budget: `Some(duration)` = bounded, `None` = wait forever.
     pub fn wait_budget(&self) -> Option<std::time::Duration> {
-        if !self
-            .timeout_enabled
-            .unwrap_or(DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED)
-        {
+        if !self.timeout_enabled {
             return None;
         }
-        match self.timeout_secs {
-            Some(secs) if secs > 0 => Some(std::time::Duration::from_secs(secs)),
-            Some(secs) => {
-                // 0 must never mean "wait forever" — that is `timeout_enabled`'s job.
-                tracing::warn!(
-                    value = secs,
-                    "ask_user_question timeout_secs must be > 0; using default budget"
-                );
-                Some(response_timeout())
-            }
-            None => Some(response_timeout()),
-        }
+        Some(std::time::Duration::from_secs(self.timeout_secs.get()))
     }
 }
 
 /// A single option within a question.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuestionOption {
     /// Option text shown to the user; a few words at most.
     #[schemars(description = "Option text shown to the user. A few words at most.")]
@@ -168,7 +120,7 @@ pub struct QuestionOption {
 
 /// A single question with its options.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Question {
     /// The question to ask, phrased as a full question.
     #[schemars(description = "The question to ask, phrased as a full question.")]
@@ -179,14 +131,7 @@ pub struct Question {
     pub options: Vec<QuestionOption>,
 
     /// Let the user pick more than one option (default false).
-    // Model-facing schema name is snake_case (`multi_select`); deserialize also
-    // accepts the legacy/ACP `multiSelect` so the shared `Question` type stays
-    // wire-compatible with the camelCase ACP ext_method.
-    #[serde(
-        default,
-        alias = "multi_select",
-        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
-    )]
+    #[serde(default)]
     #[schemars(
         rename = "multi_select",
         description = "Let the user pick more than one option (default false)."
@@ -201,6 +146,7 @@ pub struct Question {
 
 /// Input for the `AskUserQuestion` tool.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AskUserQuestionInput {
     /// The questions to ask, each with its own options. At least one question
     /// is required.
@@ -226,7 +172,7 @@ pub struct AskUserQuestionInput {
 /// over a oneshot channel and formatted into the model-visible tool result.
 ///
 /// Params: [`AskUserQuestionParams`] — timeout policy resolved by the shell
-/// across its config tiers; unset fields keep the legacy env→default budget.
+/// across its config tiers.
 #[derive(Debug, Default)]
 pub struct AskUserQuestionTool;
 
@@ -255,63 +201,6 @@ impl crate::types::tool_metadata::ToolMetadata for AskUserQuestionTool {
         // `${% if tools.by_kind.plan_control %}`-guarded, so it renders
         // fine without the plan tools.
         Expr::True
-    }
-}
-
-impl AskUserQuestionTool {
-    /// Fire-and-forget fallback used during migration when
-    /// `UserQuestionSender` is not yet injected by the shell.
-    ///
-    /// This preserves the old behavior: send a notification, return
-    /// `QuestionsSent`. Remove this method when `MIGRATION_FALLBACK` is
-    /// set to `false`.
-    async fn fallback_fire_and_forget(
-        &self,
-        input: &AskUserQuestionInput,
-        ctx: &tool_runtime::ToolCallContext,
-        resources: &SharedResources,
-    ) -> Result<AskUserQuestionOutput, tool_runtime::ToolError> {
-        let question_count = input.questions.len();
-
-        let questions_json = serde_json::to_value(&input.questions)
-            .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
-
-        {
-            let res = resources.lock().await;
-            if let Some(handle) = res.get::<NotificationHandle>() {
-                handle.0.send_user_question_asked(UserQuestionAsked {
-                    tool_call_id: ctx.call_id.as_str().to_owned(),
-                    questions_json,
-                });
-            }
-        }
-
-        tracing::info!(question_count, "Asked user questions (fallback path)");
-
-        let question_summary: Vec<String> = input
-            .questions
-            .iter()
-            .enumerate()
-            .map(|(i, q)| {
-                let options: Vec<&str> = q.options.iter().map(|o| o.label.as_str()).collect();
-                format!(
-                    "{}. {} [options: {}]",
-                    i + 1,
-                    q.question,
-                    options.join(", ")
-                )
-            })
-            .collect();
-
-        let message = format!(
-            "Your questions have been presented to the user for answering:\n{}",
-            question_summary.join("\n")
-        );
-
-        Ok(AskUserQuestionOutput::QuestionsSent {
-            message,
-            question_count,
-        })
     }
 }
 
@@ -353,10 +242,9 @@ impl tool_runtime::Tool for AskUserQuestionTool {
         let question_count = input.questions.len();
 
         if question_count == 0 {
-            return Ok(AskUserQuestionOutput::QuestionsSent {
-                message: "No questions provided. Continue with the task.".to_string(),
-                question_count: 0,
-            });
+            return Err(tool_runtime::ToolError::invalid_arguments(
+                "questions must contain at least one question",
+            ));
         }
 
         // ── Step 1: Validate unique question text ───────────────────────
@@ -378,24 +266,9 @@ impl tool_runtime::Tool for AskUserQuestionTool {
             res.get::<UserQuestionSender>().cloned()
         };
 
-        let sender = match sender {
-            Some(s) => s,
-            None => {
-                if MIGRATION_FALLBACK {
-                    tracing::warn!(
-                        "UserQuestionSender not available; falling back to fire-and-forget QuestionsSent. \
-                         This is expected during migration (TS-03 not yet wired)."
-                    );
-                    return self
-                        .fallback_fire_and_forget(&input, &ctx, &resources)
-                        .await;
-                }
-                return Err(tool_runtime::ToolError::custom(
-                    "missing_resource",
-                    "UserQuestionSender".to_string(),
-                ));
-            }
-        };
+        let sender = sender.ok_or_else(|| {
+            tool_runtime::ToolError::custom("missing_resource", "UserQuestionSender".to_string())
+        })?;
 
         // ── Step 3: Create oneshot ──────────────────────────────────────
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -425,8 +298,6 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                     questions_json,
                 });
             }
-            // Shell-injected params win; absent or unset fields keep the legacy
-            // env→default budget so non-shell registry consumers are unchanged.
             res.get::<crate::types::resources::Params<AskUserQuestionParams>>()
                 .map(|p| p.0)
                 .unwrap_or_default()
@@ -465,7 +336,7 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                 // races `result_tx.closed()` against ACP so it unblocks and
                 // can open the next questionnaire (stale UI is cancelled when
                 // a new ext_method arrives). Same model text as cancel.
-                return Ok(AskUserQuestionOutput::UserAnswered {
+                return Ok(AskUserQuestionOutput {
                     message: format::CANCEL_TEXT.to_string(),
                 });
             }
@@ -486,23 +357,23 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                 } else {
                     format::format_accepted_tool_result(&answers, &annotations)
                 };
-                Ok(AskUserQuestionOutput::UserAnswered { message })
+                Ok(AskUserQuestionOutput { message })
             }
             Ok(UserQuestionResponse::ChatAboutThis {
                 questions,
                 partial_answers,
             }) => {
                 let message = format::format_chat_about_this(&questions, &partial_answers);
-                Ok(AskUserQuestionOutput::UserAnswered { message })
+                Ok(AskUserQuestionOutput { message })
             }
             Ok(UserQuestionResponse::SkipInterview {
                 questions,
                 partial_answers,
             }) => {
                 let message = format::format_skip_interview(&questions, &partial_answers);
-                Ok(AskUserQuestionOutput::UserAnswered { message })
+                Ok(AskUserQuestionOutput { message })
             }
-            Ok(UserQuestionResponse::Cancelled) => Ok(AskUserQuestionOutput::UserAnswered {
+            Ok(UserQuestionResponse::Cancelled) => Ok(AskUserQuestionOutput {
                 message: format::CANCEL_TEXT.to_string(),
             }),
             Err(UserQuestionError::TransportError(msg)) => Err(tool_runtime::ToolError::execution(
@@ -522,7 +393,7 @@ impl tool_runtime::Tool for AskUserQuestionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::resources::Resources;
+    use crate::types::resources::{Resources, SharedResources};
     use crate::types::tool_metadata::test_ctx_with_call_id;
     use indexmap::IndexMap;
     use tokio::sync::mpsc;
@@ -542,6 +413,10 @@ mod tests {
             multi_select: None,
             id: None,
         }
+    }
+
+    fn timeout_secs(seconds: u64) -> std::num::NonZeroU64 {
+        std::num::NonZeroU64::new(seconds).expect("test timeout must be non-zero")
     }
 
     /// Create resources with a UserQuestionSender injected.
@@ -607,7 +482,7 @@ mod tests {
                     {"label": "Postgres", "description": "Relational DB"},
                     {"label": "SQLite", "description": "Embedded SQL database", "preview": "```\nSELECT 1;\n```"}
                 ],
-                "multiSelect": false
+                "multi_select": false
             }]
         });
 
@@ -649,41 +524,8 @@ mod tests {
         assert_eq!(input.questions[0].multi_select, Some(true));
     }
 
-    // ── Migration fallback tests (no UserQuestionSender) ─────────────────
-
     #[tokio::test]
-    async fn fallback_ask_single_question() {
-        let resources = Resources::new();
-        let shared = resources.into_shared();
-        let tool = AskUserQuestionTool;
-
-        let input = AskUserQuestionInput {
-            questions: vec![make_question(
-                "Which database?",
-                &["Redis (Recommended)", "Memcached"],
-            )],
-            use_id_keyed_format: false,
-        };
-
-        let result =
-            tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "test-call"), input)
-                .await
-                .unwrap();
-
-        match result {
-            AskUserQuestionOutput::QuestionsSent {
-                ref message,
-                question_count,
-            } => {
-                assert_eq!(question_count, 1);
-                assert!(message.contains("Which database?"));
-            }
-            _ => panic!("Expected QuestionsSent fallback"),
-        }
-    }
-
-    #[tokio::test]
-    async fn empty_questions_handled() {
+    async fn empty_questions_are_invalid() {
         let resources = Resources::new();
         let shared = resources.into_shared();
         let tool = AskUserQuestionTool;
@@ -693,30 +535,16 @@ mod tests {
             use_id_keyed_format: false,
         };
 
-        let result =
+        let error =
             tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "test-call"), input)
                 .await
-                .unwrap();
-
-        match result {
-            AskUserQuestionOutput::QuestionsSent {
-                ref message,
-                question_count,
-            } => {
-                assert_eq!(question_count, 0);
-                assert!(message.contains("No questions provided"));
-            }
-            _ => panic!("Expected QuestionsSent for empty"),
-        }
+                .expect_err("empty question list must fail");
+        assert!(error.to_string().contains("at least one question"));
     }
 
     #[tokio::test]
-    async fn fallback_sends_notification() {
-        use crate::notification::types::{ToolNotification, ToolNotificationHandle};
-
-        let (handle, mut rx) = ToolNotificationHandle::channel();
-        let mut resources = Resources::new();
-        resources.insert(NotificationHandle(handle));
+    async fn missing_coordinator_is_an_error() {
+        let resources = Resources::new();
         let shared = resources.into_shared();
         let tool = AskUserQuestionTool;
 
@@ -725,17 +553,10 @@ mod tests {
             use_id_keyed_format: false,
         };
 
-        tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "call-q"), input)
+        let error = tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "call-q"), input)
             .await
-            .unwrap();
-
-        let notification = rx.try_recv().expect("should have received a notification");
-        match notification {
-            ToolNotification::UserQuestionAsked(asked) => {
-                assert_eq!(asked.tool_call_id, "call-q");
-            }
-            other => panic!("Expected UserQuestionAsked, got {:?}", other),
-        }
+            .expect_err("coordinator is required");
+        assert!(error.to_string().contains("UserQuestionSender"));
     }
 
     // ── Validation tests ─────────────────────────────────────────────────
@@ -798,13 +619,12 @@ mod tests {
             .unwrap();
 
         let result = handle.await.unwrap().unwrap();
-        match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
-                assert!(message.starts_with("User has answered your questions:"));
-                assert!(message.contains("\"Which database?\"=\"Redis\""));
-            }
-            other => panic!("Expected UserAnswered, got {:?}", other),
-        }
+        assert!(
+            result
+                .message
+                .starts_with("User has answered your questions:")
+        );
+        assert!(result.message.contains("\"Which database?\"=\"Redis\""));
     }
 
     #[tokio::test]
@@ -831,17 +651,10 @@ mod tests {
             .unwrap();
 
         let result = handle.await.unwrap().unwrap();
-        match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
-                assert_eq!(message, format::CANCEL_TEXT);
-            }
-            other => panic!("Expected UserAnswered with cancel text, got {:?}", other),
-        }
+        assert_eq!(result.message, format::CANCEL_TEXT);
     }
 
-    /// Whole questionnaire (multi-question batch) shares one 6-minute timer.
-    /// No `Params` injected — pins the legacy env→default budget for
-    /// consumers that never resolve `[toolset.ask_user_question]`.
+    /// Whole questionnaire (multi-question batch) shares one default timer.
     #[tokio::test(start_paused = true)]
     async fn blocking_times_out_after_default_budget_for_batch() {
         let (shared, mut rx) = resources_with_sender();
@@ -865,20 +678,10 @@ mod tests {
 
         let request = rx.recv().await.expect("should receive request");
         assert_eq!(request.questions.len(), 2);
-        // Advance past the *effective* budget (honors env override if set).
-        let wait = response_timeout();
-        tokio::time::advance(wait + std::time::Duration::from_secs(1)).await;
+        tokio::time::advance(RESPONSE_TIMEOUT + std::time::Duration::from_secs(1)).await;
 
         let result = handle.await.unwrap().unwrap();
-        match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
-                assert_eq!(message, format::CANCEL_TEXT);
-            }
-            other => panic!(
-                "Expected UserAnswered with skip/cancel text, got {:?}",
-                other
-            ),
-        }
+        assert_eq!(result.message, format::CANCEL_TEXT);
     }
 
     #[tokio::test(start_paused = true)]
@@ -899,8 +702,7 @@ mod tests {
         });
 
         let request = rx.recv().await.expect("should receive request");
-        // Stay well under the effective timeout (env override or default budget).
-        let advance = response_timeout()
+        let advance = RESPONSE_TIMEOUT
             .checked_div(6)
             .unwrap_or(std::time::Duration::from_secs(1))
             .max(std::time::Duration::from_secs(1));
@@ -917,26 +719,18 @@ mod tests {
             .unwrap();
 
         let result = handle.await.unwrap().unwrap();
-        match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
-                assert!(message.contains("\"Which database?\"=\"Redis\""));
-            }
-            other => panic!("Expected UserAnswered, got {:?}", other),
-        }
+        assert!(result.message.contains("\"Which database?\"=\"Redis\""));
     }
 
     // ── Configured timeout params tests ──────────────────────────────────
 
-    /// Unset params reproduce the legacy env→default budget; `timeout_enabled
-    /// = false` disarms the timer; `0` never means "wait forever".
+    /// Concrete defaults remain bounded; `timeout_enabled = false` disarms the
+    /// timer and zero is rejected at deserialization.
     #[test]
     fn wait_budget_mapping() {
-        // Compared against `response_timeout()` rather than the raw constant so
-        // the assertions pin the legacy delegation and hold under a dev's env override.
         assert_eq!(
             AskUserQuestionParams::default().wait_budget(),
-            Some(response_timeout()),
-            "registry-default (all-None) params must keep the legacy budget"
+            Some(RESPONSE_TIMEOUT),
         );
         assert_eq!(
             RESPONSE_TIMEOUT,
@@ -944,18 +738,17 @@ mod tests {
             "default ask_user_question budget is 30 minutes"
         );
         let disabled = AskUserQuestionParams {
-            timeout_enabled: Some(false),
-            timeout_secs: Some(30),
+            timeout_enabled: false,
+            timeout_secs: timeout_secs(30),
         };
         assert_eq!(disabled.wait_budget(), None, "disabled timer waits forever");
-        let zero = AskUserQuestionParams {
-            timeout_enabled: Some(true),
-            timeout_secs: Some(0),
-        };
-        assert_eq!(
-            zero.wait_budget(),
-            Some(response_timeout()),
-            "0 secs must fall back to the default, never wait forever"
+        assert!(
+            serde_json::from_value::<AskUserQuestionParams>(serde_json::json!({
+                "timeout_enabled": true,
+                "timeout_secs": 0
+            }))
+            .is_err(),
+            "zero must be rejected instead of activating a fallback"
         );
     }
 
@@ -964,8 +757,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn short_params_timeout_fires_with_cancel_text() {
         let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
-            timeout_enabled: Some(true),
-            timeout_secs: Some(5),
+            timeout_enabled: true,
+            timeout_secs: timeout_secs(5),
         });
         let tool = AskUserQuestionTool;
 
@@ -986,12 +779,7 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(6)).await;
 
         let result = handle.await.unwrap().unwrap();
-        match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
-                assert_eq!(message, format::CANCEL_TEXT);
-            }
-            other => panic!("Expected UserAnswered with cancel text, got {:?}", other),
-        }
+        assert_eq!(result.message, format::CANCEL_TEXT);
     }
 
     /// `timeout_enabled = false` waits arbitrarily long — an answer far past
@@ -999,8 +787,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn timeout_disabled_waits_beyond_default_budget() {
         let (shared, mut rx) = resources_with_sender_and_params(AskUserQuestionParams {
-            timeout_enabled: Some(false),
-            timeout_secs: Some(1),
+            timeout_enabled: false,
+            timeout_secs: timeout_secs(1),
         });
         let tool = AskUserQuestionTool;
 
@@ -1018,8 +806,7 @@ mod tests {
         });
 
         let request = rx.recv().await.expect("should receive request");
-        // Far past both the default and any env-overridden budget.
-        tokio::time::advance(RESPONSE_TIMEOUT.max(response_timeout()) * 4).await;
+        tokio::time::advance(RESPONSE_TIMEOUT * 4).await;
 
         let mut answers = IndexMap::new();
         answers.insert("Which database?".to_string(), vec!["Redis".to_string()]);
@@ -1032,12 +819,7 @@ mod tests {
             .unwrap();
 
         let result = handle.await.unwrap().unwrap();
-        match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
-                assert!(message.contains("\"Which database?\"=\"Redis\""));
-            }
-            other => panic!("Expected UserAnswered, got {:?}", other),
-        }
+        assert!(result.message.contains("\"Which database?\"=\"Redis\""));
     }
 
     // ── Failure path tests ───────────────────────────────────────────────

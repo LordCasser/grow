@@ -251,8 +251,8 @@ pub fn render_dashboard(
                     if let Some(p) = state.peek.as_mut() {
                         p.model_name = badge.model;
                         p.agent_name = badge.agent;
-                        p.auto_approve = badge.yolo;
-                        p.auto = badge.auto;
+                        p.auto_approve = badge.permission_mode.is_always_approve();
+                        p.auto = badge.permission_mode.is_auto();
                         p.plan_mode = badge.plan;
                     }
                     layout = super::layout::compute_layout_with_peek_box(area, alloc.peek_box_h);
@@ -895,7 +895,7 @@ fn render_header(
     // Reserve the announcement CTA (lead space + `[label]` + pinned-only `cta.caption`)
     // so the location label truncates first (reservation-first); the shared
     // painter then clamps to the space left, so it can't overpaint chips.
-    // Caption gates on pinned only: the Ctrl+O CTA chord is handled before the peek-permission key handler, so it opens the CTA (not YOLO) even while a peek prompt is pending.
+    // Caption gates on pinned only: the Ctrl+O CTA chord is handled before the peek-permission key handler, so it opens the CTA (not always-approve) even while a peek prompt is pending.
     let promo_caption = promo_cta.and_then(|cta| cta.pinned.then_some(cta.caption).flatten());
     let promo_reserve = promo_cta.map_or(0usize, |cta| {
         1 + crate::views::announcements::promo_cta_reserve(cta.label, promo_caption) as usize
@@ -4487,7 +4487,7 @@ mod tests {
             cwd: "/repo/work".into(),
             is_worktree: false,
             model_id: None,
-            yolo: false,
+            permission_mode: diagnostics::enums::PermissionMode::Ask,
             activity: RosterActivity::Working,
             resident: true,
             last_change_unix_ms: 1_725_000_000_000,
@@ -4535,7 +4535,7 @@ mod tests {
                 cwd: "/repo/work".into(),
                 is_worktree: false,
                 model_id: None,
-                yolo: false,
+                permission_mode: diagnostics::enums::PermissionMode::Ask,
                 activity,
                 resident: true,
                 last_change_unix_ms: 1_725_000_000_000,

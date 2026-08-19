@@ -226,7 +226,6 @@ fn fork_initiation_supersedes_open_reload_window() {
             restore_summary: None,
             restore_degree: None,
             foreground: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );

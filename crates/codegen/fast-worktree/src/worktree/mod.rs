@@ -814,38 +814,8 @@ mod tests {
     }
 
     #[test]
-    fn test_worktree_with_btrfs_disabled() {
+    fn test_worktree_falls_back_to_copy_on_non_btrfs() {
         test_utils::require_git!();
-        use crate::BtrfsMode;
-
-        let temp = TempDir::new().unwrap();
-        let repo_path = temp.path().join("repo");
-        std::fs::create_dir(&repo_path).unwrap();
-
-        init_git_repo(&repo_path);
-
-        // Create and commit a file
-        std::fs::write(repo_path.join("file.txt"), "content").unwrap();
-        git_commit_all(&repo_path, "initial");
-
-        // Create worktree with BTRFS disabled - should use copy method
-        let worktree_path = temp.path().join("worktree");
-        let result = WorktreeBuilder::new(repo_path.clone(), worktree_path.clone())
-            .btrfs_mode(BtrfsMode::Disabled)
-            .create()
-            .unwrap();
-
-        assert!(result.worktree_path.exists());
-        assert!(result.worktree_path.join("file.txt").exists());
-        assert!(!result.commit.is_empty());
-        // With copy method, files_copied should be > 0
-        assert!(result.unignored_copy.files_copied > 0);
-    }
-
-    #[test]
-    fn test_worktree_with_btrfs_auto_on_non_btrfs() {
-        test_utils::require_git!();
-        use crate::BtrfsMode;
 
         let temp = TempDir::new().unwrap();
         let repo_path = temp.path().join("repo");
@@ -860,7 +830,6 @@ mod tests {
         // Create worktree with BTRFS auto - should fall back to copy on non-BTRFS
         let worktree_path = temp.path().join("worktree");
         let result = WorktreeBuilder::new(repo_path.clone(), worktree_path.clone())
-            .btrfs_mode(BtrfsMode::Auto)
             .create()
             .unwrap();
 
@@ -877,8 +846,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_worktree_btrfs_snapshot_integration() {
-        use crate::BtrfsMode;
-
         // Helper to find a writable BTRFS subvolume
         fn get_btrfs_test_dir() -> Option<std::path::PathBuf> {
             // Check environment variable first
@@ -938,9 +905,7 @@ mod tests {
         git_commit_all(&repo_path, "initial");
 
         // Create worktree using BTRFS snapshot
-        let result = WorktreeBuilder::new(repo_path.clone(), worktree_path.clone())
-            .btrfs_mode(BtrfsMode::Auto)
-            .create();
+        let result = WorktreeBuilder::new(repo_path.clone(), worktree_path.clone()).create();
 
         match result {
             Ok(report) => {

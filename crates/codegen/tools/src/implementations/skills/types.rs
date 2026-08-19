@@ -89,10 +89,10 @@ pub struct SkillInfo {
     /// Plugin version for plugin-backed skills only (from manifest).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_version: Option<String>,
-    /// Plugin root dir for plugin-backed skills, used for ${CLAUDE_PLUGIN_ROOT} expansion.
+    /// Plugin root dir for plugin-backed skills, used for ${GROW_PLUGIN_ROOT} expansion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_root: Option<String>,
-    /// Plugin data dir for plugin-backed skills, used for ${CLAUDE_PLUGIN_DATA} expansion.
+    /// Plugin data dir for plugin-backed skills, used for ${GROW_PLUGIN_DATA} expansion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

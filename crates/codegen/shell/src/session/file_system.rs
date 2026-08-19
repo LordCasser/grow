@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use base64::Engine;
 use chrono::Utc;
 use serde::Serialize;
 use workspace::file_system::{self as wfs, FsReadEncoding};
@@ -19,48 +18,6 @@ pub struct FsListParams {
     pub respect_git_ignore: bool,
     pub include_globs: Vec<String>,
     pub exclude_globs: Vec<String>,
-}
-
-pub const ERROR_CODE_FILE_SIZE_EXCEEDED: &str = "FILE_SIZE_EXCEEDED";
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileSizeExceededError {
-    pub path: String,
-    pub size_bytes: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub line_count: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit_lines: Option<u64>,
-}
-
-impl FileSizeExceededError {
-    pub fn message(&self) -> String {
-        let mut reasons = Vec::new();
-        if let Some(limit) = self.limit_bytes {
-            reasons.push(format!("{} bytes > {} byte limit", self.size_bytes, limit));
-        }
-        if let (Some(line_count), Some(limit)) = (self.line_count, self.limit_lines) {
-            reasons.push(format!("{} lines > {} line limit", line_count, limit));
-        }
-        format!("File exceeds size limits: {}", reasons.join(", "))
-    }
-}
-
-impl<T: Serialize> From<FileSizeExceededError> for super::result::ExtMethodResult<T> {
-    fn from(err: FileSizeExceededError) -> Self {
-        Self {
-            result: None,
-            error: serde_json::to_value(super::result::ExtMethodError::with_data(
-                ERROR_CODE_FILE_SIZE_EXCEEDED,
-                err.message(),
-                err,
-            ))
-            .ok(),
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -153,11 +110,6 @@ pub async fn exists(abs_path: &Path) -> Result<FsExistsData> {
     Ok(FsExistsData { exists })
 }
 
-pub async fn read_file(abs_path: &Path) -> Result<FsReadFileData> {
-    let bytes = tokio::fs::read(abs_path).await?;
-    Ok(build_file_entry(&bytes))
-}
-
 /// Binary-safe ranged read: returns the chunk `[offset, offset + min(length,
 /// max_bytes, cap))` with the full file `size`. `lineCount` is omitted and
 /// the MIME `type` is a coarse text/binary tag (mid-file chunks defeat
@@ -196,37 +148,6 @@ pub async fn read_file_ranged(
     })
 }
 
-pub fn check_file_size_limits(
-    data: &FsReadFileData,
-    path: &str,
-    max_bytes: Option<usize>,
-    max_lines: Option<usize>,
-) -> Result<(), FileSizeExceededError> {
-    let exceeds_bytes = max_bytes.is_some_and(|limit| data.size > limit as u64);
-    let exceeds_lines =
-        max_lines.is_some_and(|limit| data.line_count.is_some_and(|lc| lc > limit as u64));
-
-    if exceeds_bytes || exceeds_lines {
-        return Err(FileSizeExceededError {
-            path: path.to_string(),
-            size_bytes: data.size,
-            line_count: data.line_count,
-            limit_bytes: if exceeds_bytes {
-                max_bytes.map(|l| l as u64)
-            } else {
-                None
-            },
-            limit_lines: if exceeds_lines {
-                max_lines.map(|l| l as u64)
-            } else {
-                None
-            },
-        });
-    }
-
-    Ok(())
-}
-
 pub async fn write_file(abs_path: &Path, content: &str, create_dirs: bool) -> Result<()> {
     let abs_path = abs_path.to_path_buf();
     let content = content.to_string();
@@ -242,27 +163,6 @@ pub async fn write_file(abs_path: &Path, content: &str, create_dirs: bool) -> Re
     Ok(())
 }
 
-pub(crate) fn build_file_entry(bytes: &[u8]) -> FsReadFileData {
-    let size = bytes.len() as u64;
-    let inferred = infer::get(bytes).map(|t| t.mime_type().to_string());
-    match String::from_utf8(bytes.to_vec()) {
-        Ok(text) => FsReadFileData {
-            line_count: Some(text.lines().count() as u64),
-            content: text,
-            content_base64: None,
-            size,
-            content_type: inferred.unwrap_or_else(|| "text/plain".to_string()),
-        },
-        Err(_) => FsReadFileData {
-            content: String::new(),
-            content_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
-            size,
-            line_count: None,
-            content_type: inferred.unwrap_or_else(|| "application/octet-stream".to_string()),
-        },
-    }
-}
-
 pub async fn delete_file(abs_path: &Path) -> Result<()> {
     tokio::fs::remove_file(abs_path).await?;
     Ok(())
@@ -271,6 +171,7 @@ pub async fn delete_file(abs_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     fn params(limit: usize, offset: u64) -> FsListParams {
         FsListParams {

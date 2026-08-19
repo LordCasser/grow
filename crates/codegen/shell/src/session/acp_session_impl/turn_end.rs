@@ -278,30 +278,20 @@ impl SessionActor {
                     } => ctx.trigger.as_deref(),
                     _ => None,
                 });
-            let terminal_persisted = self
-                .emit_turn_completed(
-                    prompt_id,
-                    Some((&turn_origin, turn_kind)),
-                    &mapped,
-                    usage,
-                    cancel_trigger,
-                )
-                .await;
+            self.emit_turn_completed(
+                prompt_id,
+                Some((&turn_origin, turn_kind)),
+                &mapped,
+                usage,
+                cancel_trigger,
+            )
+            .await;
             if matches!(
                 turn_origin,
                 crate::session::PromptOrigin::GoalFinalization { .. }
             ) && Self::goal_finalization_terminal_succeeded(&result)
             {
-                if terminal_persisted {
-                    self.finalize_goal_finalization_turn().await;
-                } else {
-                    self.auto_pause_goal_if_active_with_message(
-                        crate::session::goal_tracker::GoalPauseReason::Infra,
-                        "Goal final report was produced, but its TurnCompleted record could not be durably persisted. Resume after storage is healthy."
-                            .to_string(),
-                    )
-                    .await;
-                }
+                self.finalize_goal_finalization_turn().await;
             }
         }
         // The terminal is durable before clients observe either a new running
@@ -312,11 +302,8 @@ impl SessionActor {
         }
     }
 
-    /// Emit the durable, replayable `TurnCompleted` terminal — the single
-    /// chokepoint shared by the completion (`handle_completion`) and cancel
-    /// (`cancel_running_task`) sites. Derives `(stop_reason, agent_result)`
-    /// from the same source as PromptResponse (`prompt_complete_fields`), then
-    /// persists before forwarding the live notification.
+    /// Project the already-durable Timeline terminal into the replay/client
+    /// `TurnCompleted` shape. This cache is never consulted by recovery.
     ///
     /// `cancel_trigger` (when `Some`) rides the `_meta` as `cancelTrigger`.
     pub(super) async fn emit_turn_completed(
@@ -326,7 +313,7 @@ impl SessionActor {
         mapped: &std::result::Result<acp::StopReason, acp::Error>,
         usage: Option<crate::extensions::notification::PromptUsage>,
         cancel_trigger: Option<&str>,
-    ) -> bool {
+    ) {
         let (stop_reason, agent_result) = crate::sampling::error::prompt_complete_fields(mapped);
         self.state.lock().await.record_recent_terminal(
             crate::session::prompt_queue::RecentPromptTerminal {
@@ -350,21 +337,7 @@ impl SessionActor {
         let notification = self.build_grow_notification(
             crate::session::turn_completion::build_turn_completed(
                 prompt_id,
-                identity.map(|(origin, turn_kind)| {
-                    let (goal_id, stage_id) = match origin {
-                        crate::session::PromptOrigin::GoalContinuation { goal_id, stage_id }
-                        | crate::session::PromptOrigin::GoalFinalization { goal_id, stage_id } => {
-                            (Some(goal_id.clone()), Some(*stage_id))
-                        }
-                        _ => (None, None),
-                    };
-                    crate::extensions::notification::TurnIdentity {
-                        origin: origin.wire_name().to_string(),
-                        turn_kind: turn_kind.wire_name().to_string(),
-                        goal_id,
-                        stage_id,
-                    }
-                }),
+                identity.map(|(origin, turn_kind)| origin.turn_identity(turn_kind)),
                 stop_reason,
                 agent_result,
                 usage,
@@ -385,7 +358,6 @@ impl SessionActor {
             tracing::warn!("TurnCompleted replay projection was not queued");
         }
         self.forward_grow_notification(notification).await;
-        true
     }
 
     /// Diagnostic error category; delegates to `stop_failure_error_type` so the

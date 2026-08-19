@@ -70,9 +70,8 @@ pub enum WarningSeverity {
 /// `Warning`-severity entry, else the last entry.
 ///
 /// `startup_warnings` is appended to at runtime while the user sits on the
-/// welcome screen (session-start failures, Claude import results), so a plain
-/// `first()` lets an early entry mask that later feedback — e.g. an import
-/// Info result at index 0 hides a session-start Warning pushed behind it.
+/// welcome screen, so a plain `first()` lets an early informational entry mask
+/// a later session-start failure.
 /// Severity decides first (a real Warning always beats an Info; among
 /// Warnings, assemble order stays authoritative); a Warning-less list falls
 /// back to the **last** entry because later Info pushes are direct
@@ -111,9 +110,8 @@ mod tests {
 
     #[test]
     fn banner_warning_runtime_pushed_warning_displaces_info() {
-        // An Info entry holds index 0 (e.g. a Claude import result). A
-        // Warning pushed later (e.g. "Not inside a git repository") must
-        // still win the single banner slot.
+        // An Info entry holds index 0. A Warning pushed later must still win
+        // the single banner slot.
         let list = [
             entry(WarningSeverity::Info, "info note"),
             entry(WarningSeverity::Warning, "real problem"),
@@ -123,8 +121,8 @@ mod tests {
 
     #[test]
     fn banner_warning_runtime_pushed_info_displaces_earlier_info() {
-        // Warning-less list: a later Info push is direct user-action
-        // feedback (e.g. a Claude import result) and wins over an older Info.
+        // Warning-less list: later direct user-action feedback wins over an
+        // older informational message.
         let list = [
             entry(WarningSeverity::Info, "info note"),
             entry(WarningSeverity::Info, "import result"),

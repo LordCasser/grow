@@ -919,9 +919,12 @@ where
                     // origin up, so committed content is preserved instead of
                     // overwritten. Minimal mode (and any inline consumer) relies
                     // on this when growing the viewport for an overlay near the
-                    // bottom of the screen. The pager builds without the
-                    // `scrolling-regions` feature; that variant is a separate
-                    // (unused-by-the-pager) path left as a TODO.
+                    // bottom of the screen. A region beginning at row zero has
+                    // the same scrollback semantics as `append_lines`, so both
+                    // backend capabilities preserve the covered rows.
+                    #[cfg(feature = "scrolling-regions")]
+                    self.backend
+                        .scroll_region_up(0..self.last_known_area.height, overflow)?;
                     #[cfg(not(feature = "scrolling-regions"))]
                     self.scroll_up(overflow)?;
                     self.viewport_area.y.saturating_sub(overflow)
@@ -1458,6 +1461,22 @@ mod inline_resize_tests {
             })
         }
         fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        #[cfg(feature = "scrolling-regions")]
+        fn scroll_region_up(
+            &mut self,
+            _region: std::ops::Range<u16>,
+            _line_count: u16,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        #[cfg(feature = "scrolling-regions")]
+        fn scroll_region_down(
+            &mut self,
+            _region: std::ops::Range<u16>,
+            _line_count: u16,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
     }

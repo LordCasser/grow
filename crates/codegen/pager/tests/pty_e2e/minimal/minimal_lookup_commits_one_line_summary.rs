@@ -29,7 +29,7 @@ async fn minimal_lookup_commits_one_line_summary() {
         &content,
         DEFAULT_ROWS,
         DEFAULT_COLS,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         content.home(),
     );
     wait_minimal_ready(&mut harness);

@@ -4,14 +4,6 @@
 //! instructions, permissions, hooks, skills, agents, plugins, MCP servers,
 //! LSP config, and config.toml sources. Supports `--json` for machine output.
 
-mod compat;
-
-pub use compat::{CompatEntryStatus, CompatSource, ExternalCompatEntry, ExternalCompatReport};
-use compat::{
-    derive_vendor, instruction_compat_status, resolve_inspect_compat, vendor_compat_status,
-    vendor_tag,
-};
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -66,11 +58,10 @@ pub struct InspectReport {
     pub skills: Vec<SkillEntry>,
     pub agents: Vec<AgentEntry>,
     pub plugins: Vec<PluginEntry>,
-    pub marketplaces: Vec<MarketplaceEntry>,
+    pub marketplaces: Vec<MarketplaceSourceEntry>,
     pub mcp_servers: Vec<McpServerEntry>,
     pub lsp_servers: Vec<LspServerEntry>,
     pub config_sources: ConfigSources,
-    pub external_compat: ExternalCompatReport,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub config_warnings: Vec<crate::agent::config_model_override_parse::ConfigWarning>,
     /// Invalid or ignored `[mcp_servers.*]` entries.
@@ -87,13 +78,8 @@ pub struct InstructionFile {
     pub size_bytes: usize,
     /// Estimated token count (chars / 4).
     pub approx_tokens: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vendor: Option<String>,
-    /// True when this entry's vendor surface is disabled by compat config.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compatibility_status: Option<CompatEntryStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,33 +88,6 @@ pub struct PermissionsReport {
     pub sources: Vec<String>,
     pub loaded: usize,
     pub skipped: Vec<SkippedRule>,
-    pub mcp_server_allowlist: Vec<String>,
-    pub marketplace_allowlist: Vec<String>,
-    /// Platform path for managed-settings.json vendor policy (None on unsupported OS).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub managed_settings_path: Option<String>,
-    /// Whether that file exists on disk. Always emitted, so a JSON consumer
-    /// can distinguish "absent" from "present" without string-matching.
-    pub managed_settings_exists: bool,
-    /// Whether the runtime actually loaded that file into policy (`exists` can
-    /// be true while this is false for an unreadable/malformed file). Always emitted.
-    pub managed_settings_active: bool,
-    /// Settings forced by a policy layer.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub enforced: Vec<EnforcedPolicy>,
-}
-
-/// One policy-enforced setting. Structured for `--json`; the human view
-/// derives its line from these fields (see `enforced_label`).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnforcedPolicy {
-    /// Stable key: "alwaysApprove" | "diagnostics" | "feedback".
-    pub setting: String,
-    /// The enforced value.
-    pub enabled: bool,
-    /// Originating file, e.g. "managed-settings.json".
-    pub source: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,13 +105,8 @@ pub struct HookEntry {
     pub target: String,
     pub source: ConfigSource,
     pub matcher: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vendor: Option<String>,
-    /// True when this entry's vendor surface is disabled by compat config.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compatibility_status: Option<CompatEntryStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,14 +116,9 @@ pub struct SkillEntry {
     pub description: String,
     pub source: ConfigSource,
     pub user_invocable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vendor: Option<String>,
-    /// True when disabled by `[skills].disabled` config or when this entry's
-    /// vendor surface is disabled by compat config.
+    /// True when disabled by `[skills].disabled` config.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compatibility_status: Option<CompatEntryStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,10 +150,9 @@ pub struct PluginProvides {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MarketplaceEntry {
+pub struct MarketplaceSourceEntry {
     pub name: String,
-    pub path: String,
-    pub enabled_plugins: usize,
+    pub source: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -214,15 +162,10 @@ pub struct McpServerEntry {
     pub transport: String,
     pub target: String,
     pub source: ConfigSource,
-    /// True when this entry's vendor surface is disabled by compat config.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub compatibility_status: Option<CompatEntryStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vendor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -278,18 +221,11 @@ pub async fn inspect(cwd: &Path, json: bool) -> anyhow::Result<()> {
 }
 
 async fn build_report(cwd: &Path) -> InspectReport {
-    let effective_config_result = crate::config::load_effective_config();
-    let effective_config = effective_config_result
+    let effective_config = crate::config::load_effective_config()
         .as_ref()
         .cloned()
         .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
-    // Parse compatibility separately so malformed cells cannot block unrelated sections.
-    let mut config_without_compat = effective_config.clone();
-    if let Some(table) = config_without_compat.as_table_mut() {
-        table.remove("compat");
-    }
-    let parsed_config =
-        crate::agent::config::Config::new_from_toml_cfg(&config_without_compat).ok();
+    let parsed_config = crate::agent::config::Config::new_from_toml_cfg(&effective_config).ok();
 
     let git_root = git2::Repository::discover(cwd)
         .ok()
@@ -308,7 +244,6 @@ async fn build_report(cwd: &Path) -> InspectReport {
         .get("plugins")
         .and_then(|v| v.clone().try_into().ok())
         .unwrap_or_default();
-    plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
     let mut plugin_config = plugins_cfg.to_discovery_config();
     // Project plugins gate on the same folder-trust verdict as hooks and the live
     // session/doctor sites, so the listing's `enabled` flags match runtime gating.
@@ -322,43 +257,21 @@ async fn build_report(cwd: &Path) -> InspectReport {
         &plugin_config.enabled,
     );
 
-    let external_compat = resolve_inspect_compat(effective_config_result.as_ref().map_err(|_| ()));
-
     // Same `[skills]` table the runtime loads, so `paths` skills appear,
     // `ignore`d ones are hidden, and `disabled` ones surface as disabled.
     let skills_config = crate::config::parse_skills_config(&effective_config);
 
-    // Discover with all vendors ON so inspect shows the full set on disk.
-    let (mut instructions, permissions, mut skills) = tokio::join!(
+    let (instructions, permissions, skills) = tokio::join!(
         list_instructions(cwd),
         list_permissions(cwd, project_trusted),
         list_skills(cwd, &plugin_registry, &skills_config),
     );
 
-    // Attach local compatibility status to each discovered vendor entry.
-    for entry in &mut instructions {
-        entry.compatibility_status =
-            instruction_compat_status(&entry.vendor, &entry.file_type, &external_compat);
-        entry.disabled |= entry.compatibility_status == Some(CompatEntryStatus::Disabled);
-    }
-    for entry in &mut skills {
-        entry.compatibility_status =
-            vendor_compat_status(&entry.vendor, "skills", &external_compat);
-        entry.disabled |= entry.compatibility_status == Some(CompatEntryStatus::Disabled);
-    }
-    let mut hooks = list_hooks(git_root.as_deref(), project_trusted, &discovered_plugins);
-    for entry in &mut hooks {
-        entry.compatibility_status = vendor_compat_status(&entry.vendor, "hooks", &external_compat);
-        entry.disabled |= entry.compatibility_status == Some(CompatEntryStatus::Disabled);
-    }
+    let hooks = list_hooks(git_root.as_deref(), project_trusted, &discovered_plugins);
     let agents = list_agents(cwd, &plugin_registry);
     let plugins = list_plugins(&discovered_plugins);
-    let marketplaces = list_marketplaces(git_root.as_deref());
-    let mut mcp = list_mcp_servers(cwd, &plugin_registry);
-    for entry in &mut mcp {
-        entry.compatibility_status = vendor_compat_status(&entry.vendor, "mcps", &external_compat);
-        entry.disabled |= entry.compatibility_status == Some(CompatEntryStatus::Disabled);
-    }
+    let marketplaces = list_marketplaces();
+    let mcp = list_mcp_servers(cwd, &plugin_registry);
     let lsp = list_lsp_servers(cwd, &discovered_plugins);
     let configs = list_config_sources(cwd);
     let config_warnings = parsed_config
@@ -385,7 +298,6 @@ async fn build_report(cwd: &Path) -> InspectReport {
         mcp_servers: mcp,
         lsp_servers: lsp,
         config_sources: configs,
-        external_compat,
         config_warnings,
         mcp_config_problems,
     }
@@ -422,18 +334,9 @@ fn has_rules_directory(file_path: &str, config_dir: &str) -> bool {
     false
 }
 
-fn instruction_scope(
-    file_path: &str,
-    grow_home: &Path,
-    vendor_homes: &[(PathBuf, bool)],
-    workspace_root: &Path,
-) -> Scope {
-    if crate::util::is_user_instruction_path(
-        Path::new(file_path),
-        grow_home,
-        vendor_homes,
-        Some(workspace_root),
-    ) {
+fn instruction_scope(file_path: &str, grow_home: &Path, workspace_root: &Path) -> Scope {
+    if crate::util::is_user_instruction_path(Path::new(file_path), grow_home, Some(workspace_root))
+    {
         Scope::Global
     } else {
         Scope::Project
@@ -443,7 +346,6 @@ fn instruction_scope(
 fn instruction_file_type(
     file_path: &str,
     grow_home: &Path,
-    claude_imported: bool,
     extra_rule_prefixes: &[PathBuf],
 ) -> &'static str {
     let path = Path::new(file_path);
@@ -451,8 +353,6 @@ fn instruction_file_type(
         .parent()
         .is_some_and(|parent| parent == grow_home.join("rules"))
         || has_rules_directory(file_path, ".grow")
-        || has_rules_directory(file_path, ".cursor")
-        || (!claude_imported && has_rules_directory(file_path, ".claude"))
         || extra_rule_prefixes
             .iter()
             .any(|prefix| path.starts_with(prefix))
@@ -465,30 +365,15 @@ fn instruction_file_type(
 
 /// Wraps the production instruction discovery (`agents_md::read_agents_config_with_paths`).
 async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
-    // Discover with all vendors ON so inspect shows the full set.
-    let configs = agent::prompt::agents_md::read_agents_config_with_paths(
-        &cwd.display().to_string(),
-        agent::prompt::skills::CompatConfig::default(),
-    )
-    .await;
+    let configs =
+        agent::prompt::agents_md::read_agents_config_with_paths(&cwd.display().to_string()).await;
 
     let grow_home = crate::util::grow_home::grow_home();
-    let vendor_homes = dirs::home_dir()
-        .map(|home_dir| {
-            vec![
-                (home_dir.join(".claude"), true),
-                (home_dir.join(".cursor"), true),
-            ]
-        })
-        .unwrap_or_default();
     let workspace_root = git2::Repository::discover(cwd)
         .ok()
         .and_then(|repo| repo.workdir().map(Path::to_path_buf))
         .unwrap_or_else(|| cwd.to_path_buf());
 
-    // Phase 2 cutoff: when imported, stop classifying `.claude/rules/` paths
-    // as rules. Equivalent dirs come in via `[paths] extra_rule_dirs`.
-    let imported = crate::claude_import::is_claude_import_marked();
     let extra_rule_dirs = extra_rule_dirs_from_config();
     // Pre-expand `~/` and resolve once, so the per-config-file matching loop
     // can use a clean prefix check. Empty/invalid paths fall
@@ -510,77 +395,24 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
     configs
         .into_iter()
         .map(|c| {
-            let file_type =
-                instruction_file_type(&c.file_path, &grow_home, imported, &extra_rule_prefixes);
-            let scope = instruction_scope(&c.file_path, &grow_home, &vendor_homes, &workspace_root);
+            let file_type = instruction_file_type(&c.file_path, &grow_home, &extra_rule_prefixes);
+            let scope = instruction_scope(&c.file_path, &grow_home, &workspace_root);
             let size = c.content.len();
-            let vendor = derive_vendor(&c.file_path).map(String::from);
             InstructionFile {
                 size_bytes: size,
                 approx_tokens: estimate_tokens(&c.content),
                 path: c.file_path,
                 scope,
                 file_type: file_type.to_string(),
-                vendor,
                 disabled: false,
-                compatibility_status: None,
             }
         })
         .collect()
 }
 
-/// Calls the production permission resolver (`resolve_permissions_with_provenance`)
-/// which handles both Grow TOML and vendor settings fallback in one codepath.
+/// Calls the canonical native permission resolver.
 async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsReport {
     use workspace::permission::resolution;
-
-    let ms = resolution::managed_settings();
-    let format_entry = |e: &resolution::AllowedMcpServer| match e {
-        resolution::AllowedMcpServer::Http { url_pattern } => url_pattern.clone(),
-        resolution::AllowedMcpServer::Stdio { command } => format!("command:{command}"),
-        resolution::AllowedMcpServer::Name { name } => format!("name:{name}"),
-    };
-    let mcp_server_allowlist: Vec<String> = ms
-        .mcp_allowlist
-        .entries
-        .iter()
-        .map(format_entry)
-        .chain(
-            ms.mcp_allowlist
-                .deny_entries
-                .iter()
-                .map(|e| format!("deny:{}", format_entry(e))),
-        )
-        .collect();
-    let marketplace_allowlist = ms.marketplace_allowlist.allowed_urls.clone();
-
-    // Managed settings presence + enforced policy computed unconditionally (before
-    // the early return) so that a managed-settings.json containing *only* e.g.
-    // disableBypassPermissionsMode still surfaces its path and effects.
-    let managed_settings_path =
-        crate::config::claude_managed_settings_probe_path().map(|p| p.display().to_string());
-    let managed_settings_exists =
-        crate::config::claude_managed_settings_probe_path().is_some_and(|p| p.exists());
-    // `source_path` is set only on the successful read+parse path, so it is the
-    // signal for "actually loaded" (vs present-but-broken).
-    let managed_settings_active = ms.features.source_path.is_some();
-
-    let mut enforced = Vec::new();
-    if let Some(src) = &ms.features.source_path {
-        let source = src
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "managed-settings.json".to_string());
-        for (flag, setting) in [(ms.features.disable_yolo, "alwaysApprove")] {
-            if flag == Some(true) {
-                enforced.push(EnforcedPolicy {
-                    setting: setting.to_string(),
-                    enabled: false,
-                    source: source.clone(),
-                });
-            }
-        }
-    }
 
     let Some(resolved) =
         resolution::resolve_permissions_with_provenance(cwd, project_trusted).await
@@ -589,12 +421,6 @@ async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsRepor
             sources: vec![],
             loaded: 0,
             skipped: vec![],
-            mcp_server_allowlist,
-            marketplace_allowlist,
-            managed_settings_path: managed_settings_path.clone(),
-            managed_settings_exists,
-            managed_settings_active,
-            enforced: enforced.clone(),
         };
     };
 
@@ -614,28 +440,21 @@ async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsRepor
         sources,
         loaded: resolved.config.rules.len(),
         skipped,
-        mcp_server_allowlist,
-        marketplace_allowlist,
-        managed_settings_path,
-        managed_settings_exists,
-        managed_settings_active,
-        enforced,
     }
 }
 
-/// Discovers hooks with every vendor enabled so compatibility can be annotated later.
+/// Discovers canonical Grow hooks.
 fn list_hooks(
     git_root: Option<&Path>,
     project_trusted: bool,
     discovered_plugins: &[agent::plugins::DiscoveredPlugin],
 ) -> Vec<HookEntry> {
-    let all_on = tools::types::compat::CompatConfig::default();
     // Route through the same assembly as session startup so config-layer hooks
     // (config.toml / managed_config.toml / requirements.toml) appear in `/hooks`
     // status alongside file hooks, each carrying its provenance name prefix.
     let config_layers = config::hook_config_layers();
     let (registry, _errors) =
-        crate::util::hooks::assemble_hooks(&config_layers, git_root, &all_on, project_trusted);
+        crate::util::hooks::assemble_hooks(&config_layers, git_root, project_trusted);
 
     let mut entries: Vec<HookEntry> = registry
         .all_hooks()
@@ -663,7 +482,6 @@ fn list_hooks(
                 // File/plugin/agent/unknown hooks are user-scoped for display.
                 O::UserFile | O::Plugin | O::Agent | O::Unknown => ConfigSource::User { path },
             };
-            let vendor = derive_vendor(&h.source_dir.display().to_string()).map(String::from);
             HookEntry {
                 event: h.event.to_string(),
                 hook_type: h.handler_type.as_str().to_string(),
@@ -675,9 +493,7 @@ fn list_hooks(
                     .unwrap_or_default(),
                 source,
                 matcher: h.configured_matcher.clone(),
-                vendor,
                 disabled: false,
-                compatibility_status: None,
             }
         })
         .collect();
@@ -698,9 +514,7 @@ fn list_hooks(
                 target: hooks_path.display().to_string(),
                 source,
                 matcher: None,
-                vendor: None,
                 disabled: false,
-                compatibility_status: None,
             });
         } else if p.manifest.inline_hooks().is_some() {
             entries.push(HookEntry {
@@ -709,9 +523,7 @@ fn list_hooks(
                 target: String::new(),
                 source,
                 matcher: None,
-                vendor: None,
                 disabled: false,
-                compatibility_status: None,
             });
         }
     }
@@ -724,12 +536,10 @@ async fn list_skills(
     plugin_registry: &agent::plugins::PluginRegistry,
     skills_config: &agent::prompt::skills::SkillsConfig,
 ) -> Vec<SkillEntry> {
-    // Discover with all vendors ON so inspect shows the full set.
     let skills = agent::prompt::skills::list_skills_with_plugins(
         Some(&cwd.display().to_string()),
         skills_config,
         Some(plugin_registry),
-        agent::prompt::skills::CompatConfig::default(),
     )
     .await;
 
@@ -737,16 +547,12 @@ async fn list_skills(
         .into_iter()
         .map(|s| {
             let source = skill_entry_source(&s);
-            let vendor = derive_vendor(&s.path).map(String::from);
             SkillEntry {
                 name: s.label().to_string(),
                 description: s.description,
                 source,
                 user_invocable: s.user_invocable,
-                vendor,
-                // Preserve `[skills].disabled`; compatibility is applied later.
                 disabled: !s.enabled,
-                compatibility_status: None,
             }
         })
         .collect()
@@ -819,35 +625,27 @@ fn list_plugins(discovered: &[agent::plugins::DiscoveredPlugin]) -> Vec<PluginEn
         .collect()
 }
 
-/// Wraps the production marketplace resolver (`marketplace::resolve`).
-fn list_marketplaces(git_root: Option<&Path>) -> Vec<MarketplaceEntry> {
-    let Some(root) = git_root else {
-        return vec![];
-    };
-    agent::plugins::marketplace::resolve(root)
+/// Report the canonical marketplace sources configured in Grow.
+fn list_marketplaces() -> Vec<MarketplaceSourceEntry> {
+    crate::plugin::load_marketplace_sources()
         .into_iter()
-        .map(|m| MarketplaceEntry {
-            name: m.name,
-            path: m.path.display().to_string(),
-            enabled_plugins: m.plugin_dirs.len(),
+        .map(|marketplace| MarketplaceSourceEntry {
+            name: marketplace.name,
+            source: match marketplace.kind {
+                plugin_marketplace::SourceKind::Git { url, .. } => url,
+                plugin_marketplace::SourceKind::Local { path } => path.display().to_string(),
+            },
         })
         .collect()
 }
 
-/// Discovers MCPs with every vendor enabled so compatibility can be annotated later.
+/// Discovers canonical Grow MCP sources.
 fn list_mcp_servers(
     cwd: &Path,
     plugin_registry: &agent::plugins::PluginRegistry,
 ) -> Vec<McpServerEntry> {
-    use workspace::permission::resolution;
-
-    let all_on = tools::types::compat::CompatConfig::default();
-    let sourced = crate::session::managed_mcp::merge_managed_mcp_servers_sourced(
-        cwd,
-        Some(plugin_registry),
-        &all_on,
-    );
-    let allowlist = &resolution::managed_settings().mcp_allowlist;
+    let sourced =
+        crate::session::mcp_catalog::merge_mcp_servers_sourced(cwd, Some(plugin_registry));
 
     sourced
         .into_iter()
@@ -866,28 +664,13 @@ fn list_mcp_servers(
                     // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
                     _ => ("unknown".to_string(), "unknown", String::new()),
                 };
-            let disabled_reason = (!allowlist.is_server_allowed(&server)).then(|| {
-                crate::session::managed_mcp::McpDisabledReason::for_blocked_server(
-                    allowlist, &server,
-                )
-                .to_string()
-            });
-            let vendor = match &source {
-                ConfigSource::ClaudeJson { .. } => Some("claude".to_owned()),
-                ConfigSource::McpJson { path } => {
-                    derive_vendor(&path.display().to_string()).map(String::from)
-                }
-                _ => None,
-            };
             McpServerEntry {
                 name,
                 transport: transport.to_string(),
                 target,
                 source,
                 disabled: false,
-                compatibility_status: None,
-                disabled_reason,
-                vendor,
+                disabled_reason: None,
             }
         })
         .collect()
@@ -1150,28 +933,8 @@ fn print_columns<T>(
     }
 }
 
-/// Human label for an enforced setting. Uses product vocabulary, not the
-/// internal field names (no `ui.yolo` / `--yolo` / `permission_mode`).
-fn enforced_label(p: &EnforcedPolicy) -> String {
-    let name = match p.setting.as_str() {
-        "alwaysApprove" => "Permissions mode: always-approve",
-        "diagnostics" => "Diagnostic",
-        "feedback" => "Feedback",
-        other => other,
-    };
-    let state = if p.enabled { "enabled" } else { "disabled" };
-    format!("{name} {state}")
-}
-
-fn disabled_compat_tags(
-    disabled: bool,
-    compatibility_status: Option<CompatEntryStatus>,
-) -> &'static str {
-    if disabled || compatibility_status == Some(CompatEntryStatus::Disabled) {
-        " [disabled]"
-    } else {
-        ""
-    }
+fn disabled_tag(disabled: bool) -> &'static str {
+    if disabled { " [disabled]" } else { "" }
 }
 
 fn render_config_warnings(
@@ -1215,27 +978,6 @@ fn render_mcp_config_problems(problems: &[crate::util::config::McpServerConfigPr
     out
 }
 
-fn render_harness_compatibility(report: &ExternalCompatReport) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::from("\n  Harness Compatibility\n");
-    let mut current_vendor = "";
-    for cell in &report.cells {
-        if cell.vendor != current_vendor {
-            current_vendor = &cell.vendor;
-            let _ = writeln!(out, "  {TREE} {current_vendor}");
-        }
-        let status = if cell.enabled { "on" } else { "OFF" };
-        let _ = writeln!(
-            out,
-            "    {TREE} {:<10} {:<3}  ({})",
-            cell.surface, status, cell.source
-        );
-    }
-    out.push('\n');
-    out
-}
-
 fn print_human(r: &InspectReport) {
     println!();
     println!("  Environment");
@@ -1250,29 +992,15 @@ fn print_human(r: &InspectReport) {
     );
 
     print_section("Project Instructions", &r.project_instructions, |f| {
-        let status = disabled_compat_tags(f.disabled, f.compatibility_status);
+        let status = disabled_tag(f.disabled);
         format!(
-            "{} ({}, ~{} tokens){}{}",
-            f.path,
-            f.scope,
-            f.approx_tokens,
-            vendor_tag(&f.vendor),
-            status,
+            "{} ({}, ~{} tokens){}",
+            f.path, f.scope, f.approx_tokens, status,
         )
     });
 
     println!();
     println!("  Permissions");
-    if r.permissions.managed_settings_exists
-        && let Some(ref p) = r.permissions.managed_settings_path
-    {
-        let status = if r.permissions.managed_settings_active {
-            "active"
-        } else {
-            "not loaded"
-        };
-        println!("  {TREE} Managed settings: {p} ({status})");
-    }
     if r.permissions.sources.is_empty() {
         println!("  {TREE} Source: (none)");
     } else {
@@ -1288,44 +1016,12 @@ fn print_human(r: &InspectReport) {
     for s in &r.permissions.skipped {
         println!("    {TREE} {} -- {}", s.rule, s.reason);
     }
-    if !r.permissions.enforced.is_empty() {
-        println!("  {TREE} Enforced by policy");
-        for e in &r.permissions.enforced {
-            println!("    {TREE} {} ({})", enforced_label(e), e.source);
-        }
-    }
-    if !r.permissions.mcp_server_allowlist.is_empty() {
-        println!(
-            "  {TREE} MCP server allowlist ({} patterns)",
-            r.permissions.mcp_server_allowlist.len()
-        );
-        for pat in &r.permissions.mcp_server_allowlist {
-            println!("    {TREE} {}", pat);
-        }
-    }
-    if !r.permissions.marketplace_allowlist.is_empty() {
-        println!(
-            "  {TREE} Marketplace allowlist ({} sources)",
-            r.permissions.marketplace_allowlist.len()
-        );
-        for url in &r.permissions.marketplace_allowlist {
-            println!("    {TREE} {}", url);
-        }
-    }
 
     print_columns(
         "Skills",
         &r.skills,
         |s| s.name.clone(),
-        |s| {
-            let status = disabled_compat_tags(s.disabled, s.compatibility_status);
-            format!(
-                "{}{}{}",
-                s.source.display_label(),
-                vendor_tag(&s.vendor),
-                status,
-            )
-        },
+        |s| format!("{}{}", s.source.display_label(), disabled_tag(s.disabled)),
     );
 
     print_columns(
@@ -1365,10 +1061,7 @@ fn print_human(r: &InspectReport) {
     );
 
     print_section("Marketplaces", &r.marketplaces, |m| {
-        format!(
-            "{} ({}, {} enabled plugins)",
-            m.name, m.path, m.enabled_plugins
-        )
+        format!("{} ({})", m.name, m.source)
     });
 
     if r.mcp_servers.is_empty() {
@@ -1386,15 +1079,7 @@ fn print_human(r: &InspectReport) {
                     format!("{} ({})", m.name, m.transport)
                 }
             },
-            |m| {
-                let status = disabled_compat_tags(m.disabled, m.compatibility_status);
-                format!(
-                    "{}{}{}",
-                    m.source.display_label(),
-                    vendor_tag(&m.vendor),
-                    status,
-                )
-            },
+            |m| format!("{}{}", m.source.display_label(), disabled_tag(m.disabled)),
         );
     }
 
@@ -1419,15 +1104,7 @@ fn print_human(r: &InspectReport) {
                 .unwrap_or_default();
             format!("{}{}", h.hook_type, matcher)
         },
-        |h| {
-            let status = disabled_compat_tags(h.disabled, h.compatibility_status);
-            format!(
-                "{}{}{}",
-                h.source.display_label(),
-                vendor_tag(&h.vendor),
-                status,
-            )
-        },
+        |h| format!("{}{}", h.source.display_label(), disabled_tag(h.disabled)),
     );
 
     println!();
@@ -1469,8 +1146,6 @@ fn print_human(r: &InspectReport) {
 
     print!("{}", render_config_warnings(&r.config_warnings));
     print!("{}", render_mcp_config_problems(&r.mcp_config_problems));
-
-    print!("{}", render_harness_compatibility(&r.external_compat));
 }
 
 #[cfg(test)]
@@ -1480,130 +1155,12 @@ mod tests {
     use tools::implementations::skills::types::SkillScope;
 
     #[test]
-    fn harness_compatibility_human_output_stays_compact() {
-        let effective_config: toml::Value =
-            toml::from_str("[compat.cursor]\nrules = false").unwrap();
-        let report = compat::resolve_inspect_compat_with_env(Ok(&effective_config), |_| None);
-
-        let human = render_harness_compatibility(&report);
-
-        assert!(human.contains("skills     on   (default)"), "{human}");
-        assert!(human.contains("rules      OFF  (config)"), "{human}");
-        assert!(
-            !human.contains("Defaults shown; remote may override."),
-            "{human}"
-        );
-        assert!(!human.contains("resolved at session start"), "{human}");
-        assert!(!human.contains("unresolved"), "{human}");
-        assert!(!human.contains("?"), "{human}");
-    }
-
-    #[test]
-    fn disabled_entry_status_serializes_and_renders_consistently() {
-        let entry = InstructionFile {
-            path: "/repo/.cursor/AGENTS.md".to_owned(),
-            scope: Scope::Project,
-            file_type: "agents_md".to_owned(),
-            size_bytes: 10,
-            approx_tokens: 3,
-            vendor: Some("cursor".to_owned()),
-            disabled: false,
-            compatibility_status: Some(CompatEntryStatus::Disabled),
-        };
-        assert_eq!(
-            serde_json::to_value(&entry).unwrap(),
-            serde_json::json!({
-                "path": "/repo/.cursor/AGENTS.md",
-                "scope": "project",
-                "fileType": "agents_md",
-                "sizeBytes": 10,
-                "approxTokens": 3,
-                "vendor": "cursor",
-                "compatibilityStatus": "disabled"
-            })
-        );
-        assert_eq!(
-            disabled_compat_tags(false, entry.compatibility_status),
-            " [disabled]"
-        );
-    }
-
-    #[test]
-    fn vendor_rule_paths_select_rules_compatibility_cells() {
-        let cell = |vendor: &str, surface: &str, enabled: bool| ExternalCompatEntry {
-            vendor: vendor.to_owned(),
-            surface: surface.to_owned(),
-            enabled,
-            source: CompatSource::Config,
-        };
-        let report = ExternalCompatReport {
-            remote_settings_loaded: false,
-            cells: vec![
-                cell("cursor", "rules", false),
-                cell("cursor", "agents", true),
-                cell("claude", "rules", false),
-                cell("claude", "agents", true),
-            ],
-        };
-
-        for (vendor, path) in [
-            ("cursor", "/repo/.cursor/rules/team.md"),
-            ("cursor", r"C:\repo\.cursor\rules\team.md"),
-            ("claude", "/repo/.claude/rules/team.md"),
-            ("claude", r"C:\repo\.claude\rules\team.md"),
-        ] {
-            let file_type = instruction_file_type(path, Path::new("/home/user/.grow"), false, &[]);
-            assert_eq!(file_type, "rules");
-            assert_eq!(
-                instruction_compat_status(&Some(vendor.to_owned()), file_type, &report),
-                Some(CompatEntryStatus::Disabled)
-            );
-        }
-
-        for path in ["/repo/.grow/rules/team.md", r"C:\repo\.grow\rules\team.md"] {
-            assert_eq!(
-                instruction_file_type(path, Path::new("/home/user/.grow"), false, &[]),
-                "rules"
-            );
-        }
-        for path in [
-            "/repo/.cursor/rules/team.md",
-            r"C:\repo\.cursor\rules\team.md",
-        ] {
-            assert_eq!(
-                instruction_file_type(path, Path::new("/home/user/.grow"), true, &[]),
-                "rules"
-            );
-        }
-        for path in [
-            "/repo/.claude/rules/team.md",
-            r"C:\repo\.claude\rules\team.md",
-        ] {
-            let file_type = instruction_file_type(path, Path::new("/home/user/.grow"), true, &[]);
-            assert_eq!(file_type, "agents_md");
-            assert_eq!(
-                instruction_compat_status(&Some("claude".to_owned()), file_type, &report),
-                Some(CompatEntryStatus::Enabled)
-            );
-        }
-        for path in [
-            "/repo/not.cursor/rules/team.md",
-            r"C:\repo\.cursor\ruleset\team.md",
-        ] {
-            assert_eq!(
-                instruction_file_type(path, Path::new("/home/user/.grow"), false, &[]),
-                "agents_md"
-            );
-        }
-    }
-
-    #[test]
     fn grow_home_nested_in_workspace_keeps_direct_surfaces_global() {
         let grow_home = Path::new("/repo/config");
         let workspace = Path::new("/repo");
         for path in ["/repo/config/AGENTS.md", "/repo/config/rules/global.md"] {
             assert!(matches!(
-                instruction_scope(path, grow_home, &[], workspace),
+                instruction_scope(path, grow_home, workspace),
                 Scope::Global
             ));
         }
@@ -1612,28 +1169,7 @@ mod tests {
             "/repo/config/src/AGENTS.md",
         ] {
             assert!(matches!(
-                instruction_scope(path, grow_home, &[], workspace),
-                Scope::Project
-            ));
-        }
-    }
-
-    #[test]
-    fn vendor_home_nested_in_workspace_keeps_direct_surfaces_global() {
-        let vendor_homes = vec![(Path::new("/repo/.claude").to_path_buf(), true)];
-        let workspace = Path::new("/repo");
-        for path in ["/repo/.claude/rules/global.md", "/repo/.claude/CLAUDE.md"] {
-            assert!(matches!(
-                instruction_scope(path, Path::new("/other/grow"), &vendor_homes, workspace),
-                Scope::Global
-            ));
-        }
-        for path in [
-            "/repo/.claude/.claude/rules/project.md",
-            "/repo/.claude/src/AGENTS.md",
-        ] {
-            assert!(matches!(
-                instruction_scope(path, Path::new("/other/grow"), &vendor_homes, workspace),
+                instruction_scope(path, grow_home, workspace),
                 Scope::Project
             ));
         }
@@ -1648,12 +1184,12 @@ mod tests {
             "/custom/grow/worktrees/repo/src/AGENTS.md",
         ] {
             assert!(matches!(
-                instruction_scope(path, grow_home, &[], workspace),
+                instruction_scope(path, grow_home, workspace),
                 Scope::Project
             ));
         }
         assert!(matches!(
-            instruction_scope("/custom/grow/rules/global.md", grow_home, &[], workspace,),
+            instruction_scope("/custom/grow/rules/global.md", grow_home, workspace,),
             Scope::Global
         ));
     }
@@ -1664,18 +1200,12 @@ mod tests {
             instruction_file_type(
                 "/custom/config/rules/team.md",
                 Path::new("/custom/config"),
-                false,
                 &[],
             ),
             "rules"
         );
         assert_eq!(
-            instruction_file_type(
-                "/custom/config/AGENTS.md",
-                Path::new("/custom/config"),
-                false,
-                &[],
-            ),
+            instruction_file_type("/custom/config/AGENTS.md", Path::new("/custom/config"), &[],),
             "agents_md"
         );
     }
@@ -1746,20 +1276,6 @@ mod tests {
             std::slice::from_ref(&full),
             path
         ));
-    }
-
-    #[test]
-    fn enforced_label_uses_product_vocabulary() {
-        let p = EnforcedPolicy {
-            setting: "alwaysApprove".into(),
-            enabled: false,
-            source: "managed-settings.json".into(),
-        };
-        assert_eq!(
-            enforced_label(&p),
-            "Permissions mode: always-approve disabled"
-        );
-        assert!(!enforced_label(&p).contains("yolo"));
     }
 
     /// Public provider/model warnings flow from an effective config through

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use nucleo::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 
 use super::shell_token::{CurrentToken, build_insert_token, parse_current_token};
-use super::{RankedSuggestion, SuggestContext, SuggestionSource, splice_token_into_line};
+use super::{RankedSuggestion, SuggestContext, SuggestionSource};
 
 /// Ranked results returned per request. The dropdown renders 6 rows and
 /// scrolls; ranking happens BEFORE this cap so directories and the best
@@ -78,12 +78,12 @@ impl FilePathProvider {
         let (entries, truncated) = list_ranked_entries(&split.list_dir, split.match_prefix).await;
         let boost = file_command_boost(tok.command.as_deref());
 
-        let mut results: Vec<RankedSuggestion> = entries
+        entries
             .into_iter()
             .map(|e| RankedSuggestion {
                 // Token replacement for the arg range: the completed path,
                 // re-quoted to match how the user opened the token.
-                insert_text: build_insert_token(&tok, &split.raw_dir, &e.name, e.is_dir),
+                replacement: build_insert_token(&tok, &split.raw_dir, &e.name, e.is_dir),
                 display: if e.is_dir {
                     format!("{}/", e.name)
                 } else {
@@ -97,13 +97,10 @@ impl FilePathProvider {
                 source: SuggestionSource::File,
                 priority: boost,
                 is_ghost_candidate: false,
-                replace_range: Some(arg_range),
-                token_text: None,
+                replace_range: arg_range,
                 truncated,
             })
-            .collect();
-        splice_token_into_line(&mut results, &ctx.text, arg_range);
-        results
+            .collect()
     }
 }
 
@@ -878,9 +875,8 @@ mod tests {
         let results = FilePathProvider.suggest(&ctx("cat hel", tmp.path())).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].display, "hello.txt");
-        assert_eq!(results[0].insert_text, "cat hello.txt");
-        assert_eq!(results[0].token_text.as_deref(), Some("hello.txt"));
-        assert_eq!(results[0].replace_range, Some((4, 7)));
+        assert_eq!(results[0].replacement, "hello.txt");
+        assert_eq!(results[0].replace_range, (4, 7));
         assert_eq!(results[0].source, SuggestionSource::File);
         assert!(!results[0].is_ghost_candidate);
         assert!(!results[0].truncated);
@@ -913,12 +909,8 @@ mod tests {
         let text = "cat \"My Dir/fi\"";
         let results = FilePathProvider.suggest(&ctx(text, tmp.path())).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].token_text.as_deref(),
-            Some("\"My Dir/file.txt\"")
-        );
-        assert_eq!(results[0].insert_text, "cat \"My Dir/file.txt\"");
-        assert_eq!(results[0].replace_range, Some((4, text.len())));
+        assert_eq!(results[0].replacement, "\"My Dir/file.txt\"");
+        assert_eq!(results[0].replace_range, (4, text.len()));
     }
 
     /// Unknown commands complete their args too — at priority 0, no boost.
@@ -931,7 +923,7 @@ mod tests {
             .suggest(&ctx("foobar no", tmp.path()))
             .await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].insert_text, "foobar notes.md");
+        assert_eq!(results[0].replacement, "notes.md");
         assert_eq!(results[0].priority, 0);
     }
 
@@ -948,8 +940,7 @@ mod tests {
     }
 
     /// Arg-token range with text after the cursor: the range ends at the
-    /// cursor so the tail (`| wc -l`) is out of the replaced span, and the
-    /// compat whole-line `insert_text` keeps that tail too.
+    /// cursor so the tail (`| wc -l`) is out of the replaced span.
     #[tokio::test]
     async fn suggest_arg_range_ends_at_cursor_mid_text() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -959,9 +950,8 @@ mod tests {
         let ctx = SuggestContext::new(text.into(), 7, tmp.path().to_string_lossy().into_owned());
         let results = FilePathProvider.suggest(&ctx).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].insert_text, "cat hello.txt | wc -l");
-        assert_eq!(results[0].token_text.as_deref(), Some("hello.txt"));
-        assert_eq!(results[0].replace_range, Some((4, 7)));
+        assert_eq!(results[0].replacement, "hello.txt");
+        assert_eq!(results[0].replace_range, (4, 7));
     }
 
     /// THE quoting round-trip: `cat "My Fi` completes `My File.txt` with the
@@ -974,9 +964,8 @@ mod tests {
         let text = "cat \"My Fi";
         let results = FilePathProvider.suggest(&ctx(text, tmp.path())).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].token_text.as_deref(), Some("\"My File.txt\""));
-        assert_eq!(results[0].replace_range, Some((4, text.len())));
-        assert_eq!(results[0].insert_text, "cat \"My File.txt\"");
+        assert_eq!(results[0].replacement, "\"My File.txt\"");
+        assert_eq!(results[0].replace_range, (4, text.len()));
     }
 
     /// Unquoted completion of a spaced name backslash-escapes it; the next
@@ -990,20 +979,15 @@ mod tests {
 
         let results = FilePathProvider.suggest(&ctx("cat No", tmp.path())).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].token_text.as_deref(), Some("Notes\\ Archive/"));
-        assert_eq!(results[0].insert_text, "cat Notes\\ Archive/");
+        assert_eq!(results[0].replacement, "Notes\\ Archive/");
         assert_eq!(results[0].description, "directory");
 
         // Drill-down: the accepted text re-completes inside the directory.
         let text = "cat Notes\\ Archive/";
         let results = FilePathProvider.suggest(&ctx(text, tmp.path())).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].token_text.as_deref(),
-            Some("Notes\\ Archive/inner.txt")
-        );
-        assert_eq!(results[0].replace_range, Some((4, text.len())));
-        assert_eq!(results[0].insert_text, "cat Notes\\ Archive/inner.txt");
+        assert_eq!(results[0].replacement, "Notes\\ Archive/inner.txt");
+        assert_eq!(results[0].replace_range, (4, text.len()));
     }
 
     /// Same drill-down through an open double quote: the dir insert keeps
@@ -1017,16 +1001,13 @@ mod tests {
 
         let results = FilePathProvider.suggest(&ctx("cat \"No", tmp.path())).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].token_text.as_deref(), Some("\"Notes Archive/"));
+        assert_eq!(results[0].replacement, "\"Notes Archive/");
 
         let text = "cat \"Notes Archive/";
         let results = FilePathProvider.suggest(&ctx(text, tmp.path())).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].token_text.as_deref(),
-            Some("\"Notes Archive/inner.txt\"")
-        );
-        assert_eq!(results[0].replace_range, Some((4, text.len())));
+        assert_eq!(results[0].replacement, "\"Notes Archive/inner.txt\"");
+        assert_eq!(results[0].replace_range, (4, text.len()));
     }
 
     #[tokio::test]
@@ -1040,8 +1021,8 @@ mod tests {
             .suggest(&ctx("cat src/m", tmp.path()))
             .await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].token_text.as_deref(), Some("src/main.rs"));
-        assert_eq!(results[0].replace_range, Some((4, 9)));
+        assert_eq!(results[0].replacement, "src/main.rs");
+        assert_eq!(results[0].replace_range, (4, 9));
     }
 
     #[tokio::test]
@@ -1057,14 +1038,8 @@ mod tests {
         let results = FilePathProvider.suggest(&ctx).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].display, "main.rs");
-        assert_eq!(results[0].replace_range, Some((0, cursor)));
-        assert!(
-            results[0]
-                .token_text
-                .as_deref()
-                .unwrap()
-                .ends_with("main.rs")
-        );
+        assert_eq!(results[0].replace_range, (0, cursor));
+        assert!(results[0].replacement.ends_with("main.rs"));
     }
 
     #[tokio::test]
@@ -1093,10 +1068,7 @@ mod tests {
         );
         let results = FilePathProvider.suggest(&ctx).await;
         assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].token_text.as_deref(),
-            Some("$GROW_SUGGEST_TEST_DIR/notes.md")
-        );
+        assert_eq!(results[0].replacement, "$GROW_SUGGEST_TEST_DIR/notes.md");
     }
 
     /// THE provenance case: a quoted `$VAR` is literal to the shell, so the
@@ -1114,8 +1086,7 @@ mod tests {
             .suggest(&ctx("cat '$HOME'/fi", tmp.path()))
             .await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].token_text.as_deref(), Some("'$HOME'/file.txt"));
-        assert_eq!(results[0].insert_text, "cat '$HOME'/file.txt");
+        assert_eq!(results[0].replacement, "'$HOME'/file.txt");
     }
 
     /// A dash-leading candidate inserts `./`-anchored, so single-candidate
@@ -1129,8 +1100,7 @@ mod tests {
         let results = FilePathProvider.suggest(&ctx("rm ", tmp.path())).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].display, "-rf");
-        assert_eq!(results[0].token_text.as_deref(), Some("./-rf"));
-        assert_eq!(results[0].insert_text, "rm ./-rf");
+        assert_eq!(results[0].replacement, "./-rf");
     }
 
     #[tokio::test]

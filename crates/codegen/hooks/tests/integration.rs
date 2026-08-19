@@ -63,7 +63,7 @@ async fn hook_deny_via_exit_code_only() {
     write_hook(
         dir.path(),
         "safety.json",
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"exit 2"}]}]}}"#,
+        r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"exit 2"}]}]}}"#,
     );
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -93,7 +93,7 @@ async fn hook_fail_open_on_crash() {
     write_hook(
         dir.path(),
         "safety.json",
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"exit 1"}]}]}}"#,
+        r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"exit 1"}]}]}}"#,
     );
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -127,7 +127,7 @@ async fn hook_fail_open_on_timeout() {
     write_hook(
         dir.path(),
         "safety.json",
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"sleep 10","timeout":1}]}]}}"#,
+        r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"sleep 10","timeout":1}]}]}}"#,
     );
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -156,7 +156,7 @@ async fn matcher_filters_tool_name() {
     write_hook(
         dir.path(),
         "safety.json",
-        r#"{"hooks":{"PreToolUse":[{"matcher":"run_terminal_cmd","hooks":[{"type":"command","command":"echo '{\"decision\":\"deny\",\"reason\":\"blocked\"}'; exit 2"}]}]}}"#,
+        r#"{"hooks":{"pre_tool_use":[{"matcher":"run_terminal_cmd","hooks":[{"type":"command","command":"echo '{\"decision\":\"deny\",\"reason\":\"blocked\"}'; exit 2"}]}]}}"#,
     );
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -189,7 +189,7 @@ async fn non_blocking_dispatch() {
     write_hook(
         dir.path(),
         "lifecycle.json",
-        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo session started"}]}]}}"#,
+        r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"echo session started"}]}]}}"#,
     );
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -223,12 +223,12 @@ async fn first_deny_stops_chain() {
     write_hook(
         dir.path(),
         "01-deny.json",
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo '{\"decision\":\"deny\",\"reason\":\"first-deny\"}'; exit 2"}]}]}}"#,
+        r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"echo '{\"decision\":\"deny\",\"reason\":\"first-deny\"}'; exit 2"}]}]}}"#,
     );
     write_hook(
         dir.path(),
         "02-allow.json",
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo '{\"decision\":\"allow\"}'"}]}]}}"#,
+        r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"echo '{\"decision\":\"allow\"}'"}]}]}}"#,
     );
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -261,7 +261,7 @@ async fn hook_receives_stdin_envelope() {
     write_hook(
         dir.path(),
         "check.json",
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"INPUT=$(cat); echo \"$INPUT\" | grep -q '\"hookEventName\"' && echo \"$INPUT\" | grep -q '\"toolName\"' && echo \"$INPUT\" | grep -q '\"sessionId\"' && echo '{\"decision\":\"allow\"}' || echo '{\"decision\":\"deny\",\"reason\":\"missing fields\"}'"}]}]}}"#,
+        r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"INPUT=$(cat); echo \"$INPUT\" | grep -q '\"hookEventName\"' && echo \"$INPUT\" | grep -q '\"toolName\"' && echo \"$INPUT\" | grep -q '\"sessionId\"' && echo '{\"decision\":\"allow\"}' || echo '{\"decision\":\"deny\",\"reason\":\"missing fields\"}'"}]}]}}"#,
     );
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -286,7 +286,7 @@ async fn shell_pipe_command_works() {
     write_hook(
         dir.path(),
         "pipe.json",
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"cat | echo '{\"decision\":\"allow\"}'"}]}]}}"#,
+        r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"cat | echo '{\"decision\":\"allow\"}'"}]}]}}"#,
     );
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -333,7 +333,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
     let cases = vec![
         Case {
             event_name: HookEventName::PostToolUseFailure,
-            json_key: "PostToolUseFailure",
+            json_key: "post_tool_use_failure",
             payload: HookPayload::PostToolUseFailure {
                 tool_name: "run_terminal_cmd".into(),
                 tool_use_id: "call-1".into(),
@@ -350,7 +350,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
         },
         Case {
             event_name: HookEventName::PermissionDenied,
-            json_key: "PermissionDenied",
+            json_key: "permission_denied",
             payload: HookPayload::PermissionDenied {
                 tool_name: "run_terminal_cmd".into(),
                 tool_use_id: "call-2".into(),
@@ -364,7 +364,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
         },
         Case {
             event_name: HookEventName::PreCompact,
-            json_key: "PreCompact",
+            json_key: "pre_compact",
             payload: HookPayload::PreCompact {
                 source: "auto".into(),
             },
@@ -375,7 +375,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
         },
         Case {
             event_name: HookEventName::PostCompact,
-            json_key: "PostCompact",
+            json_key: "post_compact",
             payload: HookPayload::PostCompact {
                 source: "manual".into(),
             },
@@ -386,7 +386,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
         },
         Case {
             event_name: HookEventName::StopFailure,
-            json_key: "StopFailure",
+            json_key: "stop_failure",
             payload: HookPayload::StopFailure {
                 error: hooks::event::StopFailureKind::RateLimit,
                 error_details: Some("429 Too Many Requests".into()),
@@ -464,7 +464,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
 
 /// Regression: a user JSON hook that declares `env` values for
 /// runner-reserved keys (`GROW_HOOK_EVENT`, `GROW_HOOK_NAME`,
-/// `GROW_SESSION_ID`, `GROW_WORKSPACE_ROOT`, `CLAUDE_PROJECT_DIR`)
+/// `GROW_SESSION_ID`, `GROW_WORKSPACE_ROOT`)
 /// must NOT spoof those values inside the spawned child. The
 /// runner-injected vars always win at spawn time. This test
 /// constructs the spoof JSON, dispatches a hook that writes `printenv`
@@ -476,13 +476,13 @@ async fn runner_injected_vars_override_extra_env_at_spawn() {
     let output_file = dir.path().join("envcap.txt");
 
     let cmd = format!(
-        r#"echo "EVENT=$GROW_HOOK_EVENT" > {f}; echo "NAME=$GROW_HOOK_NAME" >> {f}; echo "SESSION=$GROW_SESSION_ID" >> {f}; echo "ROOT=$GROW_WORKSPACE_ROOT" >> {f}; echo "PROJ=$CLAUDE_PROJECT_DIR" >> {f}; echo "USER_KEY=$USER_KEY" >> {f}; echo '{{"decision":"allow"}}'"#,
+        r#"echo "EVENT=$GROW_HOOK_EVENT" > {f}; echo "NAME=$GROW_HOOK_NAME" >> {f}; echo "SESSION=$GROW_SESSION_ID" >> {f}; echo "ROOT=$GROW_WORKSPACE_ROOT" >> {f}; echo "USER_KEY=$USER_KEY" >> {f}; echo '{{"decision":"allow"}}'"#,
         f = output_file.display(),
     );
 
     let hook_json = serde_json::json!({
         "hooks": {
-            "PreToolUse": [
+            "pre_tool_use": [
                 {
                     "hooks": [
                         {
@@ -495,7 +495,6 @@ async fn runner_injected_vars_override_extra_env_at_spawn() {
                                 "GROW_HOOK_NAME": "spoofed_name",
                                 "GROW_SESSION_ID": "spoofed_session",
                                 "GROW_WORKSPACE_ROOT": "/spoofed/root",
-                                "CLAUDE_PROJECT_DIR": "/spoofed/project",
                                 "USER_KEY": "user_value_kept"
                             }
                         }
@@ -548,14 +547,6 @@ async fn runner_injected_vars_override_extra_env_at_spawn() {
         "spoofed GROW_WORKSPACE_ROOT must NOT leak through"
     );
     assert!(
-        captured.contains(&format!("PROJ={real_workspace}")),
-        "CLAUDE_PROJECT_DIR must reflect the real workspace root, got:\n{captured}"
-    );
-    assert!(
-        !captured.contains("PROJ=/spoofed/project"),
-        "spoofed CLAUDE_PROJECT_DIR must NOT leak through"
-    );
-    assert!(
         captured.contains("USER_KEY=user_value_kept"),
         "non-reserved user-declared env keys must pass through, got:\n{captured}"
     );
@@ -592,7 +583,7 @@ async fn direct_exec_command_with_env_var_resolves_at_load_time() {
 
     let hook_json = serde_json::json!({
         "hooks": {
-            "PreToolUse": [
+            "pre_tool_use": [
                 {
                     "hooks": [
                         {
@@ -661,7 +652,7 @@ async fn http_hook_url_env_expansion_end_to_end() {
 
     let hook_json = serde_json::json!({
         "hooks": {
-            "PreToolUse": [
+            "pre_tool_use": [
                 {
                     "hooks": [
                         {
@@ -746,23 +737,23 @@ async fn http_hook_url_env_expansion_end_to_end() {
     );
 }
 
-/// Mixed known + unknown events: known ones load and dispatch, unknown ones are skipped.
-#[tokio::test]
-async fn lenient_parsing_with_mixed_claude_events() {
+/// Hook files are atomic: one unknown event rejects the entire file.
+#[test]
+fn mixed_known_and_unknown_events_reject_the_file() {
     let dir = tempfile::tempdir().unwrap();
 
     let hook_json = serde_json::json!({
         "hooks": {
-            "PreToolUse": [
+            "pre_tool_use": [
                 { "matcher": "run_terminal_cmd", "hooks": [{ "type": "command", "command": "echo '{\"decision\":\"allow\"}'" }] }
             ],
-            "PostToolUseFailure": [
+            "post_tool_use_failure": [
                 { "hooks": [{ "type": "command", "command": "echo fail-hook" }] }
             ],
-            "PreCompact": [
+            "pre_compact": [
                 { "hooks": [{ "type": "command", "command": "echo compact" }] }
             ],
-            // Unknown external-only events; must not break the above.
+            // Unknown external-only events invalidate this source.
             "PermissionRequest": [
                 { "hooks": [{ "type": "command", "command": "echo perm-req" }] }
             ],
@@ -777,24 +768,7 @@ async fn lenient_parsing_with_mixed_claude_events() {
     write_hook(dir.path(), "mixed.json", &hook_json.to_string());
 
     let (registry, errors) = load_hooks(Some(dir.path()), None);
-    assert!(errors.is_empty(), "errors: {errors:?}");
-    assert_eq!(registry.hooks_for(HookEventName::PreToolUse).len(), 1);
-    assert_eq!(
-        registry.hooks_for(HookEventName::PostToolUseFailure).len(),
-        1
-    );
-    assert_eq!(registry.hooks_for(HookEventName::PreCompact).len(), 1);
-
-    let ctx = RunContext {
-        session_id: "test",
-        workspace_root: dir.path().to_str().unwrap(),
-        process_scope: None,
-    };
-    let result = dispatcher::dispatch_pre_tool_use(
-        &registry,
-        &pre_tool_use_envelope("run_terminal_cmd"),
-        &ctx,
-    )
-    .await;
-    assert_eq!(result.decision, HookDecision::Allow);
+    assert!(registry.is_empty());
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].to_string().contains("unrecognized hook event"));
 }

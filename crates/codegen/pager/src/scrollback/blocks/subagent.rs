@@ -54,10 +54,6 @@ pub struct SubagentBlock {
     pub child_session_id: String,
     /// Subagent type (e.g. "general-purpose", "explore").
     pub subagent_type: String,
-    /// Named persona applied to this subagent, if any.
-    pub persona: Option<String>,
-    /// Role that supplied defaults for this subagent, if any.
-    pub role: Option<String>,
     /// Effective model ID used by the subagent, if available.
     pub model: Option<String>,
     /// Whether the subagent was launched in background mode.
@@ -79,8 +75,6 @@ impl SubagentBlock {
         description: impl Into<String>,
         child_session_id: impl Into<String>,
         subagent_type: impl Into<String>,
-        persona: Option<String>,
-        role: Option<String>,
         model: Option<String>,
         is_background: bool,
     ) -> Self {
@@ -88,8 +82,6 @@ impl SubagentBlock {
             description: description.into(),
             child_session_id: child_session_id.into(),
             subagent_type: subagent_type.into(),
-            persona,
-            role,
             model,
             is_background,
             kind: SubagentBlockKind::Started,
@@ -107,8 +99,6 @@ impl SubagentBlock {
             description: description.into(),
             child_session_id: child_session_id.into(),
             subagent_type: String::new(),
-            persona: None,
-            role: None,
             model: None,
             is_background: true,
             kind: SubagentBlockKind::Completed { elapsed },
@@ -127,8 +117,6 @@ impl SubagentBlock {
             description: description.into(),
             child_session_id: child_session_id.into(),
             subagent_type: String::new(),
-            persona: None,
-            role: None,
             model: None,
             is_background: true,
             kind: SubagentBlockKind::Failed { elapsed, error },
@@ -146,8 +134,6 @@ impl SubagentBlock {
             description: description.into(),
             child_session_id: child_session_id.into(),
             subagent_type: String::new(),
-            persona: None,
-            role: None,
             model: None,
             is_background: true,
             kind: SubagentBlockKind::Cancelled { elapsed },
@@ -195,11 +181,7 @@ impl BlockContent for SubagentBlock {
                     .filter(|s| !s.is_empty())
                     .map(|a| format!(" \u{2014} {a}"))
                     .unwrap_or_default();
-                let meta = format_subagent_meta(
-                    self.persona.as_deref(),
-                    self.role.as_deref(),
-                    self.model.as_deref(),
-                );
+                let meta = format_subagent_meta(self.model.as_deref());
                 // "Subagent running: " / "Subagent started: " = 18 chars
                 let overhead = 18 + meta.width() + activity_suffix.width();
                 let desc = quoted_desc(&self.description, w.saturating_sub(overhead));

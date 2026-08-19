@@ -295,7 +295,7 @@ async fn resume_local_session_in_worktree(
         effective_cwd,
         remote_restored: false,
         parent_session_id: resolved_session_id.to_owned(),
-        chat_messages_copied: fork_resp.chat_messages_copied,
+        surface_items_copied: fork_resp.surface_items_copied,
         updates_copied: fork_resp.updates_copied,
         code_restored,
         restore_summary,
@@ -339,7 +339,7 @@ mod tests {
             effective_cwd: "/wt/root/sub".into(),
             remote_restored: true,
             parent_session_id: "original-id".into(),
-            chat_messages_copied: 42,
+            surface_items_copied: 42,
             updates_copied: 100,
             code_restored: true,
             restore_summary: Some(
@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(deser.effective_cwd, "/wt/root/sub");
         assert!(deser.remote_restored);
         assert_eq!(deser.parent_session_id, "original-id");
-        assert_eq!(deser.chat_messages_copied, 42);
+        assert_eq!(deser.surface_items_copied, 42);
         assert_eq!(deser.updates_copied, 100);
         assert!(deser.code_restored);
         assert_eq!(
@@ -412,7 +412,7 @@ mod tests {
             effective_cwd: "e".into(),
             remote_restored: false,
             parent_session_id: "p".into(),
-            chat_messages_copied: 0,
+            surface_items_copied: 0,
             updates_copied: 0,
             code_restored: true,
             restore_summary: Some("checked out abc".into()),
@@ -438,7 +438,7 @@ mod tests {
             "effectiveCwd": "e",
             "remoteRestored": false,
             "parentSessionId": "p",
-            "chatMessagesCopied": 0,
+            "surfaceItemsCopied": 0,
             "updatesCopied": 0,
             "codeRestored": true,
             "restoreDegree": "full_"
@@ -454,7 +454,7 @@ mod tests {
             effective_cwd: "e".into(),
             remote_restored: false,
             parent_session_id: "p".into(),
-            chat_messages_copied: 0,
+            surface_items_copied: 0,
             updates_copied: 0,
             code_restored: false,
             restore_summary: None,
@@ -466,7 +466,7 @@ mod tests {
         assert!(json.contains("effectiveCwd"));
         assert!(json.contains("remoteRestored"));
         assert!(json.contains("parentSessionId"));
-        assert!(json.contains("chatMessagesCopied"));
+        assert!(json.contains("surfaceItemsCopied"));
         assert!(json.contains("updatesCopied"));
         assert!(json.contains("codeRestored"));
         assert!(!json.contains("restoreSummary"));
@@ -503,62 +503,41 @@ mod tests {
         assert_eq!(dirty, WorktreeCopyMode::Dirty);
     }
     #[test]
-    fn test_created_status_without_copied_changes() {
+    fn test_created_status_has_complete_metadata() {
         let status = WorktreeStatus::Created {
             session_id: "test-123".to_string(),
             worktree_path: "/path/to/worktree".to_string(),
             commit: "abc123".to_string(),
-            source_git_root: None,
-            copied_changes: None,
-        };
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(!json.contains("copiedChanges"));
-        assert!(json.contains("\"status\":\"created\""));
-        assert!(json.contains("\"sessionId\":\"test-123\""));
-    }
-    #[test]
-    fn test_created_status_with_copied_changes() {
-        let status = WorktreeStatus::Created {
-            session_id: "test-123".to_string(),
-            worktree_path: "/path/to/worktree".to_string(),
-            commit: "abc123".to_string(),
-            source_git_root: Some("/path/to/source".to_string()),
-            copied_changes: Some(CopiedChangesSummary {
+            source_git_root: "/path/to/source".to_string(),
+            copied_changes: CopiedChangesSummary {
                 staged_copied: 3,
                 modified_copied: 5,
                 untracked_copied: 12,
                 deletions_applied: 1,
                 warnings: vec![],
-            }),
+            },
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("copiedChanges"));
         assert!(json.contains("\"stagedCopied\":3"));
     }
     #[test]
-    fn remove_request_legacy_worktree_path_only() {
+    fn remove_request_rejects_removed_worktree_path() {
         let json = r#"{"worktreePath": "/path/to/wt", "force": true}"#;
-        let req: RemoveWorktreeRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.worktree_path.as_deref(), Some("/path/to/wt"));
-        assert!(req.id_or_path.is_none());
-        assert!(req.force);
-        assert!(!req.dry_run);
+        assert!(serde_json::from_str::<RemoveWorktreeRequest>(json).is_err());
     }
     #[test]
     fn remove_request_new_id_or_path_only() {
         let json = r#"{"idOrPath": "wt-abc123", "dryRun": true}"#;
         let req: RemoveWorktreeRequest = serde_json::from_str(json).unwrap();
-        assert!(req.worktree_path.is_none());
-        assert_eq!(req.id_or_path.as_deref(), Some("wt-abc123"));
+        assert_eq!(req.id_or_path, "wt-abc123");
         assert!(!req.force);
         assert!(req.dry_run);
     }
     #[test]
-    fn remove_request_both_fields_deserializes_but_handler_rejects() {
+    fn remove_request_rejects_duplicate_old_and_new_fields() {
         let json = r#"{"worktreePath": "/explicit", "idOrPath": "fallback"}"#;
-        let req: RemoveWorktreeRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.worktree_path.as_deref(), Some("/explicit"));
-        assert_eq!(req.id_or_path.as_deref(), Some("fallback"));
+        assert!(serde_json::from_str::<RemoveWorktreeRequest>(json).is_err());
     }
     #[test]
     fn remove_response_omits_resolved_path_when_none() {

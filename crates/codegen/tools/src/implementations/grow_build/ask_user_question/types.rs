@@ -27,6 +27,7 @@ use crate::register_resource;
 /// - `preview`: verbatim `Option.preview` of the selected option (single-select only).
 /// - `notes`: free-text the user typed in the freeform input.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QuestionAnnotation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
@@ -39,7 +40,7 @@ pub struct QuestionAnnotation {
 /// Sent as part of the ACP `ext_method` request so the pager knows whether
 /// to show plan-mode-only actions (Chat about this / Skip interview).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AskUserQuestionMode {
     /// Normal mode. Client shows only Accept and Cancel.
     Default,
@@ -51,7 +52,7 @@ pub enum AskUserQuestionMode {
 ///
 /// Serialized as `camelCase` for the ACP JSON-RPC wire format.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AskUserQuestionExtRequest {
     pub session_id: String,
     pub tool_call_id: String,
@@ -60,44 +61,18 @@ pub struct AskUserQuestionExtRequest {
     pub mode: AskUserQuestionMode,
 }
 
-/// Accepts both `"value"` (old wire format) and `["value"]` (new wire format)
-/// for each answer entry, normalizing strings into single-element vectors.
-fn deserialize_string_or_vec_answers<'de, D>(
-    deserializer: D,
-) -> Result<IndexMap<String, Vec<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum StringOrVec {
-        Vec(Vec<String>),
-        String(String),
-    }
-
-    let raw: IndexMap<String, StringOrVec> = serde::Deserialize::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .map(|(k, v)| match v {
-            StringOrVec::Vec(vec) => (k, vec),
-            StringOrVec::String(s) => (k, vec![s]),
-        })
-        .collect())
-}
-
 /// ACP `ext_method` response payload (client/pager returns to shell coordinator).
 ///
 /// Internally tagged on `"outcome"` with `snake_case` variant names so the
 /// JSON looks like `{ "outcome": "accepted", "answers": { ... } }`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AskUserQuestionExtResponse {
     /// User accepted and submitted answers (Path A).
     Accepted {
         /// Answered questions in original order; unanswered omitted.
         /// One element per selected option; freeform-only is `["Other"]`
         /// with typed text in `annotations[q].notes`.
-        #[serde(deserialize_with = "deserialize_string_or_vec_answers")]
         answers: IndexMap<String, Vec<String>>,
         /// Per-question annotations (preview, notes). Absent when empty.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,8 +107,7 @@ pub type UserQuestionResult = Result<UserQuestionResponse, UserQuestionError>;
 
 /// Successful user response (all 4 user paths).
 ///
-/// Every variant here produces `Ok(UserAnswered { message })` at the tool
-/// level with `ToolCall` status `Completed`.
+/// Every variant here produces a completed model-facing answer.
 #[derive(Debug, Clone)]
 pub enum UserQuestionResponse {
     /// User accepted and submitted answers (Path A).
@@ -558,40 +532,22 @@ mod tests {
         assert_eq!(json["notes"], "note");
     }
 
-    // -- Backwards-compatible deserialization (string -> vec) --
-
     #[test]
-    fn deserialize_accepted_old_string_format() {
+    fn deserialize_accepted_rejects_string_answer() {
         let raw = r#"{
             "outcome": "accepted",
             "answers": {"Which cache?": "Only hot-path caches"}
         }"#;
-        let resp: AskUserQuestionExtResponse = serde_json::from_str(raw).unwrap();
-        match resp {
-            AskUserQuestionExtResponse::Accepted { answers, .. } => {
-                assert_eq!(
-                    answers["Which cache?"],
-                    vec!["Only hot-path caches".to_string()]
-                );
-            }
-            other => panic!("Expected Accepted, got {:?}", other),
-        }
+        assert!(serde_json::from_str::<AskUserQuestionExtResponse>(raw).is_err());
     }
 
     #[test]
-    fn deserialize_accepted_mixed_string_and_vec() {
+    fn deserialize_accepted_rejects_mixed_answer_shapes() {
         let raw = r#"{
             "outcome": "accepted",
             "answers": {"Q1?": "old-style", "Q2?": ["new-style"]}
         }"#;
-        let resp: AskUserQuestionExtResponse = serde_json::from_str(raw).unwrap();
-        match resp {
-            AskUserQuestionExtResponse::Accepted { answers, .. } => {
-                assert_eq!(answers["Q1?"], vec!["old-style".to_string()]);
-                assert_eq!(answers["Q2?"], vec!["new-style".to_string()]);
-            }
-            other => panic!("Expected Accepted, got {:?}", other),
-        }
+        assert!(serde_json::from_str::<AskUserQuestionExtResponse>(raw).is_err());
     }
 
     // -- Deserialization from raw JSON (simulating pager responses) --

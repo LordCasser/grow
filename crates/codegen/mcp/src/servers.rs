@@ -35,20 +35,10 @@ use tools::types::{
     tool::{ToolKind, ToolNamespace},
     tool_metadata::ToolMetadata,
 };
-use tools::util::{ProcessGroup, ProcessScope};
+use tty_utils::{ProcessGroup, ProcessScope};
+use workspace_types::MCP_TOOL_NAME_DELIMITER;
 
 /// MCP tool name delimiter: server names are qualified as `"server__tool"`.
-/// Canonical definition lives in `workspace_types`; re-exported here
-/// for callers that historically imported it from this module.
-pub use workspace_types::MCP_TOOL_NAME_DELIMITER;
-
-/// Normalize an MCP server URL for comparison: strip trailing slashes.
-/// Must match the normalization the host's managed-config layer uses
-/// (e.g. shell's `session::managed_mcp::normalize_url`) so refresh
-/// lookup keys agree.
-fn normalize_url(url: &str) -> String {
-    url.trim_end_matches('/').to_string()
-}
 
 /// Regex for strictest cross-provider tool name validation.
 ///
@@ -110,7 +100,7 @@ pub struct McpConfigDiff {
     pub retained: Vec<McpServerName>,
 }
 
-/// MCP server name used as the key in client/tool maps (e.g. `"github"`, `"grow_managed_linear"`).
+/// MCP server name used as the key in client/tool maps (for example, `"github"`).
 pub type McpServerName = String;
 
 /// Unqualified MCP tool name (e.g. `"create_issue"`, without the `server__` prefix).
@@ -1020,65 +1010,6 @@ impl McpState {
     /// Get current generation (for stale check after async init)
     pub fn generation(&self) -> u64 {
         self.generation
-    }
-
-    /// Replace managed MCP clients whose URL matches a fresh config entry.
-    ///
-    /// Caller passes `(endpoint, headers)` pairs from whatever source it uses
-    /// (e.g. shell's cli-chat-proxy `ManagedMcpConfig` cache). The MCP crate
-    /// stays free of the host's managed-config schema.
-    ///
-    /// Old `Arc<McpClient>` holders (in-flight tool calls) finish naturally;
-    /// new calls look up the fresh client from the map.
-    pub fn refresh_managed_clients<'a, I>(&mut self, fresh_configs: I)
-    where
-        I: IntoIterator<Item = (&'a str, &'a HashMap<String, String>)>,
-    {
-        let fresh_by_url: HashMap<String, (&'a str, &'a HashMap<String, String>)> = fresh_configs
-            .into_iter()
-            .map(|(endpoint, headers)| (normalize_url(endpoint), (endpoint, headers)))
-            .collect();
-
-        for (client_name, client) in &mut self.owned_clients {
-            let Some(client_url) = self.configs.iter().find_map(|cfg| match cfg {
-                acp::McpServer::Http(acp::McpServerHttp { name, url, .. })
-                | acp::McpServer::Sse(acp::McpServerSse { name, url, .. })
-                    if name == client_name =>
-                {
-                    Some(normalize_url(url))
-                }
-                _ => None,
-            }) else {
-                continue;
-            };
-
-            let Some(&(fresh_endpoint, fresh_headers)) = fresh_by_url.get(&client_url) else {
-                continue;
-            };
-            if fresh_headers.is_empty() {
-                continue;
-            }
-            // Rebuilding drops the warm connection and forces a full
-            // re-handshake on next use; skip it when the token is unchanged.
-            if client.http_headers_match(fresh_headers) {
-                continue;
-            }
-
-            let headers = fresh_headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            *client = Arc::new(McpClient::new_http(
-                client_name.clone(),
-                HttpConfig {
-                    url: fresh_endpoint.to_string(),
-                    headers,
-                },
-                None,
-                self.meta_config_map.get(client_name.as_str()),
-            ));
-            tracing::info!(server = %client_name, "Refreshed managed MCP client with fresh token");
-        }
     }
 
     /// Look up a client by server name.
@@ -2762,30 +2693,6 @@ impl McpClient {
         matches!(self.reconnect, Some(PendingTransport::Acp { .. }))
     }
 
-    /// Read-only: do `headers` equal this client's current HTTP transport
-    /// headers? Compares the full set order-insensitively (the caller's
-    /// headers originate from a `HashMap`). Returns `false` for a client
-    /// with no HTTP config.
-    pub fn http_headers_match(&self, headers: &HashMap<String, String>) -> bool {
-        let Some(config) = &self.http_config else {
-            return false;
-        };
-        // Materialize into a map so a duplicate stored key collapses to one
-        // entry, keeping the length comparison honest. HTTP header names are
-        // case-insensitive, so normalize names to lowercase on both sides (the
-        // crate already does this for `authorization`) and avoid a needless
-        // rebuild on a pure casing difference. Values stay case-sensitive.
-        let stored: HashMap<String, &str> = config
-            .headers
-            .iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str()))
-            .collect();
-        stored.len() == headers.len()
-            && headers
-                .iter()
-                .all(|(k, v)| stored.get(&k.to_ascii_lowercase()) == Some(&v.as_str()))
-    }
-
     /// Recover a dead transport in place: reset → re-handshake → re-arm the
     /// liveness watcher. Returns the live [`McpService`].
     ///
@@ -3762,26 +3669,6 @@ fn is_figma_mcp(server_name: &str, url: &str) -> bool {
     if server_name.eq_ignore_ascii_case("figma") {
         return true;
     }
-    // Legacy direct managed name (`grow_managed_figma`); newer clients use gateway tools (`managed_mcp_gateway_tools_enabled`).
-    const MANAGED_PREFIX: &str = "grow_managed_";
-    if let (Some(prefix), Some(rest)) = (
-        server_name.get(..MANAGED_PREFIX.len()),
-        server_name.get(MANAGED_PREFIX.len()..),
-    ) && prefix.eq_ignore_ascii_case(MANAGED_PREFIX)
-        && rest.eq_ignore_ascii_case("figma")
-    {
-        return true;
-    }
-    // Grow.com remote MCP server name (`grow_com_figma`).
-    const COM_PREFIX: &str = "grow_com_";
-    if let (Some(prefix), Some(rest)) = (
-        server_name.get(..COM_PREFIX.len()),
-        server_name.get(COM_PREFIX.len()..),
-    ) && prefix.eq_ignore_ascii_case(COM_PREFIX)
-        && rest.eq_ignore_ascii_case("figma")
-    {
-        return true;
-    }
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
@@ -3867,7 +3754,7 @@ pub async fn start_mcp_server(
             for env_variable in &env {
                 cmd.env(&env_variable.name, &env_variable.value);
             }
-            tools::util::detach_command(&mut cmd);
+            tty_utils::detach_command(&mut cmd);
 
             let (transport, stderr_handle) =
                 SafeTokioChildProcess::spawn(cmd, ctx.scope, name.clone()).map_err(|e| {
@@ -4240,23 +4127,10 @@ mod tests {
     fn is_figma_mcp_matches_name_and_host() {
         assert!(is_figma_mcp("figma", "https://example.com/mcp"));
         assert!(is_figma_mcp("Figma", "https://example.com/mcp"));
-        assert!(is_figma_mcp(
-            "grow_managed_figma",
-            "https://example.com/mcp"
-        ));
-        assert!(is_figma_mcp("GROW_COM_FIGMA", "https://example.com/mcp"));
-        assert!(is_figma_mcp(
-            "grow_managed_FIGMA",
-            "https://example.com/mcp"
-        ));
         assert!(is_figma_mcp("other", "https://mcp.figma.com/mcp"));
         assert!(is_figma_mcp("other", "https://figma.com/mcp"));
         assert!(!is_figma_mcp("linear", "https://mcp.linear.app/mcp"));
         assert!(!is_figma_mcp("figma_extra", "https://example.com/mcp"));
-        assert!(!is_figma_mcp(
-            "grow_managed_linear",
-            "https://example.com/mcp"
-        ));
         assert!(!is_figma_mcp("linear", "not-a-url"));
         assert!(!is_figma_mcp("linear", "https://notfigma.com/mcp"));
         assert!(!is_figma_mcp("linear", "https://figma.com.evil/mcp"));
@@ -4315,7 +4189,7 @@ mod tests {
         let (transport, pid) = rt.block_on(async {
             let mut cmd = Command::new("sleep");
             cmd.arg("30").kill_on_drop(true);
-            tools::util::detach_command(&mut cmd);
+            tty_utils::detach_command(&mut cmd);
             let (transport, _stderr) = SafeTokioChildProcess::spawn(cmd, None, "test".to_string())
                 .expect("spawn test child");
             let pid = transport.id().expect("spawned child pid");
@@ -4357,7 +4231,7 @@ mod tests {
 
         let mut cmd = Command::new("sleep");
         cmd.arg("600").kill_on_drop(true);
-        tools::util::detach_command(&mut cmd);
+        tty_utils::detach_command(&mut cmd);
         let (mut child_process, _stderr) =
             SafeTokioChildProcess::spawn(cmd, Some(&scope), "wedge-test".to_string())
                 .expect("spawn enrolled MCP child");
@@ -6255,145 +6129,6 @@ mod tests {
         assert!(client.http_config.is_none());
     }
 
-    // ── http_headers_match / refresh_managed_clients guard tests ─────
-
-    #[test]
-    fn http_headers_match_compares_full_set_order_insensitively() {
-        let config = HttpConfig {
-            url: "http://localhost:5000/api/mcp".to_string(),
-            headers: vec![
-                ("authorization".to_string(), "Bearer t".to_string()),
-                ("x-scope".to_string(), "read".to_string()),
-            ],
-        };
-        let client = McpClient::new_http("managed".to_string(), config, None, None);
-
-        let equal: HashMap<String, String> = [
-            ("x-scope".to_string(), "read".to_string()),
-            ("authorization".to_string(), "Bearer t".to_string()),
-        ]
-        .into_iter()
-        .collect();
-        assert!(client.http_headers_match(&equal));
-
-        let changed_value: HashMap<String, String> = [
-            ("authorization".to_string(), "Bearer NEW".to_string()),
-            ("x-scope".to_string(), "read".to_string()),
-        ]
-        .into_iter()
-        .collect();
-        assert!(!client.http_headers_match(&changed_value));
-
-        let missing_key: HashMap<String, String> =
-            [("authorization".to_string(), "Bearer t".to_string())]
-                .into_iter()
-                .collect();
-        assert!(!client.http_headers_match(&missing_key));
-    }
-
-    #[test]
-    fn http_headers_match_handles_duplicate_stored_keys() {
-        // Duplicate stored key must not mask a missing fresh key by inflating
-        // the stored length to match.
-        let config = HttpConfig {
-            url: "http://localhost:5000/api/mcp".to_string(),
-            headers: vec![
-                ("authorization".to_string(), "Bearer t".to_string()),
-                ("authorization".to_string(), "Bearer t".to_string()),
-            ],
-        };
-        let client = McpClient::new_http("managed".to_string(), config, None, None);
-
-        let two_distinct: HashMap<String, String> = [
-            ("authorization".to_string(), "Bearer t".to_string()),
-            ("x-scope".to_string(), "read".to_string()),
-        ]
-        .into_iter()
-        .collect();
-        assert!(!client.http_headers_match(&two_distinct));
-
-        let single: HashMap<String, String> =
-            [("authorization".to_string(), "Bearer t".to_string())]
-                .into_iter()
-                .collect();
-        assert!(client.http_headers_match(&single));
-    }
-
-    #[test]
-    fn http_headers_match_false_for_non_http_client() {
-        let client = McpClient::stub("stdio-srv");
-        let headers: HashMap<String, String> =
-            [("authorization".to_string(), "Bearer t".to_string())]
-                .into_iter()
-                .collect();
-        assert!(!client.http_headers_match(&headers));
-    }
-
-    #[test]
-    fn refresh_managed_clients_keeps_arc_when_headers_unchanged() {
-        let url = "http://localhost:5000/api/mcp";
-        let mut state = McpState::new(vec![make_http_server("managed", url)]);
-        let config = HttpConfig {
-            url: url.to_string(),
-            headers: vec![("authorization".to_string(), "Bearer t".to_string())],
-        };
-        state.owned_clients.insert(
-            "managed".to_string(),
-            Arc::new(McpClient::new_http(
-                "managed".to_string(),
-                config,
-                None,
-                None,
-            )),
-        );
-        let before = Arc::clone(state.owned_clients.get("managed").unwrap());
-
-        let fresh: HashMap<String, String> =
-            [("authorization".to_string(), "Bearer t".to_string())]
-                .into_iter()
-                .collect();
-        state.refresh_managed_clients(std::iter::once((url, &fresh)));
-
-        let after = state.owned_clients.get("managed").unwrap();
-        assert!(
-            Arc::ptr_eq(&before, after),
-            "unchanged headers must not rebuild the client"
-        );
-    }
-
-    #[test]
-    fn refresh_managed_clients_installs_new_arc_when_headers_differ() {
-        let url = "http://localhost:5000/api/mcp";
-        let mut state = McpState::new(vec![make_http_server("managed", url)]);
-        let config = HttpConfig {
-            url: url.to_string(),
-            headers: vec![("authorization".to_string(), "Bearer old".to_string())],
-        };
-        state.owned_clients.insert(
-            "managed".to_string(),
-            Arc::new(McpClient::new_http(
-                "managed".to_string(),
-                config,
-                None,
-                None,
-            )),
-        );
-        let before = Arc::clone(state.owned_clients.get("managed").unwrap());
-
-        let fresh: HashMap<String, String> =
-            [("authorization".to_string(), "Bearer new".to_string())]
-                .into_iter()
-                .collect();
-        state.refresh_managed_clients(std::iter::once((url, &fresh)));
-
-        let after = state.owned_clients.get("managed").unwrap();
-        assert!(
-            !Arc::ptr_eq(&before, after),
-            "changed headers must install a fresh client"
-        );
-        assert!(after.http_headers_match(&fresh));
-    }
-
     // ── reset_transport tests ────────────────────────────────────────
 
     #[tokio::test]
@@ -6680,9 +6415,8 @@ mod tests {
 
     #[test]
     fn is_auth_rejection_message_matches_auth_signals() {
-        // The verbatim string captured in production for a managed handshake.
         assert!(is_auth_rejection_message(
-            "MCP server 'grow_managed_notion' handshake failed: Auth required, when send initialize request"
+            "MCP server 'notion' handshake failed: Auth required, when send initialize request"
         ));
         assert!(is_auth_rejection_message("401 Unauthorized"));
         assert!(is_auth_rejection_message("unauthorized"));

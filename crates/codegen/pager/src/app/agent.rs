@@ -592,16 +592,10 @@ pub struct AgentSession {
     pub pending_prompts: VecDeque<QueuedPrompt>,
     /// Next monotonic ID for [`QueuedPrompt`].
     pub(crate) next_queue_id: u64,
-    /// Whether YOLO mode (auto-approve all permissions) is active.
-    /// Read via `is_yolo()`, write via `set_yolo_mode_inner`.
-    pub(crate) yolo_mode: bool,
-    /// Whether Auto (LLM classifier) permission mode is active for this session.
-    /// Display-only mirror of the applied permission mode, read via `is_auto()`.
-    /// Kept in sync wherever the pager applies the mode; mutually exclusive with
-    /// `yolo_mode` (yolo wins).
-    pub(crate) auto_mode: bool,
+    /// Canonical permission mode for this session.
+    pub(crate) permission_mode: shell::util::config::PermissionMode,
     /// Prompt history for the current session, fetched from ACP
-    /// (`grow/prompt_history` scoped via `filter_session_id`). Most-recent-first.
+    /// (`grow/prompt_history` scoped via `session_id`). Most-recent-first.
     /// Fetched on session create/load; prompts sent in this session are
     /// additionally front-inserted locally on send.
     pub prompt_history: Vec<String>,
@@ -721,26 +715,25 @@ pub struct ChipElement {
 const WORKFLOW_RUN_COMMAND_NAME: &str = "workflow-run";
 const DEEP_RESEARCH_COMMAND_NAME: &str = "deep-research";
 impl AgentSession {
-    /// Whether YOLO mode is active. Prefer this over direct field access.
-    pub fn is_yolo(&self) -> bool {
-        self.yolo_mode
+    pub fn permission_mode(&self) -> shell::util::config::PermissionMode {
+        self.permission_mode
+    }
+    /// Whether always-approve is active.
+    pub fn is_always_approve(&self) -> bool {
+        self.permission_mode.is_always_approve()
     }
     /// Whether Auto (LLM classifier) mode is active. Prefer this over direct
-    /// field access. Mutually exclusive with `is_yolo()` (yolo wins).
+    /// field access. Mutually exclusive with `is_always_approve()` (always-approve wins).
     pub fn is_auto(&self) -> bool {
-        self.auto_mode
+        self.permission_mode.is_auto()
     }
-    /// Test-only setter for `yolo_mode` (the field is private; production toggles
-    /// it via the permission-mode facade). Available to sibling crates' test
-    /// builds through the test-only helpers.
+    /// Test-only setter for the canonical session mode.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_yolo_mode_for_test(&mut self, on: bool) {
-        self.yolo_mode = on;
-    }
-    /// Test-only setter for `auto_mode`. See [`Self::set_yolo_mode_for_test`].
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_auto_mode_for_test(&mut self, on: bool) {
-        self.auto_mode = on;
+    pub(crate) fn set_permission_mode_for_test(
+        &mut self,
+        mode: shell::util::config::PermissionMode,
+    ) {
+        self.permission_mode = mode;
     }
     /// Whether workflows can be launched in this session. Gates the `/workflow`
     /// command, the behavior-picker Workflow entry, and
@@ -843,7 +836,7 @@ impl AgentSession {
     }
     pub fn defer_compaction(
         &mut self,
-        tokens_before: Option<u64>,
+        tokens_before: u64,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
     ) {
@@ -1073,8 +1066,7 @@ mod tests {
             forked_from: None,
             pending_prompts: VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

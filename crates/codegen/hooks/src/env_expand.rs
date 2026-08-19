@@ -7,7 +7,7 @@
 //!   `command` and `url` fields at config-load time, and
 //! * the HTTP runner ([`crate::runner::http`]) to expand `spec.url` once
 //!   more right before SSRF validation, so plugin URLs that reference
-//!   plugin-injected vars (e.g. `${CLAUDE_PLUGIN_ROOT}/check`) resolve.
+//!   plugin-injected vars (e.g. `${GROW_PLUGIN_ROOT}/check`) resolve.
 //!
 //! The expansion is **lossless on missing vars and on every parameter-
 //! expansion-modifier form** -- both unset plain references (e.g.
@@ -47,7 +47,7 @@
 //! Load-time expansion in [`crate::config::parse_hook_file`] runs once
 //! using a snapshot of process env at parse time. The HTTP runner does
 //! a second pass at runtime so plugin-injected vars that arrive in
-//! `extra_env` after parsing (e.g. `CLAUDE_PLUGIN_ROOT`) resolve, and
+//! `extra_env` after parsing (e.g. `GROW_PLUGIN_ROOT`) resolve, and
 //! so mid-session changes to process env are picked up for URLs.
 //! Command paths are NOT re-expanded at runtime; the runtime `sh -c`
 //! branch in [`crate::runner::command`] picks up mid-session env

@@ -6,8 +6,8 @@ reply, attach, pin, rename, stop, or dispatch a new agent. Subagents are not
 listed; they run under their parent, which already shows when work is in
 flight.
 
-Not the agents modal (`/config-agents` / `/agents` — definitions and
-personas), the session picker (`/resume` / `Ctrl+S` — past conversations on
+Not the Agent-definition modal (`/config-agents`), the session picker
+(`/resume` / `Ctrl+S` — past conversations on
 disk), or the workflows run UI (`/workflows`).
 
 ---
@@ -301,7 +301,7 @@ flips from `❯` to yellow `Search:`; every keystroke live-filters the list.
 
 Prefixes (only inside search mode):
 
-- `a:<name>` — agent label (case-insensitive substring; persona / role).
+- `a:<name>` — Agent label (case-insensitive substring).
 - `s:<state>` — row state: `working`, `idle`, `completed`, `failed`,
   `needs-input`, `blocked` and synonyms (`busy`/`running`/`done`/etc.).
 - `#<text>` — substring match on `#<text>` (literal `#` in labels).

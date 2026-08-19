@@ -100,7 +100,6 @@ use async_trait::async_trait;
 
 use crate::session::mcp_dispatcher::{
     McpServerStatus, McpServerStatusPayload, McpServerStatusReason, SERVER_STATUS_METHOD,
-    classify_source,
 };
 
 /// Exponential backoff for the three respawn attempts.
@@ -606,7 +605,6 @@ fn push(
     let payload = McpServerStatusPayload {
         session_id: session_id.to_string(),
         name: server.to_string(),
-        source: classify_source(server),
         status,
         reason,
         detail,

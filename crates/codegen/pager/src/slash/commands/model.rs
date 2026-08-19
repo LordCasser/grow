@@ -3,7 +3,6 @@
 //! re-opens the dropdown into a `low|medium|high|xhigh` sub-menu.
 
 use agent_client_protocol as acp;
-use shell::sampling::types::supports_reasoning_effort_meta;
 
 use crate::acp::model_state::ModelState;
 use crate::app::actions::Action;
@@ -110,7 +109,7 @@ fn resolve_model(models: &ModelState, id: &str) -> Option<acp::ModelId> {
 }
 
 fn supports_reasoning_effort(info: &acp::ModelInfo) -> bool {
-    supports_reasoning_effort_meta(info.meta.as_ref())
+    shell::sampling::types::parse_reasoning_efforts_meta(info.meta.as_ref()).is_some()
 }
 
 /// Split `args` into `(prefix, last_token)` on the final whitespace run.
@@ -214,8 +213,8 @@ mod tests {
         let id = acp::ModelId::new(Arc::from(id));
         let mut meta = serde_json::Map::new();
         meta.insert(
-            "supportsReasoningEffort".into(),
-            serde_json::Value::Bool(true),
+            "reasoningEfforts".into(),
+            serde_json::json!(["xhigh", "high", "medium", "low"]),
         );
         let info = acp::ModelInfo::new(id.clone(), name.to_string())
             .meta(serde_json::Value::Object(meta).as_object().cloned());
@@ -231,12 +230,8 @@ mod tests {
     static EMPTY_BUNDLE: crate::app::bundle::BundleState = crate::app::bundle::BundleState {
         has_cache: false,
         version: String::new(),
-        personas: Vec::new(),
-        roles: Vec::new(),
         agents: Vec::new(),
         skills: Vec::new(),
-        persona_details: Vec::new(),
-        role_details: Vec::new(),
     };
 
     fn dummy_exec_ctx(models: &ModelState) -> CommandExecCtx<'_> {
@@ -247,7 +242,7 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
-                yolo_mode: false,
+                permission_mode: shell::util::config::PermissionMode::Ask,
                 ..crate::settings::PagerLocalSnapshot::default()
             },
         }
@@ -342,15 +337,15 @@ mod tests {
         assert_eq!(items[2].insert_text, "reasoning-x medium");
         assert_eq!(items[3].insert_text, "reasoning-x low");
         // Display is just the level so the user sees a clean column.
-        assert_eq!(items[0].display, "xhigh");
+        assert_eq!(items[0].display, "Xhigh");
         // match_text carries the sort-key prefix that forces the matcher's
-        // alphabetical tiebreak to render rows in EFFORT_LEVELS order.
+        // alphabetical tiebreak to preserve the model-declared order.
         assert!(items[0].match_text.starts_with("a "));
         assert!(items[3].match_text.starts_with("d "));
         // Display names are not accepted for effort-phase entry.
         let by_name = cmd.suggest_args(&ctx, "Reasoning X ").unwrap();
         assert!(
-            by_name.iter().all(|i| i.display != "xhigh"),
+            by_name.iter().all(|i| i.display != "Xhigh"),
             "display-name query must stay in model phase, got {by_name:?}"
         );
     }

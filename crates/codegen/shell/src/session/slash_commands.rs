@@ -1,7 +1,6 @@
 //! ACP slash command advertising and resolution.
 use agent_client_protocol as acp;
 use std::collections::{HashMap, HashSet};
-use tools::implementations::grow_build::LoopFireMode;
 use tools::implementations::skills::skill::format_skill_name;
 use tools::implementations::skills::types::SkillInfo;
 /// A built-in slash command.
@@ -60,13 +59,11 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "always-approve",
         description: "[permission] Switch to Always Approve",
         argument_hint: None,
-        aliases: &["yolo"],
+        aliases: &[],
         gate: BuiltinGate::AlwaysOn,
-        // Fork semantics: switching to the Always Approve Behavior is
-        // idempotent -- every invocation enables it regardless of arguments
-        // (leave the Behavior to turn it off). The `yolo` alias is a UX
-        // convenience carried over from upstream.
-        resolve: |_args| BuiltinAction::SetYolo { enabled: true },
+        resolve: |_args| BuiltinAction::SetPermissionMode {
+            mode: crate::util::config::PermissionMode::AlwaysApprove,
+        },
     },
     BuiltinCommand {
         name: "flush",
@@ -533,7 +530,6 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "home",
             "hooks",
             "howto",
-            "import-claude",
             "jump",
             "login",
             "logout",
@@ -549,7 +545,6 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "new",
             "normal",
             "onboarding",
-            "personas",
             "permission",
             "plan",
             "plan-view",
@@ -806,7 +801,6 @@ pub(crate) async fn list_commands(
     skills_config: &agent::prompt::skills::SkillsConfig,
     plugin_registry: Option<&agent::plugins::PluginRegistry>,
     availability: CommandAvailability,
-    compat: tools::types::compat::CompatConfig,
     include_project_workflows: bool,
     kind: Option<&str>,
 ) -> Result<ListCommandsResponse, acp::Error> {
@@ -814,13 +808,8 @@ pub(crate) async fn list_commands(
         return Err(acp::Error::invalid_params()
             .data("commands/list kind=\"chat\" requires a chat-enabled binary"));
     }
-    let skills = agent::prompt::skills::list_skills_with_plugins(
-        cwd,
-        skills_config,
-        plugin_registry,
-        compat,
-    )
-    .await;
+    let skills =
+        agent::prompt::skills::list_skills_with_plugins(cwd, skills_config, plugin_registry).await;
     let workflows = crate::session::workflow::registry::list_workflows(
         include_project_workflows
             .then_some(cwd)
@@ -871,8 +860,8 @@ pub(super) enum BuiltinAction {
     Compact {
         user_context: Option<String>,
     },
-    SetYolo {
-        enabled: bool,
+    SetPermissionMode {
+        mode: crate::util::config::PermissionMode,
     },
     FlushMemory,
     Dream,
@@ -945,7 +934,7 @@ impl BuiltinAction {
     pub(crate) fn command_name(&self) -> &'static str {
         match self {
             BuiltinAction::Compact { .. } => "compact",
-            BuiltinAction::SetYolo { .. } => "yolo",
+            BuiltinAction::SetPermissionMode { .. } => "always-approve",
             BuiltinAction::FlushMemory => "flush",
             BuiltinAction::Dream => "dream",
             BuiltinAction::ContextInfo => "context",
@@ -983,7 +972,7 @@ impl BuiltinAction {
     pub(crate) fn args_provided(&self) -> bool {
         match self {
             BuiltinAction::Compact { user_context } => user_context.is_some(),
-            BuiltinAction::SetYolo { .. } => true,
+            BuiltinAction::SetPermissionMode { .. } => true,
             BuiltinAction::FlushMemory => false,
             BuiltinAction::Dream => false,
             BuiltinAction::ContextInfo => false,
@@ -1198,7 +1187,6 @@ pub(super) fn resolve(
     availability: CommandAvailability,
     _skill_rewrite: SkillSlashRewrite,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
-    loop_fire_mode: LoopFireMode,
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
         return Ok(prompt_blocks);
@@ -1217,7 +1205,7 @@ pub(super) fn resolve(
         && availability.allows(prompt_cmd.gate)
     {
         let mut blocks = match prompt_cmd.name {
-            "loop" => build_loop_prompt_blocks(args, loop_fire_mode),
+            "loop" => build_loop_prompt_blocks(args),
             other => {
                 unreachable!("prompt-only command /{other} has no resolver wired in resolve()")
             }
@@ -1304,12 +1292,12 @@ fn parse_slash_prefix(prompt_blocks: &[acp::ContentBlock]) -> Option<(&str, &str
 /// two front-ends can't drift. Like the pager, there is no host-side interval
 /// default: the model derives the cadence from the request and asks when none
 /// is given.
-fn build_loop_prompt_blocks(args: &str, mode: LoopFireMode) -> Vec<acp::ContentBlock> {
+fn build_loop_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
     use tools::implementations::grow_build::{loop_schedule_instruction, loop_usage_message};
     let text = if args.trim().is_empty() {
         loop_usage_message().to_string()
     } else {
-        loop_schedule_instruction(args, mode)
+        loop_schedule_instruction(args)
     };
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
 }
@@ -1317,10 +1305,7 @@ fn build_loop_prompt_blocks(args: &str, mode: LoopFireMode) -> Vec<acp::ContentB
 mod tests {
     use super::*;
     use tools::implementations::skills::types::SkillScope;
-    /// Shadows [`super::resolve`] for the cases that route something other
-    /// than `/loop`: they are indifferent to the fire mode, and pinning it
-    /// here keeps a plumbing change out of every unrelated call site. Tests
-    /// that care about the mode call `super::resolve` directly.
+    /// Shadows [`super::resolve`] to keep test call sites compact.
     fn resolve(
         prompt_blocks: Vec<acp::ContentBlock>,
         skills: &[SkillInfo],
@@ -1334,7 +1319,6 @@ mod tests {
             availability,
             skill_rewrite,
             workflows,
-            LoopFireMode::Detached,
         )
     }
     fn all_gated() -> CommandAvailability {
@@ -1447,21 +1431,13 @@ mod tests {
             assert!(
                 matches!(
                     resolve_builtin("always-approve", arg),
-                    Some(BuiltinAction::SetYolo { enabled: true })
+                    Some(BuiltinAction::SetPermissionMode {
+                        mode: crate::util::config::PermissionMode::AlwaysApprove,
+                    })
                 ),
                 "expected on for {arg:?}",
             );
         }
-    }
-    #[test]
-    fn yolo_alias_resolves_to_always_approve() {
-        let blocks = vec![text_block("/yolo on")];
-        let outcome =
-            resolve(blocks, &[], all_gated(), SkillSlashRewrite::default(), &[]).unwrap_err();
-        assert!(matches!(
-            outcome,
-            SlashCommandOutcome::Builtin(BuiltinAction::SetYolo { enabled: true })
-        ));
     }
     #[test]
     fn resolve_routes_builtin() {
@@ -1614,35 +1590,6 @@ mod tests {
                 .and_then(|m| m.get("displayText"))
                 .and_then(|v| v.as_str()),
             Some("/loop")
-        );
-    }
-    #[test]
-    fn resolve_loop_expands_for_the_sessions_fire_mode() {
-        let text_of = |mode| {
-            let outcome = super::resolve(
-                vec![text_block("/loop 1m echo hello")],
-                &[],
-                all_gated(),
-                SkillSlashRewrite::default(),
-                &[],
-                mode,
-            )
-            .unwrap_err();
-            let SlashCommandOutcome::InvokeSkill { blocks, .. } = outcome else {
-                panic!("expected InvokeSkill for /loop");
-            };
-            let Some(acp::ContentBlock::Text(tb)) = blocks.into_iter().next() else {
-                panic!("expected a text block");
-            };
-            tb.text
-        };
-        assert!(
-            text_of(LoopFireMode::Detached).contains("cannot see this conversation"),
-            "detached sessions must get the standalone-prompt framing"
-        );
-        assert!(
-            text_of(LoopFireMode::InSession).contains("arrives as a new turn in this conversation"),
-            "in-session sessions must get the standing-order framing"
         );
     }
     #[test]
@@ -1873,15 +1820,15 @@ mod tests {
         );
     }
     /// Extract the text of the first block produced by `build_loop_prompt_blocks`.
-    fn loop_text(args: &str, mode: LoopFireMode) -> String {
-        match build_loop_prompt_blocks(args, mode).into_iter().next() {
+    fn loop_text(args: &str) -> String {
+        match build_loop_prompt_blocks(args).into_iter().next() {
             Some(acp::ContentBlock::Text(t)) => t.text,
             other => panic!("expected a text block, got {other:?}"),
         }
     }
     #[test]
     fn loop_usage_has_no_10m_default() {
-        let usage = loop_text("", LoopFireMode::Detached);
+        let usage = loop_text("");
         assert!(usage.contains("Usage: /loop"), "got: {usage}");
         assert!(
             !usage.contains("10m"),
@@ -1890,7 +1837,7 @@ mod tests {
     }
     #[test]
     fn loop_instruction_derives_interval_without_default_or_inline_execute() {
-        let instr = loop_text("every 30 minutes do x", LoopFireMode::Detached);
+        let instr = loop_text("every 30 minutes do x");
         assert!(
             !instr.contains("10m"),
             "instruction must not default: {instr}"
@@ -1908,13 +1855,11 @@ mod tests {
     #[test]
     fn loop_prompt_matches_pager_wording() {
         use tools::implementations::grow_build::{loop_schedule_instruction, loop_usage_message};
-        assert_eq!(loop_text("", LoopFireMode::Detached), loop_usage_message());
-        for mode in [LoopFireMode::Detached, LoopFireMode::InSession] {
-            assert_eq!(
-                loop_text("2h run tests", mode),
-                loop_schedule_instruction("2h run tests", mode)
-            );
-        }
+        assert_eq!(loop_text(""), loop_usage_message());
+        assert_eq!(
+            loop_text("2h run tests"),
+            loop_schedule_instruction("2h run tests")
+        );
     }
     #[test]
     fn build_tools_meta_serialises_tool_names() {

@@ -73,7 +73,7 @@ pub(super) fn dispatch_permission_select(
     // sticks to it. Allow-flavored choices only — a rejection must not steer a
     // later prompt's cursor onto a reject row. Also skip the two options that
     // aren't per-prompt choices:
-    //  - the global always-approve (YOLO) option flips global auto-approve, so
+    //  - the global always-approve (always-approve) option flips global auto-approve, so
     //    there will be no subsequent prompt to land on;
     //  - "allow all edits during this session" is edit-scoped (kind
     //    `AllowAlways`) — letting it stick would steer an unrelated later
@@ -152,16 +152,16 @@ pub(super) fn dispatch_permission_select(
     // "Enable always-approve" side effect: change only this session, drain
     // the permission queue, and notify the shell.
     //
-    // Idempotency: if YOLO is already on, the pager auto-approves in
+    // Idempotency: if always-approve is already on, the pager auto-approves in
     // `handle_permission_request` before the panel is shown, so the
-    // user couldn't have selected this option. The `is_yolo()` guard
+    // user couldn't have selected this option. The `is_always_approve()` guard
     // is defensive — a redundant call would re-emit the toast and session
     // notification, but is otherwise safe.
     if enable_always_approve && active_session_is_root {
         let already_on = app
             .agents
             .get(&id)
-            .map(|a| a.session.is_yolo())
+            .map(|a| a.session.is_always_approve())
             .unwrap_or(false);
         if !already_on {
             return set_permission_mode(

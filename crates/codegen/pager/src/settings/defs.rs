@@ -75,33 +75,22 @@ const THEME_CHOICES: &[EnumChoice] = &[
 // ---------------------------------------------------------------------------
 // Permission-mode catalog.
 //
-// Persisted values map onto runtime flags:
-//   "always-approve" ↔ yolo_mode = true  (auto-approve all)
-//   "auto"           ↔ auto_mode = true  (LLM classifier; not full yolo)
-//   "ask"            ↔ both false (interactive prompts)
-//   "default"        ↔ both false (agent's default — currently Ask)
+// Persisted values deserialize directly to the canonical `PermissionMode`.
 //
 // Canonical strings match `load_permission_mode`. `supports_preview:
-// false` because toggling YOLO drains the permission queue (unsafe
+// false` because selecting always-approve drains the permission queue (unsafe
 // for per-keystroke preview).
 //
 // Adding new modes requires: (1) `PermissionModeKind` variant,
-// (2) `EnumChoice` here, (3) `set_yolo_mode_inner` update,
+// (2) `EnumChoice` here, (3) `set_permission_mode_inner_scoped` update,
 // (4) `load_permission_mode` arm, and (5) tests. Active-session Permission
 // and Behavior are selected outside Settings through Slash/Ctrl+X.
 // ---------------------------------------------------------------------------
 
-// Choice order: safe → classifier → unsafe (Default → Ask → Auto → Always approve).
+// Choice order: safe → classifier → unsafe (Ask → Auto → Always approve).
 // "Always approve" at the end creates a speed bump against
 // accidental selection.
 const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
-    // "default" = agent's default behavior. Same as "ask" at runtime;
-    // distinct on disk and in the modal indicator.
-    EnumChoice {
-        canonical: "default",
-        display: "Default",
-        description: "Use the agent's default permission behavior (currently equivalent to Ask).",
-    },
     EnumChoice {
         canonical: "ask",
         display: "Ask",
@@ -141,7 +130,7 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
 // background, so there's no live preview surface.
 // ---------------------------------------------------------------------------
 
-// Order matches the live permission prompt rendering (YOLO -> always-allow
+// Order matches the live permission prompt rendering (always-approve -> always-allow
 // -> allow-once -> reject) so the picker mirrors what the user sees on the
 // real prompt.
 // Canonicals + display labels come from `DefaultSelectedPermission` (the
@@ -235,8 +224,6 @@ const TEXT_SELECTION_CHOICES: &[EnumChoice] = &[
 ];
 
 // Hunk-tracker-mode catalog. SHELL-owned, persisted to `[ui].hunk_tracker_mode`.
-// `disabled` is accepted as an alias for `off` at parse time but not surfaced
-// as a choice.
 const HUNK_TRACKER_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "agent_only",
@@ -573,14 +560,12 @@ pub fn default_settings() -> Vec<SettingMeta> {
             owner: SettingOwner::Shell,
             label: "Default permission mode",
             description: "Permission policy used when creating future sessions. \
-                          Default uses the agent's built-in behavior; \
                           Ask prompts for each tool action; \
                           Auto uses an LLM classifier for risky tools; \
                           Always approve grants all permissions automatically.",
             keywords: &[
                 "permission",
                 "approve",
-                "yolo",
                 "agent",
                 "always",
                 "ask",
@@ -753,35 +738,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             ],
             kind: SettingKind::Bool {
                 default: ui_default.group_tool_verbs.unwrap_or(true),
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        // SHELL-owned: `[ui].collapsed_edit_blocks` + process-wide cache.
-        // Default OFF (rollout flag; remote settings / managed config can enable).
-        SettingMeta {
-            key: "collapsed_edit_blocks",
-            category: SettingCategory::Appearance,
-            owner: SettingOwner::Shell,
-            label: "Collapsed edit blocks",
-            description: "Show edits as one-line +N/-M diffstat summaries and merge \
-                          back-to-back edits to the same file into one block; expand a \
-                          row to see the diffs.",
-            keywords: &[
-                "edit",
-                "edits",
-                "diff",
-                "diffstat",
-                "collapse",
-                "collapsed",
-                "summary",
-                "expand",
-                "one-line",
-                "merge",
-                "coalesce",
-            ],
-            kind: SettingKind::Bool {
-                default: ui_default.collapsed_edit_blocks.unwrap_or(false),
             },
             restart_required: false,
             hidden_in_minimal: false,

@@ -1,12 +1,7 @@
 //! Shared post-compaction reminder helpers (host-agnostic).
 //!
-//! Lives at the crate root rather than under a compaction-style submodule
-//! because it is consumed by *both* compaction styles and both harnesses:
-//!
-//! - Grow chat intra FullReplace ([`crate::intra_compaction`]) and inter
-//!   (appends after sampling via [`append_reminder_block`])
-//! - grow-build full-replace ([`crate::code_compaction`] assemble's
-//!   `system_reminder`)
+//! The host appends the rendered `system_reminder` to the canonical range
+//! summary carrier; hosts own snapshotting and host-only sections.
 //!
 //! **What lives here:** pure formatting of the three **common** active-agent
 //! sections — Running Background Tasks, TODO List, Running Subagents — plus

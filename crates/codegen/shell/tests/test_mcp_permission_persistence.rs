@@ -193,13 +193,19 @@ async fn run_actor_test_with_policy<F, Fut>(
     F: FnOnce(PermissionHandle, FakeGateway, AbsPathBuf) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    run_actor_test_full(client_type, policy, false, body).await;
+    run_actor_test_full(
+        client_type,
+        policy,
+        diagnostics::enums::PermissionMode::Ask,
+        body,
+    )
+    .await;
 }
 
 async fn run_actor_test_full<F, Fut>(
     client_type: ClientType,
     policy: Option<PermissionConfig>,
-    initial_yolo: bool,
+    initial_mode: diagnostics::enums::PermissionMode,
     body: F,
 ) where
     F: FnOnce(PermissionHandle, FakeGateway, AbsPathBuf) -> Fut,
@@ -219,7 +225,7 @@ async fn run_actor_test_full<F, Fut>(
                 policy,
                 vec![], // deny_read_globs
                 vec![],
-                initial_yolo,
+                initial_mode,
                 None,
                 // MCP always-allow persistence tests need the approval
                 // gate ON: with the gate off, build_options strips the
@@ -371,7 +377,7 @@ async fn policy_ask_suppresses_mcp_tool_allowlist() {
                 Some(policy),
                 vec![], // deny_read_globs
                 vec![],
-                false,
+                diagnostics::enums::PermissionMode::Ask,
                 None,
                 false, // remember_tool_approvals
             );
@@ -422,7 +428,7 @@ async fn policy_ask_suppresses_mcp_server_allowlist() {
                 Some(policy),
                 vec![], // deny_read_globs
                 vec![],
-                false,
+                diagnostics::enums::PermissionMode::Ask,
                 None,
                 false, // remember_tool_approvals
             );
@@ -467,7 +473,7 @@ async fn policy_deny_takes_precedence_over_mcp_allowlist() {
                 Some(policy),
                 vec![], // deny_read_globs
                 vec![],
-                false,
+                diagnostics::enums::PermissionMode::Ask,
                 None,
                 false,
             );
@@ -710,11 +716,11 @@ async fn dont_ask_policy_denies_without_prompting() {
     .await;
 }
 
-// --- deny rules survive YOLO mode ---
+// --- deny rules survive always-approve mode ---
 
 #[tokio::test]
 #[serial]
-async fn deny_rule_enforced_in_yolo_mode_bash() {
+async fn deny_rule_enforced_in_always_approve_mode_bash() {
     let policy = PermissionConfig::new(vec![PermissionRule {
         action: RuleAction::Deny,
         tool: ToolFilter::Bash,
@@ -725,7 +731,7 @@ async fn deny_rule_enforced_in_yolo_mode_bash() {
     run_actor_test_full(
         ClientType::GrowPager,
         Some(policy),
-        true,
+        diagnostics::enums::PermissionMode::AlwaysApprove,
         |handle, _gw, _cwd| async move {
             let d = request(
                 &handle,
@@ -735,13 +741,13 @@ async fn deny_rule_enforced_in_yolo_mode_bash() {
             .await;
             assert!(
                 matches!(d, Decision::PolicyDeny(_)),
-                "deny rule must block even in YOLO mode, got {d:?}"
+                "deny rule must block even in always-approve mode, got {d:?}"
             );
 
             let d = request(&handle, AccessKind::Bash("cargo test".to_string()), "2").await;
             assert!(
                 matches!(d, Decision::Allow),
-                "non-denied bash must auto-approve in YOLO mode, got {d:?}"
+                "non-denied bash must auto-approve in always-approve mode, got {d:?}"
             );
         },
     )
@@ -750,7 +756,7 @@ async fn deny_rule_enforced_in_yolo_mode_bash() {
 
 #[tokio::test]
 #[serial]
-async fn deny_rule_enforced_in_yolo_mode_mcp() {
+async fn deny_rule_enforced_in_always_approve_mode_mcp() {
     let policy = PermissionConfig::new(vec![PermissionRule {
         action: RuleAction::Deny,
         tool: ToolFilter::Mcp,
@@ -761,18 +767,18 @@ async fn deny_rule_enforced_in_yolo_mode_mcp() {
     run_actor_test_full(
         ClientType::GrowPager,
         Some(policy),
-        true,
+        diagnostics::enums::PermissionMode::AlwaysApprove,
         |handle, _gw, _cwd| async move {
             let d = request(&handle, mcp("dangerous__delete_all"), "1").await;
             assert!(
                 matches!(d, Decision::PolicyDeny(_)),
-                "deny rule must block MCP tool even in YOLO mode, got {d:?}"
+                "deny rule must block MCP tool even in always-approve mode, got {d:?}"
             );
 
             let d = request(&handle, mcp("linear__list"), "2").await;
             assert!(
                 matches!(d, Decision::Allow),
-                "non-denied MCP tool must auto-approve in YOLO mode, got {d:?}"
+                "non-denied MCP tool must auto-approve in always-approve mode, got {d:?}"
             );
         },
     )
@@ -781,7 +787,7 @@ async fn deny_rule_enforced_in_yolo_mode_mcp() {
 
 #[tokio::test]
 #[serial]
-async fn deny_rule_enforced_in_yolo_mode_edit() {
+async fn deny_rule_enforced_in_always_approve_mode_edit() {
     let policy = PermissionConfig::new(vec![PermissionRule {
         action: RuleAction::Deny,
         tool: ToolFilter::Edit,
@@ -792,18 +798,18 @@ async fn deny_rule_enforced_in_yolo_mode_edit() {
     run_actor_test_full(
         ClientType::GrowPager,
         Some(policy),
-        true,
+        diagnostics::enums::PermissionMode::AlwaysApprove,
         |handle, _gw, _cwd| async move {
             let d = request(&handle, AccessKind::Edit("/etc/passwd".to_string()), "1").await;
             assert!(
                 matches!(d, Decision::PolicyDeny(_)),
-                "deny rule must block edits even in YOLO mode, got {d:?}"
+                "deny rule must block edits even in always-approve mode, got {d:?}"
             );
 
             let d = request(&handle, AccessKind::Edit("src/main.rs".to_string()), "2").await;
             assert!(
                 matches!(d, Decision::Allow),
-                "non-denied edit must auto-approve in YOLO mode, got {d:?}"
+                "non-denied edit must auto-approve in always-approve mode, got {d:?}"
             );
         },
     )
@@ -812,7 +818,7 @@ async fn deny_rule_enforced_in_yolo_mode_edit() {
 
 #[tokio::test]
 #[serial]
-async fn deny_rule_enforced_in_yolo_mode_web_fetch() {
+async fn deny_rule_enforced_in_always_approve_mode_web_fetch() {
     let policy = PermissionConfig::new(vec![PermissionRule {
         action: RuleAction::Deny,
         tool: ToolFilter::WebFetch,
@@ -823,7 +829,7 @@ async fn deny_rule_enforced_in_yolo_mode_web_fetch() {
     run_actor_test_full(
         ClientType::GrowPager,
         Some(policy),
-        true,
+        diagnostics::enums::PermissionMode::AlwaysApprove,
         |handle, _gw, _cwd| async move {
             let d = request(
                 &handle,
@@ -833,7 +839,7 @@ async fn deny_rule_enforced_in_yolo_mode_web_fetch() {
             .await;
             assert!(
                 matches!(d, Decision::PolicyDeny(_)),
-                "deny rule must block web_fetch even in YOLO mode, got {d:?}"
+                "deny rule must block web_fetch even in always-approve mode, got {d:?}"
             );
 
             let d = request(
@@ -844,7 +850,7 @@ async fn deny_rule_enforced_in_yolo_mode_web_fetch() {
             .await;
             assert!(
                 matches!(d, Decision::Allow),
-                "non-denied web_fetch must auto-approve in YOLO mode, got {d:?}"
+                "non-denied web_fetch must auto-approve in always-approve mode, got {d:?}"
             );
         },
     )
@@ -853,11 +859,11 @@ async fn deny_rule_enforced_in_yolo_mode_web_fetch() {
 
 #[tokio::test]
 #[serial]
-async fn yolo_mode_without_deny_rules_approves_everything() {
+async fn always_approve_mode_without_deny_rules_approves_everything() {
     run_actor_test_full(
         ClientType::GrowPager,
         None,
-        true,
+        diagnostics::enums::PermissionMode::AlwaysApprove,
         |handle, _gw, _cwd| async move {
             let d = request(&handle, AccessKind::Bash("rm -rf /".to_string()), "1").await;
             assert!(matches!(d, Decision::Allow));

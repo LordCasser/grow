@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentOpts {
     #[serde(default)]
     pub prompt: String,
@@ -9,8 +10,6 @@ pub struct AgentOpts {
     pub label: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
-    pub max_output_tokens: Option<u64>,
     #[serde(default)]
     pub agent_type: Option<String>,
     #[serde(default)]

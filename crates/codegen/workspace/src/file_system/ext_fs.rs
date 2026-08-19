@@ -16,6 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+#[cfg(test)]
 use base64::Engine;
 use chrono::Utc;
 
@@ -89,18 +90,6 @@ impl WorkspaceOp for FsReadFileReq {
     ) -> WorkspaceResult<Self::Response> {
         let abs_unconfined = resolve_abs(&self.path, &self.cwd, ws)?;
         let (abs, _) = ws.confine_to_workspace_root(&abs_unconfined).await?;
-
-        // Legacy full-file read path: preserves the pre-range wire output
-        // (auto utf8/base64 detect, MIME `type`, `lineCount`).
-        let ranged = self.offset.is_some()
-            || self.length.is_some()
-            || self.encoding == FsReadEncoding::Base64;
-        if !ranged {
-            let bytes = tokio::fs::read(&abs)
-                .await
-                .map_err(|e| WorkspaceError::Operation(e.to_string()))?;
-            return Ok(build_file_entry(&bytes));
-        }
 
         // Binary-safe ranged read: `size` is the full file size, the
         // chunk is `[offset, offset + min(length, max_bytes, cap))`.
@@ -237,27 +226,6 @@ fn build_ranged_entry(chunk: Vec<u8>, size: u64, encoding: FsReadEncoding) -> Fs
     }
 }
 
-fn build_file_entry(bytes: &[u8]) -> FsReadFileData {
-    let size = bytes.len() as u64;
-    let inferred = infer::get(bytes).map(|t| t.mime_type().to_string());
-    match String::from_utf8(bytes.to_vec()) {
-        Ok(text) => FsReadFileData {
-            line_count: Some(text.lines().count() as u64),
-            content: text,
-            content_base64: None,
-            size,
-            content_type: inferred.unwrap_or_else(|| "text/plain".to_string()),
-        },
-        Err(_) => FsReadFileData {
-            content: String::new(),
-            content_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
-            size,
-            line_count: None,
-            content_type: inferred.unwrap_or_else(|| "application/octet-stream".to_string()),
-        },
-    }
-}
-
 // =========================================================================
 // Tests for the pure helpers (no `WorkspaceHandle` required).
 // =========================================================================
@@ -282,29 +250,6 @@ mod tests {
             include_globs: Vec::new(),
             exclude_globs: Vec::new(),
         }
-    }
-
-    #[test]
-    fn build_file_entry_utf8_sets_content_and_line_count() {
-        let bytes = b"line one\nline two\n";
-        let entry = build_file_entry(bytes);
-        assert_eq!(entry.content, "line one\nline two\n");
-        assert!(entry.content_base64.is_none());
-        assert_eq!(entry.line_count, Some(2));
-        assert_eq!(entry.size, bytes.len() as u64);
-    }
-
-    #[test]
-    fn build_file_entry_invalid_utf8_uses_base64() {
-        let bytes: &[u8] = &[0xff, 0xfe, 0x00];
-        let entry = build_file_entry(bytes);
-        assert!(entry.content.is_empty());
-        assert_eq!(
-            entry.content_base64,
-            Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
-        );
-        assert!(entry.line_count.is_none());
-        assert_eq!(entry.size, bytes.len() as u64);
     }
 
     #[test]

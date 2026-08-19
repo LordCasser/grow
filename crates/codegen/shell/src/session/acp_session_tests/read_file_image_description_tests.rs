@@ -115,7 +115,6 @@ async fn pdf_extracted_images_stay_one_ordered_group_then_are_permanently_remove
             let result = ToolRunResult {
                 output: ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
                     content: "1→PDF text".to_owned(),
-                    content_concise: None,
                     absolute_path: "/workspace/mixed.pdf".into(),
                     offset: None,
                     limit: None,

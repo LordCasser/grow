@@ -6,7 +6,8 @@ use super::*;
 #[derive(Debug)]
 pub(super) struct MemoryFlushSnapshot {
     counts: chat_state::ConversationCounts,
-    chat_history: Vec<ChatRequestMessage>,
+    request_messages: Vec<ChatRequestMessage>,
+    input_ref: chat_state::TimelineRangeRef,
 }
 
 /// Build first-turn injection backend params without mutating the shared
@@ -18,9 +19,9 @@ pub(super) struct MemoryFlushSnapshot {
 /// first-turn default of `0.0` unless the injection config explicitly
 /// overrides it.
 pub(super) fn build_initial_injection_backend_params(
-    params: &crate::session::memory::MemoryBackendParams,
+    params: &memory::MemoryBackendParams,
     initial_injection_config: &crate::config::MemoryInitialInjectionConfig,
-) -> (crate::session::memory::MemoryBackendParams, f64) {
+) -> (memory::MemoryBackendParams, f64) {
     let mut injection_params = params.clone();
     injection_params.search_source = "injection";
     let effective_min_score = initial_injection_config
@@ -101,14 +102,14 @@ impl SessionActor {
     fn dream_context(
         &self,
     ) -> Option<(
-        crate::session::memory::MemoryStorage,
-        crate::session::memory::dream_lock::DreamLock,
+        memory::MemoryStorage,
+        memory::dream_lock::DreamLock,
         std::path::PathBuf,
         String,
     )> {
         let storage = self.memory.storage()?;
         let workspace_dir = storage.workspace_dir();
-        let lock = crate::session::memory::dream_lock::DreamLock::new(workspace_dir);
+        let lock = memory::dream_lock::DreamLock::new(workspace_dir);
         let sessions_dir = storage.sessions_dir();
         let sid = &self.session_info.id.0;
         let sid8 = sid[..8.min(sid.len())].to_owned();
@@ -129,7 +130,7 @@ impl SessionActor {
             return;
         }
 
-        use crate::session::memory::dream::*;
+        use memory::dream::*;
 
         let Some((storage, lock, sessions_dir, sid8)) = self.dream_context() else {
             return;
@@ -160,7 +161,7 @@ impl SessionActor {
 
     /// Run dream from `/dream` slash command, bypassing time/session gates.
     pub(super) async fn run_dream_slash_command(&self) {
-        use crate::session::memory::dream_lock::sessions_since;
+        use memory::dream_lock::sessions_since;
 
         let Some((storage, lock, sessions_dir, sid8)) = self.dream_context() else {
             return;
@@ -208,13 +209,13 @@ impl SessionActor {
     /// Shared dream execution: build message, call model, execute, record result.
     async fn run_dream_inner(
         &self,
-        storage: &crate::session::memory::MemoryStorage,
-        lock: &crate::session::memory::dream_lock::DreamLock,
+        storage: &memory::MemoryStorage,
+        lock: &memory::dream_lock::DreamLock,
         sessions_dir: &std::path::Path,
         sessions: &[String],
         log_prefix: &str,
     ) {
-        use crate::session::memory::dream::*;
+        use memory::dream::*;
 
         let existing_memory = std::fs::read_to_string(storage.workspace_memory_file()).ok();
 
@@ -230,26 +231,13 @@ impl SessionActor {
                 }
             };
 
-        let model_response = match tokio::time::timeout(
-            std::time::Duration::from_secs(30 * 60),
-            self.run_dream_model_call(&dream_msg.content),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
+        let model_response = match self.run_dream_model_call(&dream_msg.content).await {
+            Ok(response) => response,
+            Err(error) => {
                 tracing::warn!(
                     target: ::diagnostics::memory_log::TARGET,
-                    error = %e,
+                    error = %error,
                     "{log_prefix}: model call failed"
-                );
-                self.memory.record_dream_result(false);
-                return;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    target: ::diagnostics::memory_log::TARGET,
-                    "{log_prefix}: model call timed out (30m)"
                 );
                 self.memory.record_dream_result(false);
                 return;
@@ -323,22 +311,89 @@ impl SessionActor {
             .await
             .map(|c| c.model)
             .unwrap_or_default();
-        let session_id = self.session_info.id.to_string();
         let request = ConversationRequest {
             items: vec![
-                ConversationItem::system(crate::session::memory::dream::DREAM_SYSTEM_PROMPT),
+                ConversationItem::system(memory::dream::DREAM_SYSTEM_PROMPT),
                 ConversationItem::user(user_message),
             ],
             model: Some(model),
             ..Default::default()
         };
-        let response = sampling_client
-            .conversation_collect(request)
+        let mut sideband = self
+            .begin_sideband(
+                chat_state::SidebandPurpose::MemoryDream,
+                user_message.to_owned(),
+                SidebandInput::None,
+                chat_state::SidebandRoute {
+                    model: request.model.clone().unwrap_or_default(),
+                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                },
+                None,
+            )
             .await
-            .map_err(|e| {
-                acp::Error::internal_error().data(format!("dream model call failed: {e}"))
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("dream Sideband could not start: {error}"))
             })?;
-        Ok(response.assistant_text())
+        sideband.attempt(None).await.map_err(|error| {
+            acp::Error::internal_error()
+                .data(format!("dream Sideband attempt could not commit: {error}"))
+        })?;
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_secs(30 * 60),
+            sampling_client.conversation_collect(request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                let detail = format!("dream model call failed: {error}");
+                sideband
+                    .fail(chat_state::SidebandOutcome::Failed, detail.clone())
+                    .await
+                    .map_err(|record_error| {
+                        acp::Error::internal_error().data(format!(
+                            "{detail}; Sideband failure could not commit: {record_error}"
+                        ))
+                    })?;
+                return Err(acp::Error::internal_error().data(detail));
+            }
+            Err(_) => {
+                let detail = "dream model call timed out after 30 minutes";
+                sideband
+                    .fail(chat_state::SidebandOutcome::Cancelled, detail)
+                    .await
+                    .map_err(|record_error| {
+                        acp::Error::internal_error().data(format!(
+                            "{detail}; Sideband cancellation could not commit: {record_error}"
+                        ))
+                    })?;
+                return Err(acp::Error::internal_error().data(detail));
+            }
+        };
+        let text = response.assistant_text();
+        if text.trim().is_empty() {
+            let detail = "dream model returned an empty response";
+            sideband
+                .fail(chat_state::SidebandOutcome::Failed, detail)
+                .await
+                .map_err(|record_error| {
+                    acp::Error::internal_error().data(format!(
+                        "{detail}; Sideband failure could not commit: {record_error}"
+                    ))
+                })?;
+            return Err(acp::Error::internal_error().data(detail));
+        }
+        let usage = sideband_usage(&response);
+        let finish = sideband_finish(&response);
+        sideband
+            .complete(text.clone(), None, usage, finish)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("dream Sideband result could not commit: {error}"))
+            })?;
+        Ok(text)
     }
 
     /// Run a memory flush turn that summarizes recent conversation into a
@@ -375,10 +430,14 @@ impl SessionActor {
             let sampling_client = self.prepare_chat_completion(false).await?;
             let MemoryFlushSnapshot {
                 counts,
-                chat_history,
+                request_messages,
+                input_ref,
             } = match snapshot {
                 Some(snapshot) => snapshot,
-                None => self.snapshot_memory_flush_state().await,
+                None => self.snapshot_memory_flush_state().await.ok_or_else(|| {
+                    acp::Error::internal_error()
+                        .data("memory flush could not freeze its Timeline input")
+                })?,
             };
             ::diagnostics::session_ctx::log_event(
                 ::diagnostics::memory_events::MemoryFlushStart {
@@ -396,7 +455,7 @@ impl SessionActor {
                 tool = counts.tool_result,
                 total = counts.total,
             );
-            let recent = super::helpers::memory_flush::select_flush_window(chat_history, 20);
+            let recent = super::helpers::memory_flush::select_flush_window(request_messages, 20);
 
             let flush_count = self.memory.flush_count.load(std::sync::atomic::Ordering::Relaxed);
             let system_prompt = if flush_count > 0 {
@@ -408,6 +467,9 @@ impl SessionActor {
             } else {
                 FLUSH_SYSTEM_PROMPT.to_owned()
             };
+            let sideband_prompt = format!(
+                "{system_prompt}\n\nNow write the memory summary as described in the system prompt."
+            );
             let mut items: Vec<ConversationItem> = vec![ConversationItem::system(system_prompt)];
             tracing::info!(
                 target: ::diagnostics::memory_log::TARGET,
@@ -429,138 +491,195 @@ impl SessionActor {
                 target: ::diagnostics::memory_log::TARGET,
                 "MEMORY_FLUSH: using model={model}"
             );
-            let session_id = self.session_info.id.to_string();
             let request = ConversationRequest {
                 items,
-                model: Some(model),
+                model: Some(model.clone()),
                 ..Default::default()
             };
-
-            // Run on the multi-threaded runtime so it doesn't block the
-            // session's LocalSet.
-            let handle = tokio::spawn(async move {
-                let response = sampling_client
-                    .conversation_collect(request)
-                    .await
-                    .map_err(|e| format!("flush model call failed: {e}"))?;
-                Ok::<_, String>(response.assistant_text())
-            });
-            // Abort the spawned task if this future is dropped (session
-            // cancellation), preventing orphan HTTP streams.
-            struct AbortOnDrop(tokio::task::AbortHandle);
-            impl Drop for AbortOnDrop {
-                fn drop(&mut self) {
-                    self.0.abort();
+            let mut sideband = self
+                .begin_sideband(
+                    chat_state::SidebandPurpose::MemoryFlush,
+                    sideband_prompt,
+                    SidebandInput::Frozen(vec![input_ref]),
+                    chat_state::SidebandRoute {
+                        model,
+                        backend: sideband_backend(sampling_client.api_backend()).into(),
+                    },
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("memory flush Sideband could not start: {error}"))
+                })?;
+            sideband.attempt(None).await.map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("memory flush Sideband attempt could not commit: {error}"))
+            })?;
+            match sampling_client.conversation_collect(request).await {
+                Ok(response) => Ok((response, sideband)),
+                Err(error) => {
+                    let detail = format!("flush model call failed: {error}");
+                    sideband
+                        .fail(chat_state::SidebandOutcome::Failed, detail.clone())
+                        .await
+                        .map_err(|record_error| {
+                            acp::Error::internal_error().data(format!(
+                                "{detail}; Sideband failure could not commit: {record_error}"
+                            ))
+                        })?;
+                    Err(acp::Error::internal_error().data(detail))
                 }
             }
-            let _guard = AbortOnDrop(handle.abort_handle());
-            handle
-                .await
-                .map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("flush stream task panicked: {e}"))
-                })?
-                .map_err(|e| acp::Error::internal_error().data(e))
         }
         .await;
 
         // (outcome_string, response_length, accepted_length, was_truncated, written_path)
         let (outcome, response_len, accepted_len, was_truncated, flush_path) = match result {
-            Ok(response_text) => {
+            Ok((response, mut sideband)) => {
+                let response_text = response.assistant_text();
                 let resp_len = response_text.len();
-                match process_flush_response(&response_text, &self.memory.flush_config) {
+                let processed = process_flush_response(&response_text, &self.memory.flush_config);
+                let usage = sideband_usage(&response);
+                let finish = sideband_finish(&response);
+                let recorded = match &processed {
                     FlushResult::NothingToStore => {
-                        tracing::debug!("memory flush: nothing to store");
-                        ("nothing to store".to_string(), resp_len, 0, false, None)
+                        sideband
+                            .complete(
+                                response_text.clone(),
+                                Some(serde_json::json!({ "outcome": "nothing_to_store" })),
+                                usage,
+                                finish,
+                            )
+                            .await
                     }
                     FlushResult::Accepted(content) => {
-                        let acc_len = content.len();
-                        let truncated = acc_len < resp_len;
-
-                        // Semantic dedup: check if this content overlaps with
-                        // existing memory chunks before writing.
-                        let is_sem_dup = if let Some(storage) = self.memory.storage() {
-                            if let Some(index) = self.memory.open_index(&storage) {
-                                let provider = if let Some(ref params) = self.memory.backend_params
-                                {
-                                    params.make_embedding_provider().await
-                                } else {
-                                    None
-                                };
-                                let threshold = self
-                                    .memory
-                                    .flush_config
-                                    .semantic_dedup_threshold
-                                    .unwrap_or(SEMANTIC_DEDUP_SIMILARITY_THRESHOLD);
-                                is_semantically_duplicate(
-                                    &content,
-                                    &index,
-                                    provider.as_ref().map(|p| {
-                                        p as &dyn crate::session::memory::embedding::EmbeddingProvider
-                                    }),
-                                    threshold,
-                                )
-                                .await
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-
-                        if is_sem_dup {
-                            tracing::info!(
-                                "memory flush: semantic duplicate detected, skipping write"
-                            );
-                            (
-                                "semantic duplicate".to_string(),
-                                resp_len,
-                                acc_len,
-                                truncated,
-                                None,
+                        sideband
+                            .complete(
+                                response_text.clone(),
+                                Some(serde_json::json!({
+                                    "outcome": "accepted",
+                                    "content": content,
+                                })),
+                                usage,
+                                finish,
                             )
-                        } else if let Some(storage) = self.memory.storage() {
-                            let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                            let session_id = &self.session_info.id.0;
-                            match storage
-                                .write_daily_log(&date, trigger, session_id, &content, true)
-                            {
-                                Ok(path) => {
-                                    tracing::info!("memory flush wrote session log");
-                                    self.reindex_and_embed(&path, "session").await;
-                                    *self.memory.last_flush_content.borrow_mut() = Some(content);
-                                    (
-                                        "written".to_string(),
-                                        resp_len,
-                                        acc_len,
-                                        truncated,
-                                        Some(path.display().to_string()),
-                                    )
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "memory flush write failed");
-                                    (
-                                        format!("write failed: {e}"),
-                                        resp_len,
-                                        acc_len,
-                                        truncated,
-                                        None,
-                                    )
-                                }
-                            }
-                        } else {
-                            (
-                                "storage not configured".to_string(),
-                                resp_len,
-                                acc_len,
-                                truncated,
-                                None,
-                            )
-                        }
+                            .await
                     }
                     FlushResult::Rejected(reason) => {
-                        tracing::warn!(reason = %reason, "memory flush response rejected");
-                        (format!("rejected: {reason}"), resp_len, 0, false, None)
+                        sideband
+                            .fail(
+                                chat_state::SidebandOutcome::Failed,
+                                format!("memory flush response rejected: {reason}"),
+                            )
+                            .await
+                    }
+                };
+                if let Err(error) = recorded {
+                    tracing::warn!(%error, "memory flush Sideband terminal could not commit");
+                    (
+                        format!("skipped: Sideband terminal could not commit: {error}"),
+                        resp_len,
+                        0,
+                        false,
+                        None,
+                    )
+                } else {
+                    match processed {
+                        FlushResult::NothingToStore => {
+                            tracing::debug!("memory flush: nothing to store");
+                            ("nothing to store".to_string(), resp_len, 0, false, None)
+                        }
+                        FlushResult::Accepted(content) => {
+                            let acc_len = content.len();
+                            let truncated = acc_len < resp_len;
+
+                            // Semantic dedup: check if this content overlaps with
+                            // existing memory chunks before writing.
+                            let is_sem_dup = if let Some(storage) = self.memory.storage() {
+                                if let Some(index) = self.memory.open_index(&storage) {
+                                    let provider =
+                                        if let Some(ref params) = self.memory.backend_params {
+                                            params.make_embedding_provider().await
+                                        } else {
+                                            None
+                                        };
+                                    let threshold = self
+                                        .memory
+                                        .flush_config
+                                        .semantic_dedup_threshold
+                                        .unwrap_or(SEMANTIC_DEDUP_SIMILARITY_THRESHOLD);
+                                    is_semantically_duplicate(
+                                        &content,
+                                        &index,
+                                        provider.as_ref().map(|p| {
+                                            p as &dyn memory::embedding::EmbeddingProvider
+                                        }),
+                                        threshold,
+                                    )
+                                    .await
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                            if is_sem_dup {
+                                tracing::info!(
+                                    "memory flush: semantic duplicate detected, skipping write"
+                                );
+                                (
+                                    "semantic duplicate".to_string(),
+                                    resp_len,
+                                    acc_len,
+                                    truncated,
+                                    None,
+                                )
+                            } else if let Some(storage) = self.memory.storage() {
+                                let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                                let session_id = &self.session_info.id.0;
+                                match storage
+                                    .write_daily_log(&date, trigger, session_id, &content, true)
+                                {
+                                    Ok(path) => {
+                                        tracing::info!("memory flush wrote session log");
+                                        self.reindex_and_embed(&path, "session").await;
+                                        *self.memory.last_flush_content.borrow_mut() =
+                                            Some(content);
+                                        (
+                                            "written".to_string(),
+                                            resp_len,
+                                            acc_len,
+                                            truncated,
+                                            Some(path.display().to_string()),
+                                        )
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "memory flush write failed");
+                                        (
+                                            format!("write failed: {e}"),
+                                            resp_len,
+                                            acc_len,
+                                            truncated,
+                                            None,
+                                        )
+                                    }
+                                }
+                            } else {
+                                (
+                                    "storage not configured".to_string(),
+                                    resp_len,
+                                    acc_len,
+                                    truncated,
+                                    None,
+                                )
+                            }
+                        }
+                        FlushResult::Rejected(reason) => {
+                            tracing::warn!(reason = %reason, "memory flush response rejected");
+                            (format!("rejected: {reason}"), resp_len, 0, false, None)
+                        }
                     }
                 }
             }
@@ -631,18 +750,22 @@ impl SessionActor {
     }
 
     /// Capture the flush inputs before compaction mutates conversation history.
-    pub(super) async fn snapshot_memory_flush_state(&self) -> MemoryFlushSnapshot {
-        let (counts, conversation) = tokio::join!(
-            self.chat_state_handle.get_conversation_counts(),
-            self.chat_state_handle.get_conversation(),
+    pub(super) async fn snapshot_memory_flush_state(&self) -> Option<MemoryFlushSnapshot> {
+        let materialized = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await?;
+        let counts = chat_state::ConversationCounts::from_items(&materialized.surface);
+        let request_messages = crate::sampling::conversation_to_chat_messages(
+            chat_state::compaction_utils::prepare_conversation_for_summarization(
+                materialized.surface,
+            ),
         );
-        let chat_history = crate::sampling::conversation_to_chat_messages(
-            chat_state::compaction_utils::prepare_conversation_for_summarization(conversation),
-        );
-        MemoryFlushSnapshot {
+        Some(MemoryFlushSnapshot {
             counts,
-            chat_history,
-        }
+            request_messages,
+            input_ref: materialized.input_ref,
+        })
     }
 
     /// Rewrite a raw memory note into well-structured markdown via a one-shot
@@ -685,6 +808,7 @@ impl SessionActor {
             "Session context:\n{context_summary}\n\nRewrite this note as a memory entry:\n\n{raw_text}"
         );
 
+        let sideband_prompt = format!("{system}\n\n{user_msg}");
         let items = vec![
             ConversationItem::system(system.to_owned()),
             ConversationItem::user(user_msg),
@@ -697,50 +821,68 @@ impl SessionActor {
             ..Default::default()
         };
 
-        let request_id = sampler::RequestId::random();
-        let idle_timeout = std::time::Duration::from_secs(15);
-
-        let result = match sampling_client.api_backend() {
-            crate::sampling::ApiBackend::ChatCompletions => {
-                let (raw, meta) = sampling_client
-                    .conversation_stream(request)
+        let mut sideband = self
+            .begin_sideband(
+                chat_state::SidebandPurpose::MemoryRewrite,
+                sideband_prompt,
+                SidebandInput::None,
+                chat_state::SidebandRoute {
+                    model: request.model.clone().unwrap_or_default(),
+                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| format!("rewrite Sideband could not start: {error}"))?;
+        sideband
+            .attempt(None)
+            .await
+            .map_err(|error| format!("rewrite Sideband attempt could not commit: {error}"))?;
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            sampling_client.conversation_collect(request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                let detail = format!("rewrite inference failed: {error}");
+                sideband
+                    .fail(chat_state::SidebandOutcome::Failed, detail.clone())
                     .await
-                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events = sampler::stream_chat_completions(raw, meta, request_id, idle_timeout);
-                sampler::collect_response(events).await
+                    .map_err(|record_error| {
+                        format!("{detail}; Sideband failure could not commit: {record_error}")
+                    })?;
+                return Err(detail);
             }
-            crate::sampling::ApiBackend::Responses => {
-                let (raw, meta, doom_loop) = sampling_client
-                    .conversation_stream_responses(request)
+            Err(_) => {
+                let detail = "rewrite inference timed out after 15 seconds";
+                sideband
+                    .fail(chat_state::SidebandOutcome::Cancelled, detail)
                     .await
-                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events =
-                    sampler::stream_responses(raw, meta, request_id, idle_timeout, doom_loop);
-                sampler::collect_response(events).await
-            }
-            crate::sampling::ApiBackend::Messages => {
-                let (raw, meta) = sampling_client
-                    .conversation_stream_messages(request)
-                    .await
-                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events = sampler::stream_messages(raw, meta, request_id, idle_timeout);
-                sampler::collect_response(events).await
+                    .map_err(|record_error| {
+                        format!("{detail}; Sideband cancellation could not commit: {record_error}")
+                    })?;
+                return Err(detail.into());
             }
         };
-
-        match result {
-            Ok((response, _metrics)) => {
-                let text = response.assistant_text();
-                if text.is_empty() {
-                    Err("LLM returned empty response".to_string())
-                } else {
-                    Ok(text)
-                }
-            }
-            Err(e) => {
-                tracing::debug!(error = %e.message, "memory note rewrite inference failed");
-                Err(format!("rewrite inference failed: {}", e.message))
-            }
+        let text = response.assistant_text();
+        if text.trim().is_empty() {
+            let detail = "memory rewrite returned an empty response";
+            sideband
+                .fail(chat_state::SidebandOutcome::Failed, detail)
+                .await
+                .map_err(|record_error| {
+                    format!("{detail}; Sideband failure could not commit: {record_error}")
+                })?;
+            return Err(detail.into());
         }
+        let usage = sideband_usage(&response);
+        let finish = sideband_finish(&response);
+        sideband
+            .complete(text.clone(), None, usage, finish)
+            .await
+            .map_err(|error| format!("rewrite Sideband result could not commit: {error}"))?;
+        Ok(text)
     }
 }

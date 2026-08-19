@@ -24,9 +24,9 @@ struct StageLease {
 }
 ```
 
-`GoalOrchestration` 与 Behavior 一起存入原子 `session-control.json`。stage lease、取消句柄、当前子 Agent、实时 token、activity projection、动画状态以及 planner 分段 staging（已接受段、上一任 planner subagent id、失败原因）不持久化。
+`GoalOrchestration` 与 Behavior 一起存入原子 Timeline `control` 事件。stage lease、取消句柄、当前子 Agent、实时 token、activity projection、动画状态以及 planner 分段 staging（已接受段、上一任 planner subagent id、失败原因）不持久化。
 
-- 旧 session-control architecture 不迁移，诊断后清除并恢复 Normal。
+- 旧 control architecture 不迁移；不含当前 Timeline Control schema 的 session 直接拒绝加载。
 - 旧 Goal architecture 不迁移。
 - 当前 architecture 但内部 board/phase 冲突时，保留 goal id 与 objective，清空不可信 board，恢复为 Paused/Planning 并保持 Goal Behavior；它只能由 `/goal edit`、`/goal clear` 或显式 resume 继续。
 - Active 重载后清 transient lease，由 idle hook 重拉；Paused、Blocked、BudgetLimited、Complete 不自治。
@@ -143,7 +143,7 @@ Goal compact view只消费 Shell 发布的结构化顶层任务：checkbox、状
 
 ## 存储与恢复不变量
 
-- Goal/Behavior 只有一个 `session-control.json`，控制命令写成功后才返回成功。
+- Goal/Behavior 只有 Timeline `control` 事件这一条持久化路径，控制命令写成功后才返回成功。
 - 同进程控制写失败使用保留 transient lease 的事务回滚；只有 crash/reload 恢复才清除 lease 并由 idle hook 重拉，避免旧 stage 仍运行时重复启动。
 - stage result、progress、终态先持久化，再唤醒 idle arbiter。
 - Complete receipt 冻结 token/elapsed；之后的 Normal turn不再计入。

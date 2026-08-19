@@ -49,11 +49,11 @@ impl MvpAgent {
     }
     /// Remove a session without finalizing; it stays resumable on disk.
     pub(crate) fn remove_session(&self, id: &acp::SessionId) {
-        let _ = self
-            .subagent_event_tx
-            .send(tools::implementations::grow_build::task::types::SubagentEvent::TeardownSession {
+        let _ = self.subagent_event_tx.send(
+            tools::implementations::grow_build::task::types::SubagentEvent::TeardownSession {
                 parent_session_id: id.0.to_string(),
-            });
+            },
+        );
         self.take_session(id);
         self.session_threads.borrow_mut().remove(id);
         self.resident_resources.borrow_mut().remove(id);
@@ -136,7 +136,7 @@ impl MvpAgent {
     /// published `current_prompt_id` yet (it is set asynchronously once the
     /// actor dequeues the `SessionCommand::QueuePrompt`), so a natural read would
     /// still observe `Idle`. The authoritative entry (cwd / worktree / model /
-    /// yolo) is built by `resident_roster_entry`, so it never diverges from
+    /// always-approve) is built by `resident_roster_entry`, so it never diverges from
     /// the polled entry; only the `activity` field is overridden.
     pub(super) fn push_roster_activity_delta(
         &self,
@@ -219,7 +219,7 @@ impl MvpAgent {
         id: &acp::SessionId,
     ) -> Option<crate::agent::roster::RosterEntry> {
         let session_id = id.0.to_string();
-        let (cwd, is_worktree, model_id, reasoning_effort, yolo) = {
+        let (cwd, is_worktree, model_id, reasoning_effort, permission_mode) = {
             let sessions = self.sessions.borrow();
             let h = sessions.get(id)?;
             (
@@ -227,7 +227,7 @@ impl MvpAgent {
                 h.display_cwd.is_some(),
                 Some(h.model_id.0.to_string()),
                 h.reasoning_effort,
-                h.yolo_mode,
+                h.permission_mode,
             )
         };
         Some(crate::agent::roster::RosterEntry {
@@ -241,7 +241,7 @@ impl MvpAgent {
             is_worktree,
             model_id,
             reasoning_effort,
-            yolo,
+            permission_mode,
             activity: self.resident_activity(id),
             resident: true,
             last_change_unix_ms: chrono::Utc::now().timestamp_millis(),
@@ -430,12 +430,11 @@ impl MvpAgent {
     /// Entry counts for every collection [`Self::remove_session`] drains,
     /// plus workspace bindings and shared coordinator state.
     pub(crate) async fn registry_snapshot(&self) -> RegistrySnapshot {
-        let subagents =
-            tools::implementations::grow_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
-            )
-            .registry_counts()
-            .await;
+        let subagents = tools::implementations::grow_build::task::backend::ChannelBackend::new(
+            self.subagent_event_tx.clone(),
+        )
+        .registry_counts()
+        .await;
         let (resident_resources, session_index_claims, require_gateway_sessions) = {
             let resident = self.resident_resources.borrow();
             (

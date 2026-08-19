@@ -3,7 +3,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::widgets::StatefulWidget;
 use std::ops::Range;
 
 use crate::render::SafeBuf;
@@ -23,10 +22,7 @@ use crate::theme::Theme;
 ///
 /// Displays conversation entries with optional pinned header for the current turn's prompt.
 ///
-/// # Scratch Buffers
-/// For efficiency, scratch buffers should be owned by the caller and reused across frames.
-/// Use `render_with_scratch()` for optimal performance. The `StatefulWidget::render()` impl
-/// creates a temporary scratch buffer for API compatibility but is less efficient.
+/// The scratch buffer is owned by the caller and reused across frames.
 #[derive(Debug, Clone, Default)]
 pub struct ScrollbackPane {
     /// Time-derived animation sample supplied by the owning frame.
@@ -107,17 +103,6 @@ impl ScrollbackPane {
     pub fn with_media_paths(mut self, media_paths: Vec<std::path::PathBuf>) -> Self {
         self.media_paths = media_paths;
         self
-    }
-}
-
-impl StatefulWidget for ScrollbackPane {
-    type State = ScrollbackState;
-
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        // Create a temporary scratch buffer for API compatibility.
-        // For better performance, use render_with_scratch() with a reusable scratch buffer.
-        let mut scratch = ScratchBuffer::new();
-        self.render_with_scratch(area, buf, state, &mut scratch);
     }
 }
 
@@ -358,18 +343,10 @@ impl ScrollbackPane {
         scratch: &mut ScratchBuffer,
     ) -> RenderOutputWithSelectionBoundaries {
         let layout_cfg = &state.appearance().scrollback.layout;
-        let layout = HorizontalLayout::new(area, layout_cfg);
-        let entry_content_width = layout.entry_content_area().width;
-
         // Build prompt descriptors for the given entry range.
         // For SingleTurn, this gives us relative y_virtual coordinates.
         // For AllTurns, this is equivalent to the full range.
-        let prompts = self.build_prompt_descriptors_for_range(
-            state,
-            entry_content_width,
-            theme,
-            entry_range.clone(),
-        );
+        let prompts = self.build_prompt_descriptors_for_range(state, entry_range.clone());
 
         // Compute sticky header layout (disabled in compact mode).
         let use_sticky = state.appearance().scrollback.display.sticky_headers
@@ -580,8 +557,6 @@ impl ScrollbackPane {
     fn build_prompt_descriptors_for_range(
         &self,
         state: &ScrollbackState,
-        _entry_content_width: u16, // Kept for API compat, but not used (heights from cache)
-        _theme: &Theme,            // Kept for API compat, but not used
         entry_range: Range<usize>,
     ) -> Vec<PromptDescriptor> {
         // Get cached data - must be valid after prepare_layout()

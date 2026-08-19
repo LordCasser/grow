@@ -54,26 +54,25 @@ use acp_transport::AcpAgentGatewaySender as GatewaySender;
 use crate::agent::auth_method;
 use crate::agent::config::{self, Config as AgentConfig, ModelEntry, resolve_credentials};
 use crate::agent::folder_trust;
-use crate::agent::models::{resolve_catalog_key, selectable_catalog_key_for_persisted};
+use crate::agent::models::selectable_catalog_key_for_persisted;
 use crate::agent::session_config;
 use sampling_types::{
     REASONING_EFFORT_META_KEY, ReasoningEffortOption, reasoning_effort_meta_value,
-    supports_reasoning_effort_meta,
+    parse_reasoning_efforts_meta,
 };
 use crate::agent::update_chunk_merge;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use ::diagnostics::session_ctx::log_event;
 use workspace::file_system::{AcpSessionFs, CodebaseIndexManager, LocalFs};
 use workspace::permission::ClientType;
-use crate::sampling::Client as OaiCompatClient;
 use crate::sampling::error::map_sampling_err_to_acp;
 use crate::session::mcp_servers::{McpMetaConfigMap, parse_mcp_meta_config};
 use sampler::SamplerConfig as SamplingConfig;
 use crate::session::persistence::PersistenceHandle;
 use crate::session::worktree::BackgroundCopyContext;
 use crate::session::{
-    ParsedPromptInfo, SCHEDULER_BACKGROUND_LOOPS_META_KEY, SessionCommand, SessionHandle,
-    SessionLiveState, SessionThread, info::Info as SessionInfo, spawn_session_on_thread,
+    SessionCommand, SessionHandle, SessionLiveState, SessionThread, info::Info as SessionInfo,
+    spawn_session_on_thread,
 };
 use crate::terminal::{AcpTerminalRunner, TerminalRunner};
 use crate::tools::ToolContext;
@@ -108,25 +107,6 @@ fn lookup_session_model(
         .unwrap_or_else(|| default_model_id.clone())
 }
 
-fn apply_yolo_mode_to_matching_sessions(
-    sessions: &mut HashMap<acp::SessionId, SessionHandle>,
-    sender_id: Option<&str>,
-    yolo_mode: bool,
-) -> usize {
-    let mut updated = 0;
-    for handle in sessions.values_mut() {
-        let matches_sender = sender_id.is_none()
-            || handle.origin_client.as_ref().map(|client| client.product.as_str()) == sender_id;
-        if matches_sender {
-            handle.yolo_mode = yolo_mode;
-            let _ = handle
-                .cmd_tx
-                .send(SessionCommand::SetYoloMode { enabled: yolo_mode });
-            updated += 1;
-        }
-    }
-    updated
-}
 pub(crate) struct SessionSpawnOptions<'a> {
     pub session_info: SessionInfo,
     pub cwd: AbsPathBuf,
@@ -134,11 +114,9 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub initial_client_mcp_servers: Vec<acp::McpServer>,
     pub mcp_meta_config_map: McpMetaConfigMap,
     pub persistence: PersistenceHandle,
-    /// Durable timeline for a resumed/forked session. `None` starts a new lineage.
-    pub timeline_events: Option<Vec<chat_state::TimelineEvent>>,
-    pub chat_history: Vec<crate::sampling::ConversationItem>,
+    pub session_title_route: Option<crate::session::summary::SessionTitleRoute>,
+    pub timeline_bootstrap: crate::session::TimelineBootstrap,
     pub rewind_points_file_path: Option<std::path::PathBuf>,
-    pub initial_total_tokens: u64,
     pub origin_client: Option<crate::http::OriginClientInfo>,
     pub client_code_nav_enabled: bool,
     pub client_terminal: bool,
@@ -148,7 +126,6 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
     pub persisted_behavior: Option<crate::session::behavior::BehaviorSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
-    pub persisted_goal_mode_rejected: bool,
     pub persisted_control_revision: u64,
     pub persisted_workflow_runs: Vec<
         crate::session::workflow::store::RestoredWorkflowRun,
@@ -161,8 +138,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     /// this unset and resolve the global default independently of the model.
     pub persisted_agent_name: Option<&'a str>,
     pub session_model_id: acp::ModelId,
-    pub session_yolo_mode: bool,
-    pub session_auto_mode: bool,
+    pub session_permission_mode: crate::util::config::PermissionMode,
     pub prompt_display_cwd: Option<String>,
 }
 /// `session/new` / `session/load` `_meta` key carrying per-session plugin roots.
@@ -224,19 +200,38 @@ fn mark_as_replay(
         obj.insert("grow/persist".to_string(), persist.clone());
     }
 }
-/// Resolve a session's REQUESTED auto flag from `_meta`: an explicit `autoMode`
-/// (or snake_case `auto_mode`) wins; when absent, fall back to the config default
-/// with yolo taking precedence (yolo suppresses the default auto seed). Shared by
-/// the new_session / load_session parse paths (the feature gate is enforced later
-/// at the `set_auto_mode` seam) and unit-tested directly.
-pub(crate) fn resolve_session_auto_mode(
+/// Resolve the canonical session permission mode from ACP `_meta`.
+pub(crate) fn resolve_session_permission_mode(
     meta: Option<&acp::Meta>,
-    default_auto_mode: bool,
-    session_yolo_mode: bool,
-) -> bool {
-    meta.and_then(|m| m.get("autoMode").or_else(|| m.get("auto_mode")))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default_auto_mode && !session_yolo_mode)
+    default_mode: crate::util::config::PermissionMode,
+) -> Result<crate::util::config::PermissionMode, acp::Error> {
+    let Some(value) = meta.and_then(|m| m.get("permissionMode")) else {
+        return Ok(default_mode);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(acp::Error::invalid_params().data("_meta.permissionMode must be a string"));
+    };
+    let requested = match raw {
+        "ask" => Ok(crate::util::config::PermissionMode::Ask),
+        "auto" => Ok(crate::util::config::PermissionMode::Auto),
+        "always-approve" => Ok(crate::util::config::PermissionMode::AlwaysApprove),
+        _ => Err(acp::Error::invalid_params().data(format!(
+            "unsupported _meta.permissionMode: {raw}"
+        ))),
+    }?;
+    Ok(match requested {
+        crate::util::config::PermissionMode::AlwaysApprove
+            if workspace::permission::resolution::always_approve_disabled_by_policy().is_some() =>
+        {
+            crate::util::config::PermissionMode::Ask
+        }
+        crate::util::config::PermissionMode::Auto
+            if !crate::util::config::auto_permission_mode_enabled_from_disk() =>
+        {
+            crate::util::config::PermissionMode::Ask
+        }
+        mode => mode,
+    })
 }
 /// Typed `_meta` payload for `PromptResponse`.
 /// camelCase keys match the bot's `_META_TOKEN_KEY_MAP`.
@@ -352,7 +347,6 @@ struct SettingsUpdateNotification {
     /// Soft-default permission mode for the pager (post-auth / `/new` refresh).
     permission_mode: Option<String>,
     group_tool_verbs: Option<bool>,
-    collapsed_edit_blocks: Option<bool>,
 }
 /// Reason why a client is not eligible to use codebase indexing.
 ///
@@ -452,10 +446,8 @@ pub struct MvpAgent {
     /// as `client_type`.  Using `Cell<bool>` (not `RefCell`) so `.get()` is a
     /// plain copy with no borrow that could be held across an await point.
     code_nav_enabled: std::cell::Cell<bool>,
-    /// Default YOLO mode - when true, sessions start with auto-approve enabled.
-    /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
-    default_yolo_mode: bool,
-    default_auto_mode: bool,
+    /// Default permission mode for sessions without an explicit ACP override.
+    default_permission_mode: crate::util::config::PermissionMode,
     /// Memory system configuration (None when --experimental-memory not set).
     memory_config: Option<crate::config::MemoryConfig>,
     /// Optional channel to the leader's `ConfigFileWatcher` for dynamic
@@ -492,8 +484,6 @@ pub struct MvpAgent {
     pub(crate) worktree_type: crate::util::config::WorktreeType,
     /// Restore codebase state on worktree resume (resolved: local config > remote > default false).
     pub(crate) restore_code: bool,
-    /// Managed MCP configs and gateway tool catalog; lazily fetched.
-    managed_mcp_cache: crate::session::managed_mcp::ManagedMcpStateHandle,
     /// Agent-level MCP server state. LEADER-SAFE(shared): MCP servers are
     /// agent-scoped, not per-client.
     agent_mcp_state: std::sync::Arc<
@@ -611,7 +601,6 @@ fn read_session_or_init_meta_str<'a>(
     };
     read(session_meta).or_else(|| read(init_meta))
 }
-use chat_state::conversation_util::replace_or_insert_system_head;
 /// Non-empty `systemPromptOverride` from session meta (preferred) or init meta.
 /// A blank string (empty or whitespace-only) is treated as "no override" so a
 /// client cannot accidentally blank the system prompt.
@@ -653,7 +642,7 @@ fn build_spawn_system_prompt(
 }
 /// Enqueue a `ReplaceSystemPrompt` for a resident session actor. No-op when
 /// the client sent no (non-empty) `systemPromptOverride`, or when the head
-/// already matches (e.g. a cold load that pre-applied the override).
+/// already matches.
 ///
 /// Note: only `systemPromptOverride` is synced on attach. `_meta.rules` is
 /// folded into the prompt at session creation only (see
@@ -881,11 +870,12 @@ impl MvpAgent {
                 return;
             }
         };
-        let method = env.method.unwrap_or("session/update");
-        let Some(raw_params) = env.params else {
-            tracing::debug!("replay: skipping JSONL line with no params");
+        let method = env.method;
+        if !matches!(method, "session/update" | "_grow/session/update") {
+            tracing::debug!(method, "replay: skipping unknown update method");
             return;
-        };
+        }
+        let raw_params = env.params;
         let is_grow = method == "_grow/session/update";
         if is_grow {
             if target_client_id.is_none() && !mark_replay {
@@ -992,8 +982,8 @@ impl MvpAgent {
             completions.push(self.gateway.forward_with_completion(notification));
         }
     }
-    /// Replay updates from disk and drain completions.
-    /// Returns `(initial_total_tokens, end_offset)`.
+    /// Replay updates from disk and drain completions. Returns the captured end
+    /// offset plus UI-cache coverage for canonical subagent facts.
     pub(super) async fn replay_session_updates(
         &self,
         session_id: &acp::SessionId,
@@ -1002,24 +992,24 @@ impl MvpAgent {
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
-    ) -> Result<(u64, u64, Vec<(String, String)>), acp::Error> {
+    ) -> Result<(u64, crate::session::storage::SubagentProjectionState), acp::Error> {
         let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
         replay_timer.with_field("session_id", session_id.0.as_ref());
         replay_timer.with_field("cwd", cwd.as_str());
         let Some(updates_path) = updates_file_path.clone() else {
             tracing::warn!(session_id = %session_id.0, "replay: no updates file path");
-            return Ok((0, 0, Vec::new()));
+            return Ok((0, Default::default()));
         };
         let file_size = std::fs::metadata(&updates_path).map(|m| m.len()).unwrap_or(0);
         let (raw_contents, end_offset) = match read_complete_jsonl_snapshot(&updates_path) {
             Ok((contents, end_offset)) if !contents.is_empty() => (contents, end_offset),
-            _ => return Ok((0, 0, Vec::new())),
+            _ => return Ok((0, Default::default())),
         };
         let mut prepared = {
             let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
             crate::session::storage::prepare_replay_lines(&raw_contents, cursor)
         };
-        let unfinished_subagents = std::mem::take(&mut prepared.unfinished_subagents);
+        let subagent_projections = std::mem::take(&mut prepared.subagent_projections);
         if cursor.is_some() {
             let sending = prepared.lines.len();
             if prepared.mark_replay {
@@ -1036,7 +1026,6 @@ impl MvpAgent {
                 );
             }
         }
-        let last_tokens = prepared.last_tokens;
         let mark_replay = prepared.mark_replay;
         if let Some(max_seq) = prepared.max_event_seq {
             crate::util::event_id::ensure_event_counter_at_least(max_seq + 1);
@@ -1080,7 +1069,7 @@ impl MvpAgent {
             "replay: completed"
         );
         replay_timer.with_field("updates_count", updates_count);
-        Ok((last_tokens, end_offset, unfinished_subagents))
+        Ok((end_offset, subagent_projections))
     }
     /// Enqueue replay notifications for updates appended after `from_offset`.
     /// Returns completion receivers; callers open the gate then drain.
@@ -1145,10 +1134,10 @@ impl MvpAgent {
         }
         completions
     }
-    /// Scan persisted updates for `task_backgrounded` entries that have no
-    /// matching `task_completed`. Applies rewind dead-branch filtering so
-    /// tasks from rewound branches are not included.
-    pub(super) fn find_orphaned_background_tasks(
+    /// Find replay rows that would leave a cold client's background-task UI in
+    /// a false "Running" state. This projection never restores task runtime
+    /// ownership; the process registry remains authoritative.
+    pub(super) fn find_stale_background_task_projections(
         updates_file_path: &Option<PathBuf>,
     ) -> Vec<OrphanedTask> {
         use crate::session::wire_tags::{TASK_BACKGROUNDED, TASK_COMPLETED};
@@ -1200,16 +1189,16 @@ impl MvpAgent {
         }
         pending.into_values().collect()
     }
-    /// Emit `task_completed` for background tasks that were replayed as
-    /// "Running" but whose processes no longer exist (cold session load).
+    /// Emit UI-only `task_completed` repairs for replay rows that display as
+    /// "Running" even though a cold load owns no corresponding process.
     /// Returns completion receivers so the caller can drain them before
     /// returning LoadSessionResponse.
-    pub(super) fn reconcile_stale_background_tasks(
+    pub(super) fn repair_stale_background_task_projections(
         &self,
         session_id: &acp::SessionId,
         updates_file_path: &Option<PathBuf>,
     ) -> Vec<tokio::sync::oneshot::Receiver<acp_transport::AcpResult<()>>> {
-        let orphaned = Self::find_orphaned_background_tasks(updates_file_path);
+        let orphaned = Self::find_stale_background_task_projections(updates_file_path);
         if orphaned.is_empty() {
             return Vec::new();
         }
@@ -1242,7 +1231,6 @@ impl MvpAgent {
                 session_id: session_id.clone(),
                 update: crate::extensions::notification::SessionUpdate::TaskCompleted {
                     task_snapshot: snapshot,
-                    will_wake: false,
                 },
                 meta: None,
             };
@@ -1270,50 +1258,6 @@ impl MvpAgent {
             );
         }
         completions
-    }
-    /// Extracts initial_total_tokens by scanning only the tail of the updates file.
-    /// Avoids loading and deserializing all updates when replay is skipped (noReplay).
-    pub(super) fn extract_initial_tokens_from_updates(
-        updates_file_path: &Option<PathBuf>,
-    ) -> u64 {
-        use std::io::{Read, Seek, SeekFrom};
-        let Some(updates_path) = updates_file_path else {
-            return 0;
-        };
-        let mut file = match std::fs::File::open(updates_path) {
-            Ok(f) => f,
-            Err(_) => return 0u64,
-        };
-        let file_len = match file.metadata() {
-            Ok(m) => m.len(),
-            Err(_) => return 0,
-        };
-        const TAIL_SIZE: u64 = 64 * 1024;
-        let start_pos = file_len.saturating_sub(TAIL_SIZE);
-        if file.seek(SeekFrom::Start(start_pos)).is_err() {
-            return 0;
-        }
-        let mut buf = String::new();
-        if file.read_to_string(&mut buf).is_err() {
-            return 0;
-        }
-        let result = buf
-            .lines()
-            .rev()
-            .filter(|line| !line.trim().is_empty())
-            .find_map(|line| {
-                let value: serde_json::Value = serde_json::from_str(line).ok()?;
-                value.get("params")?.get("meta")?.get("totalTokens")?.as_u64()
-            })
-            .unwrap_or(0);
-        if result == 0 {
-            tracing::warn!(
-                path = %updates_path.display(),
-                "extract_initial_tokens: no totalTokens found in updates tail, \
-                 token tracking will rely on conversation estimate until first model response"
-            );
-        }
-        result
     }
     /// Resolve current auto-GC policy and run it on the blocking pool.
     pub(super) fn spawn_auto_worktree_gc(&self) {
@@ -1343,7 +1287,6 @@ impl MvpAgent {
                 ),
                 permission_mode: rs.and_then(|s| s.permission_mode.clone()),
                 group_tool_verbs: rs.and_then(|s| s.group_tool_verbs),
-                collapsed_edit_blocks: rs.and_then(|s| s.collapsed_edit_blocks),
             }
         };
         if let Ok(params) = serde_json::value::to_raw_value(&payload) {
@@ -1469,8 +1412,6 @@ impl MvpAgent {
                 Ok(Some(res)) => {
                     tracing::info!(
                         version = %res.version,
-                        personas = res.personas_count,
-                        roles = res.roles_count,
                         agents = res.agents_count,
                         skills = res.skills_count,
                         "proactive bundle sync complete"

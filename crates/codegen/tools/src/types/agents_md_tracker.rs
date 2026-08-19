@@ -11,31 +11,11 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::Gitignore;
 
-use crate::types::compat::CompatConfig;
-
 /// Filenames (and relative paths) recognized as project instruction files.
-///
-/// The runtime list is produced by `CompatConfig::agent_filenames()`; this
-/// constant is retained only as the all-on reference that the pinning test
-/// `compat_default_matches_legacy_constants` asserts parity against.
-#[cfg(test)]
-pub(crate) const AGENT_FILENAMES: &[&str] = &[
-    "Agents.md",
-    "Claude.md",
-    "CLAUDE.md",
-    "CLAUDE.local.md",
-    "AGENT.md",
-    "AGENTS.md",
-    ".claude/CLAUDE.md",
-    ".claude/CLAUDE.local.md",
-];
+pub(crate) const AGENT_FILENAME: &str = "AGENTS.md";
 
-/// Subdirectories to scan for `*.md` rules files.
-///
-/// The runtime list is produced by `CompatConfig::rules_dirs()`; this constant
-/// is retained only as the all-on reference for the pinning test.
-#[cfg(test)]
-pub(crate) const RULES_DIRS: &[&str] = &[".grow/rules", ".claude/rules", ".cursor/rules"];
+/// Subdirectory to scan for `*.md` rules files.
+pub(crate) const RULES_DIR: &str = ".grow/rules";
 
 /// Maximum number of parent directories to walk upward per call.
 ///
@@ -107,23 +87,11 @@ pub struct AgentsMdTracker {
     /// .gitignore are silently skipped, matching the behavior of the initial
     /// discovery in agents_md.rs.
     gitignore: Option<Gitignore>,
-
-    /// Resolved vendor-compat config governing which rules dirs and agent
-    /// filenames are scanned. Defaults to all-on (historical behavior).
-    /// Set by the bridge at seed time.
-    compat: CompatConfig,
 }
 
 impl AgentsMdTracker {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Set the resolved vendor-compat config used by runtime AGENTS.md / rules
-    /// discovery. Must be called at session start (alongside `seed`) so
-    /// `check_path` gates vendor surfaces correctly.
-    pub fn set_compat(&mut self, compat: CompatConfig) {
-        self.compat = compat;
     }
 
     /// Seed the tracker with paths from the initial AGENTS.md discovery.
@@ -240,13 +208,6 @@ impl AgentsMdTracker {
 
         let mut discoveries = Vec::new();
 
-        // Compute the gated filename / rules-dir lists once per call (they are
-        // constant across the walk). The vendor-gated entries drop when the
-        // matching compat cell is off; all-on reproduces `AGENT_FILENAMES` /
-        // `RULES_DIRS` exactly.
-        let agent_filenames = self.compat.agent_filenames();
-        let rules_dirs = self.compat.rules_dirs();
-
         // Walk up from start_dir to git_root, bounded by MAX_WALK_DEPTH
         let mut current = Some(start_dir.as_path());
         let mut depth = 0;
@@ -272,42 +233,34 @@ impl AgentsMdTracker {
                 // with a timeout. On the first timeout we abort the entire
                 // walk — a single hung stat means the filesystem is
                 // unresponsive and continuing would just pile up timeouts.
-                // `agent_filenames` is computed once above the walk.
-                for filename in &agent_filenames {
-                    let agents_path = dir.join(filename);
-                    let stat_result =
-                        tokio::time::timeout(FS_SYSCALL_TIMEOUT, tokio::fs::metadata(&agents_path))
-                            .await;
+                let agents_path = dir.join(AGENT_FILENAME);
+                let stat_result =
+                    tokio::time::timeout(FS_SYSCALL_TIMEOUT, tokio::fs::metadata(&agents_path))
+                        .await;
 
-                    if stat_result.is_err() {
-                        // Timeout — filesystem unresponsive, bail out
-                        tracing::warn!(
-                            path = %agents_path.display(),
-                            "check_path: exists() timed out, aborting walk"
-                        );
-                        return discoveries;
-                    }
+                if stat_result.is_err() {
+                    tracing::warn!(
+                        path = %agents_path.display(),
+                        "check_path: exists() timed out, aborting walk"
+                    );
+                    return discoveries;
+                }
 
-                    let file_exists = stat_result.ok().and_then(|r| r.ok()).is_some();
-
-                    if file_exists {
-                        // Canonicalize the discovered path for consistent lookups
-                        let canonical_agents = normalize(&agents_path).await;
-                        if !self.is_ignored(&canonical_agents)
-                            && !self.initial_discovery.contains(&canonical_agents)
-                            && !self.reminded.contains(&canonical_agents)
-                        {
-                            discoveries.push(canonical_agents.clone());
-                            self.reminded.insert(canonical_agents);
-                        }
+                let file_exists = stat_result.ok().and_then(|r| r.ok()).is_some();
+                if file_exists {
+                    let canonical_agents = normalize(&agents_path).await;
+                    if !self.is_ignored(&canonical_agents)
+                        && !self.initial_discovery.contains(&canonical_agents)
+                        && !self.reminded.contains(&canonical_agents)
+                    {
+                        discoveries.push(canonical_agents.clone());
+                        self.reminded.insert(canonical_agents);
                     }
                 }
 
-                // Check for rules files in .grow/rules/, .claude/rules/, and
-                // .cursor/rules/ subdirectories (vendor-compat paths).
-                // `rules_dirs` is computed once above the walk.
-                for rules_subdir in &rules_dirs {
-                    let rules_dir = dir.join(rules_subdir);
+                // Check for canonical Grow project rules.
+                {
+                    let rules_dir = dir.join(RULES_DIR);
                     let stat_result =
                         tokio::time::timeout(FS_SYSCALL_TIMEOUT, tokio::fs::metadata(&rules_dir))
                             .await;
@@ -473,12 +426,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_path_finds_all_filename_variants() {
+    async fn check_path_ignores_noncanonical_instruction_filename() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let sub = root.join("sub");
         fs::create_dir_all(&sub).unwrap();
-        fs::write(sub.join("Claude.md"), "claude instructions").unwrap();
+        fs::write(sub.join("INSTRUCTIONS.md"), "foreign instructions").unwrap();
 
         let mut tracker = AgentsMdTracker::new();
         tracker
@@ -486,8 +439,7 @@ mod tests {
             .await;
 
         let results = tracker.check_path(&sub.join("foo.rs")).await;
-        assert_eq!(results.len(), 1);
-        assert!(results[0].ends_with("Claude.md"));
+        assert!(results.is_empty());
     }
 
     #[tokio::test]
@@ -809,13 +761,13 @@ mod tests {
     // ── Rules directory discovery tests ─────────────────────────────
 
     #[tokio::test]
-    async fn check_path_discovers_claude_rules_dir() {
+    async fn check_path_discovers_grow_rules_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let sub = root.join("sub");
         fs::create_dir_all(&sub).unwrap();
 
-        let rules_dir = sub.join(".claude").join("rules");
+        let rules_dir = sub.join(".grow").join("rules");
         fs::create_dir_all(&rules_dir).unwrap();
         fs::write(rules_dir.join("style.md"), "# Style rules").unwrap();
 
@@ -829,7 +781,7 @@ mod tests {
             results
                 .iter()
                 .any(|p| p.to_str().unwrap().contains("style.md")),
-            "Should discover .claude/rules/style.md, got: {:?}",
+            "Should discover .grow/rules/style.md, got: {:?}",
             results
         );
     }
@@ -841,7 +793,7 @@ mod tests {
         let sub = root.join("sub");
         fs::create_dir_all(&sub).unwrap();
 
-        let rules_dir = sub.join(".claude").join("rules");
+        let rules_dir = sub.join(".grow").join("rules");
         fs::create_dir_all(&rules_dir).unwrap();
         fs::write(rules_dir.join("style.md"), "# Style").unwrap();
 
@@ -857,18 +809,20 @@ mod tests {
         assert!(second.is_empty(), "Rules should not be reminded twice");
     }
 
-    // ── AGENT_SUBDIRS discovery tests ───────────────────────────────
-
     #[tokio::test]
-    async fn check_path_discovers_claude_subdir_claude_md() {
+    async fn check_path_ignores_foreign_instruction_subdirectory() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let sub = root.join("sub");
         fs::create_dir_all(&sub).unwrap();
 
-        let claude_dir = sub.join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
-        fs::write(claude_dir.join("CLAUDE.md"), "# Project instructions").unwrap();
+        let foreign_dir = sub.join(".foreign");
+        fs::create_dir_all(&foreign_dir).unwrap();
+        fs::write(
+            foreign_dir.join("INSTRUCTIONS.md"),
+            "# Project instructions",
+        )
+        .unwrap();
 
         let mut tracker = AgentsMdTracker::new();
         tracker
@@ -876,84 +830,6 @@ mod tests {
             .await;
 
         let results = tracker.check_path(&sub.join("foo.rs")).await;
-        assert!(
-            results
-                .iter()
-                .any(|p| p.to_str().unwrap().contains("CLAUDE.md")),
-            "Should discover .claude/CLAUDE.md, got: {:?}",
-            results
-        );
-    }
-
-    // ── compat gating + byte-for-byte parity ───────────────
-
-    /// Pin that the all-on compat helpers reproduce the legacy constants
-    /// exactly (same entries, same order). If either drifts, the
-    /// byte-for-byte default-behavior invariant is broken.
-    #[test]
-    fn compat_default_matches_legacy_constants() {
-        use crate::types::compat::CompatConfig;
-        let c = CompatConfig::default();
-        assert_eq!(c.agent_filenames(), AGENT_FILENAMES.to_vec());
-        assert_eq!(c.rules_dirs(), RULES_DIRS.to_vec());
-    }
-
-    #[tokio::test]
-    async fn check_path_gates_cursor_rules_when_off() {
-        use crate::types::compat::CompatConfig;
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let sub = root.join("sub");
-        fs::create_dir_all(&sub).unwrap();
-
-        let rules_dir = sub.join(".cursor").join("rules");
-        fs::create_dir_all(&rules_dir).unwrap();
-        fs::write(rules_dir.join("r.md"), "# Cursor rule").unwrap();
-
-        let mut compat = CompatConfig::default();
-        compat.cursor.rules = false;
-
-        let mut tracker = AgentsMdTracker::new();
-        tracker.set_compat(compat);
-        tracker
-            .seed(vec![], Some(root.to_path_buf()), vec![], None)
-            .await;
-
-        let results = tracker.check_path(&sub.join("foo.rs")).await;
-        assert!(
-            !results.iter().any(|p| p.to_str().unwrap().contains("r.md")),
-            "cursor rules must be gated off: {results:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn check_path_gates_claude_agents_when_off() {
-        use crate::types::compat::CompatConfig;
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let sub = root.join("sub");
-        fs::create_dir_all(&sub).unwrap();
-
-        let claude_dir = sub.join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
-        fs::write(claude_dir.join("CLAUDE.md"), "# Project instructions").unwrap();
-
-        let mut compat = CompatConfig::default();
-        compat.claude.agents = false;
-
-        let mut tracker = AgentsMdTracker::new();
-        tracker.set_compat(compat);
-        tracker
-            .seed(vec![], Some(root.to_path_buf()), vec![], None)
-            .await;
-
-        let results = tracker.check_path(&sub.join("foo.rs")).await;
-        assert!(
-            !results
-                .iter()
-                .any(|p| p.to_str().unwrap().contains(".claude/CLAUDE.md")
-                    || p.to_str().unwrap().contains(".claude\\CLAUDE.md")),
-            "claude .claude/CLAUDE.md must be gated off: {results:?}"
-        );
+        assert!(results.is_empty());
     }
 }

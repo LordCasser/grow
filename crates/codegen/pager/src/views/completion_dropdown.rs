@@ -214,11 +214,10 @@ mod tests {
         CompletionItemParsed {
             display: display.into(),
             description: desc.into(),
-            insert_text: insert.into(),
+            replacement: insert.into(),
             source: SuggestionSource::History,
             priority: 0,
-            replace_range: None,
-            token_text: None,
+            replace_range: 0..0,
             truncated: false,
         }
     }
@@ -338,7 +337,7 @@ mod tests {
             ..Default::default()
         };
         let item = state.accept().expect("selected item accepted");
-        assert_eq!(item.insert_text, "ls -la /tmp");
+        assert_eq!(item.replacement, "ls -la /tmp");
         assert!(!state.open);
     }
 
@@ -358,7 +357,7 @@ mod tests {
             ..Default::default()
         };
         let item = state.accept().expect("item accepted while closed");
-        assert_eq!(item.insert_text, "ls -la");
+        assert_eq!(item.replacement, "ls -la");
     }
 
     #[test]

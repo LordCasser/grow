@@ -20,7 +20,7 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 use shell::sampling::{
-    ApiBackend, Client, ConversationItem, ConversationRequest, ConversationToolChoice,
+    ApiBackend, ConversationItem, ConversationRequest, ConversationToolChoice, SamplingClient,
     SamplingError, ToolCall, ToolSpec, rs,
 };
 use test_support::sse::responses_api_reasoning_and_text_events;
@@ -983,7 +983,7 @@ async fn test_doom_loop_check_enabled_sends_header_and_absorbs_check_event() {
 
     let mut config = test_sampler_config(&server.url(), ApiBackend::Responses, &[]);
     config.doom_loop_recovery = Some(Default::default());
-    let client = Client::new(config).unwrap();
+    let client = SamplingClient::new(config).unwrap();
 
     let request = ConversationRequest::from_items(vec![ConversationItem::user("Hello")]);
     let (mut stream, _metadata, collector) =

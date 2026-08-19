@@ -51,7 +51,7 @@ fn build_suggestion(prefix: &str, raw: &str) -> Vec<RankedSuggestion> {
     // If the model returned the full command (including prefix), use it as-is.
     // Otherwise concatenate directly — the model output may start with a space
     // or continuation that should be appended verbatim after the prefix.
-    let insert_text = if trimmed.starts_with(prefix) {
+    let replacement = if trimmed.starts_with(prefix) {
         trimmed.to_owned()
     } else if raw.starts_with(prefix) {
         raw.trim_end().to_owned()
@@ -60,14 +60,13 @@ fn build_suggestion(prefix: &str, raw: &str) -> Vec<RankedSuggestion> {
     };
 
     vec![RankedSuggestion {
-        display: insert_text.clone(),
+        display: replacement.clone(),
         description: String::new(),
-        insert_text,
+        replacement,
         source: SuggestionSource::AI,
         priority: AI_PRIORITY,
         // Whole-line; `handle_suggest` stamps the range (no full text here).
-        replace_range: None,
-        token_text: None,
+        replace_range: (0, 0),
         truncated: false,
         is_ghost_candidate: true,
     }]
@@ -81,7 +80,7 @@ mod tests {
     fn build_suggestion_with_prefix_continuation() {
         let result = build_suggestion("git", "git commit --amend");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].insert_text, "git commit --amend");
+        assert_eq!(result[0].replacement, "git commit --amend");
         assert_eq!(result[0].source, SuggestionSource::AI);
         assert_eq!(result[0].priority, -10);
         assert!(result[0].is_ghost_candidate);
@@ -91,7 +90,7 @@ mod tests {
     fn build_suggestion_prepends_prefix_when_missing() {
         let result = build_suggestion("git", " commit --amend");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].insert_text, "git commit --amend");
+        assert_eq!(result[0].replacement, "git commit --amend");
     }
 
     #[test]
@@ -114,19 +113,19 @@ mod tests {
         // Model returned a continuation without leading space — result has no separator.
         // This is expected: the model should include the space if one is needed.
         let result = build_suggestion("git", "commit");
-        assert_eq!(result[0].insert_text, "gitcommit");
+        assert_eq!(result[0].replacement, "gitcommit");
     }
 
     #[test]
     fn build_suggestion_raw_starts_with_prefix_preserves_internal_whitespace() {
         let result = build_suggestion("git", "git  commit  \n");
-        assert_eq!(result[0].insert_text, "git  commit");
+        assert_eq!(result[0].replacement, "git  commit");
     }
 
     #[test]
     fn build_suggestion_trims_surrounding_whitespace() {
         let result = build_suggestion("git", "  git commit  \n");
-        assert_eq!(result[0].insert_text, "git commit");
+        assert_eq!(result[0].replacement, "git commit");
     }
 
     #[tokio::test]
@@ -156,7 +155,7 @@ mod tests {
 
         let result = suggest(&tx, "git", "/tmp", None).await;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].insert_text, "git commit --amend");
+        assert_eq!(result[0].replacement, "git commit --amend");
     }
 
     #[tokio::test]
@@ -210,6 +209,6 @@ mod tests {
 
         let result = suggest(&tx, "docker", "/home/user", Some("custom-model".into())).await;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].insert_text, "docker compose up");
+        assert_eq!(result[0].replacement, "docker compose up");
     }
 }

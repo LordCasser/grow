@@ -53,8 +53,6 @@ pub(super) fn resolve_notif_agent<'a>(
 /// updates and completion signal land on *its* agent rather than whichever
 /// agent happens to be foregrounded — otherwise a background agent's
 /// "Connecting MCPs (N/M)…" spinner is never cleared and sticks forever.
-/// Falls back to the active agent when the payload omits a `sessionId`.
-///
 /// Returns the owning agent plus whether it is the currently displayed one
 /// (used to decide whether the notification warrants a redraw).
 ///
@@ -64,25 +62,14 @@ pub(super) fn resolve_notif_agent<'a>(
 /// init would clobber its parent's spinner.
 pub(super) fn mcp_target_agent<'a>(
     app: &'a mut AppView,
-    session_id: Option<&str>,
+    session_id: &str,
 ) -> Option<(bool, &'a mut AgentView)> {
-    match session_id {
-        Some(sid) => {
-            let sid = acp::SessionId::new(sid);
-            let (matched, is_active, agent) = resolve_notif_agent(app, &sid)?;
-            if matches!(matched, SessionMatch::Child(_)) {
-                return None;
-            }
-            Some((is_active, agent))
-        }
-        None => {
-            let ActiveView::Agent(id) = app.active_view else {
-                return None;
-            };
-            let agent = app.agents.get_mut(&id)?;
-            Some((true, agent))
-        }
+    let session_id = acp::SessionId::new(session_id);
+    let (matched, is_active, agent) = resolve_notif_agent(app, &session_id)?;
+    if matches!(matched, SessionMatch::Child(_)) {
+        return None;
     }
+    Some((is_active, agent))
 }
 
 /// Given a matched session and the owning agent, borrow the correct
@@ -120,8 +107,7 @@ pub(super) fn resolve_target_view<'a>(
 /// the caller should drop it (sending an empty Ok response if applicable).
 ///
 /// All ACP-notification handlers must route through this function rather than
-/// gating on `app.active_view` directly; see the `handle_scheduled_task_*`
-/// family for the legacy active-view pattern still pending migration.
+/// gating on `app.active_view` directly.
 pub(super) fn find_session_match(
     app: &AppView,
     session_id: &acp::SessionId,

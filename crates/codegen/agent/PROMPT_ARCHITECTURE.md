@@ -5,12 +5,15 @@ Grow composes an Agent session from independent layers. The layers have a fixed 
 ```text
 Mandatory Core
   + Audience (primary | subagent)
+  + Standard Guidance (extend only)
   + Agent Role (Markdown body)
   + Active Behavior (normal | clarify | plan | workflow | deep-research | goal)
-  + Runtime Context
+  + Session Extensions (memory)
 ```
 
-Mandatory Core contains instruction priority, action safety, tool-use rules, project-instruction scoping, output rules, and Grow client context. It is always rendered. `promptComposition: full` replaces the standard role foundation; it does not replace Mandatory Core, Audience, an active Behavior, or Runtime Context.
+Mandatory Core contains instruction priority, action safety, tool-use rules, project-instruction scoping, output rules, and Grow client context. It is always rendered. `promptComposition: full` replaces the optional standard guidance; it does not replace Mandatory Core, Audience, an active Behavior, or Session Extensions.
+
+Runtime facts do not belong to the system prompt. At session start, the shell renders one typed `RuntimeContextSnapshot` as a user-role message containing the visible workspace, OS, shell, local date, and optional VCS snapshot, then durably appends it to Timeline. Agent definitions cannot override its shape. Skills, project instructions, MCP catalogs, capability changes, and reminders each publish their own Timeline-backed messages instead of being copied into either the system prompt or the runtime snapshot.
 
 Audience defines ownership boundaries: the primary Agent owns the user-facing result, the task-wide understanding needed to produce it, and the integration of delegated results, while a subagent owns only its delegated task. Primary ownership cannot be transferred wholesale: delegation may extend coverage or isolate bounded work, but the primary Agent directly examines central evidence, retains cross-cutting synthesis, and continues independent work while children run whenever useful work remains. Audience never declares a role, toolset, or Behavior.
 
@@ -34,7 +37,7 @@ write it, and execute verification; the picker and `/doctor` consume the same
 eligibility result. The Agents settings UI only enables or disables definitions
 and does not rewrite this architectural purpose.
 
-`toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, Agent denies and subagent policy, session clamps, depth/ownership/plugin/MCP eligibility, and ToolBridge finalization. Requestable native Execute/ReadWrite eligibility requires both an authored matching kind from `toolPreset`/`additionalTools` and a surviving implementation in the finalized bridge; runtime injection cannot silently expand that ceiling. For a subagent, `capabilityMode` no longer deletes eligible tools: it seeds the child-local current grant set. Model tool definitions and call dispatch both filter the finalized bridge through that grant set. `ToolKind`, `ToolMetadata`, registry finalization, template name resolution, and `ToolServerConfig.behavior_preset` retain their existing responsibilities.
+`toolPreset` is resolved first, followed by `additionalTools`, fixed runtime injection, Agent denies and subagent policy, session clamps, depth/ownership/plugin/MCP eligibility, and ToolBridge finalization. Requestable native Execute/ReadWrite eligibility requires both an authored matching kind from `toolPreset`/`additionalTools` and a surviving implementation in the finalized bridge; runtime injection cannot silently expand that ceiling. For a subagent, `capabilityMode` no longer deletes eligible tools: it seeds the child-local current grant set. Model tool definitions and call dispatch both filter the finalized bridge through that grant set. `ToolKind`, `ToolMetadata`, registry finalization, and template name resolution retain their existing responsibilities.
 
 The built-in Agent, tool, and session surface is Grow-native. External vendor schemas are not exposed as Agent profiles, tool presets, namespaces, ignored frontmatter fields, or session scanners. Agent files use the documented Grow schema and reject unknown keys; source provenance does not create a vendor execution mode.
 

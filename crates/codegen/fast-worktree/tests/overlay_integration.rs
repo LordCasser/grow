@@ -844,7 +844,7 @@ fn test_overlay_metadata_survives_unmount() {
     let meta: serde_json::Value = serde_json::from_str(&content).unwrap();
 
     assert_eq!(meta["type"], "overlay");
-    assert!(meta["snapshot_upper"].as_str().is_some());
+    assert!(meta["snapshot_root"].as_str().is_some());
     assert!(meta["work_dir"].as_str().is_some());
     assert!(meta["lower_dir"].as_str().is_some());
     assert!(meta["mount_target"].as_str().is_some());

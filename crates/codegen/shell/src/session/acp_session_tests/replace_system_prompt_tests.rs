@@ -6,7 +6,7 @@
 
 use sampling_types::conversation::ConversationItem;
 
-use super::support::create_test_actor;
+use super::support::{create_test_actor, replace_test_surface};
 use super::{PersistenceMsg, SessionActor};
 
 fn head_text(conv: &[ConversationItem]) -> Option<String> {
@@ -21,7 +21,7 @@ async fn actor_with_history(history: Vec<ConversationItem>) -> SessionActor {
         tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    actor.chat_state_handle.replace_conversation(history);
+    replace_test_surface(&actor.chat_state_handle, history).await;
     actor
 }
 

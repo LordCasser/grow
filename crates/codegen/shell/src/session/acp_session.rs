@@ -2,15 +2,15 @@
 #![allow(clippy::arc_with_non_send_sync)]
 //! Session actor implementation for the MVP ACP agent.
 //!
-//! Each session runs as an actor with its own chat history and tool context.
+//! Each session runs as an actor over one Timeline-derived Surface and tool context.
 //! The agent owns the client connection and routes commands and events via
 //! channels:
 //! - Agent → Session: `SessionCommand` (prompt, cancel, shutdown)
 //! - Session → Client: `session_notification` via a shared gateway handle
 //!
 use super::commands::{
-    ParsedPromptInfo, PromptCompletionKind, PromptTurnOk, PromptTurnResult, SessionCommand,
-    TaskWakeAdmission, TaskWakeFallback, ok_end_turn,
+    PromptCompletionKind, PromptTurnOk, PromptTurnResult, SessionCommand, TaskWakeAdmission,
+    TaskWakeFallback, ok_end_turn,
 };
 use super::handle::SessionHandle;
 use super::notifications::NotificationSender;
@@ -35,7 +35,8 @@ use crate::session::mcp_servers::mcp_target_str;
 use crate::session::mcp_servers::mcp_transport_str;
 use crate::session::mcp_servers::parse_mcp_tool_name;
 use crate::session::persistence::{
-    PersistenceContentChunk, PersistenceHandle, PersistenceMsg, get_prompt_file_path,
+    PersistenceHandle, PersistenceMsg, get_prompt_blob_path, get_prompt_blob_ref,
+    write_immutable_blob,
 };
 use crate::session::prompt_parser::parse_prompt_with_skills;
 use crate::session::replay_events::{SessionEvent, SessionNotification};
@@ -44,12 +45,10 @@ use crate::session::signals::{SessionSignalsHandle, TurnDeltaSnapshot};
 use crate::session::slash_commands::{self, BuiltinAction, SlashCommandOutcome};
 use crate::session::storage::SessionUpdate;
 use crate::session::user_message::extract_user_query;
-use crate::session::user_message::{construct_user_message, construct_user_message_minimal};
 use crate::terminal::TerminalRunRequest;
 use crate::tools::ToolContext;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
 use agent::AgentDefinition;
-use agent::prompt::agents_md::LEGACY_AGENTS_MD_REMINDER_PREFIX;
 use agent::prompt::skills::SkillsConfig;
 use agent_client_protocol as acp;
 use agent_client_protocol::ContentBlock;
@@ -58,7 +57,7 @@ use sampler::SamplerConfig as SamplingConfig;
 use sampling_types::truncate_bytes;
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -68,7 +67,6 @@ use tools::computer::local::LocalTerminalBackend;
 use tools::implementations::BashToolInput;
 use tools::implementations::grow_build::web_fetch::WebFetchConfig;
 use tools::types::ToolInput;
-use tools::types::compat::CompatConfig;
 use tools::types::output::{
     BashOutput, ReadFileOutput, ToolOutput as ToolsToolOutput, ToolRunResult,
 };
@@ -78,8 +76,6 @@ use workspace::session::file_state::{FileStateHandle, FileStateTracker};
 const SESSION_LOG: &str = "grow_session";
 #[path = "compaction.rs"]
 mod compaction;
-#[path = "compaction_segments.rs"]
-mod compaction_segments;
 #[path = "acp_session_impl/types.rs"]
 mod types;
 pub(crate) use types::*;
@@ -115,11 +111,11 @@ mod prompt_queue;
 mod slash_exec;
 use super::PromptOrigin;
 use super::acp_types;
-use super::chat_persistence;
 use super::compaction_config;
 use super::diagnostics;
 use super::helpers;
 use super::memory_state;
+use super::timeline_persistence;
 #[path = "acp_session_impl/prompt_build.rs"]
 mod prompt_build;
 use prompt_build::*;
@@ -128,6 +124,7 @@ mod session_mode;
 use session_mode::*;
 #[path = "acp_session_impl/sampler_turn.rs"]
 mod sampler_turn;
+use super::sideband::*;
 use sampler_turn::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
@@ -200,11 +197,9 @@ pub(crate) struct InputItem {
     /// Consumed by Ctrl+C if it removes the wake before the turn starts.
     pub(crate) task_wake_fallback: Option<TaskWakeFallback>,
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
-    /// Fired after the user message is in chat history and a persistence flush
+    /// Fired after the user message is committed to Timeline and a persistence flush
     /// barrier has completed (see `SessionCommand::QueuePrompt::persist_ack`).
     pub(crate) persist_ack: Option<oneshot::Sender<()>>,
-    /// Pre-parsed prompt channel. See `SessionCommand::QueuePrompt::parsed_prompt_tx`.
-    pub(crate) parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     /// Server-authoritative prompt-queue metadata. `Some` for
     /// user-originated prompts (they appear in the shared queue); `None` for
     /// synthetic / system inputs (auto-wake, nudges, notification drains).
@@ -410,6 +405,10 @@ pub(crate) struct ModelAuthMemo {
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
+    /// Canonical storage location of this Timeline entity. This is explicit
+    /// because child entities are nested under their parent and cannot be
+    /// reconstructed from `cwd + id`.
+    pub(crate) session_dir: PathBuf,
     /// ACP method selected for this BYOK-only session.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     /// Memoized per-model auth state, read through
@@ -542,8 +541,8 @@ pub(crate) struct SessionActor {
     ///
     /// Used by `build_user_message_prefix` (user-message `Workspace Path`),
     /// `PathRewriter` (tool result path sanitization), and hunk tracker
-    /// (client-facing diff paths). The system prompt's `Workspace Path` is
-    /// set at build time via `AgentBuilder::with_prompt_working_directory()`.
+    /// (client-facing diff paths). AgentBuilder also uses it for model-facing
+    /// Skill and AGENTS.md paths.
     ///
     /// Set once at session spawn from the `prompt_display_cwd` parameter
     /// (e.g. for forked sessions that should display the original project
@@ -566,7 +565,7 @@ pub(crate) struct SessionActor {
     /// Session-scoped primary-Agent Behavior controller. It owns the selected
     /// collaboration protocol and Plan phase, not permissions or runtimes.
     pub(crate) behavior: Arc<parking_lot::Mutex<crate::session::behavior::BehaviorCoordinator>>,
-    /// Monotonic revision of the atomic session-control snapshot.
+    /// Monotonic revision of the Timeline control projection.
     pub(crate) control_revision: Arc<std::sync::atomic::AtomicU64>,
     /// Whether goal mode (`/goal`) is enabled for this session (feature flag).
     pub(crate) goal_enabled: bool,
@@ -614,8 +613,6 @@ pub(crate) struct SessionActor {
     pub(crate) workflow_tx: tokio::sync::mpsc::UnboundedSender<
         tools::implementations::grow_build::workflow::WorkflowEnvelope,
     >,
-    /// Agent-level managed MCP config cache (refreshed in background).
-    pub(crate) managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
     /// Original client-provided MCP servers from session creation.
     /// Retained for re-merge during plugin reload.
     pub(crate) initial_client_mcp_servers: Vec<acp::McpServer>,
@@ -633,9 +630,7 @@ pub(crate) struct SessionActor {
     /// Cleared by `maybe_inject_mcp_reminder` after injecting.
     pub(crate) mcp_reminder_dirty: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) mcp_connecting_reminder_injected: std::cell::Cell<bool>,
-    /// Wakes waiters when MCP background handshakes finish and
-    /// `initializing_servers` is cleared. Used by
-    /// `wait_for_mcp_templated_prefix_ready` to avoid polling.
+    /// Wakes bounded MCP readiness waiters when background handshakes finish.
     pub(crate) mcp_handshakes_done: Arc<tokio::sync::Notify>,
     /// Background-computed user-message prefix, injected before the first prompt.
     pub(crate) deferred_prefix: TaskSlot<String>,
@@ -646,9 +641,6 @@ pub(crate) struct SessionActor {
     /// compaction, model switch) or a date-rollover `<system-reminder>`. Plain resume reuses the
     /// cached prefix. Drives [`SessionActor::maybe_inject_date_rollover_reminder`].
     pub(crate) last_announced_local_date: std::cell::Cell<chrono::NaiveDate>,
-    /// True when the render-failure fallback stamped a date into a date-free template's prefix, so
-    /// [`SessionActor::maybe_inject_date_rollover_reminder`] still rolls it over.
-    pub(crate) prefix_carries_fallback_date: std::cell::Cell<bool>,
     /// Prompt index when search_tool last ran. -1 = never. Used for turns_since_last_search.
     pub(crate) last_search_prompt_index: std::sync::atomic::AtomicI64,
     /// Timestamp (millis since epoch) of the last successful API request.
@@ -741,6 +733,10 @@ pub(crate) struct SessionActor {
     /// Explicitly configured vision model for `read_file` image/PDF results.
     /// `None` leaves those images on the active session model path.
     pub(crate) image_description_model: parking_lot::RwLock<Option<String>>,
+    /// One-shot title inference capability. `None` means the session already
+    /// has a title or is a child session that never generates one.
+    pub(crate) session_title_route:
+        std::cell::RefCell<Option<crate::session::summary::SessionTitleRoute>>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
     /// Per-subagent token state keyed by `subagent_id`; sums into
@@ -794,11 +790,12 @@ impl SessionActor {
     async fn emit_turn_ended(
         &self,
         outcome: crate::session::events::TurnOutcomeLabel,
+        terminal: chat_state::TurnTerminal,
         category: Option<crate::session::events::CancellationCategory>,
         context: Option<serde_json::Value>,
     ) -> Result<(), acp::Error> {
         self.events
-            .emit_turn_ended(outcome, category, context)
+            .emit_turn_ended(outcome, terminal, category, context)
             .await
             .map_err(|error| {
                 acp::Error::internal_error()
@@ -944,300 +941,9 @@ impl SessionActor {
         Arc::clone(self.agent.borrow().tool_bridge())
     }
 }
-const PROMPT_CONTEXT_FILENAME: &str = "prompt_context.json";
-/// Persist the structured prompt context to `{session_dir}/prompt_context.json`.
-///
-/// This is best-effort: failures are logged but do not block session creation.
-/// The saved JSON enables deterministic re-rendering, `grow prompt --json`
-/// inspection, and post-hoc debugging of what went into a session's system prompt.
-fn save_prompt_context(session_info: &SessionInfo, prompt_context: &agent::PromptContext) {
-    let dir = crate::session::persistence::session_dir(session_info);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(?e, "failed to create session dir for prompt_context.json");
-        return;
-    }
-    let path = dir.join(PROMPT_CONTEXT_FILENAME);
-    match serde_json::to_string_pretty(prompt_context) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                tracing::warn!(?e, "failed to write prompt_context.json");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(?e, "failed to serialize PromptContext");
-        }
-    }
-}
-const SYSTEM_PROMPT_FILENAME: &str = "system_prompt.txt";
-/// Persist the exact rendered system prompt to `{session_dir}/system_prompt.txt`.
-/// Should match the current Timeline Surface's first System entry modulo trailing
-/// newlines (`canonical_system_prompt_eq`); a trailing-newline-only difference
-/// is benign, and this artifact is a convenience mirror, not the source of truth
-/// (the conversation head is).
-fn save_system_prompt(session_info: &SessionInfo, system_prompt: &str) {
-    let dir = crate::session::persistence::session_dir(session_info);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(?e, "failed to create session dir for system_prompt.txt");
-        return;
-    }
-    let path = dir.join(SYSTEM_PROMPT_FILENAME);
-    if let Err(e) = std::fs::write(&path, system_prompt) {
-        tracing::warn!(?e, "failed to write system_prompt.txt");
-    }
-}
-/// Load the canonical system prompt from `{session_dir}/system_prompt.txt`.
-///
-/// Returns `None` when the diagnostic artifact does not exist.
-#[expect(dead_code, reason = "API for future viewers/debug tools")]
-pub(crate) fn load_system_prompt(session_info: &SessionInfo) -> Option<String> {
-    let dir = crate::session::persistence::session_dir(session_info);
-    load_system_prompt_from_dir(&dir)
-}
-fn load_system_prompt_from_dir(session_dir: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(session_dir.join(SYSTEM_PROMPT_FILENAME)).ok()
-}
-/// Load the canonical prompt context from `{session_dir}/prompt_context.json`.
-///
-/// Returns `None` for sessions without a persisted context.
-#[expect(dead_code, reason = "API for future viewers/debug tools")]
-pub(crate) fn load_prompt_context(session_info: &SessionInfo) -> Option<agent::PromptContext> {
-    let dir = crate::session::persistence::session_dir(session_info);
-    load_prompt_context_from_dir(&dir)
-}
-fn load_prompt_context_from_dir(session_dir: &std::path::Path) -> Option<agent::PromptContext> {
-    let json = std::fs::read_to_string(session_dir.join(PROMPT_CONTEXT_FILENAME)).ok()?;
-    serde_json::from_str(&json)
-        .map_err(|e| tracing::warn!(?e, "failed to deserialize prompt_context.json"))
-        .ok()
-}
 #[cfg(test)]
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/replace_system_prompt_tests.rs"]
-mod replace_system_prompt_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/support.rs"]
-mod support;
-#[cfg(test)]
-#[path = "acp_session_tests/usage_categories_tests.rs"]
-mod usage_categories_tests;
-#[cfg(test)]
-mod managed_gateway_descriptor_tests {
-    use super::*;
-    use tools::types::output::{MCPOutput, ToolOutput};
-    use tools::types::tool::{ToolKind, ToolNamespace};
-    #[derive(Debug)]
-    struct FixtureMcpTool(&'static str);
-    impl tools::types::tool_metadata::ToolMetadata for FixtureMcpTool {
-        fn kind(&self) -> ToolKind {
-            ToolKind::Other
-        }
-        fn tool_namespace(&self) -> ToolNamespace {
-            ToolNamespace::MCP
-        }
-        fn description_template(&self) -> &str {
-            "fixture"
-        }
-    }
-    impl tool_runtime::Tool for FixtureMcpTool {
-        type Args = serde_json::Value;
-        type Output = ToolOutput;
-        fn id(&self) -> tool_protocol::ToolId {
-            tool_protocol::ToolId::new(self.0).expect("valid")
-        }
-        fn description(
-            &self,
-            _ctx: &::tool_runtime::ListToolsContext,
-        ) -> tool_types::ToolDescription {
-            tool_types::ToolDescription::new(self.0, "fixture")
-        }
-        async fn run(
-            &self,
-            _ctx: tool_runtime::ToolCallContext,
-            _args: serde_json::Value,
-        ) -> Result<ToolOutput, tool_runtime::ToolError> {
-            Ok(ToolOutput::MCP(MCPOutput::okay_output(
-                self.0.to_string(),
-                self.0
-                    .split_once("__")
-                    .expect("qualified MCP name")
-                    .0
-                    .to_string(),
-                "ok".to_string(),
-            )))
-        }
-    }
-    #[tokio::test]
-    async fn refresh_snapshot_indexes_only_admitted_gateway_tools() {
-        let bridge = Arc::new(crate::tools::bridge::ToolBridge::for_test());
-        bridge
-            .register_mcp_tools(
-                "server__tool".to_string(),
-                FixtureMcpTool("server__tool"),
-                Some(serde_json::json!({"type": "object"})),
-            )
-            .await
-            .expect("local fixture registration succeeds");
-        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
-        let managed = crate::session::managed_mcp::ManagedMcpStateHandle::default();
-        {
-            let mut state = managed.lock().await;
-            state.enable_gateway_tools();
-            let epoch = state.start_gateway_tool_fetch().unwrap();
-            assert!(state.complete_gateway_tool_fetch(
-                epoch,
-                crate::session::managed_mcp::GatewayToolCatalog {
-                    tools: vec![
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "server".to_string(),
-                            connector_name: "Gateway Collision".to_string(),
-                            tool_id: "tool".to_string(),
-                            tool_name: "Collision".to_string(),
-                            call_id: "gateway.collision".to_string(),
-                            description: "Gateway collision".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "gateway".to_string(),
-                            connector_name: "Gateway".to_string(),
-                            tool_id: "search".to_string(),
-                            tool_name: "Search".to_string(),
-                            call_id: "gateway.search".to_string(),
-                            description: "Gateway search".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                    ],
-                    total_tools: 2,
-                }
-            ));
-        }
-        let snapshot = Arc::new(std::sync::Mutex::new(
-            crate::session::tool_index::ToolMetadataSnapshot::default(),
-        ));
-        refresh_mcp_snapshot_for_test(bridge, mcp_state, managed, snapshot.clone()).await;
-        let snapshot = snapshot.lock().unwrap();
-        let names: std::collections::HashSet<&str> = snapshot
-            .tools
-            .iter()
-            .map(|tool| tool.qualified_name.as_str())
-            .collect();
-        assert!(names.contains("gateway__search"));
-        let server_tool = snapshot
-            .tools
-            .iter()
-            .find(|tool| tool.qualified_name == "server__tool")
-            .expect("local MCP tool remains indexed");
-        assert_eq!(server_tool.server_name, "server");
-        assert_eq!(server_tool.description, "fixture");
-    }
-    #[tokio::test]
-    async fn arbitrary_mcp_search_tool_is_registered_without_a_reserved_name() {
-        let bridge = Arc::new(crate::tools::bridge::ToolBridge::for_test());
-        bridge
-            .register_mcp_tools(
-                "research__search_docs".to_string(),
-                FixtureMcpTool("research__search_docs"),
-                Some(serde_json::json!({"type": "object"})),
-            )
-            .await
-            .expect("ordinary MCP search tool registration succeeds");
-        let snapshot = Arc::new(std::sync::Mutex::new(
-            crate::session::tool_index::ToolMetadataSnapshot::default(),
-        ));
-        refresh_mcp_snapshot_for_test(
-            bridge,
-            Arc::new(TokioMutex::new(McpState::new(vec![]))),
-            crate::session::managed_mcp::ManagedMcpStateHandle::default(),
-            snapshot.clone(),
-        )
-        .await;
-        let snapshot = snapshot.lock().unwrap();
-        let tool = snapshot
-            .tools
-            .iter()
-            .find(|tool| tool.qualified_name == "research__search_docs")
-            .expect("arbitrarily named MCP search tool remains discoverable");
-        assert_eq!(tool.server_name, "research");
-    }
-    #[tokio::test]
-    async fn refresh_snapshot_excludes_disabled_gateway_tools_and_connectors() {
-        let bridge = Arc::new(crate::tools::bridge::ToolBridge::for_test());
-        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
-        let managed = crate::session::managed_mcp::ManagedMcpStateHandle::default();
-        {
-            let mut state = managed.lock().await;
-            state.enable_gateway_tools();
-            let epoch = state.start_gateway_tool_fetch().unwrap();
-            assert!(state.complete_gateway_tool_fetch(
-                epoch,
-                crate::session::managed_mcp::GatewayToolCatalog {
-                    tools: vec![
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "linear".to_string(),
-                            connector_name: "Linear".to_string(),
-                            tool_id: "list_issues".to_string(),
-                            tool_name: "List".to_string(),
-                            call_id: "linear.list_issues".to_string(),
-                            description: "List issues".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "linear".to_string(),
-                            connector_name: "Linear".to_string(),
-                            tool_id: "create_issue".to_string(),
-                            tool_name: "Create".to_string(),
-                            call_id: "linear.create_issue".to_string(),
-                            description: "Create issue".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "slack".to_string(),
-                            connector_name: "Slack".to_string(),
-                            tool_id: "search".to_string(),
-                            tool_name: "Search".to_string(),
-                            call_id: "slack.search".to_string(),
-                            description: "Search Slack".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                    ],
-                    total_tools: 3,
-                }
-            ));
-        }
-        let snapshot = Arc::new(std::sync::Mutex::new(
-            crate::session::tool_index::ToolMetadataSnapshot::default(),
-        ));
-        let disabled: std::collections::HashMap<String, std::collections::HashSet<String>> =
-            std::collections::HashMap::from([
-                (
-                    "linear".to_string(),
-                    std::collections::HashSet::from(["linear__create_issue".to_string()]),
-                ),
-                (
-                    crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY.to_string(),
-                    std::collections::HashSet::from(["slack".to_string()]),
-                ),
-            ]);
-        refresh_mcp_snapshot_for_test_with_disabled(
-            bridge,
-            mcp_state,
-            managed,
-            snapshot.clone(),
-            &disabled,
-        )
-        .await;
-        let snapshot = snapshot.lock().unwrap();
-        let names: std::collections::HashSet<&str> = snapshot
-            .tools
-            .iter()
-            .map(|tool| tool.qualified_name.as_str())
-            .collect();
-        assert!(names.contains("linear__list_issues"));
-        assert!(!names.contains("linear__create_issue"));
-        assert!(!names.contains("slack__search"));
-    }
-}
 /// ToolBridge must route file operations through the injected FileSystem,
 /// not direct disk I/O. When `.with_fs()` is dropped from the builder,
 /// tools fall back to LocalFs and ACP client-side enforcement stops working.
@@ -1256,11 +962,8 @@ mod permission_auto_mode_tests;
 /// Coverage:
 /// - True when a tagged [`SyntheticReason::ProjectInstructions`] user item
 ///   is present (the new post-Task-1 form).
-/// - True when an untagged legacy user item is present whose first text
-///   part begins with the wrapper-tag prefix written by older shells.
-/// - False for an empty conversation, for a conversation with only a real
-///   user message, when the wrapper prefix appears in a non-first content
-///   part, and when the wrapper prefix is buried mid-text.
+/// - False for an empty conversation and for a conversation with only a real
+///   user message.
 #[cfg(test)]
 #[path = "acp_session_tests/project_instructions_idempotence_tests.rs"]
 mod project_instructions_idempotence_tests;
@@ -1274,6 +977,9 @@ mod read_file_image_description_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/record_response_token_usage_tests.rs"]
 mod record_response_token_usage_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/replace_system_prompt_tests.rs"]
+mod replace_system_prompt_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/reverse_request_session_id_tests.rs"]
 mod reverse_request_session_id_tests;
@@ -1290,6 +996,12 @@ mod subagent_bash_permission_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/subagent_usage_fold_tests.rs"]
 mod subagent_usage_fold_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/support.rs"]
+mod support;
+#[cfg(test)]
+#[path = "acp_session_tests/usage_categories_tests.rs"]
+mod usage_categories_tests;
 /// Drop guard that records aggregate turn metrics on the current tracing span
 struct TurnMetrics {
     turn_tool_count: u64,
@@ -1325,8 +1037,14 @@ mod build_tool_parse_error_message_tests;
 #[path = "acp_session_tests/turn/chat_history_integrity_tests.rs"]
 mod chat_history_integrity_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/compaction_pre_prune_tests.rs"]
+mod compaction_pre_prune_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/goal/goal_plan_staging_tests.rs"]
 mod goal_plan_staging_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/interjection_tests.rs"]
+mod interjection_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/laziness/laziness_debug_tests.rs"]
 mod laziness_debug_tests;
@@ -1344,218 +1062,23 @@ mod parallel_dispatch_tests;
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/session_thread_tests.rs"]
-mod session_thread_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
-mod turn_end_guard_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
-mod wait_for_mcp_prefix_tests;
-#[cfg(test)]
-mod managed_gateway_tool_tests {
-    use super::*;
-    use tools::types::output::{MCPOutput, ToolOutput};
-    use tools::types::tool::{ToolKind, ToolNamespace};
-    use tools::types::tool_metadata::ToolMetadata;
-    #[derive(Debug)]
-    struct FixtureMcpTool;
-    impl ToolMetadata for FixtureMcpTool {
-        fn kind(&self) -> ToolKind {
-            ToolKind::Other
-        }
-        fn tool_namespace(&self) -> ToolNamespace {
-            ToolNamespace::MCP
-        }
-        fn description_template(&self) -> &str {
-            "fixture"
-        }
-    }
-    impl tool_runtime::Tool for FixtureMcpTool {
-        type Args = serde_json::Value;
-        type Output = ToolOutput;
-        fn id(&self) -> tool_protocol::ToolId {
-            tool_protocol::ToolId::new("server__tool").expect("valid")
-        }
-        fn description(
-            &self,
-            _ctx: &::tool_runtime::ListToolsContext,
-        ) -> tool_types::ToolDescription {
-            tool_types::ToolDescription::new("server__tool", "fixture")
-        }
-        async fn run(
-            &self,
-            _ctx: tool_runtime::ToolCallContext,
-            _args: serde_json::Value,
-        ) -> Result<ToolOutput, tool_runtime::ToolError> {
-            Ok(ToolOutput::MCP(MCPOutput::okay_output(
-                "server__tool".to_string(),
-                "server".to_string(),
-                "ok".to_string(),
-            )))
-        }
-    }
-    #[tokio::test]
-    async fn refresh_snapshot_seeds_only_admitted_gateway_catalog_entries() {
-        let bridge = Arc::new(crate::tools::bridge::ToolBridge::for_test());
-        bridge
-            .register_mcp_tools(
-                "server__tool".to_string(),
-                FixtureMcpTool,
-                Some(serde_json::json!({"type": "object"})),
-            )
-            .await
-            .expect("local fixture registration succeeds");
-        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
-        let managed = crate::session::managed_mcp::ManagedMcpStateHandle::default();
-        {
-            let mut state = managed.lock().await;
-            state.enable_gateway_tools();
-            let epoch = state.start_gateway_tool_fetch().unwrap();
-            assert!(state.complete_gateway_tool_fetch(
-                epoch,
-                crate::session::managed_mcp::GatewayToolCatalog {
-                    tools: vec![
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "server".to_string(),
-                            connector_name: "Gateway Collision".to_string(),
-                            tool_id: "tool".to_string(),
-                            tool_name: "Collision".to_string(),
-                            call_id: "gateway.collision".to_string(),
-                            description: "Gateway collision".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "gateway".to_string(),
-                            connector_name: "Gateway".to_string(),
-                            tool_id: "search".to_string(),
-                            tool_name: "Search".to_string(),
-                            call_id: "gateway.search".to_string(),
-                            description: "Gateway search".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                    ],
-                    total_tools: 2,
-                }
-            ));
-        }
-        let snapshot = Arc::new(std::sync::Mutex::new(
-            crate::session::tool_index::ToolMetadataSnapshot::default(),
-        ));
-        refresh_mcp_snapshot_for_test(bridge.clone(), mcp_state, managed, snapshot.clone()).await;
-        let catalog = bridge
-            .read_resource::<tools::types::resources::ManagedGatewayToolCatalog>()
-            .await
-            .expect("catalog resource should be seeded");
-        assert!(catalog.get("gateway__search").is_some());
-        assert!(
-            catalog.get("server__tool").is_none(),
-            "gateway catalog resource must match admitted snapshot and skip local collisions"
-        );
-    }
-    #[tokio::test]
-    async fn refresh_snapshot_excludes_disabled_gateway_tools_and_connectors() {
-        let bridge = Arc::new(crate::tools::bridge::ToolBridge::for_test());
-        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
-        let managed = crate::session::managed_mcp::ManagedMcpStateHandle::default();
-        {
-            let mut state = managed.lock().await;
-            state.enable_gateway_tools();
-            let epoch = state.start_gateway_tool_fetch().unwrap();
-            assert!(state.complete_gateway_tool_fetch(
-                epoch,
-                crate::session::managed_mcp::GatewayToolCatalog {
-                    tools: vec![
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "linear".to_string(),
-                            connector_name: "Linear".to_string(),
-                            tool_id: "list_issues".to_string(),
-                            tool_name: "List".to_string(),
-                            call_id: "linear.list_issues".to_string(),
-                            description: "List issues".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "linear".to_string(),
-                            connector_name: "Linear".to_string(),
-                            tool_id: "create_issue".to_string(),
-                            tool_name: "Create".to_string(),
-                            call_id: "linear.create_issue".to_string(),
-                            description: "Create issue".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                        crate::session::managed_mcp::GatewayTool {
-                            connector_id: "slack".to_string(),
-                            connector_name: "Slack".to_string(),
-                            tool_id: "search".to_string(),
-                            tool_name: "Search".to_string(),
-                            call_id: "slack.search".to_string(),
-                            description: "Search Slack".to_string(),
-                            json_schema: serde_json::json!({"type": "object"}),
-                        },
-                    ],
-                    total_tools: 3,
-                }
-            ));
-        }
-        let snapshot = Arc::new(std::sync::Mutex::new(
-            crate::session::tool_index::ToolMetadataSnapshot::default(),
-        ));
-        let disabled: std::collections::HashMap<String, std::collections::HashSet<String>> =
-            std::collections::HashMap::from([
-                (
-                    "linear".to_string(),
-                    std::collections::HashSet::from(["linear__create_issue".to_string()]),
-                ),
-                (
-                    crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY.to_string(),
-                    std::collections::HashSet::from(["slack".to_string()]),
-                ),
-            ]);
-        refresh_mcp_snapshot_for_test_with_disabled(
-            bridge.clone(),
-            mcp_state,
-            managed,
-            snapshot.clone(),
-            &disabled,
-        )
-        .await;
-        let catalog = bridge
-            .read_resource::<tools::types::resources::ManagedGatewayToolCatalog>()
-            .await
-            .expect("catalog resource should be seeded");
-        assert!(catalog.get("linear__list_issues").is_some());
-        assert!(catalog.get("linear__create_issue").is_none());
-        assert!(catalog.get("slack__search").is_none());
-        let snapshot = snapshot.lock().unwrap();
-        let names: std::collections::HashSet<&str> = snapshot
-            .tools
-            .iter()
-            .map(|tool| tool.qualified_name.as_str())
-            .collect();
-        assert!(names.contains("linear__list_issues"));
-        assert!(!names.contains("linear__create_issue"));
-        assert!(!names.contains("slack__search"));
-    }
-}
-#[cfg(test)]
-#[path = "acp_session_tests/compaction_pre_prune_tests.rs"]
-mod compaction_pre_prune_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/interjection_tests.rs"]
-mod interjection_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/recap_display_only_tests.rs"]
 mod recap_display_only_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/reminder_policy_tests.rs"]
 mod reminder_policy_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/session_thread_tests.rs"]
+mod session_thread_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/stop_cancelled_tests.rs"]
 mod stop_cancelled_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/truncation_recovery_tests.rs"]
 mod truncation_recovery_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
+mod turn_end_guard_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn_pipeline_v2_tests.rs"]
 mod turn_pipeline_v2_tests;

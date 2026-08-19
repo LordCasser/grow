@@ -11,12 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 pub struct SessionMemory {
     /// Memory storage handle for writing flush output (None when memory disabled).
     /// Wrapped in `RefCell` to allow `/memory on|off` toggle from `&Arc<SessionActor>`.
-    pub storage: RefCell<Option<crate::session::memory::MemoryStorage>>,
+    pub storage: RefCell<Option<memory::MemoryStorage>>,
     /// Whether to write a session summary to memory on session end.
     pub save_on_end: bool,
     /// Shared params for building a fully-configured memory backend.
     /// `None` when memory is disabled.
-    pub backend_params: Option<crate::session::memory::MemoryBackendParams>,
+    pub backend_params: Option<memory::MemoryBackendParams>,
     /// First-turn memory injection behavior resolved from local + remote config.
     pub initial_injection_config: crate::config::MemoryInitialInjectionConfig,
     /// Per-process latch: the first-turn injection decision already ran in
@@ -64,7 +64,7 @@ impl SessionMemory {
     }
 
     /// Clone the storage out of the `RefCell`, dropping the borrow immediately.
-    pub fn storage(&self) -> Option<crate::session::memory::MemoryStorage> {
+    pub fn storage(&self) -> Option<memory::MemoryStorage> {
         self.storage.borrow().clone()
     }
 
@@ -131,15 +131,15 @@ impl SessionMemory {
     /// and opens the index at `<workspace_dir>/index.sqlite`.
     pub(crate) fn open_index(
         &self,
-        storage: &crate::session::memory::MemoryStorage,
-    ) -> Option<crate::session::memory::MemoryIndex> {
+        storage: &memory::MemoryStorage,
+    ) -> Option<memory::MemoryIndex> {
         let embed_dims = self
             .backend_params
             .as_ref()
             .and_then(|p| p.embed_config.as_ref())
             .map_or(1024, |c| c.dimensions);
         let db_path = storage.workspace_dir().join("index.sqlite");
-        crate::session::memory::MemoryIndex::open_or_create(
+        memory::MemoryIndex::open_or_create(
             &db_path,
             storage.clone(),
             Default::default(),
@@ -158,7 +158,7 @@ impl SessionMemory {
             if let Some(ref params) = self.backend_params
                 && let Some(provider) = params.make_embedding_provider().await
             {
-                crate::session::memory::embed_missing_chunks(&index, &provider).await;
+                memory::embed_missing_chunks(&index, &provider).await;
             }
         }
     }

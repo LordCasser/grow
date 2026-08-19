@@ -357,7 +357,7 @@ async fn scripted_goal_slash_presession_disabled() {
 }
 
 /// Full folder-trust session: with `GROW_FOLDER_TRUST=1` and a git repo that
-/// ships a repo-local `.mcp.json` (declared via the scenario `workspace`), the
+/// ships a repo-local Grow MCP config (declared via the scenario `workspace`), the
 /// trust question renders before any session, accepting it (`y`) lets the
 /// session proceed, and a submitted prompt streams the mock response. The
 /// declarative counterpart to the programmatic `folder_trust_*` PTY tests.

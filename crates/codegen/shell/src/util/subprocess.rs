@@ -119,8 +119,8 @@ pub(crate) async fn run_detached_with_timeout(
         // Pipe stderr; inherit would corrupt the TUI alternate screen.
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    tools::util::detach_command(&mut cmd);
-    cmd.envs(tools::util::pager_env());
+    tty_utils::detach_command(&mut cmd);
+    cmd.envs(tty_utils::pager_env());
 
     #[allow(clippy::disallowed_methods)] // a process group is built for it below
     let mut child = match cmd.spawn() {

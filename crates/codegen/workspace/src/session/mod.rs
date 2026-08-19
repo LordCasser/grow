@@ -1,5 +1,3 @@
-pub(crate) mod checkpoint;
-pub(crate) mod checkpoint_store;
 pub mod file_state;
 pub mod git;
 pub mod jj;
@@ -8,7 +6,6 @@ pub mod tool_config;
 use crate::capability::CapabilityMode;
 use crate::config::{MemoryConfig, SessionContextFactory};
 use crate::file_system::{AsyncFsWrapper, LocalFs};
-use crate::session::file_state::FileStateTracker;
 use hunk_tracker::HunkTrackerHandle;
 use mcp::servers::McpState;
 use parking_lot::RwLock;
@@ -61,21 +58,6 @@ pub struct WorkspaceSession {
     ///
     /// [`HunkTrackerActor`]: hunk_tracker::HunkTrackerActor
     pub(crate) hunk_tracker_cancel: Option<tokio_util::sync::CancellationToken>,
-    pub(crate) file_state_tracker: Arc<FileStateTracker>,
-    /// Per-turn hunk deltas keyed by `prompt_index`, captured at finalize and
-    /// replayed on rewind (only when `workspace_rewind_hunks` is on). The live
-    /// restore source; the durable on-disk mirror is the [`checkpoint_store`] field.
-    ///
-    /// [`checkpoint_store`]: WorkspaceSession::checkpoint_store
-    pub(crate) hunk_checkpoints:
-        Arc<tokio::sync::Mutex<HashMap<usize, hunk_tracker::HunkTurnDelta>>>,
-    /// Git domain of the per-prompt rewind checkpoints (HEAD + staged set).
-    pub(crate) git_checkpoints: crate::session::git::GitCheckpointStore,
-    /// Disk-backed durability mirror for finalized checkpoints, fronted by an
-    /// in-memory cache. Gated by `workspace_rewind_durable` (off = no disk I/O,
-    /// legacy path). Co-located in the working tree so the rootfs snapshot carries
-    /// it and a restored session rehydrates the cache. Mirror only — restore stays in-process.
-    pub(crate) checkpoint_store: crate::session::checkpoint_store::CheckpointStore,
     pub(crate) async_fs: AsyncFsWrapper,
     inner: RwLock<WorkspaceSessionInner>,
     /// Per-session lock that serialises `update_tool_config` calls.
@@ -85,8 +67,6 @@ pub struct WorkspaceSession {
     /// Per-session feature-flag bag resolved at creation time, frozen for
     /// the session lifetime. `None` → tools use their safe defaults.
     pub(crate) viewer_ctx: Option<WorkspaceViewerContext>,
-    /// Auto-approve (YOLO) state, refreshed by each before-turn hook.
-    pub(crate) yolo_mode: std::sync::atomic::AtomicBool,
     /// Session-lifetime terminal backend (background-task registry +
     /// persistent shell). Created once at session construction; every toolset
     /// re-resolve reuses it, so background tasks and shell state survive
@@ -163,9 +143,6 @@ impl WorkspaceSession {
             None => (None, None),
         };
         let async_fs = AsyncFsWrapper::new(Arc::new(LocalFs::new(cwd.clone())));
-        let file_state_tracker = Arc::new(FileStateTracker::new());
-        let checkpoint_store =
-            crate::session::checkpoint_store::CheckpointStore::new(&cwd, &session_id);
         Self {
             session_id,
             cwd,
@@ -175,10 +152,6 @@ impl WorkspaceSession {
             fork_budget,
             hunk_tracker,
             hunk_tracker_cancel,
-            file_state_tracker,
-            hunk_checkpoints: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            git_checkpoints: crate::session::git::GitCheckpointStore::new(),
-            checkpoint_store,
             async_fs,
             inner: RwLock::new(WorkspaceSessionInner {
                 effective_tool_config,
@@ -190,7 +163,6 @@ impl WorkspaceSession {
             stale_resolve: std::sync::atomic::AtomicBool::new(false),
             mcp_state: Arc::new(tokio::sync::Mutex::new(McpState::new(vec![]))),
             viewer_ctx,
-            yolo_mode: std::sync::atomic::AtomicBool::new(false),
             system_notifications,
             system_notify_handle,
             #[allow(dead_code)]
@@ -263,20 +235,6 @@ impl WorkspaceSession {
     /// Per-user feature-flag bag resolved at session-bind time.
     pub fn viewer_ctx(&self) -> Option<&WorkspaceViewerContext> {
         self.viewer_ctx.as_ref()
-    }
-    pub fn yolo_mode(&self) -> bool {
-        self.yolo_mode.load(std::sync::atomic::Ordering::Relaxed)
-    }
-    pub fn set_yolo_mode(&self, enabled: bool) {
-        self.yolo_mode
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
-    }
-    pub fn file_state_tracker(&self) -> &Arc<FileStateTracker> {
-        &self.file_state_tracker
-    }
-    /// Git domain of the per-prompt rewind checkpoints.
-    pub fn git_checkpoints(&self) -> &crate::session::git::GitCheckpointStore {
-        &self.git_checkpoints
     }
     pub fn async_fs(&self) -> &AsyncFsWrapper {
         &self.async_fs
@@ -470,9 +428,6 @@ pub struct WorkspaceShared {
     pub(crate) lsp: Option<std::sync::Arc<dyn tools::implementations::lsp::LspBackend>>,
     pub(crate) codebase_indexes:
         std::sync::Arc<parking_lot::Mutex<crate::file_system::CodebaseIndexManager>>,
-    /// Finalize the FS rewind checkpoint on non-`Completed` turn-end outcomes
-    /// (from `GROW_WORKSPACE_REWIND_ALL_OUTCOMES`, default off).
-    pub(crate) workspace_rewind_all_outcomes: bool,
     /// Resolved `$GROW_WORKSPACE_HOME` — the workspace-owned on-disk state root
     /// (`<grow_home>/workspace` by default).
     pub(crate) workspace_home: std::path::PathBuf,

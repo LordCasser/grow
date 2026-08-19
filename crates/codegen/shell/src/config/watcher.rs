@@ -69,31 +69,11 @@ fn new_filtered_debouncer<F: notify_debouncer_mini::DebounceEventHandler>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigChangeEvent {
     GlobalConfigChanged,
-    ProjectConfigChanged {
-        path: PathBuf,
-    },
-    /// A project-scoped MCP config file changed
-    /// (`<cwd>/.mcp.json` or `<cwd>/.claude.json` where `<cwd>` is a
-    /// project root, **not** `$HOME`). Project `<cwd>` is derived
-    /// from `path.parent()` by the reloader.
-    McpConfigChanged {
-        path: PathBuf,
-    },
-    /// The user's **home-level** `~/.claude.json` changed. Distinct
-    /// from [`Self::McpConfigChanged`] because `~/.claude.json` is
-    /// loaded for **every** session regardless of cwd (see
-    /// `load_claude_json_mcp_servers_as_configs`), so the reload
-    /// must broadcast through the legacy unit
-    /// [`super::reloader::ConfigUpdate::McpServersChanged`] arm —
-    /// routing it through `ProjectMcpServersChanged { cwd: $HOME }`
-    /// would silently skip sessions whose cwd doesn't sit under
-    /// `$HOME`.
-    HomeClaudeJsonChanged,
+    ProjectConfigChanged { path: PathBuf },
 }
 
 /// Watches `~/.grow/` for `config.toml`
-/// changes, plus any extra paths (project `.grow/config.toml`, `.mcp.json`,
-/// etc.) provided at startup.
+/// changes, plus project `.grow/config.toml` paths provided at startup.
 ///
 /// Uses `notify-debouncer-mini` for built-in debounce that coalesces rapid
 /// editor writes (including write-then-rename patterns).
@@ -107,9 +87,8 @@ pub enum ConfigChangeEvent {
 /// optimistic suppression window accidentally swallows writes from external
 /// processes.
 ///
-/// Adds two **non-recursive** watches per `cwd` argument:
-/// `<cwd>/` (catches `.mcp.json` and `.claude.json` at the project root) and
-/// `<cwd>/.grow/` (catches `<cwd>/.grow/config.toml`). Recursing on `<cwd>`
+/// Adds narrow **non-recursive** watches for `<cwd>/` and `<cwd>/.grow/`
+/// so `<cwd>/.grow/config.toml` changes can be observed. Recursing on `<cwd>`
 /// would walk `node_modules/`, `target/`, `.git/`, etc. and blow through
 /// `fs.inotify.max_user_watches` on large repos. Use [`Self::watch_path`]
 /// to register additional cwds at runtime when new sessions open in
@@ -142,26 +121,6 @@ impl ConfigFileWatcher {
         let debounce = debounce.unwrap_or(DEFAULT_DEBOUNCE);
         let (tx, rx) = mpsc::unbounded_channel();
         let grow_home_buf = grow_home.to_path_buf();
-        // `~/.claude.json` is consumed by **every**
-        // session (see `load_claude_json_mcp_servers_as_configs`), so
-        // a write to it must broadcast through the unit
-        // `McpServersChanged` arm — NOT through the per-cwd
-        // `ProjectMcpServersChanged { cwd: $HOME }` arm, which
-        // `cwd_matches` would silently filter for sessions outside
-        // `$HOME`. We snapshot `$HOME` here so the closure can
-        // discriminate `<home>/.claude.json` from a project-level
-        // `<cwd>/.claude.json` purely by path.
-        //
-        // Canonicalize `$HOME` ONCE up front. `notify`
-        // backends may deliver canonicalized event paths (e.g. macOS
-        // FSEvents resolves symlinks, returning `/private/var/...`
-        // where `dirs::home_dir()` returned `/var/...`), so a raw byte
-        // compare against an un-canonicalized `$HOME` would mis-route
-        // `~/.claude.json` to the per-cwd path. The per-event side is
-        // canonicalized in `parent_is_dir`.
-        let user_home_buf: Option<PathBuf> =
-            dirs::home_dir().map(|h| dunce::canonicalize(&h).unwrap_or(h));
-
         let mut debouncer = new_filtered_debouncer(debounce, move |res: DebounceEventResult| {
             let Ok(events) = res else { return };
 
@@ -177,21 +136,6 @@ impl ConfigFileWatcher {
                     }
                     Some("config.toml") => {
                         Some(ConfigChangeEvent::ProjectConfigChanged { path: path.clone() })
-                    }
-                    // `~/.claude.json` routes through
-                    // the dedicated home-level variant so the
-                    // reloader can broadcast. Project-level
-                    // `<cwd>/.claude.json` (and any `.mcp.json`)
-                    // continues to be a per-cwd reload.
-                    Some(".claude.json")
-                        if user_home_buf
-                            .as_deref()
-                            .is_some_and(|h| parent_is_dir(parent, h)) =>
-                    {
-                        Some(ConfigChangeEvent::HomeClaudeJsonChanged)
-                    }
-                    Some(".mcp.json") | Some(".claude.json") => {
-                        Some(ConfigChangeEvent::McpConfigChanged { path: path.clone() })
                     }
                     _ => None,
                 };
@@ -271,10 +215,10 @@ impl ConfigFileWatcher {
     ///
     /// Intended for the session-open path: when a session opens in a cwd
     /// the leader hasn't seen before, calling this method ensures edits to
-    /// `<cwd>/.mcp.json` and `<cwd>/.grow/config.toml` trigger a
-    /// [`ConfigChangeEvent`] (and downstream [`ConfigUpdate::
-    /// ProjectMcpServersChanged`](super::reloader::ConfigUpdate::
-    /// ProjectMcpServersChanged)) within the debounce window.
+    /// `<cwd>/.grow/config.toml` triggers a
+    /// [`ConfigChangeEvent`] (and downstream project-scoped
+    /// [`ConfigUpdate::McpCatalogChanged`](super::reloader::ConfigUpdate::McpCatalogChanged))
+    /// within the debounce window.
     ///
     /// **Non-recursive by design.** Watching `<cwd>` recursively would
     /// walk `node_modules/`, `target/`, `.git/`, etc. and easily exhaust
@@ -313,17 +257,6 @@ impl ConfigFileWatcher {
         }
         unwatch_cwd_dirs(&mut self.debouncer, cwd);
     }
-}
-
-/// Component-aware "is `parent` the directory `dir`?" that tolerates
-/// symlink / canonicalization differences between a `notify`-delivered
-/// event path and a `dirs::home_dir()`-style reference. `dir` is
-/// expected to be already canonicalized (see `ConfigFileWatcher::start`).
-fn parent_is_dir(parent: Option<&Path>, dir: &Path) -> bool {
-    let Some(parent) = parent else {
-        return false;
-    };
-    parent == dir || dunce::canonicalize(parent).is_ok_and(|p| p == dir)
 }
 
 /// Add the two non-recursive watches for a project root.
@@ -396,7 +329,7 @@ pub enum DiscoveryChange {
 
 fn discovery_change_for_path(path: &Path) -> Option<DiscoveryChange> {
     let file_name = path.file_name().and_then(|name| name.to_str());
-    if file_name.is_some_and(|name| VENDOR_CONFIG_ROOT_NAMES.contains(&name)) {
+    if file_name.is_some_and(|name| GROW_CONFIG_ROOT_NAMES.contains(&name)) {
         return Some(DiscoveryChange::Skills);
     }
     if file_name.is_some_and(|name| name == "workflows")
@@ -420,18 +353,18 @@ fn discovery_change_for_path(path: &Path) -> Option<DiscoveryChange> {
     None
 }
 
-/// Known vendor config root basenames; kept in sync with `collect_skill_config_dirs`.
-const VENDOR_CONFIG_ROOT_NAMES: &[&str] = &[".grow", ".agents", ".claude", ".cursor"];
+/// Canonical Grow config root basename.
+const GROW_CONFIG_ROOT_NAMES: &[&str] = &[".grow"];
 
-/// Vendor roots (by name or `grow_home`) must use scoped watches — they can
+/// Grow roots (by name or `grow_home`) must use scoped watches — they can
 /// contain large non-skill trees (`worktrees/`, etc.).
-fn is_vendor_config_root(dir: &Path, grow_home: &Path) -> bool {
+fn is_grow_config_root(dir: &Path, grow_home: &Path) -> bool {
     if paths_equal(dir, grow_home) {
         return true;
     }
     dir.file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| VENDOR_CONFIG_ROOT_NAMES.contains(&n))
+        .is_some_and(|n| GROW_CONFIG_ROOT_NAMES.contains(&n))
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
@@ -450,7 +383,7 @@ fn path_set_contains(dirs: &HashSet<PathBuf>, target: &Path) -> bool {
     dirs.iter().any(|dir| paths_equal(dir, target))
 }
 
-fn vendor_skill_refresh_dirs(config_dir: &Path) -> [(PathBuf, RecursiveMode); 3] {
+fn grow_discovery_refresh_dirs(config_dir: &Path) -> [(PathBuf, RecursiveMode); 3] {
     [
         (config_dir.join("skills"), RecursiveMode::Recursive),
         (config_dir.join("commands"), RecursiveMode::NonRecursive),
@@ -461,7 +394,7 @@ fn vendor_skill_refresh_dirs(config_dir: &Path) -> [(PathBuf, RecursiveMode); 3]
 fn project_grow_refresh_dirs(project_root: &Path) -> Vec<(PathBuf, RecursiveMode)> {
     let project_grow = project_root.join(".grow");
     let mut dirs = vec![(project_grow.clone(), RecursiveMode::NonRecursive)];
-    dirs.extend(vendor_skill_refresh_dirs(&project_grow));
+    dirs.extend(grow_discovery_refresh_dirs(&project_grow));
     dirs
 }
 
@@ -487,7 +420,7 @@ fn attach_new_refresh_dirs(
     changed
 }
 
-/// Paths successfully watched under a scoped vendor root (root + skill subdirs).
+/// Paths successfully watched under a scoped Grow root (root + skill subdirs).
 fn watch_skill_subdirs(
     debouncer: &mut Debouncer<AccessFilteredWatcher>,
     config_dir: &Path,
@@ -502,7 +435,7 @@ fn watch_skill_subdirs(
         }
         Err(error) => log_watch_error(&error, "failed to watch config dir root"),
     }
-    for (dir, mode) in vendor_skill_refresh_dirs(config_dir) {
+    for (dir, mode) in grow_discovery_refresh_dirs(config_dir) {
         if !dir.is_dir() {
             continue;
         }
@@ -518,9 +451,9 @@ fn watch_skill_subdirs(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SkillsWatchPlan {
-    vendor_roots: Vec<PathBuf>,
+    grow_roots: Vec<PathBuf>,
     recursive_roots: Vec<PathBuf>,
-    /// Non-recursive parent so first create of a missing project vendor root is observed.
+    /// Non-recursive parent so first create of a missing project Grow root is observed.
     project_parent_watch: Option<PathBuf>,
     refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
 }
@@ -531,14 +464,14 @@ fn plan_skills_watch_targets(
     grow_home: &Path,
     project_root: Option<&Path>,
 ) -> SkillsWatchPlan {
-    let mut vendor_roots = Vec::new();
+    let mut grow_roots = Vec::new();
     let mut recursive_roots = Vec::new();
     let mut refresh_dirs = Vec::new();
 
     for dir in dirs_to_watch {
-        if is_vendor_config_root(dir, grow_home) {
-            vendor_roots.push(dir.clone());
-            refresh_dirs.extend(vendor_skill_refresh_dirs(dir));
+        if is_grow_config_root(dir, grow_home) {
+            grow_roots.push(dir.clone());
+            refresh_dirs.extend(grow_discovery_refresh_dirs(dir));
         } else {
             recursive_roots.push(dir.clone());
         }
@@ -546,22 +479,22 @@ fn plan_skills_watch_targets(
 
     let mut project_parent_watch = None;
     if let Some(project_root) = project_root {
-        let mut missing_project_vendor = false;
-        for name in VENDOR_CONFIG_ROOT_NAMES {
-            let vendor_root = project_root.join(name);
-            if !dirs_contain(dirs_to_watch, &vendor_root) {
-                missing_project_vendor = true;
-                refresh_dirs.push((vendor_root.clone(), RecursiveMode::NonRecursive));
-                refresh_dirs.extend(vendor_skill_refresh_dirs(&vendor_root));
+        let mut missing_project_grow = false;
+        for name in GROW_CONFIG_ROOT_NAMES {
+            let grow_root = project_root.join(name);
+            if !dirs_contain(dirs_to_watch, &grow_root) {
+                missing_project_grow = true;
+                refresh_dirs.push((grow_root.clone(), RecursiveMode::NonRecursive));
+                refresh_dirs.extend(grow_discovery_refresh_dirs(&grow_root));
             }
         }
-        if missing_project_vendor && !dirs_contain(dirs_to_watch, project_root) {
+        if missing_project_grow && !dirs_contain(dirs_to_watch, project_root) {
             project_parent_watch = Some(project_root.to_path_buf());
         }
     }
 
     SkillsWatchPlan {
-        vendor_roots,
+        grow_roots,
         recursive_roots,
         project_parent_watch,
         refresh_dirs,
@@ -667,18 +600,12 @@ impl SkillsFileWatcher {
         config_paths: &[String],
     ) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
         let grow_home = tools::util::grow_home::grow_home();
-        // Watch the full superset of vendor dirs (all-on compat). This watcher
-        // is leader-global (no per-session compat resolved here); the actual
-        // per-session discovery gating happens downstream, so watching a
-        // currently-disabled vendor dir is harmless (a change just re-runs the
-        // gated discovery) and avoids ever missing a watch if a toggle flips.
         let user_skill_roots = agent::prompt::skills::user_skill_roots();
         let dirs_to_watch = agent::prompt::skills::collect_skill_config_dirs(
             cwd,
             monorepo_user_dir,
             &user_skill_roots,
             config_paths,
-            tools::types::compat::CompatConfig::default(),
         );
         let project_root = cwd.map(crate::session::workflow::registry::project_root);
         Self::start_with_dirs(&dirs_to_watch, &grow_home, project_root.as_deref())
@@ -721,7 +648,7 @@ impl SkillsFileWatcher {
 
         let mut watched = 0;
         let mut refreshed_dirs = HashSet::new();
-        for dir in &plan.vendor_roots {
+        for dir in &plan.grow_roots {
             let attached = watch_skill_subdirs(&mut debouncer, dir);
             watched += attached.len();
             refreshed_dirs.extend(attached);
@@ -783,1011 +710,100 @@ impl SkillsFileWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    fn wait_ms(ms: u64) {
-        std::thread::sleep(Duration::from_millis(ms));
-    }
 
     #[test]
-    fn is_vendor_config_root_matches_known_names_at_any_tier() {
-        let home = TempDir::new().unwrap();
-        let home = home.path();
-        let grow_home = home.join(".grow");
-
-        assert!(is_vendor_config_root(&grow_home, &grow_home));
-        assert!(is_vendor_config_root(&home.join(".claude"), &grow_home));
-        assert!(is_vendor_config_root(&home.join(".cursor"), &grow_home));
-        assert!(is_vendor_config_root(&home.join(".agents"), &grow_home));
-        assert!(is_vendor_config_root(
-            &home.join("repo").join(".grow"),
-            &grow_home
-        ));
-        assert!(is_vendor_config_root(
-            &home.join("repo").join(".claude"),
-            &grow_home
-        ));
-
-        assert!(!is_vendor_config_root(&home.join("my-skills"), &grow_home));
-        assert!(!is_vendor_config_root(&home.join(".config"), &grow_home));
-        assert!(!is_vendor_config_root(
-            &home.join("repo").join("my-skills"),
-            &grow_home
-        ));
-
-        let custom_home = home.join("custom-grow-home");
-        assert!(is_vendor_config_root(&custom_home, &custom_home));
-    }
-
-    #[test]
-    fn vendor_skill_refresh_dirs_paths_and_modes() {
-        let root = Path::new("/tmp/project/.claude");
+    fn discovery_classifies_only_canonical_grow_paths() {
         assert_eq!(
-            vendor_skill_refresh_dirs(root),
-            [
-                (root.join("skills"), RecursiveMode::Recursive),
-                (root.join("commands"), RecursiveMode::NonRecursive),
-                (root.join("workflows"), RecursiveMode::NonRecursive),
-            ]
+            discovery_change_for_path(Path::new("/repo/.grow/skills/review/SKILL.md")),
+            Some(DiscoveryChange::Skills)
         );
-    }
-
-    #[test]
-    fn project_grow_refresh_dirs_matches_vendor_layout() {
-        let project = Path::new("/tmp/repo");
-        let grow = project.join(".grow");
-        let dirs = project_grow_refresh_dirs(project);
-
-        assert_eq!(dirs.len(), 4);
-        assert_eq!(dirs[0], (grow.clone(), RecursiveMode::NonRecursive));
         assert_eq!(
-            &dirs[1..],
-            [
-                (grow.join("skills"), RecursiveMode::Recursive),
-                (grow.join("commands"), RecursiveMode::NonRecursive),
-                (grow.join("workflows"), RecursiveMode::NonRecursive),
-            ]
+            discovery_change_for_path(Path::new("/repo/.grow/commands/review.md")),
+            Some(DiscoveryChange::Skills)
         );
-        assert_eq!(dirs[1..], vendor_skill_refresh_dirs(&grow));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn path_set_contains_uses_paths_equal() {
-        let tmp = TempDir::new().unwrap();
-        let real = tmp.path().join("real_skills");
-        fs::create_dir_all(&real).unwrap();
-        let link = tmp.path().join("link_skills");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-
-        assert_ne!(real.as_os_str(), link.as_os_str());
-        let mut set = HashSet::new();
-        set.insert(real.clone());
-
-        assert!(path_set_contains(&set, &real));
-        assert!(
-            path_set_contains(&set, &link),
-            "symlink form must match via paths_equal/canonicalize"
-        );
-        assert!(
-            !set.contains(&link),
-            "HashSet::contains must not match symlink form"
-        );
-        assert!(!path_set_contains(&set, &tmp.path().join("other")));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn attach_new_refresh_dirs_skips_known_and_missing() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        let known_real = root.join("known");
-        let known_link = root.join("known_link");
-        let missing = root.join("missing");
-        let fresh = root.join("fresh");
-        fs::create_dir(&known_real).unwrap();
-        std::os::unix::fs::symlink(&known_real, &known_link).unwrap();
-        fs::create_dir(&fresh).unwrap();
-
-        let mut debouncer = new_filtered_debouncer(Duration::from_millis(50), |_| {}).unwrap();
-        debouncer
-            .watcher()
-            .watch(root, RecursiveMode::NonRecursive)
-            .unwrap();
-
-        // Seed with symlink form; refresh_dirs lists the real path (paths_equal, not byte-equal).
-        let refresh_dirs = vec![
-            (known_real.clone(), RecursiveMode::NonRecursive),
-            (missing.clone(), RecursiveMode::NonRecursive),
-            (fresh.clone(), RecursiveMode::NonRecursive),
-        ];
-        let mut refreshed_dirs = HashSet::from([known_link.clone()]);
-        assert_ne!(known_real.as_os_str(), known_link.as_os_str());
-        assert!(!refreshed_dirs.contains(&known_real));
-
-        assert!(attach_new_refresh_dirs(
-            &mut debouncer,
-            &refresh_dirs,
-            &mut refreshed_dirs,
-            "test attach",
-        ));
         assert_eq!(
-            refreshed_dirs.len(),
-            2,
-            "skip known (path-equal form) and missing; only fresh attaches"
+            discovery_change_for_path(Path::new("/repo/.grow/workflows/release.toml")),
+            Some(DiscoveryChange::Workflows)
         );
-        assert!(path_set_contains(&refreshed_dirs, &known_real));
-        assert!(path_set_contains(&refreshed_dirs, &known_link));
-        assert!(path_set_contains(&refreshed_dirs, &fresh));
-        assert!(!path_set_contains(&refreshed_dirs, &missing));
-        assert!(!attach_new_refresh_dirs(
-            &mut debouncer,
-            &refresh_dirs,
-            &mut refreshed_dirs,
-            "test attach",
-        ));
-        assert_eq!(refreshed_dirs.len(), 2);
-    }
-
-    fn expected_missing_vendor_refresh_seeds(project_root: &Path) -> Vec<(PathBuf, RecursiveMode)> {
-        let mut expected = Vec::new();
-        for name in VENDOR_CONFIG_ROOT_NAMES {
-            let root = project_root.join(name);
-            expected.push((root.clone(), RecursiveMode::NonRecursive));
-            expected.extend(vendor_skill_refresh_dirs(&root));
+        for path in [
+            "/repo/.claude/skills/review/SKILL.md",
+            "/repo/.cursor/commands/review.md",
+            "/repo/.agents/workflows/release.toml",
+        ] {
+            assert_eq!(discovery_change_for_path(Path::new(path)), None, "{path}");
         }
-        expected
     }
 
-    /// Parent-only plan (empty dirs_to_watch) must still start so mid-session
-    /// vendor creates under project_root can attach via refresh seeds.
     #[test]
-    fn start_with_dirs_keeps_parent_only_watch() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path();
-        let grow_home = project.join("home-grow");
-        fs::create_dir_all(&grow_home).unwrap();
+    fn grow_config_root_is_exact() {
+        let grow_home = Path::new("/home/user/.grow");
+        assert!(is_grow_config_root(grow_home, grow_home));
+        assert!(is_grow_config_root(Path::new("/repo/.grow"), grow_home));
+        assert!(!is_grow_config_root(Path::new("/repo/.claude"), grow_home));
+        assert!(!is_grow_config_root(Path::new("/repo/config"), grow_home));
+    }
 
-        let plan = plan_skills_watch_targets(&[], &grow_home, Some(project));
-        assert!(plan.vendor_roots.is_empty());
+    #[test]
+    fn project_refresh_plan_seeds_only_grow() {
+        let project = Path::new("/repo");
+        let grow_home = Path::new("/home/user/.grow");
+        let plan = plan_skills_watch_targets(&[], grow_home, Some(project));
+
+        assert!(plan.grow_roots.is_empty());
         assert!(plan.recursive_roots.is_empty());
         assert_eq!(plan.project_parent_watch.as_deref(), Some(project));
-
-        let (watcher, _rx) = SkillsFileWatcher::start_with_dirs(&[], &grow_home, Some(project))
-            .expect("parent-only watch must start when no discovery roots exist yet");
+        assert_eq!(plan.refresh_dirs, project_grow_refresh_dirs(project));
         assert!(
-            path_set_contains(&watcher.refreshed_dirs, project),
-            "successful project parent watch must be retained"
-        );
-        assert_eq!(
-            watcher.refresh_dirs,
-            expected_missing_vendor_refresh_seeds(project)
+            plan.refresh_dirs
+                .iter()
+                .all(|(path, _)| path.starts_with(project.join(".grow")))
         );
     }
 
     #[test]
-    fn plan_skills_watch_targets_scopes_vendors_and_seeds_refresh() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path();
-        let grow_home = project.join("home-grow");
-        let project_claude = project.join(".claude");
-        let project_grow = project.join(".grow");
-        let custom = project.join("my-skills");
-        fs::create_dir_all(&project_claude).unwrap();
-        fs::create_dir_all(&project_grow).unwrap();
-        fs::create_dir_all(&custom).unwrap();
-
-        let dirs = vec![project_claude.clone(), project_grow.clone(), custom.clone()];
-        let plan = plan_skills_watch_targets(&dirs, &grow_home, Some(project));
+    fn explicit_grow_root_is_scoped_and_custom_root_is_recursive() {
+        let grow_home = PathBuf::from("/home/user/.grow");
+        let project_grow = PathBuf::from("/repo/.grow");
+        let custom = PathBuf::from("/repo/custom-skills");
+        let plan = plan_skills_watch_targets(
+            &[grow_home.clone(), project_grow.clone(), custom.clone()],
+            &grow_home,
+            Some(Path::new("/repo")),
+        );
 
         assert_eq!(
-            plan.vendor_roots,
-            vec![project_claude.clone(), project_grow.clone()]
+            plan.grow_roots,
+            vec![grow_home.clone(), project_grow.clone()]
         );
         assert_eq!(plan.recursive_roots, vec![custom]);
-        assert_eq!(plan.project_parent_watch.as_deref(), Some(project));
-
-        let mut expected_refresh: Vec<(PathBuf, RecursiveMode)> =
-            vendor_skill_refresh_dirs(&project_claude)
-                .into_iter()
-                .chain(vendor_skill_refresh_dirs(&project_grow))
-                .collect();
-        for name in [".agents", ".cursor"] {
-            let root = project.join(name);
-            expected_refresh.push((root.clone(), RecursiveMode::NonRecursive));
-            expected_refresh.extend(vendor_skill_refresh_dirs(&root));
-        }
-        assert_eq!(plan.refresh_dirs, expected_refresh);
-    }
-
-    #[test]
-    fn plan_skills_watch_targets_multi_vendor_refresh_fanout() {
-        let grow_home = PathBuf::from("/home/u/.grow");
-        let a = PathBuf::from("/repo/.claude");
-        let b = PathBuf::from("/repo/.agents");
-        let plan = plan_skills_watch_targets(&[a.clone(), b.clone()], &grow_home, None);
-
-        assert_eq!(plan.vendor_roots, vec![a.clone(), b.clone()]);
-        assert!(plan.recursive_roots.is_empty());
-        assert_eq!(
-            plan.refresh_dirs,
-            vendor_skill_refresh_dirs(&a)
-                .into_iter()
-                .chain(vendor_skill_refresh_dirs(&b))
-                .collect::<Vec<_>>()
-        );
-        for root in [&a, &b] {
-            for (dir, mode) in vendor_skill_refresh_dirs(root) {
-                assert!(
-                    plan.refresh_dirs.contains(&(dir, mode)),
-                    "missing refresh seed for {}",
-                    root.display()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn plan_skills_watch_targets_seeds_all_missing_project_vendor_roots() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path();
-        let grow_home = project.join("elsewhere").join(".grow");
-        let plan = plan_skills_watch_targets(&[], &grow_home, Some(project));
-
-        assert_eq!(plan.project_parent_watch.as_deref(), Some(project));
-        assert!(plan.vendor_roots.is_empty());
-        assert!(plan.recursive_roots.is_empty());
-        assert_eq!(
-            plan.refresh_dirs,
-            expected_missing_vendor_refresh_seeds(project)
-        );
-        for name in VENDOR_CONFIG_ROOT_NAMES {
-            let root = project.join(name);
-            assert!(
-                plan.refresh_dirs
-                    .contains(&(root.clone(), RecursiveMode::NonRecursive)),
-                "missing root seed for {name}"
-            );
-            for (dir, mode) in vendor_skill_refresh_dirs(&root) {
-                assert!(
-                    plan.refresh_dirs.contains(&(dir, mode)),
-                    "missing subdir seed under {name}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn plan_skills_watch_targets_does_not_double_seed_present_vendor_roots() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path();
-        let grow_home = project.join("home-grow");
-        let present: Vec<PathBuf> = VENDOR_CONFIG_ROOT_NAMES
-            .iter()
-            .map(|name| project.join(name))
-            .collect();
-        for root in &present {
-            fs::create_dir_all(root).unwrap();
-        }
-
-        let plan = plan_skills_watch_targets(&present, &grow_home, Some(project));
-
-        assert_eq!(plan.vendor_roots, present);
-        assert!(plan.project_parent_watch.is_none());
-
-        let mut expected = Vec::new();
-        for root in &present {
-            expected.extend(vendor_skill_refresh_dirs(root));
-        }
+        assert_eq!(plan.project_parent_watch, None);
+        let expected = grow_discovery_refresh_dirs(&grow_home)
+            .into_iter()
+            .chain(grow_discovery_refresh_dirs(&project_grow))
+            .collect::<Vec<_>>();
         assert_eq!(plan.refresh_dirs, expected);
-        for root in &present {
-            assert!(
-                !plan
-                    .refresh_dirs
-                    .contains(&(root.clone(), RecursiveMode::NonRecursive)),
-                "present vendor root {} must not be refresh-seeded",
-                root.display()
-            );
-            assert_eq!(
-                plan.refresh_dirs
-                    .iter()
-                    .filter(|(dir, _)| dir == root || dir.starts_with(root))
-                    .count(),
-                vendor_skill_refresh_dirs(root).len()
-            );
-        }
     }
 
     #[test]
-    fn plan_skills_watch_targets_partial_vendors_seed_only_missing() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path();
-        let grow_home = project.join("home-grow");
-        let project_claude = project.join(".claude");
-        fs::create_dir_all(&project_claude).unwrap();
-
-        let plan = plan_skills_watch_targets(
-            std::slice::from_ref(&project_claude),
-            &grow_home,
-            Some(project),
-        );
-
-        assert_eq!(plan.vendor_roots, vec![project_claude.clone()]);
-        assert_eq!(plan.project_parent_watch.as_deref(), Some(project));
-
-        let mut expected = vendor_skill_refresh_dirs(&project_claude).to_vec();
-        for name in [".grow", ".agents", ".cursor"] {
-            let root = project.join(name);
-            expected.push((root.clone(), RecursiveMode::NonRecursive));
-            expected.extend(vendor_skill_refresh_dirs(&root));
-        }
-        assert_eq!(plan.refresh_dirs, expected);
-        assert!(
-            !plan
-                .refresh_dirs
-                .contains(&(project_claude.clone(), RecursiveMode::NonRecursive))
-        );
-    }
-
-    #[test]
-    fn plan_skills_watch_targets_parent_watches_project_when_grok_present_siblings_missing() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path();
-        let grow_home = project.join("home-grow");
-        let project_grow = project.join(".grow");
-        fs::create_dir_all(&project_grow).unwrap();
-
-        let plan = plan_skills_watch_targets(
-            std::slice::from_ref(&project_grow),
-            &grow_home,
-            Some(project),
-        );
-
-        assert_eq!(plan.vendor_roots, vec![project_grow.clone()]);
-        assert_eq!(plan.project_parent_watch.as_deref(), Some(project));
-        assert!(
-            !plan
-                .refresh_dirs
-                .contains(&(project_grow.clone(), RecursiveMode::NonRecursive))
-        );
-        for name in [".agents", ".claude", ".cursor"] {
-            let root = project.join(name);
-            assert!(
-                plan.refresh_dirs
-                    .contains(&(root.clone(), RecursiveMode::NonRecursive)),
-                "missing root seed for {name}"
-            );
-            for (dir, mode) in vendor_skill_refresh_dirs(&root) {
-                assert!(
-                    plan.refresh_dirs.contains(&(dir, mode)),
-                    "missing subdir seed under {name}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn watch_skill_subdirs_ignores_worktrees_under_scoped_root() {
-        let tmp = TempDir::new().unwrap();
-        let global = tmp.path();
-
-        let alpha = global.join("skills").join("alpha");
-        fs::create_dir_all(&alpha).unwrap();
-        fs::write(alpha.join("SKILL.md"), "# alpha").unwrap();
-
-        let wt_skill = global
-            .join("worktrees")
-            .join("wt1")
-            .join(".grow")
-            .join("skills")
-            .join("beta");
-        fs::create_dir_all(&wt_skill).unwrap();
-        fs::write(wt_skill.join("SKILL.md"), "# beta").unwrap();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut debouncer = new_filtered_debouncer(
-            Duration::from_millis(50),
-            move |res: DebounceEventResult| {
-                let Ok(events) = res else { return };
-                if events
-                    .iter()
-                    .any(|event| discovery_change_for_path(&event.path).is_some())
-                {
-                    let _ = tx.send(());
-                }
-            },
-        )
-        .expect("debouncer should build");
-
-        let watched = watch_skill_subdirs(&mut debouncer, global);
-        assert!(watched.contains(&global.join("skills")));
-        wait_ms(150);
-        while rx.try_recv().is_ok() {}
-
-        fs::write(wt_skill.join("SKILL.md"), "# beta v2").unwrap();
-        wait_ms(250);
-        assert!(
-            rx.try_recv().is_err(),
-            "changes under worktrees/ must not fire under scoped watches"
-        );
-
-        fs::write(alpha.join("SKILL.md"), "# alpha v2").unwrap();
-        wait_ms(250);
-        assert!(rx.try_recv().is_ok(), "changes under skills/ must fire");
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn watch_skill_subdirs_scopes_project_claude_not_worktrees() {
-        let tmp = TempDir::new().unwrap();
-        let project_claude = tmp.path().join(".claude");
-
-        let alpha = project_claude.join("skills").join("alpha");
-        fs::create_dir_all(&alpha).unwrap();
-        fs::write(alpha.join("SKILL.md"), "# alpha").unwrap();
-
-        let wt_skill = project_claude
-            .join("worktrees")
-            .join("wt1")
-            .join("bazel-out")
-            .join("deep")
-            .join("SKILL.md");
-        fs::create_dir_all(wt_skill.parent().unwrap()).unwrap();
-        fs::write(&wt_skill, "# noise").unwrap();
-
-        assert!(is_vendor_config_root(
-            &project_claude,
-            &tmp.path().join(".grow")
-        ));
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut debouncer = new_filtered_debouncer(
-            Duration::from_millis(50),
-            move |res: DebounceEventResult| {
-                let Ok(events) = res else { return };
-                if events
-                    .iter()
-                    .any(|event| discovery_change_for_path(&event.path).is_some())
-                {
-                    let _ = tx.send(());
-                }
-            },
-        )
-        .expect("debouncer should build");
-
-        let watched = watch_skill_subdirs(&mut debouncer, &project_claude);
-        assert!(watched.contains(&project_claude.join("skills")));
-        wait_ms(150);
-        while rx.try_recv().is_ok() {}
-
-        fs::write(&wt_skill, "# noise v2").unwrap();
-        wait_ms(250);
-        assert!(
-            rx.try_recv().is_err(),
-            "changes under project .claude/worktrees must not fire"
-        );
-
-        fs::write(alpha.join("SKILL.md"), "# alpha v2").unwrap();
-        wait_ms(250);
-        assert!(
-            rx.try_recv().is_ok(),
-            "changes under project .claude/skills must fire"
-        );
-    }
-
-    #[test]
-    fn workflow_change_classifies_missing_directory_creation() {
-        let grow = Path::new("/tmp/project/.grow");
+    fn project_refresh_modes_are_bounded() {
+        let dirs = project_grow_refresh_dirs(Path::new("/repo"));
         assert_eq!(
-            discovery_change_for_path(grow),
-            Some(DiscoveryChange::Skills)
+            dirs,
+            vec![
+                (PathBuf::from("/repo/.grow"), RecursiveMode::NonRecursive),
+                (
+                    PathBuf::from("/repo/.grow/skills"),
+                    RecursiveMode::Recursive,
+                ),
+                (
+                    PathBuf::from("/repo/.grow/commands"),
+                    RecursiveMode::NonRecursive,
+                ),
+                (
+                    PathBuf::from("/repo/.grow/workflows"),
+                    RecursiveMode::NonRecursive,
+                ),
+            ]
         );
-        assert_eq!(
-            discovery_change_for_path(Path::new("/tmp/project/.claude")),
-            Some(DiscoveryChange::Skills)
-        );
-        assert_eq!(
-            discovery_change_for_path(&grow.join("skills")),
-            Some(DiscoveryChange::Skills)
-        );
-        assert_eq!(
-            discovery_change_for_path(&grow.join("commands")),
-            Some(DiscoveryChange::Skills)
-        );
-        assert_eq!(
-            discovery_change_for_path(&grow.join("workflows")),
-            Some(DiscoveryChange::Workflows)
-        );
-        assert_eq!(
-            discovery_change_for_path(&grow.join("workflows/review.rhai")),
-            Some(DiscoveryChange::Workflows)
-        );
-        assert_eq!(
-            discovery_change_for_path(&grow.join("skills/review/SKILL.md")),
-            Some(DiscoveryChange::Skills)
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn refresh_new_discovery_dirs_attaches_first_created_workflows_dir() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let root_for_handler = root.to_path_buf();
-        let mut debouncer = new_filtered_debouncer(
-            Duration::from_millis(50),
-            move |result: DebounceEventResult| {
-                let Ok(events) = result else { return };
-                if events
-                    .iter()
-                    .any(|event| event.path.starts_with(&root_for_handler))
-                {
-                    let _ = tx.send(());
-                }
-            },
-        )
-        .unwrap();
-        debouncer
-            .watcher()
-            .watch(root, RecursiveMode::NonRecursive)
-            .unwrap();
-        let workflows = root.join("workflows");
-        let mut watcher = SkillsFileWatcher {
-            debouncer,
-            refresh_dirs: vec![(workflows.clone(), RecursiveMode::NonRecursive)],
-            refreshed_dirs: HashSet::new(),
-        };
-        fs::create_dir(&workflows).unwrap();
-        wait_ms(150);
-        assert!(
-            rx.try_recv().is_ok(),
-            "parent watch sees first directory creation"
-        );
-        assert!(watcher.refresh_new_discovery_dirs());
-        assert!(watcher.refreshed_dirs.contains(&workflows));
-    }
-
-    #[test]
-    fn refresh_new_discovery_dirs_attaches_existing_after_mkdir() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        let workflows = root.join("workflows");
-        let mut debouncer = new_filtered_debouncer(Duration::from_millis(50), |_| {}).unwrap();
-        debouncer
-            .watcher()
-            .watch(root, RecursiveMode::NonRecursive)
-            .unwrap();
-        let mut watcher = SkillsFileWatcher {
-            debouncer,
-            refresh_dirs: vec![(workflows.clone(), RecursiveMode::NonRecursive)],
-            refreshed_dirs: HashSet::new(),
-        };
-        assert!(!watcher.refresh_new_discovery_dirs());
-        fs::create_dir(&workflows).unwrap();
-        assert!(watcher.refresh_new_discovery_dirs());
-        assert!(watcher.refreshed_dirs.contains(&workflows));
-        assert!(!watcher.refresh_new_discovery_dirs());
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn refresh_new_discovery_dirs_attaches_skills_and_commands() {
-        let tmp = TempDir::new().unwrap();
-        let vendor = tmp.path().join(".claude");
-        fs::create_dir(&vendor).unwrap();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut debouncer = new_filtered_debouncer(
-            Duration::from_millis(50),
-            move |result: DebounceEventResult| {
-                let Ok(events) = result else { return };
-                if events
-                    .iter()
-                    .any(|event| discovery_change_for_path(&event.path).is_some())
-                {
-                    let _ = tx.send(());
-                }
-            },
-        )
-        .unwrap();
-        debouncer
-            .watcher()
-            .watch(&vendor, RecursiveMode::NonRecursive)
-            .unwrap();
-
-        let skills = vendor.join("skills");
-        let commands = vendor.join("commands");
-        let mut watcher = SkillsFileWatcher {
-            debouncer,
-            refresh_dirs: vendor_skill_refresh_dirs(&vendor).to_vec(),
-            refreshed_dirs: HashSet::new(),
-        };
-
-        fs::create_dir_all(skills.join("alpha")).unwrap();
-        wait_ms(150);
-        assert!(rx.try_recv().is_ok(), "must see skills/ creation");
-        assert!(watcher.refresh_new_discovery_dirs());
-        assert!(watcher.refreshed_dirs.contains(&skills));
-        while rx.try_recv().is_ok() {}
-
-        fs::write(skills.join("alpha").join("SKILL.md"), "# alpha").unwrap();
-        wait_ms(250);
-        assert!(
-            rx.try_recv().is_ok(),
-            "SKILL.md under newly created skills/ must fire"
-        );
-        while rx.try_recv().is_ok() {}
-
-        fs::create_dir(&commands).unwrap();
-        wait_ms(150);
-        assert!(rx.try_recv().is_ok(), "must see commands/ creation");
-        assert!(watcher.refresh_new_discovery_dirs());
-        assert!(watcher.refreshed_dirs.contains(&commands));
-        while rx.try_recv().is_ok() {}
-
-        fs::write(commands.join("foo.md"), "# foo").unwrap();
-        wait_ms(250);
-        assert!(
-            rx.try_recv().is_ok(),
-            "command md under newly created commands/ must fire"
-        );
-    }
-
-    /// Regression test for the MCP/skills reload storm (feedback loop):
-    /// merely *reading* a watched config file must NOT produce a
-    /// `ConfigChangeEvent`. Linux inotify delivers `IN_OPEN`/`IN_ACCESS`
-    /// for reads, `notify` subscribes to `OPEN`, and `notify-debouncer-mini`
-    /// forwards every kind — so without [`AccessFilteredWatcher`] each
-    /// leader-initiated reload's own re-reads of `config.toml` would
-    /// schedule the next debounce tick and re-fire forever. A write
-    /// afterwards must still be detected (the filter only drops `Access`).
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn watcher_ignores_reads_of_watched_files() {
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("config.toml"), "a = 1").unwrap();
-
-        let (_w, mut rx) =
-            ConfigFileWatcher::start(tmp.path(), &[], None, Some(Duration::from_millis(50)))
-                .expect("watcher should start");
-        wait_ms(150);
-        while rx.try_recv().is_ok() {} // drain any startup noise
-
-        // Simulate what the leader does on every reload: read the watched
-        // files. Repeatedly, to defeat any incidental coalescing.
-        for _ in 0..5 {
-            let _ = fs::read(tmp.path().join("config.toml")).unwrap();
-            wait_ms(20);
-        }
-        wait_ms(300);
-
-        let mut read_events = Vec::new();
-        while let Ok(evt) = rx.try_recv() {
-            read_events.push(evt);
-        }
-        assert!(
-            read_events.is_empty(),
-            "reads of watched files must not emit config-change events \
-             (reload-storm feedback loop); got {read_events:?}"
-        );
-
-        // Sanity: a real write is still observed through the filter.
-        fs::write(tmp.path().join("config.toml"), "a = 2").unwrap();
-        wait_ms(300);
-        let mut found = false;
-        while let Ok(evt) = rx.try_recv() {
-            if evt == ConfigChangeEvent::GlobalConfigChanged {
-                found = true;
-            }
-        }
-        assert!(found, "a write must still be detected after read filtering");
-    }
-
-    #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "flaky on macOS: FSEvents does not reliably deliver events in test harness"
-    )]
-    fn watcher_detects_config_toml_change() {
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("config.toml"), "").unwrap();
-
-        let (_w, mut rx) =
-            ConfigFileWatcher::start(tmp.path(), &[], None, Some(Duration::from_millis(50)))
-                .expect("watcher should start");
-
-        fs::write(tmp.path().join("config.toml"), "[ui]\ntheme = \"dark\"").unwrap();
-        wait_ms(300);
-
-        let mut found = false;
-        while let Ok(evt) = rx.try_recv() {
-            if evt == ConfigChangeEvent::GlobalConfigChanged {
-                found = true;
-            }
-        }
-        assert!(found, "should detect config.toml change");
-    }
-
-    #[test]
-    #[ignore = "flaky on CI: OS file watcher may fail to initialize"]
-    fn watcher_ignores_unrelated_files() {
-        let tmp = TempDir::new().unwrap();
-
-        let (_w, mut rx) =
-            ConfigFileWatcher::start(tmp.path(), &[], None, Some(Duration::from_millis(50)))
-                .expect("watcher should start");
-
-        fs::write(tmp.path().join("leader.log"), "log line").unwrap();
-        fs::write(tmp.path().join("leader.lock"), "12345").unwrap();
-        wait_ms(300);
-
-        assert!(
-            rx.try_recv().is_err(),
-            "should not emit events for unrelated files"
-        );
-    }
-
-    #[test]
-    fn watcher_debounces_rapid_writes() {
-        let tmp = TempDir::new().unwrap();
-
-        // Use a long debounce (500ms) so all rapid writes (50ms total)
-        // land in a single debounce window regardless of platform.
-        let (_w, mut rx) =
-            ConfigFileWatcher::start(tmp.path(), &[], None, Some(Duration::from_millis(500)))
-                .expect("watcher should start");
-
-        wait_ms(200);
-
-        // 5 rapid writes — total ~50ms, well within the 500ms debounce window
-        for i in 0..5 {
-            fs::write(tmp.path().join("config.toml"), format!("version = {i}")).unwrap();
-            wait_ms(10);
-        }
-        // Wait for the single debounce tick to fire
-        wait_ms(800);
-
-        let mut count = 0;
-        while rx.try_recv().is_ok() {
-            count += 1;
-        }
-        // All writes should coalesce into a small number of events
-        // (1 per debounce tick, or a few if OS delivers events in
-        // separate batches within the window).
-        assert!(count >= 1, "expected at least 1 event, got {count}");
-        assert!(count <= 3, "expected coalesced events (<=3), got {count}");
-    }
-
-    /// A write to `<cwd>/.grow/config.toml` must surface as
-    /// a `ConfigChangeEvent::ProjectConfigChanged` so the reloader emits
-    /// `ConfigUpdate::ProjectMcpServersChanged { cwd }`. Uses a longer
-    /// debounce and explicit poll loop so it survives the slower-than-
-    /// usual FSEvents delivery on macOS CI.
-    #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "flaky on macOS: FSEvents does not reliably deliver events in test harness"
-    )]
-    fn project_cwd_toml_triggers_reload() {
-        let grow_home = TempDir::new().unwrap();
-        let cwd = TempDir::new().unwrap();
-        let project_grow = cwd.path().join(".grow");
-        fs::create_dir_all(&project_grow).unwrap();
-        // Seed the file before the watcher starts so we observe the
-        // modification rather than the creation event.
-        fs::write(project_grow.join("config.toml"), "").unwrap();
-
-        let (_w, mut rx) = ConfigFileWatcher::start(
-            grow_home.path(),
-            &[],
-            Some(cwd.path()),
-            Some(Duration::from_millis(100)),
-        )
-        .expect("watcher should start");
-
-        fs::write(
-            project_grow.join("config.toml"),
-            "[mcp_servers.x]\ncommand = \"/bin/true\"",
-        )
-        .unwrap();
-
-        // Poll up to 2s for the event.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let mut found = false;
-        while std::time::Instant::now() < deadline {
-            if let Ok(evt) = rx.try_recv()
-                && matches!(evt, ConfigChangeEvent::ProjectConfigChanged { .. })
-            {
-                found = true;
-                break;
-            }
-            wait_ms(50);
-        }
-        assert!(
-            found,
-            "expected ProjectConfigChanged for <cwd>/.grow/config.toml within 2s"
-        );
-    }
-
-    /// A write to `<cwd>/.mcp.json` must surface as a
-    /// `ConfigChangeEvent::McpConfigChanged` so the reloader can fan out
-    /// a `ProjectMcpServersChanged { cwd }`. Same FSEvents caveat as
-    /// [`project_cwd_toml_triggers_reload`].
-    #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "flaky on macOS: FSEvents does not reliably deliver events in test harness"
-    )]
-    fn project_mcp_json_triggers_reload() {
-        let grow_home = TempDir::new().unwrap();
-        let cwd = TempDir::new().unwrap();
-        fs::write(cwd.path().join(".mcp.json"), "{}").unwrap();
-
-        let (_w, mut rx) = ConfigFileWatcher::start(
-            grow_home.path(),
-            &[],
-            Some(cwd.path()),
-            Some(Duration::from_millis(100)),
-        )
-        .expect("watcher should start");
-
-        fs::write(
-            cwd.path().join(".mcp.json"),
-            r#"{"mcpServers": {"x": {"command": "/bin/true"}}}"#,
-        )
-        .unwrap();
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let mut found = false;
-        while std::time::Instant::now() < deadline {
-            if let Ok(evt) = rx.try_recv()
-                && matches!(evt, ConfigChangeEvent::McpConfigChanged { .. })
-            {
-                found = true;
-                break;
-            }
-            wait_ms(50);
-        }
-        assert!(
-            found,
-            "expected McpConfigChanged for <cwd>/.mcp.json within 2s"
-        );
-    }
-
-    /// The cwd watch is **non-recursive** by design. This writes a
-    /// file that the watcher's name filter **would** route
-    /// (`.mcp.json`) into a deeply nested subdir. If a future
-    /// regression flips `RecursiveMode::NonRecursive` → `Recursive`,
-    /// recursive notify would surface the write, the name filter would
-    /// map it to `McpConfigChanged`, and the test would fail. The file
-    /// name must match the filter (`.mcp.json`, not e.g. `file.txt`)
-    /// or the filter drops it regardless of recursion mode, so this is
-    /// the test that actually guards the constraint.
-    #[test]
-    #[ignore = "flaky on CI: OS file watcher may fail to initialize"]
-    fn nested_subdir_change_does_not_trigger() {
-        let grow_home = TempDir::new().unwrap();
-        let cwd = TempDir::new().unwrap();
-        let nested = cwd.path().join("some").join("deep").join("nested");
-        fs::create_dir_all(&nested).unwrap();
-
-        let (_w, mut rx) = ConfigFileWatcher::start(
-            grow_home.path(),
-            &[],
-            Some(cwd.path()),
-            Some(Duration::from_millis(100)),
-        )
-        .expect("watcher should start");
-
-        // Write a file whose name DOES match the watcher filter —
-        // under recursive mode this would surface
-        // as a `ConfigChangeEvent`; under non-recursive mode no
-        // event must reach `rx`.
-        fs::write(
-            nested.join(".mcp.json"),
-            r#"{"mcpServers": {"x": {"command": "/bin/true"}}}"#,
-        )
-        .unwrap();
-        wait_ms(500);
-
-        assert!(
-            rx.try_recv().is_err(),
-            "non-recursive watch must not surface .mcp.json events from <cwd>/some/deep/nested/"
-        );
-    }
-
-    /// [`ConfigFileWatcher::watch_path`] registered after
-    /// `start` must light up `<new_cwd>/.grow/config.toml` writes
-    /// identically to a cwd passed in at `start`. Exercises the
-    /// session-open registration path where the leader learns about a
-    /// new project root after the watcher is already running.
-    #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "flaky on macOS: FSEvents does not reliably deliver events in test harness"
-    )]
-    fn watch_path_dynamic_registration() {
-        let grow_home = TempDir::new().unwrap();
-        let new_cwd = TempDir::new().unwrap();
-        let project_grow = new_cwd.path().join(".grow");
-        fs::create_dir_all(&project_grow).unwrap();
-        fs::write(project_grow.join("config.toml"), "").unwrap();
-
-        let (mut watcher, mut rx) = ConfigFileWatcher::start(
-            grow_home.path(),
-            &[],
-            None,
-            Some(Duration::from_millis(100)),
-        )
-        .expect("watcher should start");
-
-        watcher.watch_path(new_cwd.path());
-
-        fs::write(
-            project_grow.join("config.toml"),
-            "[mcp_servers.y]\ncommand = \"/bin/true\"",
-        )
-        .unwrap();
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let mut found = false;
-        while std::time::Instant::now() < deadline {
-            if let Ok(evt) = rx.try_recv()
-                && matches!(evt, ConfigChangeEvent::ProjectConfigChanged { .. })
-            {
-                found = true;
-                break;
-            }
-            wait_ms(50);
-        }
-        assert!(
-            found,
-            "watch_path-registered cwd must surface ProjectConfigChanged within 2s"
-        );
-    }
-
-    /// Bookkeeping-only (no OS event delivery, so deterministic on
-    /// every platform): `watch_path` records the cwd in `watched_cwds`
-    /// and is idempotent; `unwatch_path` removes it and is a no-op for
-    /// an unknown cwd. Guards the set that backs `unwatch_path` and the
-    /// `watch_path` de-dup.
-    #[test]
-    fn watch_and_unwatch_path_bookkeeping() {
-        let grow_home = TempDir::new().unwrap();
-        let cwd = TempDir::new().unwrap();
-        let Some((mut watcher, _rx)) = ConfigFileWatcher::start(
-            grow_home.path(),
-            &[],
-            None,
-            Some(Duration::from_millis(100)),
-        ) else {
-            // OS watcher unavailable in this environment; nothing to assert.
-            return;
-        };
-        let p = cwd.path();
-        assert!(!watcher.watched_cwds.contains(p));
-
-        watcher.watch_path(p);
-        assert!(watcher.watched_cwds.contains(p));
-
-        // Idempotent: a second registration doesn't duplicate the entry.
-        watcher.watch_path(p);
-        assert_eq!(
-            watcher
-                .watched_cwds
-                .iter()
-                .filter(|c| c.as_path() == p)
-                .count(),
-            1,
-        );
-
-        // Unwatch removes it; a second unwatch is a no-op.
-        watcher.unwatch_path(p);
-        assert!(!watcher.watched_cwds.contains(p));
-        watcher.unwatch_path(p);
-        assert!(!watcher.watched_cwds.contains(p));
     }
 }

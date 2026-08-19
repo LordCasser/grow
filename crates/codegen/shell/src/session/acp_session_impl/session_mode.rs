@@ -142,26 +142,19 @@ impl SessionActor {
             .borrow_mut()
             .set_behavior_instructions(instructions)
             .await;
-        let mut conversation = self.chat_state_handle.get_conversation().await;
-        for item in conversation.iter_mut() {
-            if let ConversationItem::System(system) = item {
-                system.content = std::sync::Arc::<str>::from(system_prompt);
-                break;
-            }
+        if let Err(error) = self
+            .chat_state_handle
+            .replace_system_head(&system_prompt)
+            .await
+        {
+            tracing::error!(%error, "failed to durably publish behavior context");
         }
-        self.chat_state_handle.replace_conversation(conversation);
     }
 
     pub(super) fn apply_behavior_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
         let behavior = self.turn_behavior.lock().to_string();
         snapshot.admitted_behavior = Some(behavior.clone());
         snapshot.completed_behavior = Some(behavior);
-    }
-    /// `false` twin: this template integration is not compiled into this
-    /// build, so no session runs it. Keeps ungated call sites compiling in
-    /// both configurations.
-    pub(super) fn is_cursor_harness(&self) -> bool {
-        false
     }
     pub(super) async fn request_behavior_change(
         &self,
@@ -345,7 +338,7 @@ impl SessionActor {
         };
         let admitted = *self.turn_behavior.lock();
         if admitted == tool_types::BehaviorId::Workflow {
-            let session_dir = crate::session::persistence::session_dir(&self.session_info);
+            let session_dir = &self.session_dir;
             let context = crate::session::workflow::workspace::WorkflowWorkspace::open(
                 &session_dir,
                 std::path::Path::new(self.session_info.cwd.as_str()),
@@ -393,7 +386,7 @@ impl SessionActor {
         {
             push_reminder(self, &rendered);
             self.behavior.lock().record_reminder_injected();
-            self.persist_behavior_state();
+            self.record_control_snapshot();
         }
     }
     /// Render a plan mode template via the tool bridge's `TemplateRenderer`.
@@ -423,8 +416,9 @@ impl SessionActor {
             .render_prompt(template, &extra)
             .await
     }
-    /// Persist the current Behavior state after each transition.
-    pub(super) fn persist_behavior_state(&self) {
+    /// Append a buffered control snapshot for best-effort bookkeeping changes.
+    /// User-visible transitions use the durable transaction method below.
+    pub(super) fn record_control_snapshot(&self) {
         let revision = self
             .control_revision
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -434,10 +428,10 @@ impl SessionActor {
             self.behavior.lock().snapshot(),
             self.goal_tracker.lock().snapshot().cloned(),
         );
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::SessionControl(snapshot));
+        match snapshot.timeline_kind() {
+            Ok(kind) => self.chat_state_handle.record_timeline_event(kind),
+            Err(error) => tracing::error!(%error, "failed to encode session control event"),
+        }
     }
 
     /// Commit a Behavior transition through the same atomic control snapshot
@@ -451,7 +445,7 @@ impl SessionActor {
         let next = self.behavior.lock().snapshot();
         let goal = self.goal_tracker.lock().snapshot().cloned();
         if let Err(error) = self.persist_control_snapshot_durably(next, goal).await {
-            let session_dir = crate::session::persistence::session_dir(&self.session_info);
+            let session_dir = self.session_dir.clone();
             *self.behavior.lock() =
                 crate::session::behavior::BehaviorCoordinator::from_snapshot(session_dir, previous);
             return Err(format!("Behavior control state was not persisted: {error}"));

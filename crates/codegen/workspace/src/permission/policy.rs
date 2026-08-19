@@ -625,7 +625,7 @@ fn webfetch_probes() -> Vec<AccessKind> {
     .map(|u| AccessKind::WebFetch((*u).to_string()))
     .collect()
 }
-/// Whether an Allow rule fully opens a `--yolo`-substitute dimension (a blanket
+/// Whether an Allow rule fully opens a `--permission-mode always-approve`-substitute dimension (a blanket
 /// grant, not a scoped one). Probes run through the real evaluator
 /// [`pattern_matches`] so detection can't drift: `*://*` and `*__*` are judged as
 /// enforced. `Any` counts when it opens ANY of Bash/MCP/WebFetch (catching
@@ -756,7 +756,7 @@ mod tests {
             Some("evil.example.com"),
             PatternMode::Domain
         )));
-        // Read/Edit/Grep are file-access only: never a `--yolo`-substitute catch-all.
+        // Read/Edit/Grep are file-access only: never a `--permission-mode always-approve`-substitute catch-all.
         assert!(!rule_is_catchall(&glob(ToolFilter::Read, Some("**"))));
         assert!(!rule_is_catchall(&glob(ToolFilter::Edit, Some("*"))));
     }

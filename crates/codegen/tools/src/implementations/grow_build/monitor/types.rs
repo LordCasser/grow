@@ -122,20 +122,17 @@ pub struct MonitorEventNotification {
     /// In leader mode every session shares one [`MonitorEventBuffer`], so the
     /// drain sites filter on this to avoid surfacing one session's monitor
     /// events inside another session's turn. `None` for legacy / non-grow-build
-    /// backends, which any session drains for backwards compatibility.
+    /// backends. Ownerless events are not eligible for session delivery.
     pub owner_session_id: Option<String>,
 }
 
 impl MonitorEventNotification {
     /// Whether this buffered event should surface in the session whose owner id
     /// is `my_owner`. Mirrors `task_owned_by_session`: an event surfaces only
-    /// when it has no recorded owner (legacy) or its owner matches the draining
-    /// session. Foreign events stay buffered for their own session to drain.
-    pub fn owned_by_session(&self, my_owner: Option<&str>) -> bool {
-        match (my_owner, self.owner_session_id.as_deref()) {
-            (Some(me), Some(owner)) => me == owner,
-            _ => true,
-        }
+    /// when its owner matches the draining session. Foreign and ownerless
+    /// events stay buffered.
+    pub fn owned_by_session(&self, my_owner: &str) -> bool {
+        self.owner_session_id.as_deref() == Some(my_owner)
     }
 }
 
@@ -149,11 +146,8 @@ pub type MonitorEventBuffer = crate::interjection::EventQueue<MonitorEventNotifi
 crate::register_resource!("grow_build", "MonitorEventBuffer", MonitorEventBuffer);
 
 /// Drain only `my_owner`'s events (the buffer is shared across sessions in
-/// leader mode); owner-less legacy events drain anywhere.
-pub fn drain_owned(
-    buffer: &MonitorEventBuffer,
-    my_owner: Option<&str>,
-) -> Vec<MonitorEventNotification> {
+/// leader mode). Ownerless events are never session-deliverable.
+pub fn drain_owned(buffer: &MonitorEventBuffer, my_owner: &str) -> Vec<MonitorEventNotification> {
     buffer.drain_matching(|e| e.owned_by_session(my_owner))
 }
 

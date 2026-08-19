@@ -13,8 +13,8 @@ use crate::agent::MvpAgent;
 
 type ExtResult = Result<acp::ExtResponse, acp::Error>;
 
-fn load_filtered_marketplace_sources() -> Vec<plugin_marketplace::MarketplaceSource> {
-    crate::plugin::load_filtered_marketplace_sources()
+fn load_marketplace_sources() -> Vec<plugin_marketplace::MarketplaceSource> {
+    crate::plugin::load_marketplace_sources()
 }
 
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -27,7 +27,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
 async fn handle_list() -> ExtResult {
     let t0 = std::time::Instant::now();
-    let sources = load_filtered_marketplace_sources();
+    let sources = load_marketplace_sources();
     let source_names: Vec<String> = sources
         .iter()
         .map(|s| {
@@ -114,7 +114,7 @@ async fn handle_action(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             // Force re-sync git caches (local sources are re-scanned on next
             // list). Runs on the blocking pool: git clone/fetch is sync and
             // can stall for up to its timeout — never run it on the LocalSet.
-            let sources = load_filtered_marketplace_sources();
+            let sources = load_marketplace_sources();
             let filter = source_url_or_path;
             match tokio::task::spawn_blocking(move || refresh_sources(&sources, filter.as_deref()))
                 .await
@@ -204,7 +204,7 @@ async fn handle_update(
     use extension_types::{ActionOutcome, OutcomeStatus};
     use plugin_marketplace::installer;
 
-    let sources = load_filtered_marketplace_sources();
+    let sources = load_marketplace_sources();
 
     let source_identity = |s: &plugin_marketplace::MarketplaceSource| -> String {
         match &s.kind {
@@ -273,7 +273,17 @@ async fn handle_update(
         }
     };
 
-    let scan = plugin_marketplace::scan_marketplace(&marketplace_root);
+    let scan = match plugin_marketplace::scan_marketplace(&marketplace_root) {
+        Ok(scan) => scan,
+        Err(error) => {
+            return ActionOutcome {
+                status: OutcomeStatus::InternalError,
+                message: format!("Invalid marketplace index: {error}"),
+                requires_reload: false,
+                requires_restart: false,
+            };
+        }
+    };
     let entry = match scan
         .entries
         .into_iter()
@@ -358,7 +368,7 @@ async fn handle_install(
     use extension_types::{ActionOutcome, OutcomeStatus};
     use plugin_marketplace::installer;
 
-    let sources = load_filtered_marketplace_sources();
+    let sources = load_marketplace_sources();
 
     // Helper: get canonical URL/path for a source.
     let source_identity = |s: &plugin_marketplace::MarketplaceSource| -> String {
@@ -709,7 +719,23 @@ fn scan_source(source: &plugin_marketplace::MarketplaceSource) -> (MarketplaceSc
         }
     };
 
-    let scan = plugin_marketplace::scan_marketplace(&root);
+    let scan = match plugin_marketplace::scan_marketplace(&root) {
+        Ok(scan) => scan,
+        Err(error) => {
+            drop(lease);
+            return (
+                MarketplaceScanResult {
+                    source_name: source.name.clone(),
+                    featured: source.featured,
+                    source_kind,
+                    source_url_or_path,
+                    plugins: Vec::new(),
+                    error: Some(format!("Invalid marketplace index: {error}")),
+                },
+                false,
+            );
+        }
+    };
     let catalog_loaded = scan.catalog_loaded;
     let discovered = scan.entries;
     drop(lease);
@@ -771,10 +797,6 @@ fn to_plugin_entry(
         domains: p.domains,
         homepage: p.homepage,
         relative_path: p.relative_path,
-        skill_count: p.skill_count,
-        has_hooks: p.has_hooks,
-        has_agents: p.has_agents,
-        has_mcp: p.has_mcp,
         install_status,
         installed_version,
         components: p.components,
@@ -823,18 +845,6 @@ async fn handle_add_source(url: &str) -> extension_types::ActionOutcome {
         MarketplaceAddInput::GitUrl(u) => u.clone(),
         MarketplaceAddInput::LocalPath(p) => p.display().to_string(),
     };
-
-    // Local paths never match the git-URL allowlist, so a restricted
-    // strictKnownMarketplaces policy blocks them — intentionally fail-closed.
-    let allowlist = &workspace::permission::resolution::managed_settings().marketplace_allowlist;
-    if allowlist.is_restricted() && !allowlist.is_url_allowed(&identity) {
-        return ActionOutcome {
-            status: OutcomeStatus::ValidationError,
-            message: format!("Marketplace source blocked: {}", allowlist.block_reason()),
-            requires_reload: false,
-            requires_restart: false,
-        };
-    }
 
     let config = crate::config::load_effective_config()
         .ok()
@@ -1069,7 +1079,7 @@ fn remove_source_locked(source_url_or_path: &str) -> extension_types::ActionOutc
         removed_from_config = true;
     }
 
-    if !removed_from_config && !plugin::try_remove_source_from_json_files(source_url_or_path) {
+    if !removed_from_config {
         return ActionOutcome {
             status: OutcomeStatus::NotFound,
             message: format!("Source not found in config: {source_url_or_path}"),
@@ -1093,54 +1103,6 @@ fn remove_source_locked(source_url_or_path: &str) -> extension_types::ActionOutc
         requires_reload: true,
         requires_restart: false,
     }
-}
-
-fn set_marketplace_bool_flag_in_toml(content: &str, key: &str) -> std::io::Result<String> {
-    let mut doc = content.parse::<toml_edit::DocumentMut>().map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid TOML: {e}"),
-        )
-    })?;
-
-    let marketplace = doc
-        .entry("marketplace")
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "[marketplace] is not a table",
-            )
-        })?;
-    marketplace[key] = toml_edit::value(true);
-
-    Ok(doc.to_string())
-}
-
-fn set_marketplace_bool_flag(config_path: &std::path::Path, key: &str) -> std::io::Result<()> {
-    if let Some(parent) = config_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let existing = crate::util::config::read_to_string_or_empty(config_path)?;
-    let updated = set_marketplace_bool_flag_in_toml(&existing, key)?;
-    crate::util::config::atomic_write_string(config_path, &updated)
-}
-
-fn read_marketplace_bool_flag(config_path: &std::path::Path, key: &str) -> bool {
-    let raw = match std::fs::read_to_string(config_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let parsed: toml::Value = match toml::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    parsed
-        .get("marketplace")
-        .and_then(|m| m.get(key))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
 }
 
 /// Acquire an advisory exclusive `flock` on `<grow_home>/.config-init.lock`,
@@ -1172,303 +1134,6 @@ fn acquire_init_lock(grow_home: &std::path::Path) -> std::io::Result<std::fs::Fi
     ))
 }
 
-fn is_default_skills_plugin_subdir(plugin_subdir: &str) -> bool {
-    plugin_subdir == "default-skills"
-}
-
-fn default_skills_repo_keys<'a>(
-    repos: impl IntoIterator<Item = (&'a str, &'a agent::plugins::install_registry::InstalledRepo)>,
-) -> Vec<&'a str> {
-    repos
-        .into_iter()
-        .filter_map(|(key, repo)| {
-            repo.marketplace
-                .as_ref()
-                .filter(|mp| is_default_skills_plugin_subdir(&mp.plugin_subdir))
-                .map(|_| key)
-        })
-        .collect()
-}
-
-fn set_default_skills_installs_purged(config_path: &std::path::Path) -> std::io::Result<()> {
-    set_marketplace_bool_flag(config_path, "default_skills_installs_purged")
-}
-
-fn read_default_skills_installs_purged(config_path: &std::path::Path) -> bool {
-    read_marketplace_bool_flag(config_path, "default_skills_installs_purged")
-}
-
-/// One-shot purge of legacy marketplace `default-skills` installs.
-///
-/// Gated by sticky `default_skills_installs_purged` in config.toml. Best-effort:
-/// errors are logged and never block startup.
-pub fn purge_default_skills_installs(grow_home: &std::path::Path) {
-    purge_default_skills_installs_impl(grow_home, || {
-        agent::plugins::install_registry::InstallRegistry::try_load_from(
-            agent::plugins::install_registry::InstallRegistry::resolve_install_dir(),
-        )
-    });
-}
-
-fn purge_default_skills_installs_impl(
-    grow_home: &std::path::Path,
-    load_registry: impl FnOnce() -> Result<
-        agent::plugins::install_registry::InstallRegistry,
-        agent::plugins::install_registry::InstallError,
-    >,
-) {
-    let config_path = grow_home.join("config.toml");
-
-    if read_default_skills_installs_purged(&config_path) {
-        return;
-    }
-
-    let _lock = match acquire_init_lock(grow_home) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                path = %grow_home.join(".config-init.lock").display(),
-                "skipping default-skills purge: failed to acquire init lock"
-            );
-            return;
-        }
-    };
-
-    if read_default_skills_installs_purged(&config_path) {
-        return;
-    }
-
-    let mut registry = match load_registry() {
-        Ok(reg) => reg,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "skipping default-skills purge: failed to load install registry"
-            );
-            return;
-        }
-    };
-    let keys: Vec<String> = default_skills_repo_keys(registry.list())
-        .into_iter()
-        .map(|k| k.to_string())
-        .collect();
-
-    for key in &keys {
-        let path = registry
-            .get_repo(key)
-            .map(|r| r.path.clone())
-            .unwrap_or_else(|| registry.install_dir().join(key));
-        if path.exists()
-            && let Err(e) = std::fs::remove_dir_all(&path)
-        {
-            let _ = std::fs::remove_file(&path);
-            if path.exists() {
-                tracing::warn!(
-                    error = %e,
-                    path = %path.display(),
-                    repo_key = %key,
-                    "failed to remove default-skills install dir"
-                );
-            }
-        }
-        registry.remove(key);
-    }
-
-    if !keys.is_empty() {
-        if let Err(e) = registry.save() {
-            tracing::warn!(error = %e, "failed to save registry after default-skills purge");
-            return;
-        }
-        tracing::info!(
-            count = keys.len(),
-            "purged legacy default-skills marketplace installs"
-        );
-    }
-
-    if let Err(e) = set_default_skills_installs_purged(&config_path) {
-        tracing::warn!(
-            error = %e,
-            path = %config_path.display(),
-            "failed to set default_skills_installs_purged flag"
-        );
-    }
-}
-
-#[cfg(test)]
-mod default_skills_purge_tests {
-    use super::*;
-    use agent::plugins::install_registry::{
-        InstallKind, InstallRegistry, InstalledRepo, MarketplaceProvenance, RepoPlugin,
-    };
-
-    fn repo_at(path: &std::path::Path, plugin_subdir: Option<&str>) -> InstalledRepo {
-        InstalledRepo {
-            kind: InstallKind::Local {
-                source_path: path.to_path_buf(),
-                subdir: None,
-            },
-            installed_at: String::new(),
-            updated_at: String::new(),
-            path: path.to_path_buf(),
-            plugins: std::collections::HashMap::from([(
-                "p".into(),
-                RepoPlugin {
-                    subdir: None,
-                    version: None,
-                },
-            )]),
-            marketplace: plugin_subdir.map(|subdir| MarketplaceProvenance {
-                source_url_or_path: "https://example.com/market.git".into(),
-                source_display_name: "Test".into(),
-                plugin_subdir: subdir.into(),
-            }),
-        }
-    }
-
-    #[test]
-    fn match_is_exact_plugin_subdir_only() {
-        assert!(is_default_skills_plugin_subdir("default-skills"));
-        assert!(!is_default_skills_plugin_subdir("plugins/default-skills"));
-        assert!(!is_default_skills_plugin_subdir("default-skills/extra"));
-        assert!(!is_default_skills_plugin_subdir("defaults-skills"));
-        assert!(!is_default_skills_plugin_subdir(""));
-    }
-
-    #[test]
-    fn collects_only_default_skills_repo_keys() {
-        let default_skills = repo_at(std::path::Path::new("/tmp/ds"), Some("default-skills"));
-        let other = repo_at(std::path::Path::new("/tmp/office"), Some("plugins/office"));
-        let no_marketplace = repo_at(std::path::Path::new("/tmp/local"), None);
-
-        let keys = default_skills_repo_keys([
-            ("ds-aaaa", &default_skills),
-            ("office-bbbb", &other),
-            ("local-cccc", &no_marketplace),
-        ]);
-        assert_eq!(keys, vec!["ds-aaaa"]);
-    }
-
-    #[test]
-    fn purged_flag_toml_preserves_other_content() {
-        let content = "[ui]\ntheme = \"dark\"\n[marketplace]\ncustom = true\n";
-        let out =
-            set_marketplace_bool_flag_in_toml(content, "default_skills_installs_purged").unwrap();
-        assert!(out.contains("theme = \"dark\""), "{out}");
-        assert!(out.contains("custom = true"), "{out}");
-        assert!(
-            out.contains("default_skills_installs_purged = true"),
-            "{out}"
-        );
-    }
-
-    #[test]
-    fn read_purged_flag_false_when_missing_or_wrong_type() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        assert!(!read_default_skills_installs_purged(&path));
-
-        std::fs::write(
-            &path,
-            "[marketplace]\ndefault_skills_installs_purged = \"yes\"\n",
-        )
-        .unwrap();
-        assert!(!read_default_skills_installs_purged(&path));
-
-        std::fs::write(
-            &path,
-            "[marketplace]\ndefault_skills_installs_purged = true\n",
-        )
-        .unwrap();
-        assert!(read_default_skills_installs_purged(&path));
-    }
-
-    #[test]
-    fn purge_sets_flag_when_nothing_to_delete() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        let install_dir = home.join("installed-plugins");
-        purge_default_skills_installs_impl(home, || {
-            Ok(InstallRegistry::empty(install_dir.clone()))
-        });
-        let config_path = home.join("config.toml");
-        assert!(read_default_skills_installs_purged(&config_path));
-
-        let after_first = std::fs::read_to_string(&config_path).unwrap();
-        purge_default_skills_installs_impl(home, || Ok(InstallRegistry::empty(install_dir)));
-        let after_second = std::fs::read_to_string(&config_path).unwrap();
-        assert_eq!(after_first, after_second);
-    }
-
-    #[test]
-    fn purge_skips_flag_when_registry_load_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        let install_dir = home.join("installed-plugins");
-        std::fs::create_dir_all(&install_dir).unwrap();
-        std::fs::write(install_dir.join("registry.json"), "{not-json").unwrap();
-
-        purge_default_skills_installs_impl(home, || {
-            InstallRegistry::try_load_from(install_dir.clone())
-        });
-
-        assert!(!read_default_skills_installs_purged(
-            &home.join("config.toml")
-        ));
-    }
-
-    #[test]
-    fn purge_removes_default_skills_retains_others_and_sets_flag() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-        let install_dir = home.join("installed-plugins");
-        std::fs::create_dir_all(&install_dir).unwrap();
-
-        let ds_path = install_dir.join("ds-aaaa");
-        std::fs::create_dir_all(&ds_path).unwrap();
-        std::fs::write(ds_path.join("marker"), "ds").unwrap();
-
-        let other_path = install_dir.join("office-bbbb");
-        std::fs::create_dir_all(&other_path).unwrap();
-        std::fs::write(other_path.join("marker"), "office").unwrap();
-
-        let mut registry = InstallRegistry::empty(install_dir.clone());
-        registry.insert("ds-aaaa".into(), repo_at(&ds_path, Some("default-skills")));
-        registry.insert(
-            "office-bbbb".into(),
-            repo_at(&other_path, Some("plugins/office")),
-        );
-        registry.save().unwrap();
-
-        let install_dir_for_load = install_dir.clone();
-        purge_default_skills_installs_impl(home, move || {
-            InstallRegistry::try_load_from(install_dir_for_load)
-        });
-
-        assert!(
-            !ds_path.exists(),
-            "default-skills install dir must be removed"
-        );
-        assert!(other_path.exists(), "non-matching install must be retained");
-
-        let reloaded = InstallRegistry::load_from(install_dir.clone());
-        assert!(reloaded.get_repo("ds-aaaa").is_none());
-        assert!(reloaded.get_repo("office-bbbb").is_some());
-
-        let config_path = home.join("config.toml");
-        assert!(read_default_skills_installs_purged(&config_path));
-
-        let after_first = std::fs::read_to_string(&config_path).unwrap();
-        let install_dir_for_reload = install_dir;
-        purge_default_skills_installs_impl(home, move || {
-            InstallRegistry::try_load_from(install_dir_for_reload)
-        });
-        let after_second = std::fs::read_to_string(&config_path).unwrap();
-        assert_eq!(after_first, after_second);
-        assert!(other_path.exists());
-    }
-}
-
 #[cfg(test)]
 mod conversion_tests {
     use super::*;
@@ -1486,10 +1151,6 @@ mod conversion_tests {
             domains: vec!["example.com".into()],
             homepage: Some("https://example.com/demo".into()),
             relative_path: "plugins/demo".into(),
-            skill_count: 2,
-            has_hooks: true,
-            has_agents: false,
-            has_mcp: false,
             remote_url: None,
             remote_ref: None,
             remote_sha: None,

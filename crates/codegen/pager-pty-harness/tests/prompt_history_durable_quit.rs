@@ -1,19 +1,15 @@
-//! E2E: a submitted prompt is durably recorded in the per-CWD
-//! `prompt_history.jsonl` and survives quitting the TUI — via a fast double
-//! Ctrl+C (the reported repro, recalled after a `--continue` resume) and via a
-//! real OS SIGINT routed through the same graceful quit.
+//! E2E: an accepted prompt is durably recorded as a typed Timeline turn and
+//! survives quitting the TUI — via a fast double Ctrl+C (the reported repro,
+//! recalled after a `--continue` resume) and via a real OS SIGINT routed
+//! through the same graceful quit.
 //!
 //! Drives the real pager binary through a PTY against the shared mock
 //! inference server (isolated `$HOME`), exercising the full
-//! pager -> shell -> queue_input -> append path plus the graceful-quit teardown.
+//! pager -> shell -> durable turn-start boundary plus graceful-quit teardown.
 //!
-//! Coverage note: both paths wait for the turn to land before quitting, so
-//! `queue_input` (and its now-awaited append) has already run. This is an
-//! end-to-end durability + recall check, not a probe of the old detached-append
-//! race — that race is closed structurally by awaiting the append in
-//! `queue_input` and is covered by the `prompt_history` unit test. The
-//! deterministic regression catch here is the SIGINT path exiting 0 (pre-fix it
-//! was `process::exit(130)`).
+//! Coverage note: both paths wait for the turn to land before quitting. This is
+//! an end-to-end durability + recall check. The deterministic signal regression
+//! catch is the SIGINT path exiting 0 (pre-fix it was `process::exit(130)`).
 //!
 //! ```bash
 //! cargo test -p pager-pty-harness --test prompt_history_durable_quit \
@@ -36,7 +32,7 @@ const ACK: &str = "ACKSENTINEL";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore] // opt-in: spawns the real pager binary in a PTY (CI runs with --ignored)
 async fn prompt_history_durable_after_double_ctrl_c_and_recallable_on_resume() {
-    run().await.expect("prompt-history durable-quit e2e");
+    run().await.expect("Timeline prompt durable-quit e2e");
 }
 
 /// A real OS SIGINT (not an injected Ctrl+C key byte) must route through the
@@ -60,7 +56,7 @@ async fn run() -> Result<()> {
     let binary = pager_binary().context("resolve pager binary")?;
 
     // 1) Submit a prompt and let the turn settle (proves the shell reached
-    //    queue_input, where the append happens), then quit with double Ctrl+C.
+    //    the durable Timeline boundary), then quit with double Ctrl+C.
     let mut first = submit_and_settle(&binary, &content, project.path(), CANARY)
         .context("submit canary in first pager")?;
 
@@ -179,9 +175,8 @@ async fn run_sigint() -> Result<()> {
 
 /// Spawn the pager in `project`, submit `canary`, then wait for the turn to
 /// render + settle to idle. Waiting past `queue_input` is deliberate: it
-/// guarantees the prompt reached the shell (so the durability assertion is
-/// meaningful), at the cost of not reproducing the sub-millisecond
-/// detached-append race (closed by awaiting the append; see the unit test).
+/// guarantees the prompt reached the shell, so the durability assertion is
+/// meaningful.
 fn submit_and_settle(
     binary: &Path,
     content: &ContentController,
@@ -216,31 +211,54 @@ fn terminal_restored(h: &PtyHarness, since: usize) -> bool {
         .any(|w| w == SHOW_CURSOR)
 }
 
-/// Assert the per-CWD `prompt_history.jsonl` durably recorded `canary`.
+/// Assert the canonical Timeline durably recorded a typed user turn.
 fn assert_prompt_durable(home: &Path, canary: &str) -> Result<()> {
-    let hist = find_prompt_history(home).context("locate prompt_history.jsonl")?;
-    let body =
-        std::fs::read_to_string(&hist).with_context(|| format!("read {}", hist.display()))?;
-    eprintln!("[e2e] prompt_history.jsonl @ {}:\n{body}", hist.display());
-    assert!(
-        body.contains(canary),
-        "prompt_history.jsonl is missing the submitted prompt after the quit:\n{body}"
-    );
-    Ok(())
-}
-
-/// The per-CWD history file lives at `<home>/.grow/sessions/<enc-cwd>/prompt_history.jsonl`.
-fn find_prompt_history(home: &Path) -> Result<PathBuf> {
     let root = home.join(".grow").join("sessions");
-    for cwd_ent in std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
-        let cwd_ent = cwd_ent?;
-        if !cwd_ent.file_type()?.is_dir() {
-            continue;
-        }
-        let candidate = cwd_ent.path().join("prompt_history.jsonl");
-        if candidate.is_file() {
-            return Ok(candidate);
+    let timelines = collect_named_files(&root, "timeline.jsonl")?;
+    for timeline in &timelines {
+        let body = std::fs::read_to_string(timeline)
+            .with_context(|| format!("read {}", timeline.display()))?;
+        let found = body.lines().any(|line| {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                return false;
+            };
+            let Some(event) = value.get("event") else {
+                return false;
+            };
+            value.get("type").and_then(|value| value.as_str()) == Some("turn")
+                && event.get("state").and_then(|value| value.as_str()) == Some("started")
+                && event.get("prompt_text").and_then(|value| value.as_str()) == Some(canary)
+                && event.get("input_kind").and_then(|value| value.as_str()) == Some("prompt")
+                && event
+                    .get("identity")
+                    .and_then(|identity| identity.get("origin"))
+                    .and_then(|value| value.as_str())
+                    == Some("user")
+        });
+        if found {
+            eprintln!("[e2e] canonical prompt turn @ {}", timeline.display());
+            return Ok(());
         }
     }
-    bail!("no prompt_history.jsonl found under {}", root.display())
+    bail!(
+        "no typed Timeline turn for {canary:?} under {}; timelines={timelines:?}",
+        root.display()
+    )
+}
+
+fn collect_named_files(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|file| file.to_str()) == Some(name) {
+                found.push(path);
+            }
+        }
+    }
+    Ok(found)
 }

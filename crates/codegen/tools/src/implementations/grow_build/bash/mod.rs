@@ -129,13 +129,8 @@ fn terminal_notification_base(notif: &ToolNotification) -> Option<&BashNotificat
 ///
 /// All fields are optional — `None` means "use the built-in default".
 ///
-/// **Backwards compatibility:** new optional fields use `#[serde(default)]` so
-/// older clients that omit them keep working on new servers.
-///
-/// **Unknown fields are ignored** (no `deny_unknown_fields`): clients may send
-/// newer keys to older *or* newer servers without finalize failures. Typos in
-/// `params_json` will silently no-op — prefer pin-matched servers in CI.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BashParams {
     /// Default command timeout in seconds. None → 120s.
     pub timeout_secs: Option<f64>,
@@ -481,41 +476,14 @@ const ABSOLUTE_MAX_TIMEOUT_MS: u64 = 36_000_000;
 #[allow(dead_code)] // description follow-up + tests (not yet model-facing)
 pub(crate) const DEFAULT_FOREGROUND_BLOCK_BUDGET_MS: u64 = 15_000;
 
-/// Internal version discriminant for run_terminal_cmd.
-///
-/// Use `from_contract()` instead of raw string comparisons against
-/// `ctx.contract_version`. If additional version-sensitive schema or
-/// validation behavior accumulates, consider promoting to a full
-/// `versions/` module structure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BashVersion {
-    Current,
-    Legacy0_4_10,
-}
-
-impl BashVersion {
-    pub(crate) fn from_contract(v: Option<&str>) -> Self {
-        match v {
-            Some("legacy-0.4.10") => Self::Legacy0_4_10,
-            _ => Self::Current,
-        }
-    }
-
-    pub(crate) fn is_legacy(self) -> bool {
-        self == Self::Legacy0_4_10
-    }
-}
-
 // ───────────────────────────────────────────────────────────────────────────
 // Background operator detection
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Detects only a trailing `&` (after trimming), excluding `&&` and `>&`.
 ///
-/// Used where only a trailing `&` backgrounds a command: the legacy-0.4.10 bash
-/// contract, and PowerShell (a *leading* `&` is the call
-/// operator, so only a trailing `&` is the job operator). The current bash
-/// contract uses `contains_background_operator()`, which detects `&` anywhere.
+/// Used for PowerShell, where a leading `&` is the call operator and only a
+/// trailing `&` is the job operator.
 fn has_trailing_background_operator(command: &str) -> bool {
     let trimmed = command.trim();
     // Must end with `&` but NOT `&&` (logical AND) or `>&`/`&>` (redirects).
@@ -542,24 +510,10 @@ fn contains_unwaited_background_operator(command: &str) -> bool {
     contains_background_operator(command) && !ends_with_wait_builtin(command)
 }
 
-/// Whether `command` uses `&` as a bash background operator under the given
-/// contract version: legacy (0.4.10) flags only a trailing `&`; current flags
-/// an unwaited `&` anywhere. Callers apply this only when
-/// [`config::shell::ampersand_semantics`] reports POSIX `&` semantics
-/// (Unix + Git Bash).
-fn command_has_bash_background_operator(command: &str, is_legacy: bool) -> bool {
-    if is_legacy {
-        has_trailing_background_operator(command)
-    } else {
-        contains_unwaited_background_operator(command)
-    }
-}
-
 /// PowerShell trailing-`&` detection: a leading `&` is the call operator, so only
 /// a trailing `&` backgrounds. Strips trailing statement separators (`;`,
 /// newlines) before reusing [`has_trailing_background_operator`] so `cmd &;` and
-/// `cmd & ;` are caught too. Distinct from the bash legacy check, which must keep
-/// its frozen `0.4.10` behavior.
+/// `cmd & ;` are caught too.
 fn powershell_has_trailing_background(command: &str) -> bool {
     let stripped = command.trim_end().trim_end_matches([';', '\n']);
     has_trailing_background_operator(stripped)
@@ -578,7 +532,7 @@ enum BackgroundOpViolation {
 
 /// Classify the background-operator `&` violation in `command` for the active
 /// shell's [`AmpersandSemantics`], or `None` when there is none:
-/// - bash/POSIX rejects an unwaited `&` anywhere (legacy: only a trailing `&`);
+/// - bash/POSIX rejects an unwaited `&` anywhere;
 /// - PowerShell rejects only a *trailing* `&` (a leading `&` is the call
 ///   operator and is allowed; a mid-line `&` job is intentionally not detected,
 ///   to avoid false-positives on the call operator — a no-op);
@@ -589,12 +543,10 @@ enum BackgroundOpViolation {
 fn detect_background_op_violation(
     semantics: AmpersandSemantics,
     command: &str,
-    is_legacy: bool,
 ) -> Option<BackgroundOpViolation> {
     match semantics {
         AmpersandSemantics::PosixBackground => {
-            command_has_bash_background_operator(command, is_legacy)
-                .then_some(BackgroundOpViolation::Bash)
+            contains_unwaited_background_operator(command).then_some(BackgroundOpViolation::Bash)
         }
         AmpersandSemantics::PowerShellCore => powershell_has_trailing_background(command)
             .then_some(BackgroundOpViolation::PowerShell {
@@ -622,12 +574,11 @@ fn should_reject_background_op(
     background_enabled: bool,
     semantics: AmpersandSemantics,
     command: &str,
-    is_legacy: bool,
 ) -> Option<BackgroundOpViolation> {
     if is_background || (allow_background_operator && background_enabled) {
         return None;
     }
-    detect_background_op_violation(semantics, command, is_legacy)
+    detect_background_op_violation(semantics, command)
 }
 
 /// Returns `true` when the command's last statement is the `wait` builtin.
@@ -1504,24 +1455,19 @@ ${%- endif %}"#
     }
 
     fn background_operator_validation_message(
-        is_legacy: bool,
         background_enabled: bool,
         param_name: &str,
     ) -> String {
-        match (background_enabled, is_legacy) {
-            (true, true) => format!(
-                "Command must not end with '&'. Remove the '&' and set {}=true to run the command in the background.",
-                param_name
-            ),
-            (true, false) => {
-                format!("Remove the background '&' from your command and set {}=true instead.", param_name)
+        match background_enabled {
+            true => {
+                format!(
+                    "Remove the background '&' from your command and set {}=true instead.",
+                    param_name
+                )
             }
-            (false, true) => {
-                "Command must not end with '&' because background execution is disabled. Remove the '&' and run the command in the foreground."
+            false => {
+                "Remove the background '&' from your command; background execution is disabled."
                     .to_string()
-            }
-            (false, false) => {
-                "Remove the background '&' from your command; background execution is disabled.".to_string()
             }
         }
     }
@@ -1583,9 +1529,8 @@ impl crate::types::tool_metadata::ToolMetadata for BashTool {
         ]
     }
 
-    fn versioned_definition(
+    fn finalized_definition(
         &self,
-        contract_version: Option<&str>,
         client_name: &str,
         description_override: Option<&str>,
         renderer: &TemplateRenderer,
@@ -1611,7 +1556,6 @@ impl crate::types::tool_metadata::ToolMetadata for BashTool {
         } else {
             crate::util::remap::remap_schema_properties(&exported_schema, param_map)
         };
-        let _ = contract_version;
         ToolDefinition::function(client_name, Some(&description), remapped_schema)
     }
 
@@ -1893,10 +1837,6 @@ impl tool_runtime::Tool for BashTool {
             .unwrap_or(config_output_byte_limit);
 
         // --- Validate: reject commands that use `&` as a background operator ---
-        let version = BashVersion::from_contract(
-            crate::types::tool_metadata::behavior_version(&ctx).as_deref(),
-        );
-        let is_legacy = version.is_legacy();
         // `&` means different things per shell, so detection and remediation are
         // shell-specific: bash/POSIX backgrounds with a bare `&`; PowerShell
         // backgrounds only with a trailing `&` (a leading `&` is the call
@@ -1908,7 +1848,6 @@ impl tool_runtime::Tool for BashTool {
             background_enabled,
             ampersand,
             &input.command,
-            is_legacy,
         ) {
             // `is_background` is the canonical param key (the input-schema
             // property name). Presence-aware lookup (not a template render):
@@ -1922,11 +1861,9 @@ impl tool_runtime::Tool for BashTool {
                     .to_string()
             };
             let message = match violation {
-                BackgroundOpViolation::Bash => Self::background_operator_validation_message(
-                    is_legacy,
-                    background_enabled,
-                    &bg_param_name,
-                ),
+                BackgroundOpViolation::Bash => {
+                    Self::background_operator_validation_message(background_enabled, &bg_param_name)
+                }
                 BackgroundOpViolation::PowerShell {
                     trailing_is_syntax_error,
                 } => Self::powershell_background_operator_message(
@@ -2098,10 +2035,8 @@ impl tool_runtime::Tool for BashTool {
                 // every Shell call carries an explicit `block_until_ms`
                 // and the harness's observed behavior is to auto-background
                 // past that deadline rather than kill the process.
-                // Backwards compatible because
-                // `auto_background_on_timeout` defaults to `false`;
-                // existing grow_build callers that never opted in are
-                // unaffected.
+                // Sessions opt into this behavior through the canonical bash
+                // parameters; otherwise foreground timeout remains terminal.
                 auto_background_on_timeout: Self::auto_background_on_timeout_enabled(&params),
                 foreground_block_budget: Self::effective_foreground_block_budget(&params),
                 kind: crate::computer::types::TaskKind::Bash,
@@ -3559,35 +3494,13 @@ mod tests {
     // ─── contains_background_operator unit tests ───
 
     mod background_operator_tests {
-        use super::super::{
-            command_has_bash_background_operator, contains_background_operator,
-            contains_unwaited_background_operator,
-        };
+        use super::super::{contains_background_operator, contains_unwaited_background_operator};
 
         // ── Should detect (true) ──
 
         #[test]
         fn trailing_ampersand() {
             assert!(contains_background_operator("sleep 600 &"));
-        }
-
-        #[test]
-        fn helper_dispatches_on_contract_version() {
-            // current: flags an unwaited `&` anywhere, allows `&&`.
-            assert!(command_has_bash_background_operator(
-                "echo a & echo b",
-                false
-            ));
-            assert!(!command_has_bash_background_operator(
-                "echo a && echo b",
-                false
-            ));
-            // legacy: only a trailing `&`.
-            assert!(command_has_bash_background_operator("sleep 1 &", true));
-            assert!(!command_has_bash_background_operator(
-                "echo a & echo b",
-                true
-            ));
         }
 
         #[test]
@@ -4274,9 +4187,8 @@ mod tests {
                     HashMap::from([("timeout".to_string(), "max_wait".to_string())]),
                 )]),
             );
-            let def = ToolMetadata::versioned_definition(
+            let def = ToolMetadata::finalized_definition(
                 &BashTool,
-                None,
                 "run_terminal_cmd",
                 None,
                 &renderer,
@@ -4473,9 +4385,9 @@ mod tests {
         }
     }
 
-    // ─── Legacy trailing-only `&` detection ───
+    // ─── PowerShell trailing-only `&` detection ───
 
-    mod legacy_trailing_ampersand {
+    mod trailing_ampersand {
         use super::*;
 
         #[test]
@@ -4490,7 +4402,7 @@ mod tests {
 
         #[test]
         fn mid_command_ampersand_not_detected() {
-            // Legacy only checks trailing — mid-command `&` is allowed.
+            // This primitive only checks the PowerShell trailing form.
             assert!(!has_trailing_background_operator("echo a & echo b"));
         }
 
@@ -4575,8 +4487,8 @@ mod tests {
     mod gate_decision {
         use super::*;
 
-        /// The pure gate decision is exercised for every shell semantics (and
-        /// both contract versions) on all platforms; the `.run()` integration
+        /// The pure gate decision is exercised for every shell semantics on all
+        /// platforms; the `.run()` integration
         /// path can only cover Unix/Git Bash.
         #[test]
         fn detect_background_op_violation_per_shell() {
@@ -4589,60 +4501,46 @@ mod tests {
                 trailing_is_syntax_error: true,
             });
 
-            // bash/POSIX current contract: an unwaited `&` anywhere is rejected.
+            // bash/POSIX: an unwaited `&` anywhere is rejected.
             assert_eq!(
-                detect_background_op_violation(PosixBackground, "sleep 10 &", false),
+                detect_background_op_violation(PosixBackground, "sleep 10 &"),
                 Some(Bash)
             );
             assert_eq!(
-                detect_background_op_violation(PosixBackground, "echo a & echo b", false),
+                detect_background_op_violation(PosixBackground, "echo a & echo b"),
                 Some(Bash)
             );
             assert_eq!(
-                detect_background_op_violation(PosixBackground, "echo a && echo b", false),
+                detect_background_op_violation(PosixBackground, "echo a && echo b"),
                 None
             );
-            // bash/POSIX legacy contract: only a trailing `&` (mid-command allowed).
             assert_eq!(
-                detect_background_op_violation(PosixBackground, "sleep 10 &", true),
-                Some(Bash)
+                detect_background_op_violation(PowerShellCore, "Start-Sleep 10 &"),
+                ps_core
             );
             assert_eq!(
-                detect_background_op_violation(PosixBackground, "echo a & echo b", true),
+                detect_background_op_violation(PowerShellCore, "Start-Sleep 10 &;"),
+                ps_core
+            );
+            assert_eq!(
+                detect_background_op_violation(WindowsPowerShell, "Start-Sleep 10 &"),
+                ps_51
+            );
+            assert_eq!(
+                detect_background_op_violation(PowerShellCore, r#"& "C:\app.exe""#),
                 None
             );
-            // PowerShell: only a trailing `&`; call operator allowed; the edition
-            // bit is independent of the bash contract version (`is_legacy`).
-            for legacy in [false, true] {
-                assert_eq!(
-                    detect_background_op_violation(PowerShellCore, "Start-Sleep 10 &", legacy),
-                    ps_core
-                );
-                // Trailing `&` before a separator is still caught.
-                assert_eq!(
-                    detect_background_op_violation(PowerShellCore, "Start-Sleep 10 &;", legacy),
-                    ps_core
-                );
-                assert_eq!(
-                    detect_background_op_violation(WindowsPowerShell, "Start-Sleep 10 &", legacy),
-                    ps_51
-                );
-                assert_eq!(
-                    detect_background_op_violation(PowerShellCore, r#"& "C:\app.exe""#, legacy),
-                    None
-                );
-                assert_eq!(
-                    detect_background_op_violation(WindowsPowerShell, "echo a 2>&1", legacy),
-                    None
-                );
-            }
+            assert_eq!(
+                detect_background_op_violation(WindowsPowerShell, "echo a 2>&1"),
+                None
+            );
             // cmd.exe: `&` is a sequential separator, never rejected.
             assert_eq!(
-                detect_background_op_violation(CmdSeparator, "dir & echo done", false),
+                detect_background_op_violation(CmdSeparator, "dir & echo done"),
                 None
             );
             assert_eq!(
-                detect_background_op_violation(CmdSeparator, "ping -n 1 x &", false),
+                detect_background_op_violation(CmdSeparator, "ping -n 1 x &"),
                 None
             );
         }
@@ -4673,49 +4571,37 @@ mod tests {
             use AmpersandSemantics::PosixBackground as P;
             // is_background bypasses regardless of flag/backgrounding.
             assert_eq!(
-                should_reject_background_op(true, false, false, P, "sleep 10 &", false),
+                should_reject_background_op(true, false, false, P, "sleep 10 &"),
                 None
             );
             // Default: flag on + backgrounding on + foreground → accepted.
             assert_eq!(
-                should_reject_background_op(false, true, true, P, "sleep 10 &", false),
+                should_reject_background_op(false, true, true, P, "sleep 10 &"),
                 None
             );
             // Backgrounding disabled rejects a foreground `&` even with the flag on.
             assert_eq!(
-                should_reject_background_op(false, true, false, P, "sleep 10 &", false),
+                should_reject_background_op(false, true, false, P, "sleep 10 &"),
                 Some(BackgroundOpViolation::Bash)
             );
             // Flag off (backgrounding on) + foreground delegates by construction.
-            for (s, c, l) in [(P, "sleep 10 &", false), (P, "echo a 2>&1", false)] {
+            for (s, c) in [(P, "sleep 10 &"), (P, "echo a 2>&1")] {
                 assert_eq!(
-                    should_reject_background_op(false, false, true, s, c, l),
-                    detect_background_op_violation(s, c, l)
+                    should_reject_background_op(false, false, true, s, c),
+                    detect_background_op_violation(s, c)
                 );
             }
         }
     }
 
-    // ─── Versioned `&` detection integration ───
-
-    mod versioned_background_check {
+    mod background_check {
         use super::*;
 
-        fn legacy_rt_ctx(
-            resources: crate::types::resources::SharedResources,
-        ) -> tool_runtime::ToolCallContext {
-            let mut ctx = tool_runtime::ToolCallContext::new(tool_protocol::ToolCallId::new_v7());
-            ctx.extensions.insert(resources);
-            ctx.extensions
-                .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-            ctx
-        }
-
-        /// Under current version, mid-command `&` is rejected (Unix/Git Bash only;
+        /// Mid-command `&` is rejected (Unix/Git Bash only;
         /// PowerShell/cmd give `&` other meanings — see `ampersand_semantics`).
         #[cfg(unix)]
         #[tokio::test]
-        async fn current_rejects_mid_command_ampersand() {
+        async fn rejects_mid_command_ampersand() {
             let resources = make_resources_reject_bg_op(MockTerminal::success("", 0));
             let tool = BashTool;
             let result = tool_runtime::Tool::run(
@@ -4729,62 +4615,6 @@ mod tests {
             assert!(
                 err.contains("background '&'"),
                 "expected a background '&' error, got: {err}"
-            );
-        }
-
-        /// Under legacy version, mid-command `&` is allowed.
-        #[tokio::test]
-        async fn legacy_allows_mid_command_ampersand() {
-            let resources = make_resources_reject_bg_op(MockTerminal::success("output", 0));
-            let tool = BashTool;
-            let result = tool_runtime::Tool::run(
-                &tool,
-                legacy_rt_ctx(resources.into_shared()),
-                make_input("echo a & echo b"),
-            )
-            .await;
-            assert!(
-                result.is_ok(),
-                "legacy should allow mid-command &, got: {:?}",
-                result.err()
-            );
-        }
-
-        /// Under legacy version, trailing `&` is still rejected (Unix/Git Bash only).
-        #[cfg(unix)]
-        #[tokio::test]
-        async fn legacy_rejects_trailing_ampersand() {
-            let resources = make_resources_reject_bg_op(MockTerminal::success("", 0));
-            let tool = BashTool;
-            let result = tool_runtime::Tool::run(
-                &tool,
-                legacy_rt_ctx(resources.into_shared()),
-                make_input("sleep 600 &"),
-            )
-            .await;
-            assert!(result.is_err());
-            let err = result.unwrap_err().to_string();
-            assert!(
-                err.contains("must not end with"),
-                "expected 'must not end with' error, got: {err}"
-            );
-        }
-
-        /// Under legacy version, logical AND (&&) is not rejected.
-        #[tokio::test]
-        async fn legacy_allows_logical_and() {
-            let resources = make_resources_reject_bg_op(MockTerminal::success("output", 0));
-            let tool = BashTool;
-            let result = tool_runtime::Tool::run(
-                &tool,
-                legacy_rt_ctx(resources.into_shared()),
-                make_input("ls && echo done"),
-            )
-            .await;
-            assert!(
-                result.is_ok(),
-                "legacy should allow &&, got: {:?}",
-                result.err()
             );
         }
     }

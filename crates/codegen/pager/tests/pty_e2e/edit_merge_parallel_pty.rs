@@ -6,16 +6,13 @@ const DONE_SENTINEL: &str = "EDIT_MERGE_PAR_DONE";
 
 const FIXTURE: &str = "parallel_fix.py";
 
-/// PTY: with `collapsed_edit_blocks` enabled, TWO search_replace calls to the
-/// same file issued in ONE model turn (parallel tool calls) coalesce into a
-/// single Edit row with the summed diffstat, regardless of the order their
-/// completions land in.
+/// PTY: TWO search_replace calls to the same file issued in ONE model turn
+/// coalesce into a single Edit row with the summed diffstat, regardless of the
+/// order their completions land in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run with cargo test -p pager --test pty_e2e -- --ignored"]
 async fn edit_merge_parallel_pty() {
     let content = ContentController::start().await.expect("start content");
-    seed_ui_config(&content, "collapsed_edit_blocks = true");
-
     let target = content.home().join(FIXTURE);
     std::fs::write(
         &target,
@@ -63,7 +60,7 @@ async fn edit_merge_parallel_pty() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

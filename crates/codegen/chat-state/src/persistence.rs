@@ -1,26 +1,25 @@
-//! Chat persistence trait and mock implementation.
+//! Timeline persistence port and test implementations.
 //!
-//! The actor owns persistence exclusively (`Box<dyn ChatPersistence>`), so the
+//! The actor owns persistence exclusively (`Box<dyn TimelinePersistence>`), so the
 //! trait uses `&mut self` — no locks, no atomics, no shared state.
 //! The mock uses a channel to report records to the test, keeping everything
 //! in the actor / message-passing paradigm.
 
 use std::io;
 
-use sampling_types::ConversationItem;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::TimelineEvent;
 
-/// Abstraction over chat-specific persistence operations.
+/// Append-only persistence boundary owned by the Timeline actor.
 ///
-/// The actor owns this exclusively via `Box<dyn ChatPersistence>`, so all
+/// The actor owns this exclusively via `Box<dyn TimelinePersistence>`, so all
 /// methods take `&mut self` — no interior mutability needed.
 ///
 /// The real implementation wraps an `mpsc::UnboundedSender<PersistenceMsg>`
 /// (which only needs `&self` to send, but `&mut self` is still correct
 /// because the actor is the sole owner).
-pub trait ChatPersistence: Send + 'static {
+pub trait TimelinePersistence: Send + 'static {
     /// Append one immutable conversation fact to the durable timeline.
     fn persist_timeline_event(&mut self, event: &TimelineEvent);
 
@@ -29,12 +28,6 @@ pub trait ChatPersistence: Send + 'static {
         &mut self,
         event: &TimelineEvent,
     ) -> oneshot::Receiver<io::Result<()>>;
-
-    /// Persist a single conversation item (append to chat_history.jsonl).
-    fn persist_message(&mut self, item: &ConversationItem);
-
-    /// Replace the entire chat history (compaction / rewind).
-    fn replace_history(&mut self, items: &[ConversationItem]);
 
     /// Flush pending writes to disk.
     fn flush(&mut self);
@@ -49,10 +42,6 @@ pub trait ChatPersistence: Send + 'static {
 pub enum PersistenceRecord {
     /// An immutable timeline event was appended.
     Timeline(TimelineEvent),
-    /// A single message was persisted.
-    Message(ConversationItem),
-    /// The full history was replaced.
-    ReplaceHistory(Vec<ConversationItem>),
     /// A flush was requested.
     Flush,
 }
@@ -60,7 +49,7 @@ pub enum PersistenceRecord {
 /// Test implementation: sends every call as a [`PersistenceRecord`] over a
 /// channel. The test holds the [`MockPersistenceReceiver`] to inspect what
 /// the actor did. No locks, no atomics — just message passing.
-pub struct MockChatPersistence {
+pub struct MockTimelinePersistence {
     tx: mpsc::UnboundedSender<PersistenceRecord>,
     timeline_ack_tx: Option<mpsc::UnboundedSender<oneshot::Sender<io::Result<()>>>>,
 }
@@ -71,7 +60,7 @@ pub struct MockPersistenceReceiver {
     timeline_ack_rx: Option<mpsc::UnboundedReceiver<oneshot::Sender<io::Result<()>>>>,
 }
 
-impl MockChatPersistence {
+impl MockTimelinePersistence {
     /// Create a paired (mock, receiver). Give the mock to the actor, keep the
     /// receiver in the test.
     pub fn new() -> (Self, MockPersistenceReceiver) {
@@ -117,24 +106,16 @@ impl MockPersistenceReceiver {
 
     pub async fn next_timeline_ack(&mut self) -> Option<oneshot::Sender<io::Result<()>>> {
         match &mut self.timeline_ack_rx {
-            Some(rx) => rx.recv().await,
+            Some(rx) => tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .ok()
+                .flatten(),
             None => None,
         }
     }
-
-    /// Collect all `Message` items received so far (drains the channel).
-    pub fn messages(&mut self) -> Vec<ConversationItem> {
-        self.drain()
-            .into_iter()
-            .filter_map(|r| match r {
-                PersistenceRecord::Message(item) => Some(item),
-                _ => None,
-            })
-            .collect()
-    }
 }
 
-impl ChatPersistence for MockChatPersistence {
+impl TimelinePersistence for MockTimelinePersistence {
     fn persist_timeline_event(&mut self, event: &TimelineEvent) {
         let _ = self.tx.send(PersistenceRecord::Timeline(event.clone()));
     }
@@ -158,16 +139,6 @@ impl ChatPersistence for MockChatPersistence {
         receiver
     }
 
-    fn persist_message(&mut self, item: &ConversationItem) {
-        let _ = self.tx.send(PersistenceRecord::Message(item.clone()));
-    }
-
-    fn replace_history(&mut self, items: &[ConversationItem]) {
-        let _ = self
-            .tx
-            .send(PersistenceRecord::ReplaceHistory(items.to_vec()));
-    }
-
     fn flush(&mut self) {
         let _ = self.tx.send(PersistenceRecord::Flush);
     }
@@ -178,9 +149,9 @@ impl ChatPersistence for MockChatPersistence {
 // ============================================================================
 
 /// No-op implementation: discards everything (for benchmarks / noop scenarios).
-pub struct NullChatPersistence;
+pub struct NullTimelinePersistence;
 
-impl ChatPersistence for NullChatPersistence {
+impl TimelinePersistence for NullTimelinePersistence {
     fn persist_timeline_event(&mut self, _event: &TimelineEvent) {}
 
     fn persist_timeline_event_and_ack(
@@ -191,8 +162,6 @@ impl ChatPersistence for NullChatPersistence {
         let _ = reply.send(Ok(()));
         receiver
     }
-    fn persist_message(&mut self, _item: &ConversationItem) {}
-    fn replace_history(&mut self, _items: &[ConversationItem]) {}
     fn flush(&mut self) {}
 }
 
@@ -201,39 +170,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mock_persistence_records_messages() {
-        let (mut mock, mut rx) = MockChatPersistence::new();
-        let item = ConversationItem::system("test");
-        mock.persist_message(&item);
-        let records = rx.drain();
-        assert_eq!(records.len(), 1);
-        assert!(matches!(&records[0], PersistenceRecord::Message(_)));
-    }
-
-    #[test]
-    fn mock_persistence_records_multiple_messages() {
-        let (mut mock, mut rx) = MockChatPersistence::new();
-        mock.persist_message(&ConversationItem::system("a"));
-        mock.persist_message(&ConversationItem::user("b"));
-        mock.persist_message(&ConversationItem::assistant("c"));
-        assert_eq!(rx.messages().len(), 3);
-    }
-
-    #[test]
-    fn mock_persistence_records_replace_history() {
-        let (mut mock, mut rx) = MockChatPersistence::new();
-        mock.replace_history(&[ConversationItem::system("a"), ConversationItem::system("b")]);
-        let records = rx.drain();
-        assert_eq!(records.len(), 1);
-        match &records[0] {
-            PersistenceRecord::ReplaceHistory(items) => assert_eq!(items.len(), 2),
-            other => panic!("expected ReplaceHistory, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn mock_persistence_records_flush() {
-        let (mut mock, mut rx) = MockChatPersistence::new();
+        let (mut mock, mut rx) = MockTimelinePersistence::new();
         mock.flush();
         mock.flush();
         let records = rx.drain();
@@ -247,9 +185,7 @@ mod tests {
 
     #[test]
     fn null_persistence_does_not_panic() {
-        let mut null = NullChatPersistence;
-        null.persist_message(&ConversationItem::system("test"));
-        null.replace_history(&[ConversationItem::user("a")]);
+        let mut null = NullTimelinePersistence;
         null.flush();
     }
 }

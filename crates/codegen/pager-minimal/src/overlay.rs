@@ -805,13 +805,14 @@ mod tests {
     use pager::views::suggestion_controller::CompletionItemParsed;
 
     fn completion_item() -> CompletionItemParsed {
-        // Functional update: only the semantic fields; new optional item
-        // fields (e.g. the replace-range pair) default without breaking
-        // this out-of-crate literal again.
         CompletionItemParsed {
             display: "item".into(),
-            insert_text: "item".into(),
-            ..Default::default()
+            description: String::new(),
+            replacement: "item".into(),
+            source: pager::views::suggestion_controller::SuggestionSource::History,
+            priority: 0,
+            replace_range: 0..0,
+            truncated: false,
         }
     }
 

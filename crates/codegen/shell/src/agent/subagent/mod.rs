@@ -51,7 +51,7 @@ pub(crate) enum InitialContextSource {
     /// Parent history as `<background_context>` (harness-only chat-prefix fork).
     Forked,
     /// Resumed from a previously completed peer subagent. The child inherits
-    /// the source's raw transcript, tool state, and model. System prompt and
+    /// the source's raw transcript and model. System prompt, tool runtime, and
     /// prompt context are freshly rendered from the current agent definition.
     Resumed,
 }
@@ -66,7 +66,7 @@ pub(crate) struct AutoCompactThresholdTiers {
     pub user_session: Option<u8>,
     /// Subset of `cfg.config_models` whose `auto_compact_threshold_percent`
     /// is set, keyed by the model entry's id (the table key in
-    /// `[model.<id>]`). Looked up by the subagent's resolved model id at
+    /// `[provider.<id>.models.<model>]`). Looked up by the subagent's resolved model id at
     /// spawn time so user per-model overrides for the subagent's model are
     /// honored (not just the parent's).
     pub user_per_model: std::collections::HashMap<String, u8>,
@@ -111,7 +111,6 @@ pub(crate) struct SubagentSpawnContext {
     /// context is built (an async snapshot from the parent session actor).
     pub client_hooks: crate::extensions::hooks::ClientHooks,
     pub sampling_config: sampler::SamplerConfig,
-    pub managed_mcp_proxy_base_url: String,
     /// The staging auth header value propagated from the parent. Used
     /// when materialising subagent `SamplerConfig`s for auth-flow tracking
     /// and for `inject_url_derived_headers` in the construction helpers.
@@ -120,8 +119,8 @@ pub(crate) struct SubagentSpawnContext {
     pub model_id: acp::ModelId,
     pub parent_cwd: PathBuf,
     pub parent_session_id: String,
-    /// The parent's cutoff at spawn, applied to the child's first turn. `None` if unset.
-    pub yolo_mode: bool,
+    /// Parent permission mode inherited at child spawn.
+    pub permission_mode: crate::util::config::PermissionMode,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
     pub parent_depth: u32,
     pub subagents_max_depth: u32,
@@ -197,14 +196,6 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     /// Parent session info — used to locate parent session directory.
     pub parent_session_info: Option<SessionInfo>,
-    /// Subagent roles config for role-based config layering.
-    pub subagent_roles:
-        std::collections::HashMap<String, crate::agent::subagent::resolution::config::SubagentRole>,
-    /// Subagent personas config for persona/SOUL layering.
-    pub subagent_personas: std::collections::HashMap<
-        String,
-        crate::agent::subagent::resolution::config::SubagentPersona,
-    >,
     /// Parent session's ChatStateHandle — used to read the actual live
     /// sampling config and credentials from the parent session actor (async).
     /// Cheap Clone (mpsc sender). `None` when parent SessionHandle not found.
@@ -254,17 +245,12 @@ pub(crate) struct SubagentSpawnContext {
     pub workspace_ops: workspace::WorkspaceOps,
     /// Parent session's agent name (e.g. "grow-build").
     pub parent_agent_name: Option<String>,
-    /// Parent's managed MCP state handle (Arc-shared, no re-fetch).
-    pub managed_mcp_state: crate::session::managed_mcp::ManagedMcpStateHandle,
     /// Snapshot of the parent session's MCP client pool at spawn time.
     pub parent_mcp_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
     /// Pre-discovered skills from the parent session, captured at spawn time.
     pub parent_skills: Option<Vec<tools::implementations::skills::types::SkillInfo>>,
     /// Parent's skills config for the child's SkillManager.
     pub parent_skills_config: agent::prompt::skills::SkillsConfig,
-    /// Parent's resolved vendor-compat config, inherited by the child so its
-    /// skills / rules / AGENTS.md discovery honors the same vendor toggles.
-    pub parent_compat: tools::types::compat::CompatConfig,
     /// Shared completion reservations held by auto-wake prompts.
     pub task_completion_reservations:
         Option<tools::reminders::task_completion::TaskCompletionReservations>,
@@ -282,7 +268,7 @@ impl SubagentSpawnContext {
     /// Resolve `auto_compact_threshold_percent` for the subagent's actual
     /// model id (the one selected by `resolve_subagent_sampling_config`,
     /// not the parent's). Walks the same precedence as the main session's
-    /// resolver: env > user [model.<id>] > user [session] > GB per-model
+    /// resolver: env > provider model > user [session] > managed per-model
     /// > GB global > 85.
     ///
     /// The GB per-model tier is read from `available_models` (the same
@@ -290,9 +276,11 @@ impl SubagentSpawnContext {
     /// GB global tiers are sourced from the parent's snapshot captured at
     /// spawn-context build time.
     pub fn resolve_auto_compact_threshold_percent(&self, subagent_model_id: &str) -> u8 {
-        let gb_per_model =
-            crate::agent::config::find_model_by_id(&self.available_models, subagent_model_id)
-                .and_then(|e| e.info.auto_compact_threshold_percent);
+        let gb_per_model = crate::agent::config::find_model_by_catalog_id(
+            &self.available_models,
+            subagent_model_id,
+        )
+        .and_then(|e| e.info.auto_compact_threshold_percent);
         crate::util::config::resolve_auto_compact_threshold_percent_from_tiers(
             self.auto_compact_threshold_tiers
                 .user_per_model
@@ -303,8 +291,9 @@ impl SubagentSpawnContext {
             self.auto_compact_threshold_tiers.remote_global,
         )
     }
-    /// Bind a spawned subagent by the parent session's `--tools`/
-    /// `--disallowed-tools`/`--permission-mode` restrictions.
+    /// Bind a spawned subagent by the parent session's `--tools` and
+    /// `--disallowed-tools` restrictions. Permission ownership remains in the
+    /// shared session PermissionManager.
     fn apply_session_cli_overrides(&self, def: &mut agent::config::AgentDefinition) {
         if let Some(ref cfg) = self.agent_config {
             cfg.cli_agent_overrides.apply_to_subagent_definition(def);
@@ -460,7 +449,8 @@ pub(crate) struct ShellCompletionData {
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
     diagnostics_tokens: u64,
     spawned_notification_emitted: bool,
-    persisted_output_dir: Option<PathBuf>,
+    persisted_output_ref: Option<PathBuf>,
+    terminal_committed: bool,
 }
 impl ShellCompletionData {
     fn from_context(ctx: &SubagentSpawnContext) -> Self {
@@ -472,14 +462,19 @@ impl ShellCompletionData {
             goal_loop_active: Arc::clone(&ctx.goal_loop_active),
             diagnostics_tokens: 0,
             spawned_notification_emitted: false,
-            persisted_output_dir: None,
+            persisted_output_ref: None,
+            terminal_committed: false,
         }
     }
-    pub(crate) fn persisted_output_dir(&self) -> Option<&Path> {
-        self.persisted_output_dir.as_deref()
+    pub(crate) fn persisted_output_ref(&self) -> Option<&Path> {
+        self.persisted_output_ref.as_deref()
     }
-    fn set_persisted_output_dir(&mut self, path: Option<PathBuf>) {
-        self.persisted_output_dir = path;
+    fn set_persisted_output_ref(&mut self, path: Option<PathBuf>) {
+        self.persisted_output_ref = path;
+    }
+
+    fn mark_terminal_committed(&mut self) {
+        self.terminal_committed = true;
     }
 }
 pub(crate) struct SubagentPresentation {
@@ -505,6 +500,13 @@ pub(crate) fn present_child_completion(
         completion_data,
         disposition,
     } = completion;
+    if !completion_data.terminal_committed {
+        tracing::error!(
+            subagent_id = %request.id,
+            "suppressing subagent completion projection without a canonical parent terminal"
+        );
+        return;
+    }
     let parent_channel_open = completion_data
         .parent_cmd_tx
         .as_ref()
@@ -535,7 +537,7 @@ pub(crate) fn present_child_completion(
             });
         }
     }
-    let will_wake = should_auto_wake_subagent(
+    let should_wake = should_auto_wake_subagent(
         disposition.backgrounded,
         result.cancelled,
         completion_data.auto_wake_enabled,
@@ -558,12 +560,11 @@ pub(crate) fn present_child_completion(
                 duration_ms: result.duration_ms,
                 tokens_used: completion_data.diagnostics_tokens,
                 output: result.success.then(|| result.output.to_string()),
-                will_wake,
             },
             completion_data.parent_cmd_tx.as_ref(),
         );
     }
-    if will_wake {
+    if should_wake {
         inject_subagent_completed_prompt(
             &request.id,
             &result,
@@ -590,7 +591,7 @@ pub(crate) fn present_child_completion(
 /// pin references an unknown model it is ignored (with a `tracing::warn!`)
 /// and resolution falls through to the next priority.
 ///
-/// NOTE: the persona/role/runtime override (`effective_runtime.model`) is
+/// NOTE: the host/runtime override (`effective_runtime.model`) is
 /// applied by the caller (`run_shell_child`) BEFORE this function
 /// runs, so it is not handled here.
 ///
@@ -642,10 +643,10 @@ async fn resolve_subagent_sampling_config(
 /// Resolve a subagent's effective sampling config + model id, honoring the
 /// model-resolution precedence (Key Decision #16).
 ///
-/// An explicit `runtime_override_model` — the goal role model or a persona
-/// override carried on `effective_runtime.model` — is resolved HERE, BEFORE
+/// An explicit `runtime_override_model` — a host-owned Goal-stage model or an
+/// explicit Task runtime override — is resolved HERE, BEFORE
 /// [`resolve_subagent_sampling_config`] (where the user `[subagents.models]`
-/// pin applies). So a goal/persona override WINS
+/// pin applies). So an explicit host/runtime override WINS
 /// over a user per-agent pin. An override that does not resolve to a known
 /// model warns and falls through to the pin path; `None` (inherit) hands
 /// precedence back to the pin path entirely (pin > inherit).
@@ -724,10 +725,11 @@ async fn read_parent_sampling_config(
                 creds.alpha_test_key.as_deref(),
                 &cfg.base_url,
             );
-            let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model)
-                .map(|r| r.auth_scheme)
-                .unwrap_or_default();
-            let bearer_resolver = crate::agent::config::find_model_by_id(
+            let auth_scheme =
+                crate::agent::config::try_resolve_model_credentials(ctx.model_id.0.as_ref())
+                    .map(|r| r.auth_scheme)
+                    .unwrap_or_default();
+            let bearer_resolver = crate::agent::config::find_model_by_catalog_id(
                 &ctx.available_models,
                 ctx.model_id.0.as_ref(),
             )
@@ -803,18 +805,15 @@ async fn read_parent_sampling_config(
         .model_compaction_at_tokens(ctx.model_id.0.as_ref());
     (fallback, ctx.model_id.clone())
 }
-/// Resolve a model override string (config key or model ID) to a
+/// Resolve an exact `provider/model` override to a
 /// `(SamplerConfig, ModelId)` pair.
 fn resolve_model_override_to_config(
     model_id: &str,
     ctx: &SubagentSpawnContext,
 ) -> Option<(sampler::SamplerConfig, acp::ModelId)> {
-    let entry = crate::agent::config::find_model_by_id(&ctx.available_models, model_id).cloned()?;
-    let canonical_model_id = if ctx.available_models.contains_key(model_id) {
-        acp::ModelId::new(model_id)
-    } else {
-        acp::ModelId::new(entry.info().model.clone())
-    };
+    let entry =
+        crate::agent::config::find_model_by_catalog_id(&ctx.available_models, model_id).cloned()?;
+    let canonical_model_id = acp::ModelId::new(model_id);
     let credentials = resolve_credentials(&entry);
     let config = sampling_config_for_model(&entry, credentials, ctx.alpha_test_key.clone());
     ::diagnostics::unified_log::debug(
@@ -844,60 +843,54 @@ pub(crate) fn resume_inherited_prefix_len(
         .count()
 }
 /// How a subagent's initial conversation was bootstrapped.
+#[derive(Debug)]
 struct InitialContext {
     source: InitialContextSource,
-    copy_error: Option<String>,
+    source_ref: Option<chat_state::TimelineRangeRef>,
     prefix_len: Option<usize>,
     conversation: Vec<sampling_types::conversation::ConversationItem>,
+    prompt_blobs: crate::session::persistence::ImmutablePromptBlobs,
     /// True only for a verbatim mirror-fork (parent conversation copied
     /// byte-for-byte before child-only runtime context is applied).
     verbatim_fork: bool,
 }
 /// Resume bootstrap: preserve only the System head (see `resume_inherited_prefix_len`).
-fn resume_initial_context(
+fn resume_initial_context_with_ref(
     conversation: Vec<sampling_types::conversation::ConversationItem>,
+    source_ref: chat_state::TimelineRangeRef,
 ) -> InitialContext {
     InitialContext {
         source: InitialContextSource::Resumed,
-        copy_error: None,
+        source_ref: Some(source_ref),
         prefix_len: Some(resume_inherited_prefix_len(&conversation)),
         conversation,
+        prompt_blobs: Default::default(),
         verbatim_fork: false,
     }
 }
-/// Apply `fork_filter_chat` then normalize; empty or System-only input (no
-/// `<background_context>` produced) fails open to `New`.
-fn forked_initial_context(
+/// Apply `fork_filter_surface` then normalize. Empty or System-only input is
+/// rejected because it cannot satisfy an explicit fork request.
+fn forked_initial_context_with_ref(
     mut items: Vec<sampling_types::conversation::ConversationItem>,
-) -> InitialContext {
-    crate::session::storage::jsonl::fork_filter_chat(&mut items);
+    source_ref: chat_state::TimelineRangeRef,
+) -> Result<InitialContext, String> {
+    crate::session::storage::jsonl::fork_filter_surface(&mut items);
     if items.is_empty() {
-        return InitialContext {
-            source: InitialContextSource::New,
-            copy_error: Some("empty parent conversation".to_string()),
-            prefix_len: None,
-            conversation: vec![],
-            verbatim_fork: false,
-        };
+        return Err("empty parent Surface".to_string());
     }
     let (conversation, prefix_len) =
         crate::agent::subagent::resolution::context::normalize_forked_context(items);
     if prefix_len < 2 {
-        return InitialContext {
-            source: InitialContextSource::New,
-            copy_error: Some("no inheritable parent content".to_string()),
-            prefix_len: None,
-            conversation: vec![],
-            verbatim_fork: false,
-        };
+        return Err("parent Surface has no inheritable content".to_string());
     }
-    InitialContext {
+    Ok(InitialContext {
         source: InitialContextSource::Forked,
-        copy_error: None,
+        source_ref: Some(source_ref),
         prefix_len: Some(prefix_len),
         conversation,
+        prompt_blobs: Default::default(),
         verbatim_fork: false,
-    }
+    })
 }
 /// A verbatim mirror requires a coherent tail: the conversation must end on a
 /// plain assistant text response (a clean turn boundary). A dangling assistant
@@ -914,7 +907,7 @@ fn conversation_tail_is_complete(items: &[sampling_types::conversation::Conversa
 ///
 /// Verbatim mirror (the cache-preserving path): when the parent fits the child
 /// window (same 80% guard as resume) AND ends at a clean turn boundary, keep the
-/// items BYTE-FOR-BYTE. We deliberately do NOT run `fork_filter_chat` here — its
+/// items BYTE-FOR-BYTE. We deliberately do NOT run `fork_filter_surface` here — its
 /// step 1 strips synthetic-reason user items (`<system-reminder>`s, drained
 /// monitor events, doom-loop warnings) that the parent actually sent and cached;
 /// stripping them would diverge the child prefix at the first removed item and
@@ -923,64 +916,102 @@ fn conversation_tail_is_complete(items: &[sampling_types::conversation::Conversa
 /// and no trimming is needed; an incomplete tail falls back to summarized.
 ///
 /// Summarized fallback (oversize OR incomplete tail): the reasoning-aware
-/// `fork_filter_chat` drops synthetics + trims the incomplete tail, then
+/// `fork_filter_surface` drops synthetics + trims the incomplete tail, then
 /// `normalize_forked_context` summarizes. (This is the ONLY path that filters;
 /// the verbatim path never does.)
 ///
-/// Input that is empty or only `System` item(s) — before OR after filtering —
-/// inherited nothing, so it fails open to `New` rather than a hollow fork.
-fn verbatim_or_normalize_fork(
+/// Input that is empty or only `System` item(s), before or after filtering, is
+/// rejected rather than producing a hollow fork.
+fn verbatim_or_normalize_fork_with_ref(
     items: Vec<sampling_types::conversation::ConversationItem>,
     child_context_window: u64,
-) -> InitialContext {
+    source_ref: chat_state::TimelineRangeRef,
+) -> Result<InitialContext, String> {
     if !items
         .iter()
         .any(|i| !matches!(i, ConversationItem::System(_)))
     {
-        return InitialContext {
-            source: InitialContextSource::New,
-            copy_error: Some("forked parent conversation has no inheritable content".to_string()),
-            prefix_len: None,
-            conversation: vec![],
-            verbatim_fork: false,
-        };
+        return Err("parent Surface has no inheritable content".to_string());
     }
     let estimated_tokens = chat_state::estimate_conversation_tokens(&items);
     const SAFE_FORK_PERCENT: u64 = 80;
     let threshold = child_context_window * SAFE_FORK_PERCENT / 100;
     if estimated_tokens <= threshold && conversation_tail_is_complete(&items) {
         let prefix_len = items.len();
-        return InitialContext {
+        return Ok(InitialContext {
             source: InitialContextSource::Forked,
-            copy_error: None,
+            source_ref: Some(source_ref),
             prefix_len: Some(prefix_len),
             conversation: items,
+            prompt_blobs: Default::default(),
             verbatim_fork: true,
-        };
+        });
     }
     let mut filtered = items;
-    crate::session::storage::jsonl::fork_filter_chat(&mut filtered);
+    crate::session::storage::jsonl::fork_filter_surface(&mut filtered);
     if !filtered
         .iter()
         .any(|i| !matches!(i, ConversationItem::System(_)))
     {
-        return InitialContext {
-            source: InitialContextSource::New,
-            copy_error: Some("no inheritable parent content after filtering".to_string()),
-            prefix_len: None,
-            conversation: vec![],
-            verbatim_fork: false,
-        };
+        return Err("parent Surface has no inheritable content after filtering".to_string());
     }
     let (conversation, prefix_len) =
         crate::agent::subagent::resolution::context::normalize_forked_context(filtered);
-    InitialContext {
+    Ok(InitialContext {
         source: InitialContextSource::Forked,
-        copy_error: None,
+        source_ref: Some(source_ref),
         prefix_len: Some(prefix_len),
         conversation,
+        prompt_blobs: Default::default(),
         verbatim_fork: false,
+    })
+}
+
+fn freeze_initial_prompt_blobs(
+    mut context: InitialContext,
+    source_session_dir: Option<&Path>,
+) -> Result<InitialContext, String> {
+    let references =
+        crate::session::persistence::referenced_prompt_blob_hashes(&context.conversation)
+            .map_err(|error| format!("invalid inherited prompt artifact reference: {error}"))?;
+    if references.is_empty() {
+        return Ok(context);
     }
+    let source_session_dir = source_session_dir.ok_or_else(|| {
+        "inherited Surface references prompt artifacts but its source session directory is unavailable"
+            .to_string()
+    })?;
+    context.prompt_blobs =
+        crate::session::persistence::freeze_prompt_blobs(&context.conversation, source_session_dir)
+            .map_err(|error| format!("cannot freeze inherited prompt artifacts: {error}"))?;
+    Ok(context)
+}
+#[cfg(test)]
+fn test_source_ref() -> chat_state::TimelineRangeRef {
+    chat_state::TimelineRangeRef {
+        timeline_id: "test-source".into(),
+        first_seq: 0,
+        last_seq: 0,
+    }
+}
+#[cfg(test)]
+fn resume_initial_context(
+    conversation: Vec<sampling_types::conversation::ConversationItem>,
+) -> InitialContext {
+    resume_initial_context_with_ref(conversation, test_source_ref())
+}
+#[cfg(test)]
+fn forked_initial_context(
+    items: Vec<sampling_types::conversation::ConversationItem>,
+) -> Result<InitialContext, String> {
+    forked_initial_context_with_ref(items, test_source_ref())
+}
+#[cfg(test)]
+fn verbatim_or_normalize_fork(
+    items: Vec<sampling_types::conversation::ConversationItem>,
+    child_context_window: u64,
+) -> Result<InitialContext, String> {
+    verbatim_or_normalize_fork_with_ref(items, child_context_window, test_source_ref())
 }
 /// `true` only when the fork actually summarized (ran `normalize_forked_context`).
 /// A verbatim mirror-fork inherits items as-is and never normalizes, so it reports
@@ -988,56 +1019,18 @@ fn verbatim_or_normalize_fork(
 fn fork_context_normalized(source: &InitialContextSource, verbatim_fork: bool) -> bool {
     matches!(source, InitialContextSource::Forked) && !verbatim_fork
 }
-/// Stamp `subagent_fork` / `forked` on the child summary (live path; disk copy already stamps).
-fn stamp_live_fork_session_metadata(
-    child_session_info: &SessionInfo,
-    parent_session_id: &str,
-    parent_prompt_id: Option<String>,
-    model_id: &str,
-    inherited_prefix_len: Option<usize>,
-    fork_context_source: &str,
-) {
-    let dir = session::persistence::session_dir(child_session_info);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(error = %e, "live fork: could not create child session dir for metadata stamp");
-        return;
-    }
-    let summary_path = dir.join("summary.json");
-    let model = acp::ModelId::new(model_id);
-    let mut summary = std::fs::read(&summary_path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .or_else(|| session::persistence::Summary::new(child_session_info, model).ok());
-    let Some(ref mut summary) = summary else {
-        tracing::warn!("live fork: could not load or create child summary");
-        return;
-    };
-    summary.session_kind = Some("subagent_fork".to_string());
-    summary.fork_context_source = Some(fork_context_source.to_string());
-    summary.parent_session_id = Some(parent_session_id.to_string());
-    summary.fork_parent_prompt_id = parent_prompt_id;
-    summary.inherited_prefix_len = inherited_prefix_len;
-    summary.forked_at = Some(chrono::Utc::now());
-    if let Ok(bytes) = serde_json::to_vec_pretty(summary)
-        && let Err(e) = std::fs::write(&summary_path, bytes)
-    {
-        tracing::warn!(error = %e, "live fork: failed to write forked session summary");
-    }
-}
 enum BootstrapInitialContext {
     Ready(InitialContext),
-    /// Explicit resume_from failed — abort spawn (fail closed).
-    ResumeAbort(String),
+    /// The requested lineage could not be materialized — abort spawn.
+    Abort(String),
 }
-/// Phase 3: resume (fail-closed on copy error) > fork (live then disk, fail-open) > New.
+/// Phase 3: resume > fork (live then disk) > new. Explicit lineage requests
+/// fail closed; a child is never silently started with an empty Surface.
 /// Unresolved non-empty resume is aborted by the caller before this runs.
 async fn bootstrap_initial_context(
     request: &SubagentRequest,
     resume_source: Option<&ResumeSourceData>,
     ctx: &SubagentSpawnContext,
-    child_session_info: &SessionInfo,
-    child_session_dir: &std::path::Path,
-    effective_model_id: &str,
     child_context_window: u64,
 ) -> BootstrapInitialContext {
     if request.fork_context && request.resume_from.is_some() {
@@ -1056,89 +1049,94 @@ async fn bootstrap_initial_context(
         let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
             crate::util::grow_home::grow_home(),
         );
-        let copy_options = crate::session::storage::CopySessionOptions {
-            parent_session_id: Some(source.child_session_id.clone()),
-            new_model_id: Some(effective_model_id.to_string()),
-            session_kind: Some("subagent_resume".to_string()),
-            fork_context_source: Some("resumed".to_string()),
-            fork_parent_prompt_id: request.parent_prompt_id.clone(),
-            copy_plan_state: false,
-            copy_session_control: false,
-            copy_signals: false,
-            copy_tool_state: true,
-            fork_filter: false,
-            ..Default::default()
-        };
-        return match storage.copy_session_data_sync(
-            &source_session_info,
-            child_session_info,
-            copy_options,
-        ) {
-            Ok(result) => {
-                let conversation =
-                    match storage.load_timeline_surface_from_dir(child_session_dir) {
-                        Ok(items) if !items.is_empty() => items,
-                        Ok(_) => {
-                            return BootstrapInitialContext::ResumeAbort(format!(
-                                "Cannot resume from subagent '{}': \
-                                 copied transcript is empty",
-                                source.subagent_id,
-                            ));
-                        }
-                        Err(e) => {
-                            return BootstrapInitialContext::ResumeAbort(format!(
-                                "Cannot resume from subagent '{}': \
-                                 failed to load copied transcript: {e}",
-                                source.subagent_id,
-                            ));
-                        }
-                    };
-                let estimated_tokens = chat_state::estimate_conversation_tokens(&conversation);
-                const SAFE_RESUME_PERCENT: u64 = 80;
-                let threshold = child_context_window * SAFE_RESUME_PERCENT / 100;
-                if estimated_tokens > threshold {
-                    return BootstrapInitialContext::ResumeAbort(format!(
-                        "Cannot resume from subagent '{}': source transcript \
-                         (~{estimated_tokens} tokens) exceeds {SAFE_RESUME_PERCENT}% of \
-                         the model's context window ({child_context_window} tokens). \
-                         The source conversation is too large for the current model.",
-                        source.subagent_id,
-                    ));
-                }
-                tracing::info!(
-                    subagent_id = %request.id,
-                    source_subagent = %source.subagent_id,
-                    chat_messages = result.chat_messages_copied,
-                    tool_state = result.tool_state_copied,
-                    estimated_tokens,
-                    "Resume-copied source child session data into new child"
-                );
-                BootstrapInitialContext::Ready(resume_initial_context(conversation))
+        let source_session_dir =
+            crate::session::persistence::find_session_dir_by_id(&source.child_session_id)
+                .unwrap_or_else(|| session::persistence::session_dir(&source_session_info));
+        let materialized = match storage
+            .materialize_timeline_from_dir(&source_session_dir, &source.child_session_id)
+        {
+            Ok(materialized) if !materialized.surface.is_empty() => materialized,
+            Ok(_) => {
+                return BootstrapInitialContext::Abort(format!(
+                    "Cannot resume from subagent '{}': source Surface is empty",
+                    source.subagent_id,
+                ));
             }
-            Err(e) => BootstrapInitialContext::ResumeAbort(format!(
-                "Cannot resume from subagent '{}': failed to copy source session data: {e}",
+            Err(error) => {
+                return BootstrapInitialContext::Abort(format!(
+                    "Cannot resume from subagent '{}': failed to materialize source Timeline: \
+                     {error}",
+                    source.subagent_id,
+                ));
+            }
+        };
+        let conversation = materialized.surface;
+        let estimated_tokens = chat_state::estimate_conversation_tokens(&conversation);
+        const SAFE_RESUME_PERCENT: u64 = 80;
+        let threshold = child_context_window * SAFE_RESUME_PERCENT / 100;
+        if estimated_tokens > threshold {
+            return BootstrapInitialContext::Abort(format!(
+                "Cannot resume from subagent '{}': source transcript (~{estimated_tokens} \
+                 tokens) exceeds {SAFE_RESUME_PERCENT}% of the model's context window \
+                 ({child_context_window} tokens). The source conversation is too large for \
+                 the current model.",
                 source.subagent_id,
-            )),
+            ));
+        }
+        tracing::info!(
+            subagent_id = %request.id,
+            source_subagent = %source.subagent_id,
+            surface_items = conversation.len(),
+            estimated_tokens,
+            "Materialized frozen resume source without publishing the child session"
+        );
+        return match freeze_initial_prompt_blobs(
+            resume_initial_context_with_ref(conversation, materialized.input_ref),
+            Some(&source_session_dir),
+        ) {
+            Ok(context) => BootstrapInitialContext::Ready(context),
+            Err(error) => BootstrapInitialContext::Abort(error),
         };
     }
     if !request.fork_context {
         return BootstrapInitialContext::Ready(InitialContext {
             source: InitialContextSource::New,
-            copy_error: None,
+            source_ref: None,
             prefix_len: None,
             conversation: vec![],
+            prompt_blobs: Default::default(),
             verbatim_fork: false,
         });
     }
-    let live_items = match ctx.parent_chat_state.as_ref() {
+    let live_materialized = match ctx.parent_chat_state.as_ref() {
         Some(chat_state) => {
-            let items = chat_state.get_conversation().await;
-            if items.is_empty() { None } else { Some(items) }
+            chat_state
+                .materialize_timeline(ctx.parent_session_id.clone())
+                .await
         }
         None => None,
     };
-    if let Some(items) = live_items {
-        let ctx_out = verbatim_or_normalize_fork(items, child_context_window);
+    if let Some(materialized) = live_materialized {
+        let ctx_out = match verbatim_or_normalize_fork_with_ref(
+            materialized.surface,
+            child_context_window,
+            materialized.input_ref,
+        ) {
+            Ok(context) => context,
+            Err(error) => return BootstrapInitialContext::Abort(error),
+        };
+        let source_session_dir = crate::session::persistence::find_session_dir_by_id(
+            &ctx.parent_session_id,
+        )
+        .or_else(|| {
+            ctx.parent_session_info
+                .as_ref()
+                .map(session::persistence::session_dir)
+        });
+        let ctx_out = match freeze_initial_prompt_blobs(ctx_out, source_session_dir.as_deref()) {
+            Ok(context) => context,
+            Err(error) => return BootstrapInitialContext::Abort(error),
+        };
         tracing::info!(
             subagent_id = %request.id,
             subagent_type = %request.subagent_type,
@@ -1147,90 +1145,42 @@ async fn bootstrap_initial_context(
             verbatim = ctx_out.verbatim_fork,
             "Forked context from live parent_chat_state"
         );
-        if matches!(ctx_out.source, InitialContextSource::Forked) {
-            let marker = if ctx_out.verbatim_fork {
-                "forked_verbatim"
-            } else {
-                "forked_summarized"
-            };
-            stamp_live_fork_session_metadata(
-                child_session_info,
-                &ctx.parent_session_id,
-                request.parent_prompt_id.clone(),
-                effective_model_id,
-                ctx_out.prefix_len,
-                marker,
-            );
-        }
         return BootstrapInitialContext::Ready(ctx_out);
     }
     if let Some(ref parent_info) = ctx.parent_session_info {
         let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
             crate::util::grow_home::grow_home(),
         );
-        let copy_options = crate::session::storage::CopySessionOptions {
-            parent_session_id: Some(ctx.parent_session_id.clone()),
-            new_model_id: Some(effective_model_id.to_string()),
-            session_kind: Some("subagent_fork".to_string()),
-            fork_context_source: Some("forked".to_string()),
-            fork_parent_prompt_id: request.parent_prompt_id.clone(),
-            copy_plan_state: false,
-            copy_session_control: false,
-            copy_signals: false,
-            copy_tool_state: false,
-            fork_filter: true,
-            ..Default::default()
+        let parent_session_dir =
+            crate::session::persistence::find_session_dir_by_id(&ctx.parent_session_id)
+                .unwrap_or_else(|| session::persistence::session_dir(parent_info));
+        let materialized = match storage
+            .materialize_timeline_from_dir(&parent_session_dir, &ctx.parent_session_id)
+        {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                return BootstrapInitialContext::Abort(format!(
+                    "Cannot fork parent session: source Timeline could not be materialized: \
+                     {error}"
+                ));
+            }
         };
-        return match storage.copy_session_data_sync(parent_info, child_session_info, copy_options) {
-            Ok(result) => {
-                tracing::info!(
-                    subagent_id = %request.id,
-                    subagent_type = %request.subagent_type,
-                    chat_messages = result.chat_messages_copied,
-                    tool_state = result.tool_state_copied,
-                    "Fork-copied parent session data into child (disk fallback)"
-                );
-                let items = storage
-                    .load_timeline_surface_from_dir(child_session_dir)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to load forked chat history, starting with empty context"
-                        );
-                        vec![]
-                    });
-                BootstrapInitialContext::Ready(forked_initial_context(items))
-            }
-            Err(e) => {
-                let err_msg = format!("{e}");
-                tracing::warn!(
-                    subagent_id = %request.id,
-                    subagent_type = %request.subagent_type,
-                    error = %e,
-                    "Failed to fork-copy parent session, falling back to fresh"
-                );
-                BootstrapInitialContext::Ready(InitialContext {
-                    source: InitialContextSource::New,
-                    copy_error: Some(err_msg),
-                    prefix_len: None,
-                    conversation: vec![],
-                    verbatim_fork: false,
-                })
-            }
+        tracing::info!(
+            subagent_id = %request.id,
+            subagent_type = %request.subagent_type,
+            surface_items = materialized.surface.len(),
+            "Materialized frozen disk fork source without publishing the child session"
+        );
+        return match forked_initial_context_with_ref(materialized.surface, materialized.input_ref)
+            .and_then(|context| freeze_initial_prompt_blobs(context, Some(&parent_session_dir)))
+        {
+            Ok(context) => BootstrapInitialContext::Ready(context),
+            Err(error) => BootstrapInitialContext::Abort(error),
         };
     }
-    tracing::warn!(
-        subagent_id = %request.id,
-        subagent_type = %request.subagent_type,
-        "fork_context=true but no live parent conversation or parent_session_info; falling back to fresh"
-    );
-    BootstrapInitialContext::Ready(InitialContext {
-        source: InitialContextSource::New,
-        copy_error: Some("parent conversation unavailable".to_string()),
-        prefix_len: None,
-        conversation: vec![],
-        verbatim_fork: false,
-    })
+    BootstrapInitialContext::Abort(
+        "Cannot fork parent session: parent Surface is unavailable".to_string(),
+    )
 }
 /// Resolve the effective working directory for a child session.
 ///
@@ -1290,27 +1240,81 @@ fn durable_resume_source_for(
         id: acp::SessionId::new(parent_session_id),
         cwd: parent_cwd.to_string_lossy().into_owned(),
     };
-    let meta_path = session::persistence::session_dir(&parent_info)
-        .join("subagents")
-        .join(id)
-        .join("meta.json");
-    let data = std::fs::read_to_string(meta_path).ok()?;
-    let meta: SubagentMeta = serde_json::from_str(&data).ok()?;
-    if meta.parent_session_id != parent_session_id
-        || !matches!(meta.status.as_str(), "completed" | "failed" | "cancelled")
-    {
-        return None;
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
+        crate::util::grow_home::grow_home(),
+    );
+    let timeline =
+        chat_state::Timeline::from_events(storage.read_timeline_events_sync(&parent_info).ok()?)
+            .ok()?;
+    let (spawn_seq, spawn, terminal) = resume_source_facts_from_timeline(&timeline, id)?;
+    let source_session_dir =
+        crate::session::persistence::find_session_dir_by_id(&spawn.child_session_id)
+            .unwrap_or_else(|| {
+                session::persistence::session_dir(&SessionInfo {
+                    id: acp::SessionId::new(spawn.child_session_id.clone()),
+                    cwd: spawn.child_cwd.clone(),
+                })
+            });
+    let child = crate::session::storage::read_timeline_in_session_dir(&source_session_dir).ok()?;
+    child
+        .validate_subagent_result_link(parent_session_id, spawn_seq, spawn, terminal)
+        .ok()?;
+    Some(resume_source_from_facts(spawn, terminal))
+}
+
+fn resume_source_facts_from_timeline<'a>(
+    timeline: &'a chat_state::Timeline,
+    id: &str,
+) -> Option<(
+    chat_state::EventSeq,
+    &'a chat_state::SubagentSpawnEvent,
+    &'a chat_state::SubagentTerminalEvent,
+)> {
+    let (spawn_seq, spawn) =
+        timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) if spawn.subagent_id == id => Some((event.seq, spawn)),
+                _ => None,
+            })?;
+    let terminal =
+        timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+                    terminal,
+                )) if terminal.subagent_id == id => Some(terminal),
+                _ => None,
+            })?;
+    Some((spawn_seq, spawn, terminal))
+}
+
+fn resume_source_from_facts(
+    spawn: &chat_state::SubagentSpawnEvent,
+    terminal: &chat_state::SubagentTerminalEvent,
+) -> ResumeSourceData {
+    ResumeSourceData {
+        subagent_id: spawn.subagent_id.clone(),
+        child_session_id: spawn.child_session_id.clone(),
+        child_cwd: spawn.child_cwd.clone(),
+        worktree_path: spawn.worktree_path.as_deref().map(PathBuf::from),
+        snapshot_ref: terminal.snapshot_ref.clone(),
+        subagent_type: spawn.subagent_type.clone(),
+        model_id: Some(spawn.effective_model_id.clone()),
     }
-    Some(ResumeSourceData {
-        subagent_id: meta.subagent_id,
-        child_session_id: meta.child_session_id,
-        child_cwd: meta.child_cwd.unwrap_or_default(),
-        worktree_path: meta.worktree_path.map(PathBuf::from),
-        snapshot_ref: meta.snapshot_ref,
-        subagent_type: meta.subagent_type,
-        persona: meta.persona,
-        model_id: meta.effective_model_id,
-    })
+}
+
+#[cfg(test)]
+fn resume_source_from_timeline(
+    timeline: &chat_state::Timeline,
+    id: &str,
+) -> Option<ResumeSourceData> {
+    let (_, spawn, terminal) = resume_source_facts_from_timeline(timeline, id)?;
+    Some(resume_source_from_facts(spawn, terminal))
 }
 /// Resolve the MCP pool a child subagent should import from its parent.
 ///
@@ -1444,9 +1448,6 @@ pub(crate) fn validate_subagent_type(
         Err(crate::agent::subagent::resolution::ResolutionError::Disabled { .. }) => {
             SubagentValidateTypeOutcome::Disabled
         }
-        Err(crate::agent::subagent::resolution::ResolutionError::PersonaResolution(_)) => {
-            SubagentValidateTypeOutcome::ValidationUnavailable
-        }
     }
 }
 /// Gate an already-resolved subagent type against the `[subagents.toggle]`
@@ -1483,10 +1484,9 @@ fn gate_subagent_type(
         Err(crate::agent::subagent::resolution::ResolutionError::Disabled { .. }) => {
             SubagentValidateTypeOutcome::Disabled
         }
-        Err(
-            crate::agent::subagent::resolution::ResolutionError::Unknown { .. }
-            | crate::agent::subagent::resolution::ResolutionError::PersonaResolution(_),
-        ) => SubagentValidateTypeOutcome::ValidationUnavailable,
+        Err(crate::agent::subagent::resolution::ResolutionError::Unknown { .. }) => {
+            SubagentValidateTypeOutcome::ValidationUnavailable
+        }
     }
 }
 pub(crate) fn subagent_harness_flavor_is_representable(agent_type: &str) -> bool {
@@ -1534,8 +1534,8 @@ enum ResumeWorktreeAction {
     Reuse,
     /// Directory gone but a snapshot ref exists — rehydrate from it.
     Rehydrate,
-    /// Directory gone and no snapshot — fall back to the shared workspace.
-    Shared,
+    /// Directory gone and no snapshot — lineage cannot be resumed.
+    Missing,
 }
 /// Decide how to recover a resumed subagent's worktree from its on-disk state
 /// and whether a durable snapshot is available. Pure so the three outcomes are
@@ -1546,7 +1546,7 @@ fn resume_worktree_action(dir_exists: bool, snapshot_ref: Option<&str>) -> Resum
     } else if dir_exists {
         ResumeWorktreeAction::Reuse
     } else {
-        ResumeWorktreeAction::Shared
+        ResumeWorktreeAction::Missing
     }
 }
 /// The parent session's working directory — the source path for a subagent
@@ -1558,9 +1558,9 @@ fn parent_source_cwd(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
         .map(|i| std::path::PathBuf::from(&i.cwd))
         .unwrap_or_else(|| std::path::PathBuf::from(&ctx.parent_cwd))
 }
-/// Effective permission mode for a spawned subagent. Plugin agents never honor a
-/// non-default mode; under the pin, `bypassPermissions` downgrades to `Default`
-/// so a repo/profile/`--agents` def can't restore auto-approve. Caller logs it.
+/// Effective permission mode for a spawned subagent. Plugin agents never honor
+/// `always-approve`; under the pin it downgrades to `ask` so a repo, profile, or
+/// `--agents` definition cannot restore unattended approval. Caller logs it.
 /// Main repo root for a subagent's source: the durable repo a completion snapshot is transferred into and the repo a resume rehydrates from — both arms MUST resolve this identically.
 fn resolve_subagent_source_repo(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
     let source_cwd = parent_source_cwd(ctx);
@@ -1639,8 +1639,7 @@ fn cancellation_error_message(
 /// gate in `notification_bridge`); skipping the inject also skips the
 /// the completion reservation, leaving surfaces 2/3 free to drain it.
 /// `parent_channel_open` folds `inject_subagent_completed_prompt`'s own
-/// no-channel bail into the decision, so the `will_wake` stamped on the
-/// completion notification can never promise a wake the inject won't do.
+/// no-channel bail into the decision.
 ///
 /// `cancelled` results never wake: a child dies cancelled because the user
 /// (or parent teardown) killed it — most acutely the Ctrl+C race where the
@@ -1711,7 +1710,6 @@ fn inject_subagent_completed_prompt(
             admission: None,
             respond_to,
             persist_ack: None,
-            parsed_prompt_tx: None,
         })
         .is_err()
         && let Some(reservations) = task_completion_reservations
@@ -1741,44 +1739,128 @@ fn cancelled_result(request: &SubagentRequest, error: &str) -> SubagentResult {
 fn child_run_output(
     result: SubagentResult,
     completion_data: ShellCompletionData,
-    snapshot_ref: Option<String>,
 ) -> ChildRunOutput<ShellCompletionData> {
     ChildRunOutput {
         result,
         completion_data,
-        snapshot_ref,
     }
 }
-/// Persist a failure after `SubagentSpawned`; lifecycle delivery stays actor-owned.
 fn fail_subagent(
     error: &str,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
-    subagent_meta_dir: &Path,
     duration_ms: u64,
 ) -> SubagentResult {
-    let result = SubagentResult {
+    SubagentResult {
         success: false,
         error: Some(error.to_string()),
         subagent_id: subagent_id.to_string(),
         child_session_id: child_session_id.0.to_string(),
         duration_ms,
         ..Default::default()
-    };
-    persist_subagent_completion(subagent_meta_dir, &result);
-    result
+    }
+}
+
+fn subagent_outcome(result: &SubagentResult) -> chat_state::SubagentOutcome {
+    if result.success {
+        chat_state::SubagentOutcome::Completed
+    } else if result.cancelled {
+        chat_state::SubagentOutcome::Cancelled
+    } else {
+        chat_state::SubagentOutcome::Failed
+    }
+}
+
+fn subagent_result_fact(
+    result: &SubagentResult,
+    output_ref: Option<String>,
+) -> chat_state::SubagentResultEvent {
+    chat_state::SubagentResultEvent {
+        subagent_id: result.subagent_id.clone(),
+        outcome: subagent_outcome(result),
+        duration_ms: result.duration_ms,
+        tool_calls: result.tool_calls,
+        turns: result.turns,
+        tokens_used: result.total_tokens_used,
+        error: result.error.clone(),
+        output_ref,
+    }
+}
+
+async fn record_child_result(
+    child_chat_state: &chat_state::ChatStateHandle,
+    result: &SubagentResult,
+    output_ref: Option<String>,
+) -> Result<chat_state::TimelineRangeRef, String> {
+    let event = child_chat_state
+        .record_timeline_event_durably(chat_state::TimelineEventKind::SubagentResult(
+            subagent_result_fact(result, output_ref),
+        ))
+        .await
+        .map_err(|error| format!("failed to commit child result: {error}"))?;
+    Ok(chat_state::TimelineRangeRef {
+        timeline_id: result.child_session_id.clone(),
+        first_seq: event.seq.get(),
+        last_seq: event.seq.get(),
+    })
+}
+
+async fn record_child_result_with_persistence(
+    persistence: &session::persistence::PersistenceHandle,
+    timeline_events: Vec<chat_state::TimelineEvent>,
+    result: &SubagentResult,
+) -> Result<chat_state::TimelineRangeRef, String> {
+    let mut timeline = chat_state::Timeline::from_events(timeline_events)
+        .map_err(|error| format!("invalid child Timeline: {error}"))?;
+    let event = timeline
+        .record(chat_state::TimelineEventKind::SubagentResult(
+            subagent_result_fact(result, None),
+        ))
+        .map_err(|error| format!("invalid child result: {error}"))?;
+    persistence
+        .append_timeline_event_durably(event.clone())
+        .await
+        .map_err(|error| format!("failed to persist child result: {error}"))?;
+    Ok(chat_state::TimelineRangeRef {
+        timeline_id: result.child_session_id.clone(),
+        first_seq: event.seq.get(),
+        last_seq: event.seq.get(),
+    })
+}
+
+async fn record_parent_subagent_end(
+    parent_chat_state: &chat_state::ChatStateHandle,
+    result: &SubagentResult,
+    result_ref: Option<chat_state::TimelineRangeRef>,
+    snapshot_ref: Option<String>,
+) -> Result<(), String> {
+    parent_chat_state
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                subagent_id: result.subagent_id.clone(),
+                child_session_id: result.child_session_id.clone(),
+                outcome: subagent_outcome(result),
+                duration_ms: result.duration_ms,
+                tool_calls: result.tool_calls,
+                turns: result.turns,
+                tokens_used: result.total_tokens_used,
+                error: result.error.clone(),
+                result_ref,
+                snapshot_ref,
+            }),
+        ))
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("failed to commit parent subagent terminal: {error}"))
 }
 /// Tear down a child whose pending-to-active promotion lost to cancellation.
 async fn cancel_pending_shell_child(
-    child_cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
-    subagent_meta_dir: &Path,
     worktree_path: Option<&Path>,
     worktree_freshly_created: bool,
     duration_ms: u64,
 ) -> SubagentResult {
-    let _ = child_cmd_tx.send(SessionCommand::Shutdown);
     if worktree_freshly_created
         && let Some(wt_path) = worktree_path
         && let Err(e) = crate::session::worktree::remove_subagent_worktree(wt_path).await
@@ -1790,7 +1872,7 @@ async fn cancel_pending_shell_child(
             "failed to remove pristine worktree for killed-while-pending subagent"
         );
     }
-    let result = SubagentResult {
+    SubagentResult {
         success: false,
         cancelled: true,
         error: Some("Subagent was cancelled".to_string()),
@@ -1798,9 +1880,7 @@ async fn cancel_pending_shell_child(
         child_session_id: child_session_id.0.to_string(),
         duration_ms,
         ..Default::default()
-    };
-    persist_subagent_completion(subagent_meta_dir, &result);
-    result
+    }
 }
 fn emit_subagent_notification(
     gateway: &GatewaySender,
@@ -1969,207 +2049,6 @@ mod progress_publisher_tests {
         assert!(progress_tick_should_emit(BASE, BASE, true));
     }
 }
-/// Metadata stored as `meta.json` in the child session directory.
-/// Links the child session back to its parent.
-///
-/// For the local session artifact (`subagent.json`), see [`SubagentSessionMetadata`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct SubagentMeta {
-    pub subagent_id: String,
-    pub parent_session_id: String,
-    pub child_session_id: String,
-    pub subagent_type: String,
-    pub description: String,
-    pub prompt: String,
-    /// "running" | "completed" | "failed" | "cancelled"
-    pub status: String,
-    pub started_at: chrono::DateTime<chrono::Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turns: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Effective context source after bootstrap: "new" or "resumed".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_context_source: Option<String>,
-    /// True only for a summarized (normalized) fork; false for verbatim
-    /// mirror-forks, resume, and new sessions.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub context_normalized: bool,
-    /// Error message if fork-copy failed and fell back to fresh.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_copy_error: Option<String>,
-    /// Named persona applied to this subagent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persona: Option<String>,
-    /// ID of the source subagent this session was resumed from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resumed_from: Option<String>,
-    /// Effective cwd used by the child session. Persisted for durable
-    /// `resume_from` reconstruction after in-memory cache eviction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_cwd: Option<String>,
-    /// Worktree path if the child used `isolation=worktree`. Persisted
-    /// for durable `resume_from` reconstruction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_path: Option<String>,
-    /// Durable git ref holding a snapshot of the child's worktree working
-    /// state. Persisted so a deleted worktree can be rehydrated on resume.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_ref: Option<String>,
-    /// Effective model ID used by the child session. Persisted for
-    /// durable `resume_from` identity validation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_model_id: Option<String>,
-}
-/// Canonical subagent metadata for local persistence (`subagent.json`).
-///
-/// Contains the full subagent identity, provenance, and execution state.
-/// Stored as `{session_id}/subagent.json`. Schema is versioned for forward
-/// compatibility.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubagentSessionMetadata {
-    pub schema_version: u32,
-    pub session_id: String,
-    pub session_kind: String,
-    pub subagent_id: String,
-    pub child_session_id: String,
-    pub parent_session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_prompt_id: Option<String>,
-    pub subagent_type: String,
-    /// Human-readable spawn description: the task tool's `description`
-    /// argument, or the fixed role label for harness-spawned goal subagents
-    /// ("goal plan writer", "goal achievement skeptic", ...). All goal roles
-    /// share `subagent_type = "general-purpose"`, so this is what identifies
-    /// them in the artifact.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub persona: Option<String>,
-    #[serde(default)]
-    pub context_normalized: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capability_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub isolation_mode: Option<String>,
-    #[serde(default)]
-    pub depth: u32,
-    pub started_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<String>,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turns: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fork_copy_error: Option<String>,
-    /// ID of the source subagent this session was resumed from (`resume_from`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resumed_from: Option<String>,
-}
-impl SubagentSessionMetadata {
-    /// Current schema version.
-    pub const SCHEMA_VERSION: u32 = 1;
-    /// Build from a `SubagentMeta` + additional runtime context.
-    pub fn from_meta(
-        meta: &SubagentMeta,
-        model_id: Option<&str>,
-        cwd: Option<&str>,
-        worktree_path: Option<&str>,
-        isolation_mode: Option<&str>,
-        capability_mode: Option<&str>,
-        reasoning_effort: Option<&str>,
-        role: Option<&str>,
-        parent_prompt_id: Option<&str>,
-        depth: u32,
-    ) -> Self {
-        let session_kind = if meta.resumed_from.is_some() {
-            "subagent_resume"
-        } else {
-            "subagent"
-        };
-        Self {
-            schema_version: Self::SCHEMA_VERSION,
-            session_id: meta.child_session_id.clone(),
-            session_kind: session_kind.to_string(),
-            subagent_id: meta.subagent_id.clone(),
-            child_session_id: meta.child_session_id.clone(),
-            parent_session_id: meta.parent_session_id.clone(),
-            parent_prompt_id: parent_prompt_id.map(str::to_string),
-            subagent_type: meta.subagent_type.clone(),
-            description: meta.description.clone(),
-            role: role.map(str::to_string),
-            persona: meta.persona.clone(),
-            context_normalized: meta.context_normalized,
-            capability_mode: capability_mode.map(str::to_string),
-            reasoning_effort: reasoning_effort.map(str::to_string),
-            model_id: model_id.map(str::to_string),
-            cwd: cwd.map(str::to_string),
-            worktree_path: worktree_path.map(str::to_string),
-            isolation_mode: isolation_mode.map(str::to_string),
-            depth,
-            started_at: meta.started_at.to_rfc3339(),
-            completed_at: meta.completed_at.map(|t| t.to_rfc3339()),
-            status: meta.status.clone(),
-            duration_ms: meta.duration_ms,
-            tool_calls: meta.tool_calls,
-            turns: meta.turns,
-            error: meta.error.clone(),
-            fork_copy_error: meta.fork_copy_error.clone(),
-            resumed_from: meta.resumed_from.clone(),
-        }
-    }
-}
-/// Write via a same-directory temp file and rename, so a crash mid-write
-/// cannot leave a torn `meta.json` or `output.json`.
-fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
-    })?;
-    std::fs::create_dir_all(parent)?;
-    let tmp = tempfile::NamedTempFile::new_in(parent)?;
-    std::fs::write(tmp.path(), contents)?;
-    tmp.persist(path)?;
-    Ok(())
-}
-/// Write `meta.json`. Returns `true` on success so callers on the resume-pointer
-/// path can gate worktree disposal on a durable write.
-fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
-    let json = match serde_json::to_string_pretty(meta) {
-        Ok(json) => json,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to serialize subagent meta");
-            return false;
-        }
-    };
-    if let Err(e) = atomic_write(&dir.join("meta.json"), &json) {
-        tracing::warn!(error = %e, "failed to write subagent meta");
-        return false;
-    }
-    true
-}
 /// Borrowed output schema so persistence does not copy the text.
 #[derive(serde::Serialize)]
 struct SubagentOutputFileRef<'a> {
@@ -2177,7 +2056,13 @@ struct SubagentOutputFileRef<'a> {
     output: &'a str,
 }
 const SUBAGENT_OUTPUT_SCHEMA_VERSION: u32 = 1;
-fn write_subagent_output(dir: &Path, output: &str) -> bool {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubagentOutputArtifact {
+    path: PathBuf,
+    timeline_ref: String,
+}
+
+fn write_subagent_output(dir: &Path, output: &str) -> Result<SubagentOutputArtifact, String> {
     let file = SubagentOutputFileRef {
         schema_version: SUBAGENT_OUTPUT_SCHEMA_VERSION,
         output,
@@ -2186,185 +2071,290 @@ fn write_subagent_output(dir: &Path, output: &str) -> bool {
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(error = %e, "failed to serialize subagent output");
-            return false;
+            return Err(format!("failed to serialize subagent output: {e}"));
         }
     };
-    if let Err(e) = atomic_write(&dir.join("output.json"), &json) {
+    let hash = blake3::hash(json.as_bytes()).to_hex().to_string();
+    let path = dir
+        .join("artifacts")
+        .join("subagent-output")
+        .join(format!("{hash}.json"));
+    if let Err(e) = crate::session::persistence::write_immutable_blob(&path, json.as_bytes()) {
         tracing::warn!(error = %e, "failed to write subagent output");
-        return false;
+        return Err(format!("failed to write subagent output: {e}"));
     }
-    true
+    Ok(SubagentOutputArtifact {
+        path,
+        timeline_ref: format!("artifact:subagent-output:blake3:{hash}"),
+    })
 }
-pub(crate) fn read_subagent_output(dir: &Path) -> Option<String> {
+pub(crate) fn read_subagent_output(path: &Path) -> Option<String> {
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct OutputFile {
         schema_version: u32,
         output: String,
     }
-    let data = std::fs::read_to_string(dir.join("output.json")).ok()?;
+    let data = std::fs::read_to_string(path).ok()?;
+    let expected_hash = path.file_stem()?.to_str()?;
+    if blake3::hash(data.as_bytes()).to_hex().as_str() != expected_hash {
+        return None;
+    }
     let file: OutputFile = serde_json::from_str(&data).ok()?;
     (file.schema_version == SUBAGENT_OUTPUT_SCHEMA_VERSION).then_some(file.output)
 }
-/// Persist the durable worktree `snapshot_ref` into the on-disk `meta.json`
-/// after completion, so `resumable_source_for` can rehydrate the disposed
-/// worktree on resume. Returns `true` only when the ref is persisted to disk;
-/// any read/parse/write failure is `warn!`-logged (this is the critical resume
-/// pointer) so the caller keeps the worktree rather than removing it without a
-/// recoverable ref. Also re-asserts the terminal `status` so a failed
-/// `persist_subagent_completion` write can't leave a non-terminal record that
-/// `resumable_source_for` rejects after the worktree is removed.
-fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &str) -> bool {
-    let meta_path = dir.join("meta.json");
-    let mut meta = match std::fs::read_to_string(&meta_path) {
-        Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
-            Ok(meta) => meta,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)");
-                return false;
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to read subagent meta; snapshot_ref not persisted (resume pointer lost)");
-            return false;
-        }
-    };
-    meta.snapshot_ref = Some(snapshot_ref.to_string());
-    meta.status = status.to_string();
-    write_subagent_meta(dir, &meta)
-}
 #[must_use]
-fn persist_subagent_output(dir: &Path, result: &SubagentResult) -> Option<PathBuf> {
-    (result.success && !result.output.is_empty() && write_subagent_output(dir, &result.output))
-        .then(|| dir.to_path_buf())
-}
-fn persist_subagent_completion(dir: &Path, result: &SubagentResult) {
-    let meta_path = dir.join("meta.json");
-    if let Ok(data) = std::fs::read_to_string(&meta_path)
-        && let Ok(mut meta) = serde_json::from_str::<SubagentMeta>(&data)
-    {
-        meta.status = result.status().to_string();
-        meta.completed_at = Some(chrono::Utc::now());
-        meta.duration_ms = Some(result.duration_ms);
-        meta.tool_calls = Some(result.tool_calls);
-        meta.turns = Some(result.turns);
-        meta.error = result.error.clone();
-        write_subagent_meta(dir, &meta);
+fn persist_subagent_output(
+    dir: &Path,
+    result: &SubagentResult,
+) -> Result<Option<SubagentOutputArtifact>, String> {
+    if !result.success || result.output.is_empty() {
+        return Ok(None);
     }
+    write_subagent_output(dir, &result.output).map(Some)
 }
 const ORPHAN_RECONCILE_REASON: &str = "interrupted by process restart";
-/// `SubagentFinished` for a force-terminated orphan; interrupt counts are zeroed.
-fn cancelled_orphan_finish(
-    subagent_id: String,
-    child_session_id: String,
-    duration_ms: u64,
-) -> SessionUpdate {
-    SessionUpdate::SubagentFinished {
-        subagent_id,
-        child_session_id,
-        status: "cancelled".to_string(),
-        error: Some(ORPHAN_RECONCILE_REASON.to_string()),
-        tool_calls: 0,
-        turns: 0,
-        duration_ms,
-        tokens_used: 0,
-        output: None,
-        will_wake: false,
-    }
-}
-/// Flip a stale `running` meta to `cancelled` and emit the missing finish.
-/// On meta-write failure returns `false` and skips the notify, so a reload re-heals.
-fn finalize_orphaned_subagent(
-    subagent_meta_dir: &Path,
-    mut meta: SubagentMeta,
-    gateway: &GatewaySender,
-    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
-) -> bool {
-    let completed_at = chrono::Utc::now();
-    let duration_ms = (completed_at - meta.started_at).num_milliseconds().max(0) as u64;
-    meta.status = "cancelled".to_string();
-    meta.completed_at = Some(completed_at);
-    meta.duration_ms = Some(duration_ms);
-    meta.tool_calls = Some(0);
-    meta.turns = Some(0);
-    meta.error = Some(ORPHAN_RECONCILE_REASON.to_string());
-    if !write_subagent_meta(subagent_meta_dir, &meta) {
-        return false;
-    }
-    emit_subagent_notification(
-        gateway,
-        &meta.parent_session_id,
-        cancelled_orphan_finish(meta.subagent_id, meta.child_session_id, duration_ms),
-        parent_cmd_tx,
-    );
-    true
-}
-/// Parse `meta_path` and return it only when it is a stale `running` orphan
-/// owned by `parent_session_id` and not tracked live. Malformed metas → `None`.
-fn running_orphan_meta(meta_path: &Path, parent_session_id: &str) -> Option<SubagentMeta> {
-    let data = std::fs::read_to_string(meta_path).ok()?;
-    let meta: SubagentMeta = serde_json::from_str(&data).ok()?;
-    if meta.status != "running" || meta.parent_session_id != parent_session_id {
-        return None;
-    }
-    Some(meta)
-}
-fn completed_finish_from_inspection(inspection: &SubagentInspection) -> Option<SessionUpdate> {
-    let (status, error, tool_calls, turns) = match &inspection.snapshot.status {
-        SubagentSnapshotStatus::Completed {
-            tool_calls, turns, ..
-        } => ("completed", None, *tool_calls, *turns),
-        SubagentSnapshotStatus::Failed { error } => ("failed", Some(error.clone()), 0, 0),
-        SubagentSnapshotStatus::Cancelled { reason } => ("cancelled", reason.clone(), 0, 0),
-        SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. } => {
-            return None;
-        }
+
+fn finish_from_terminal(terminal: &chat_state::SubagentTerminalEvent) -> SessionUpdate {
+    let status = match terminal.outcome {
+        chat_state::SubagentOutcome::Completed => "completed",
+        chat_state::SubagentOutcome::Failed => "failed",
+        chat_state::SubagentOutcome::Cancelled => "cancelled",
     };
-    Some(SessionUpdate::SubagentFinished {
-        subagent_id: inspection.snapshot.subagent_id.clone(),
-        child_session_id: inspection.child_session_id.clone(),
-        status: status.to_owned(),
-        error,
+    SessionUpdate::SubagentFinished {
+        subagent_id: terminal.subagent_id.clone(),
+        child_session_id: terminal.child_session_id.clone(),
+        status: status.to_string(),
+        error: terminal.error.clone(),
+        tool_calls: terminal.tool_calls,
+        turns: terminal.turns,
+        duration_ms: terminal.duration_ms,
+        tokens_used: terminal.tokens_used,
+        output: None,
+    }
+}
+
+fn spawn_from_fact(
+    parent_session_id: &str,
+    spawn: &chat_state::SubagentSpawnEvent,
+) -> SessionUpdate {
+    let context_source = match spawn.context_source {
+        chat_state::SubagentContextSource::New => "new",
+        chat_state::SubagentContextSource::Forked => "forked",
+        chat_state::SubagentContextSource::Resumed => "resumed",
+    };
+    SessionUpdate::SubagentSpawned {
+        subagent_id: spawn.subagent_id.clone(),
+        child_session_id: spawn.child_session_id.clone(),
+        parent_session_id: parent_session_id.to_string(),
+        parent_prompt_id: spawn.parent_prompt_id.clone(),
+        subagent_type: spawn.subagent_type.clone(),
+        description: spawn.description.clone(),
+        effective_context_source: Some(context_source.to_string()),
+        context_normalized: spawn.context_normalized,
+        capability_mode: spawn.capability_mode.clone(),
+        permission_mode: spawn.permission_mode.clone(),
+        effective_permission_mode: spawn.effective_permission_mode.clone(),
+        model: Some(spawn.effective_model_id.clone()),
+        resumed_from: spawn.resumed_from.clone(),
+        workflow_run_id: spawn.workflow_run_id.clone(),
+        goal_id: spawn.goal_id.clone(),
+    }
+}
+
+fn result_from_inspection(
+    spawn: &chat_state::SubagentSpawnEvent,
+    inspection: Option<&SubagentInspection>,
+    duration_ms: u64,
+) -> chat_state::SubagentResultEvent {
+    let (outcome, error, tool_calls, turns) = match inspection.map(|value| &value.snapshot.status) {
+        Some(SubagentSnapshotStatus::Completed {
+            tool_calls, turns, ..
+        }) => (
+            chat_state::SubagentOutcome::Completed,
+            None,
+            *tool_calls,
+            *turns,
+        ),
+        Some(SubagentSnapshotStatus::Failed { error }) => (
+            chat_state::SubagentOutcome::Failed,
+            Some(error.clone()),
+            0,
+            0,
+        ),
+        Some(SubagentSnapshotStatus::Cancelled { reason }) => (
+            chat_state::SubagentOutcome::Cancelled,
+            Some(
+                reason
+                    .clone()
+                    .unwrap_or_else(|| ORPHAN_RECONCILE_REASON.to_string()),
+            ),
+            0,
+            0,
+        ),
+        Some(SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. }) => {
+            unreachable!("running inspections are filtered before recovery")
+        }
+        None => (
+            chat_state::SubagentOutcome::Cancelled,
+            Some(ORPHAN_RECONCILE_REASON.to_string()),
+            0,
+            0,
+        ),
+    };
+    chat_state::SubagentResultEvent {
+        subagent_id: spawn.subagent_id.clone(),
+        outcome,
+        duration_ms,
         tool_calls,
         turns,
-        duration_ms: inspection.snapshot.duration_ms,
         tokens_used: 0,
-        output: None,
-        will_wake: false,
-    })
+        error,
+        output_ref: None,
+    }
 }
-/// Heal subagents stuck "Running" after a dead process: emit exactly one
-/// `SubagentFinished` per id, unioning two id-keyed sources (so a crash orphan
-/// in both heals once) — `unfinished` replayed spawns whose finish a rewind
-/// dropped (or a forked-in subagent with no meta), and on-disk `running` metas.
-/// Skipping ids still active or pending: a `running` meta → `cancelled` (unless
-/// the coordinator still holds its terminal result, then re-emit that); a terminal
-/// meta that survived a rewound finish re-emits its real outcome; a no-meta
-/// replayed spawn → `cancelled`. Runs after replay so the finish orders after the spawn.
+
+async fn ensure_recovered_child_result(
+    parent_timeline_id: &str,
+    parent_spawn_seq: chat_state::EventSeq,
+    spawn: &chat_state::SubagentSpawnEvent,
+    fallback: chat_state::SubagentResultEvent,
+) -> Result<
+    (
+        chat_state::TimelineRangeRef,
+        chat_state::SubagentResultEvent,
+    ),
+    String,
+> {
+    let child_info = SessionInfo {
+        id: acp::SessionId::new(spawn.child_session_id.clone()),
+        cwd: spawn.child_cwd.clone(),
+    };
+    let child_dir = crate::session::persistence::find_session_dir_by_id(&spawn.child_session_id)
+        .unwrap_or_else(|| session::persistence::session_dir(&child_info));
+    let storage =
+        crate::session::storage::jsonl::JsonlStorageAdapter::with_explicit_session_dir(child_dir);
+    let events = storage
+        .read_timeline_events_sync(&child_info)
+        .map_err(|error| format!("cannot read child Timeline: {error}"))?;
+    let mut timeline = chat_state::Timeline::from_events(events)
+        .map_err(|error| format!("invalid child Timeline: {error}"))?;
+    timeline
+        .validate_subagent_seed_link(parent_timeline_id, parent_spawn_seq, spawn)
+        .map_err(|error| format!("invalid child seed link: {error}"))?;
+    if let Some((event, result)) = timeline
+        .events()
+        .iter()
+        .find_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::SubagentResult(result) => Some((event, result)),
+            _ => None,
+        })
+    {
+        return Ok((
+            chat_state::TimelineRangeRef {
+                timeline_id: spawn.child_session_id.clone(),
+                first_seq: event.seq.get(),
+                last_seq: event.seq.get(),
+            },
+            result.clone(),
+        ));
+    }
+    let event = timeline
+        .record(chat_state::TimelineEventKind::SubagentResult(
+            fallback.clone(),
+        ))
+        .map_err(|error| format!("invalid recovered child result: {error}"))?;
+    crate::session::storage::StorageAdapter::append_timeline_event_durable(
+        &storage,
+        &child_info,
+        &event,
+    )
+    .await
+    .map_err(|error| format!("cannot persist recovered child result: {error}"))?;
+    Ok((
+        chat_state::TimelineRangeRef {
+            timeline_id: spawn.child_session_id.clone(),
+            first_seq: event.seq.get(),
+            last_seq: event.seq.get(),
+        },
+        fallback,
+    ))
+}
+
+/// Reconcile parent spawn facts that have no terminal. The backend is merely
+/// an observation source: recovery first commits a child result (when the child
+/// entity exists), then closes the parent spawn, and only then emits UI state.
 pub(crate) async fn reconcile_orphaned_subagents_with_backend(
-    unfinished: &[(String, String)],
+    projections: &crate::session::storage::SubagentProjectionState,
+    emit_replay_projections: bool,
     backend: &tools::implementations::grow_build::task::backend::ChannelBackend,
     session_dir: &Path,
     parent_session_id: &str,
+    parent_chat_state: &chat_state::ChatStateHandle,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
 ) {
-    let subagents_dir = session_dir.join("subagents");
-    let mut candidates: std::collections::BTreeMap<String, Option<String>> =
-        std::collections::BTreeMap::new();
-    for (id, child) in unfinished {
-        candidates.insert(id.clone(), Some(child.clone()));
+    let parent_info = SessionInfo {
+        id: acp::SessionId::new(parent_session_id),
+        cwd: String::new(),
+    };
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_explicit_session_dir(
+        session_dir.to_path_buf(),
+    );
+    let Ok(events) = storage.read_timeline_events_sync(&parent_info) else {
+        return;
+    };
+    let Ok(timeline) = chat_state::Timeline::from_events(events) else {
+        return;
+    };
+    let mut spawns = std::collections::BTreeMap::<
+        String,
+        (chat_state::EventSeq, i64, chat_state::SubagentSpawnEvent),
+    >::new();
+    let mut terminals =
+        std::collections::BTreeMap::<String, chat_state::SubagentTerminalEvent>::new();
+    for event in timeline.events() {
+        match &event.kind {
+            chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) => {
+                spawns.insert(
+                    spawn.subagent_id.clone(),
+                    (event.seq, event.at_ms, spawn.clone()),
+                );
+            }
+            chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(terminal)) => {
+                terminals.insert(terminal.subagent_id.clone(), terminal.clone());
+            }
+            _ => {}
+        }
     }
-    if let Ok(entries) = std::fs::read_dir(&subagents_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if running_orphan_meta(&entry.path().join("meta.json"), parent_session_id).is_some()
-                && let Some(id) = name.to_str()
-            {
-                candidates.entry(id.to_string()).or_insert(None);
+
+    if emit_replay_projections {
+        for (_, _, spawn) in spawns.values() {
+            if !projections.spawned.contains(&spawn.subagent_id) {
+                emit_subagent_notification(
+                    gateway,
+                    parent_session_id,
+                    spawn_from_fact(parent_session_id, spawn),
+                    parent_cmd_tx,
+                );
+            }
+        }
+        for terminal in terminals.values() {
+            if !projections.finished.contains(&terminal.subagent_id) {
+                emit_subagent_notification(
+                    gateway,
+                    parent_session_id,
+                    finish_from_terminal(terminal),
+                    parent_cmd_tx,
+                );
             }
         }
     }
-    for (subagent_id, spawn_child) in candidates {
+
+    for (subagent_id, (spawn_seq, spawned_at_ms, spawn)) in spawns {
+        if terminals.contains_key(&subagent_id) {
+            continue;
+        }
         let inspection = backend.inspect(&subagent_id).await;
         if inspection
             .as_ref()
@@ -2372,73 +2362,63 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         {
             continue;
         }
-        let subagent_dir = subagents_dir.join(&subagent_id);
-        let meta = std::fs::read_to_string(subagent_dir.join("meta.json"))
-            .ok()
-            .and_then(|data| serde_json::from_str::<SubagentMeta>(&data).ok());
-        match meta {
-            Some(m) if m.parent_session_id != parent_session_id => {}
-            Some(m) if m.status == "running" => {
-                if let Some(finish) = inspection
-                    .as_ref()
-                    .and_then(completed_finish_from_inspection)
-                {
-                    tracing::info!(
-                        subagent_id = %subagent_id,
-                        parent_session_id,
-                        "Re-emitting finish for completed subagent with a lost terminal meta write"
-                    );
-                    emit_subagent_notification(gateway, parent_session_id, finish, parent_cmd_tx);
-                } else {
-                    tracing::info!(
-                        subagent_id = %m.subagent_id,
-                        parent_session_id,
-                        "Reconciling orphaned subagent left running by a previous process"
-                    );
-                    finalize_orphaned_subagent(&subagent_dir, m, gateway, parent_cmd_tx);
-                }
-            }
-            Some(m) => {
-                tracing::info!(
-                    subagent_id = %subagent_id,
-                    parent_session_id,
-                    status = %m.status,
-                    "Re-emitting finish for rewound subagent (terminal meta survived)"
-                );
-                emit_subagent_notification(
-                    gateway,
-                    parent_session_id,
-                    SessionUpdate::SubagentFinished {
-                        subagent_id,
-                        child_session_id: m.child_session_id,
-                        status: m.status,
-                        error: m.error,
-                        tool_calls: m.tool_calls.unwrap_or(0),
-                        turns: m.turns.unwrap_or(0),
-                        duration_ms: m.duration_ms.unwrap_or(0),
+        let duration_ms = chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_sub(spawned_at_ms)
+            .max(0) as u64;
+        let fallback = result_from_inspection(&spawn, inspection.as_ref(), duration_ms);
+        let recovered =
+            ensure_recovered_child_result(parent_session_id, spawn_seq, &spawn, fallback.clone())
+                .await;
+        let (result_ref, result) = match recovered {
+            Ok((result_ref, result)) => (Some(result_ref), result),
+            Err(error) => {
+                tracing::warn!(%subagent_id, %error, "child result recovery failed");
+                (
+                    None,
+                    chat_state::SubagentResultEvent {
+                        subagent_id: subagent_id.clone(),
+                        outcome: chat_state::SubagentOutcome::Failed,
+                        duration_ms,
+                        tool_calls: 0,
+                        turns: 0,
                         tokens_used: 0,
-                        output: None,
-                        will_wake: false,
+                        error: Some(error),
+                        output_ref: None,
                     },
-                    parent_cmd_tx,
-                );
+                )
             }
-            None => {
-                let Some(child_session_id) = spawn_child else {
-                    continue;
-                };
-                tracing::info!(
-                    subagent_id = %subagent_id,
-                    parent_session_id,
-                    "Reconciling inherited subagent with no local meta (cancelled)"
-                );
-                emit_subagent_notification(
-                    gateway,
-                    parent_session_id,
-                    cancelled_orphan_finish(subagent_id, child_session_id, 0),
-                    parent_cmd_tx,
-                );
-            }
+        };
+        let terminal = chat_state::SubagentTerminalEvent {
+            subagent_id: subagent_id.clone(),
+            child_session_id: spawn.child_session_id.clone(),
+            outcome: result.outcome,
+            duration_ms: result.duration_ms,
+            tool_calls: result.tool_calls,
+            turns: result.turns,
+            tokens_used: result.tokens_used,
+            error: result.error,
+            result_ref,
+            snapshot_ref: None,
+        };
+        match parent_chat_state
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Ended(terminal.clone()),
+            ))
+            .await
+        {
+            Ok(_) if emit_replay_projections => emit_subagent_notification(
+                gateway,
+                parent_session_id,
+                finish_from_terminal(&terminal),
+                parent_cmd_tx,
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::error!(
+                %subagent_id,
+                %error,
+                "failed to commit recovered parent subagent terminal"
+            ),
         }
     }
 }

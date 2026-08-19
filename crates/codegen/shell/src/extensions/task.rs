@@ -59,10 +59,9 @@ pub struct CancelSubagentRequest {
 }
 
 /// Wire mirror of the coordinator's [`SubagentCancelOutcome`], `kind`-tagged so
-/// a client can branch and read the already-finished `status`. Sent alongside
-/// the legacy `cancelled` bool: a new pager prefers this, an old one ignores it.
+/// clients can branch and read the already-finished `status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SubagentCancelOutcomeDto {
     /// A live subagent was cancelled — a real `SubagentFinished` is coming.
     Cancelled,
@@ -70,18 +69,6 @@ pub enum SubagentCancelOutcomeDto {
     AlreadyFinished { status: String },
     /// The id is unknown (never existed / evicted) — no finish coming.
     NotFound,
-    /// Unknown future `kind` (`#[serde(other)]`): lets an old client still parse
-    /// and fall back to the legacy bool. Never produced by `From`.
-    #[serde(other)]
-    Unknown,
-}
-
-impl SubagentCancelOutcomeDto {
-    /// Legacy bool for older pagers: true only when a live subagent was stopped.
-    /// Already-finished / not-found → false so an old pager finalizes the row.
-    fn cancelled_bool(&self) -> bool {
-        matches!(self, Self::Cancelled)
-    }
 }
 
 impl From<SubagentCancelOutcome> for SubagentCancelOutcomeDto {
@@ -97,14 +84,10 @@ impl From<SubagentCancelOutcome> for SubagentCancelOutcomeDto {
 /// Wire DTO for the `grow/subagent/cancel` response payload (under `result` in
 /// the `ExtMethodResult` envelope). `pub` + both serde dirs so clients read it typed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CancelSubagentResponse {
     pub subagent_id: String,
-    /// Legacy wire-compat flag for older pagers; new clients prefer `outcome`.
-    pub cancelled: bool,
-    /// Typed outcome; `None` only from an older shell. This shell always sets it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<SubagentCancelOutcomeDto>,
+    pub outcome: SubagentCancelOutcomeDto,
 }
 
 // ── Subagent list_running DTOs ────────────────────────────────────────────
@@ -414,8 +397,7 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
                 SubagentCancelOutcomeDto::from(agent.cancel_subagent(&req.subagent_id).await);
             respond(Ok::<_, String>(CancelSubagentResponse {
                 subagent_id: req.subagent_id,
-                cancelled: outcome.cancelled_bool(),
-                outcome: Some(outcome),
+                outcome,
             }))
         }
         "grow/subagent/get" => {
@@ -530,7 +512,6 @@ mod tests {
                 description: "d".into(),
                 started_at_epoch_ms: 100,
                 duration_ms: 200,
-                persona: None,
                 status: SubagentSnapshotStatus::Running {
                     turn_count: 1,
                     tool_call_count: 3,
@@ -571,7 +552,6 @@ mod tests {
             description: "find files".into(),
             started_at_epoch_ms: 1000,
             duration_ms: 5000,
-            persona: None,
             status: SubagentSnapshotStatus::Running {
                 turn_count: 3,
                 tool_call_count: 12,
@@ -610,7 +590,6 @@ mod tests {
             description: "refactor auth".into(),
             started_at_epoch_ms: 2000,
             duration_ms: 15_000,
-            persona: None,
             status: SubagentSnapshotStatus::Completed {
                 output: "Done, refactored 3 files.".into(),
                 tool_calls: 8,
@@ -638,7 +617,6 @@ mod tests {
             description: "plan feature".into(),
             started_at_epoch_ms: 0,
             duration_ms: 100,
-            persona: None,
             status: SubagentSnapshotStatus::Failed {
                 error: "sampling error".into(),
             },
@@ -658,7 +636,6 @@ mod tests {
             description: "search".into(),
             started_at_epoch_ms: 0,
             duration_ms: 50,
-            persona: None,
             status: SubagentSnapshotStatus::Cancelled {
                 reason: Some("user cancelled".into()),
             },
@@ -678,7 +655,6 @@ mod tests {
             description: "search".into(),
             started_at_epoch_ms: 0,
             duration_ms: 50,
-            persona: None,
             status: SubagentSnapshotStatus::Cancelled { reason: None },
         };
         let dto =
@@ -703,7 +679,6 @@ mod tests {
             description: "search".into(),
             started_at_epoch_ms: 1000,
             duration_ms: 5000,
-            persona: None,
             status: SubagentSnapshotStatus::Running {
                 turn_count: 2,
                 tool_call_count: 5,
@@ -742,7 +717,6 @@ mod tests {
             description: "refactor".into(),
             started_at_epoch_ms: 0,
             duration_ms: 10_000,
-            persona: None,
             status: SubagentSnapshotStatus::Completed {
                 output: "Refactored 3 files.".into(),
                 tool_calls: 7,
@@ -803,7 +777,6 @@ mod tests {
             description: "fix review".into(),
             started_at_epoch_ms: 2000,
             duration_ms: 3000,
-            persona: None,
             status: SubagentSnapshotStatus::Running {
                 turn_count: 1,
                 tool_call_count: 2,
@@ -833,12 +806,9 @@ mod tests {
 
     #[test]
     fn subagent_cancel_outcome_dto_maps_from_coordinator_outcome() {
-        // Cancelled → legacy bool true (a real finish is coming).
         let dto = SubagentCancelOutcomeDto::from(SubagentCancelOutcome::Cancelled);
         assert_eq!(dto, SubagentCancelOutcomeDto::Cancelled);
-        assert!(dto.cancelled_bool());
 
-        // AlreadyFinished carries the terminal status; legacy bool false.
         let dto = SubagentCancelOutcomeDto::from(SubagentCancelOutcome::AlreadyFinished {
             status: "completed".into(),
         });
@@ -848,39 +818,35 @@ mod tests {
                 status: "completed".into()
             }
         );
-        assert!(!dto.cancelled_bool());
 
-        // NotFound → legacy bool false.
         let dto = SubagentCancelOutcomeDto::from(SubagentCancelOutcome::NotFound);
         assert_eq!(dto, SubagentCancelOutcomeDto::NotFound);
-        assert!(!dto.cancelled_bool());
     }
 
     #[test]
     fn cancel_subagent_response_serializes_outcome_snake_case() {
         let resp = CancelSubagentResponse {
             subagent_id: "sa-1".into(),
-            cancelled: false,
-            outcome: Some(SubagentCancelOutcomeDto::AlreadyFinished {
+            outcome: SubagentCancelOutcomeDto::AlreadyFinished {
                 status: "failed".into(),
-            }),
+            },
         };
         let json = serde_json::to_value(&resp).expect("should serialize");
         assert_eq!(json["subagentId"], "sa-1");
-        assert_eq!(json["cancelled"], false);
         assert_eq!(json["outcome"]["kind"], "already_finished");
         assert_eq!(json["outcome"]["status"], "failed");
     }
 
-    /// Wire-compat: a payload from an older shell (no `outcome`) still
-    /// deserializes, leaving `outcome` as `None` so the client falls back to
-    /// the legacy `cancelled` bool.
     #[test]
-    fn cancel_subagent_response_deserializes_without_outcome() {
-        let resp: CancelSubagentResponse =
-            serde_json::from_str(r#"{"subagentId":"sa-1","cancelled":true}"#).expect("parse");
-        assert_eq!(resp.subagent_id, "sa-1");
-        assert!(resp.cancelled);
-        assert!(resp.outcome.is_none());
+    fn cancel_subagent_response_requires_known_outcome() {
+        assert!(
+            serde_json::from_str::<CancelSubagentResponse>(r#"{"subagentId":"sa-1"}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<CancelSubagentResponse>(
+                r#"{"subagentId":"sa-1","outcome":{"kind":"future"}}"#
+            )
+            .is_err()
+        );
     }
 }

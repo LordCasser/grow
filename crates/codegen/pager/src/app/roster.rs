@@ -47,7 +47,7 @@ pub struct RosterEntry {
     #[serde(default)]
     pub model_id: Option<String>,
     #[serde(default)]
-    pub yolo: bool,
+    pub permission_mode: diagnostics::enums::PermissionMode,
     pub activity: RosterActivity,
     #[serde(default)]
     pub resident: bool,
@@ -112,7 +112,7 @@ mod tests {
             is_worktree: true,
             model_id: Some("grow-4".to_string()),
             reasoning_effort: None,
-            yolo: true,
+            permission_mode: diagnostics::enums::PermissionMode::AlwaysApprove,
             activity: agent::RosterActivity::Working,
             resident: true,
             last_change_unix_ms: 1_725_000_000_123,
@@ -173,7 +173,10 @@ mod tests {
         assert_eq!(e.cwd, "/repo/worktree");
         assert!(e.is_worktree);
         assert_eq!(e.model_id.as_deref(), Some("grow-4"));
-        assert!(e.yolo);
+        assert_eq!(
+            e.permission_mode,
+            diagnostics::enums::PermissionMode::AlwaysApprove
+        );
         assert_eq!(e.activity, RosterActivity::Working);
         assert!(e.resident);
         assert_eq!(e.last_change_unix_ms, 1_725_000_000_123);
@@ -184,7 +187,7 @@ mod tests {
     /// parse — the parser tolerates both shapes.
     #[test]
     fn roster_list_response_parses_bare_body() {
-        let body = r#"{"sessions":[{"sessionId":"s1","cwd":"/x","isWorktree":false,"yolo":false,"activity":"idle","resident":true,"lastChangeUnixMs":7,"origin":{"kind":"local"}}]}"#;
+        let body = r#"{"sessions":[{"sessionId":"s1","cwd":"/x","isWorktree":false,"permissionMode":"ask","activity":"idle","resident":true,"lastChangeUnixMs":7,"origin":{"kind":"local"}}]}"#;
         let parsed = parse_roster_list_response(body).expect("bare body parses");
         assert_eq!(parsed.sessions.len(), 1);
         assert_eq!(parsed.sessions[0].session_id, "s1");

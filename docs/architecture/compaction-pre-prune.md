@@ -55,7 +55,9 @@ pre-compaction flush and **before** `run_compact_inner`. The ladder function is
    that absolute target. The strict gate (step 5) still re-checks the full
    estimate before the summary is skipped, so this only leans conservative.
 4. **Apply**: `chat_state_handle.prune_tool_results(plan)` — actor-serialized,
-   idempotent, persists via `replace_history` only.
+   idempotent, commits one complete `tool_result_prune` Surface replacement
+   through the durable Timeline acknowledgement path. The replacement is
+   accepted in memory only after storage confirms it.
    **Any `Err` fails open**: `warn` log + `false` (continue the summary path).
    Pruning is an optimization, never a correctness requirement.
 5. **Strict gate**: re-read `get_estimated_total_tokens()`; only when it is
@@ -124,10 +126,10 @@ lives on `CompactionConfig` as `Cell<bool>` / `Cell<Option<u64>>` (the `!Send`
 - **`timeline.jsonl`**: appends a `tool_result_prune` replacement event. Prior
   tool output remains in the transcript projection while Surface carries the
   pruned content (head + marker + tail).
-- **`chat_history.jsonl`**: rewritten through `replace_history` only as a
-  derived cache of the current Surface.
-- **`updates.jsonl`**: untouched by pruning and remains the UI/diagnostic replay
-  used when an explicit rewind constructs a new Surface.
+- **No second conversation file**: the replacement event is the complete
+  durable mutation; no snapshot cache is written alongside it.
+- **`updates.jsonl`**: untouched by pruning and remains UI/diagnostic replay
+  only. Rewind constructs its new Surface from Timeline.
 - **Suppress state**: a prune whose strict gate passes stores
   `SUPPRESS_NONE` — pruning changed the effective context budget, which is
   the existing STICKY clear condition (same rule as a successful compaction,
@@ -178,7 +180,8 @@ own sticky-suppress behavior is unchanged.
 
 ## 7. P2 Not Done (Deferred)
 
-**Per-model budget override** (e.g. `[model.<id>].pre_prune_token_budget`)
+**Per-model budget override** (e.g.
+`[provider.<id>.models.<model>.pre_prune_token_budget]`)
 is not implemented:
 
 - **ceiling**: the current session-level budget (5% of the window) is uniform
@@ -189,7 +192,8 @@ is not implemented:
   `AutoCompactPruned.budget_tokens` vs. reported usage, or a rise in
   post-prune `ModelContextWindowExceeded`/compaction calls per model).
 - **upgrade path**: add `auto_compact_threshold_percent`-style per-model tiers
-  (env > `[model.<id>]` > `[compaction]` > remote per-model > remote global)
+  (env > `[provider.<id>.models.<model>]` > `[compaction]` > managed per-model
+  > managed global)
   next to `resolve_auto_compact_threshold_percent_from_tiers` in
   `shell/src/util/config/resolve/compaction.rs`, and thread the resolved value
   through `spawn_session_actor` / `spawn_session_on_thread` like the existing

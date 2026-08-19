@@ -1,14 +1,12 @@
 use regex::Regex;
-use tools::types::{claude_names_for, grow_names_for};
 
 /// A compiled hook matcher for tool names. The pattern semantics are chosen so that
-/// `matcher` entries in hooks migrated from other agent CLIs keep firing unchanged:
+/// matching is deterministic over Grow's canonical tool names:
 ///
 /// - an empty pattern or `"*"` matches every tool;
 /// - a "simple" pattern (only `[A-Za-z0-9_|]`, i.e. a plain name or `|`-list) is an
-///   **exact** match against each name (after external→Grow alias expansion), NOT a regex;
-/// - anything else is an **unanchored** regex (also tested against the tool's external
-///   alias names, so e.g. `^Bash$` matches the Grow tool `run_terminal_command`).
+///   **exact** match against each name, NOT a regex;
+/// - anything else is an **unanchored** regex over the canonical tool name.
 ///
 /// The simple-vs-regex split is deliberate: it avoids anchoring a `|`-alternation (a
 /// naive `^a|b|c$` anchors only the first/last term and silently over-matches). Whitespace
@@ -55,10 +53,7 @@ impl HookMatcher {
             MatcherKind::All => true,
             MatcherKind::Never => false,
             MatcherKind::Exact(names) => names.iter().any(|n| n == tool_name),
-            MatcherKind::Regex(regex) => {
-                regex.is_match(tool_name)
-                    || claude_names_for(tool_name).any(|alias| regex.is_match(alias))
-            }
+            MatcherKind::Regex(regex) => regex.is_match(tool_name),
         }
     }
 }
@@ -81,10 +76,8 @@ fn is_simple_form(pattern: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'|')
 }
 
-/// Expand a simple-form pattern into the exact set of names it matches: each `|`-term
-/// plus any Grow tool names that term aliases (so `"Bash"` also matches
-/// `run_terminal_command`), per the shared external-name to Grow registry in
-/// `tools`. Empty terms and duplicates are dropped.
+/// Expand a simple-form pattern into its exact canonical names. Empty terms and
+/// duplicates are dropped.
 fn exact_names(pattern: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut push = |name: &str| {
@@ -94,9 +87,6 @@ fn exact_names(pattern: &str) -> Vec<String> {
     };
     for term in pattern.split('|') {
         push(term);
-        for grow_name in grow_names_for(term) {
-            push(grow_name);
-        }
     }
     names
 }
@@ -183,34 +173,11 @@ mod tests {
     }
 
     #[test]
-    fn claude_bash_matches_grow_tool() {
-        let m = HookMatcher::new("Bash").unwrap();
-        assert!(m.is_match("Bash")); // external alias name
-        assert!(m.is_match("run_terminal_command")); // Grow name
-        assert!(!m.is_match("read_file"));
-        // Bug-fix regression: exact, not prefix.
-        assert!(!m.is_match("run_terminal_command_v2"));
-    }
-
-    #[test]
-    fn claude_edit_write_matches_grow_tool_exactly() {
-        let m = HookMatcher::new("Edit|Write").unwrap();
-        assert!(m.is_match("Edit"));
-        assert!(m.is_match("Write"));
-        assert!(m.is_match("search_replace")); // Grow equivalent
-        assert!(m.is_match("hashline_edit")); // second Grow alias
-        assert!(!m.is_match("read_file"));
-        // The old anchoring bug matched these; the exact-list mode must not.
-        assert!(!m.is_match("Editorial"));
-        assert!(!m.is_match("my_search_replace"));
-    }
-
-    #[test]
-    fn regex_against_claude_alias_matches_grow_tool() {
-        // A regex written against an external alias still matches the Grow tool
-        // (legacy alias-name expansion).
-        let m = HookMatcher::new("^Bash$").unwrap();
+    fn canonical_names_are_not_expanded() {
+        let m = HookMatcher::new("run_terminal_command|read_file").unwrap();
         assert!(m.is_match("run_terminal_command"));
-        assert!(m.is_match("Bash"));
+        assert!(m.is_match("read_file"));
+        assert!(!m.is_match("Bash"));
+        assert!(!m.is_match("Read"));
     }
 }

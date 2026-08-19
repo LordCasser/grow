@@ -4,14 +4,6 @@ use serde::Serialize;
 
 use crate::session::unified_list::SessionKind;
 
-pub(crate) const SELECTABLE_REASONING_EFFORTS: [ReasoningEffort; 5] = [
-    ReasoningEffort::Minimal,
-    ReasoningEffort::Low,
-    ReasoningEffort::Medium,
-    ReasoningEffort::High,
-    ReasoningEffort::Xhigh,
-];
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionConfigOption {
@@ -49,34 +41,6 @@ impl GrowSessionDetail {
             title,
         }
     }
-}
-
-fn effort_label(effort: ReasoningEffort) -> String {
-    match effort {
-        ReasoningEffort::None => "None",
-        ReasoningEffort::Minimal => "Minimal",
-        ReasoningEffort::Low => "Low",
-        ReasoningEffort::Medium => "Medium",
-        ReasoningEffort::High => "High",
-        ReasoningEffort::Xhigh => "X-High",
-        ReasoningEffort::Max => "Max",
-    }
-    .to_string()
-}
-
-/// The built-in session-picker modes used when the model has no server list.
-/// Reproduces the historical five rows and their labels.
-pub(crate) fn legacy_session_effort_options() -> Vec<ReasoningEffortOption> {
-    SELECTABLE_REASONING_EFFORTS
-        .iter()
-        .map(|&effort| ReasoningEffortOption {
-            id: effort.as_str().to_string(),
-            value: effort,
-            label: effort_label(effort),
-            description: None,
-            default: false,
-        })
-        .collect()
 }
 
 pub(crate) fn build_session_config_options(
@@ -123,16 +87,27 @@ mod tests {
         acp::ModelInfo::new(acp::ModelId::new(id), name.to_string())
     }
 
+    fn efforts(values: &[ReasoningEffort]) -> Vec<ReasoningEffortOption> {
+        values
+            .iter()
+            .copied()
+            .map(|value| ReasoningEffortOption {
+                id: value.as_str().to_string(),
+                value,
+                label: value.to_string(),
+                description: None,
+                default: false,
+            })
+            .collect()
+    }
+
     #[test]
     fn options_have_one_selected_model_and_a_mode_per_effort() {
         let models = [model("grow-build", "Grow"), model("grow-4.5", "Grow 4.5")];
         let current = acp::ModelId::from("grow-build");
-        let opts = build_session_config_options(
-            &models,
-            &current,
-            &legacy_session_effort_options(),
-            Some(ReasoningEffort::High),
-        );
+        let menu = efforts(&[ReasoningEffort::Low, ReasoningEffort::High]);
+        let opts =
+            build_session_config_options(&models, &current, &menu, Some(ReasoningEffort::High));
 
         let model_opts: Vec<_> = opts.iter().filter(|o| o.category == "model").collect();
         assert_eq!(model_opts.len(), 2);
@@ -141,7 +116,7 @@ mod tests {
         assert_eq!(selected_models[0].id, "grow-build");
 
         let mode_opts: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
-        assert_eq!(mode_opts.len(), SELECTABLE_REASONING_EFFORTS.len());
+        assert_eq!(mode_opts.len(), menu.len());
         let selected_modes: Vec<_> = mode_opts.iter().filter(|o| o.selected).collect();
         assert_eq!(selected_modes.len(), 1);
         assert_eq!(selected_modes[0].id, "high");
@@ -149,16 +124,12 @@ mod tests {
     }
 
     #[test]
-    fn none_effort_is_not_a_user_selectable_mode() {
-        assert!(!SELECTABLE_REASONING_EFFORTS.contains(&ReasoningEffort::None));
+    fn undeclared_current_effort_does_not_create_a_mode() {
         let models = [model("grow-build", "Grow")];
         let current = acp::ModelId::from("grow-build");
-        let opts = build_session_config_options(
-            &models,
-            &current,
-            &legacy_session_effort_options(),
-            Some(ReasoningEffort::None),
-        );
+        let menu = efforts(&[ReasoningEffort::Low, ReasoningEffort::High]);
+        let opts =
+            build_session_config_options(&models, &current, &menu, Some(ReasoningEffort::None));
         let modes: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
         assert!(modes.iter().all(|o| o.id != "none"));
         assert!(modes.iter().all(|o| !o.selected));

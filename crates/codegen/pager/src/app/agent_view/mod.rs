@@ -102,6 +102,7 @@ pub(crate) struct InlineMediaHitAreas {
 use super::actions::Action;
 use super::agent::AgentSession;
 use super::app_view::InputOutcome;
+use crate::app::subagent::SubagentInfo;
 use crate::scrollback::EntryId;
 use crate::scrollback::ScrollbackSearchState;
 use crate::scrollback::state::ScrollbackState;
@@ -116,7 +117,7 @@ use crate::views::block_viewer::BlockViewerPane;
 use crate::views::extensions_modal::ExtensionsModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
-use crate::views::permission_view::{PermissionViewState, SubagentInfo};
+use crate::views::permission_view::PermissionViewState;
 use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment};
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
 use crate::views::question_view::QuestionViewState;
@@ -1119,7 +1120,6 @@ pub struct AgentView {
     /// Active agents modal popup. When `Some`, blocks all input and
     /// renders as a centered overlay. Opened by `/config-agents` or `/agents`.
     pub(crate) agents_modal: Option<crate::views::agents_modal::AgentsModalState>,
-    pub(crate) persona_detail: Option<crate::views::persona_detail::PersonaDetailState>,
     /// Active /btw side question overlay. When `Some`, renders as a dismissible
     /// overlay and captures keyboard input (Esc/Enter/Space to dismiss).
     pub btw_state: Option<crate::views::btw_overlay::BtwOverlayState>,
@@ -1167,7 +1167,7 @@ pub struct AgentView {
     pub(crate) session_banner_active: bool,
     /// A pinned (non-dismissible) promo announcement CTA is live this frame (set at
     /// the start of `draw` from the same slot gate as the header CTA). When
-    /// true, `Ctrl+O` opens that CTA instead of toggling YOLO; the dispatch
+    /// true, `Ctrl+O` opens that CTA instead of toggling always-approve; the dispatch
     /// re-resolves through the gate so a stale-by-one-frame value stays safe.
     pub(crate) pinned_promo_cta_live: bool,
     /// Fullscreen block viewer. When `Some`, replaces the scrollback area.
@@ -1338,15 +1338,6 @@ pub struct AgentView {
     pub is_subagent_view: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
-    /// Whether THIS session's scheduled fires run as detached background
-    /// subagents, as resolved by the shell when the session's actor spawned and
-    /// delivered on the `session/new` / `session/load` response. `/loop` reads
-    /// it to describe the runtime a fire will get. `None` until that response
-    /// lands (or against a shell that predates the key), where readers fall
-    /// back to `AppView::scheduler_background_loops_seed`. Deliberately NOT
-    /// refreshed by `grow/settings/update`: the fire side is pinned for the
-    /// session's lifetime, so a live mirror would drift out of agreement.
-    pub scheduler_background_loops: Option<bool>,
     /// Input flight recorder — rolling buffer of recent key events.
     /// Dumped to file via Esc→d combo for debugging.
     pub(crate) input_log: crate::input_log::InputRingBuffer,
@@ -1395,14 +1386,15 @@ pub struct AgentView {
     /// The manually-chosen session title (`/rename` or the dashboard
     /// rename flow), as distinct from the auto-generated
     /// `generated_session_title` below. Set optimistically at dispatch,
-    /// persisted by the shell as `Summary.title_is_manual`, and restored
+    /// persisted by the shell as a user-authored `session/title` event, and restored
     /// from disk on resume (`TaskResult::SessionTitleFromDisk`). Drives the
     /// prompt-border inline title and wins precedence for the dashboard
     /// modal label and the OSC terminal title. The on-disk write is
     /// best-effort (failure surfaces a toast through the existing
     /// `RenameSessionFailed` arm).
     pub display_name: Option<String>,
-    /// Short title from shell `SessionSummaryGenerated` or `summary.json` on load/resume.
+    /// Short title from ACP `SessionInfoUpdate.title` or the Timeline-backed
+    /// summary projection on load/resume.
     /// Precedence in the dashboard title is below `display_name`, above first-prompt text.
     pub generated_session_title: Option<String>,
     /// Effects queued by input handlers that cannot return `InputOutcome::Action`.
@@ -1443,13 +1435,13 @@ pub struct AgentView {
     /// [`AgentView::apply_follow_ups`]; cleared at each turn start.
     pub(crate) follow_ups: Option<FollowUps>,
     /// `promptId` (turn identity) of the currently-shown `follow_ups`, when the
-    /// delivery that displayed them carried one. Tracked separately because
+    /// delivery that displayed them carried. Tracked separately because
     /// [`FollowUps`] is keyed by `response_id` and does not carry the turn id.
     /// Used by [`AgentView::reset_follow_ups_for_reload_preserving`] to tell
     /// whether the on-screen chips belong to the running turn a reload is about
     /// to adopt — so a reload preserves chips that RENDERED during replay, not
     /// only those still sitting in the pending buffer. `None` when no chips are
-    /// shown or the delivery had no stamped `promptId` (legacy/newest-wins).
+    /// shown.
     pub(crate) follow_up_shown_prompt_id: Option<String>,
     /// Clickable screen rect of each rendered follow-up chip, index-aligned
     /// with the rendered prefix of `follow_ups.suggestions` (chips that do
@@ -2073,13 +2065,13 @@ pub(crate) mod test_fixtures {
     /// path. `timeout_ms > 0` advertises a blocking (sendable/parked) wait;
     /// `0` is an instant poll that must NOT advertise one.
     pub fn simulate_task_output_wait_ms(agent: &mut AgentView, task_id: &str, timeout_ms: u64) {
-        simulate_task_output_wait_call(agent, "wait-1", task_id, timeout_ms);
+        simulate_task_output_wait_call(agent, "wait-1", &[task_id], timeout_ms);
     }
     /// [`simulate_task_output_wait_ms`] with an explicit tool-call id.
     pub fn simulate_task_output_wait_call(
         agent: &mut AgentView,
         tool_call_id: &str,
-        task_id: &str,
+        task_ids: &[&str],
         timeout_ms: u64,
     ) {
         confirm_submitted_turn(agent);
@@ -2105,7 +2097,7 @@ pub(crate) mod test_fixtures {
             acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),
                 acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!({
-                    "task_ids": [task_id],
+                    "task_ids": task_ids,
                     "timeout_ms": timeout_ms,
                 }))),
             )),
@@ -2153,37 +2145,10 @@ pub(crate) mod test_fixtures {
     pub fn simulate_task_output_wait(agent: &mut AgentView, task_id: &str) {
         simulate_task_output_wait_ms(agent, task_id, 30_000);
     }
-    /// Drive the agent's tracker into a wait-all
-    /// (`WaitingReason::TasksComplete`) blocking wait via the real update
-    /// path; the tracker classifies on the title alone.
-    pub fn simulate_wait_all(agent: &mut AgentView) {
-        confirm_submitted_turn(agent);
-        use crate::acp::meta::NotificationMeta;
-        use crate::acp::tracker::{TurnActivity, WaitingReason};
-        use std::sync::Arc;
-        let meta = NotificationMeta::default();
-        agent.session.handle_update(
-            acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(
-                    acp::ToolCallId::new(Arc::from("waitall-1")),
-                    "wait_commands_or_subagents",
-                )
-                .kind(acp::ToolKind::Other)
-                .status(acp::ToolCallStatus::Pending)
-                .content(vec![])
-                .locations(vec![]),
-            ),
-            &meta,
-            &mut agent.scrollback,
-        );
-        let activity = agent.resolve_turn_activity();
-        assert!(
-            matches!(
-                activity,
-                Some(TurnActivity::Waiting(WaitingReason::TasksComplete))
-            ),
-            "expected TasksComplete wait, got {activity:?}"
-        );
+    /// Blocking multi-id task-output wait through the canonical tool contract.
+    pub fn simulate_task_output_wait_ids(agent: &mut AgentView, task_ids: &[&str]) {
+        assert!(!task_ids.is_empty(), "a task-output wait requires an id");
+        simulate_task_output_wait_call(agent, "wait-many-1", task_ids, 30_000);
     }
     /// A minimal running (foreground) subagent registry row, so tests can
     /// count it in `watchers()` snapshots.
@@ -2195,8 +2160,6 @@ pub(crate) mod test_fixtures {
             child_session_id: Arc::from(child_sid),
             description: Arc::from("test"),
             subagent_type: Arc::from("general-purpose"),
-            persona: None,
-            role: None,
             model: None,
             context_source: None,
             resumed_from: None,
@@ -2314,8 +2277,7 @@ pub(crate) mod test_fixtures {
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -2373,8 +2335,7 @@ pub(crate) mod test_fixtures {
                 forked_from: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
-                yolo_mode: false,
-                auto_mode: false,
+                permission_mode: shell::util::config::PermissionMode::Ask,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -2401,8 +2362,11 @@ pub(crate) mod test_fixtures {
     #[test]
     fn apply_follow_ups_renders_chips_for_a_response() {
         let mut agent = make_agent();
-        let changed =
-            agent.apply_follow_ups("resp-1".into(), vec!["Tell me more".into(), "Sum".into()]);
+        let changed = agent.apply_follow_ups(
+            "resp-1".into(),
+            "p1",
+            vec!["Tell me more".into(), "Sum".into()],
+        );
         assert!(changed, "first chips for a response warrant a redraw");
         let fu = agent.follow_ups.as_ref().expect("chips must be set");
         assert_eq!(fu.response_id, "resp-1");
@@ -2411,8 +2375,8 @@ pub(crate) mod test_fixtures {
     #[test]
     fn apply_follow_ups_newer_response_supersedes() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
-        let changed = agent.apply_follow_ups("resp-2".into(), vec!["b".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
+        let changed = agent.apply_follow_ups("resp-2".into(), "p1", vec!["b".into()]);
         assert!(changed, "a newer response must take over");
         let fu = agent.follow_ups.as_ref().unwrap();
         assert_eq!(fu.response_id, "resp-2");
@@ -2421,9 +2385,9 @@ pub(crate) mod test_fixtures {
     #[test]
     fn apply_follow_ups_ignores_superseded_redelivery() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
-        agent.apply_follow_ups("resp-2".into(), vec!["b".into()]);
-        let changed = agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
+        agent.apply_follow_ups("resp-2".into(), "p1", vec!["b".into()]);
+        let changed = agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         assert!(!changed, "a superseded response's re-delivery is ignored");
         let fu = agent.follow_ups.as_ref().unwrap();
         assert_eq!(fu.response_id, "resp-2");
@@ -2432,16 +2396,16 @@ pub(crate) mod test_fixtures {
     #[test]
     fn apply_follow_ups_same_response_is_idempotent() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
-        let changed = agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
+        let changed = agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         assert!(!changed);
         assert_eq!(agent.follow_ups.as_ref().unwrap().suggestions, vec!["a"]);
     }
     #[test]
     fn apply_follow_ups_empty_clears_current_response_chips() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
-        let changed = agent.apply_follow_ups("resp-1".into(), Vec::new());
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
+        let changed = agent.apply_follow_ups("resp-1".into(), "p1", Vec::new());
         assert!(
             changed,
             "retracting the shown response's chips warrants redraw"
@@ -2451,22 +2415,22 @@ pub(crate) mod test_fixtures {
     #[test]
     fn apply_follow_ups_empty_for_different_response_supersedes_and_clears() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
-        let changed = agent.apply_follow_ups("resp-2".into(), Vec::new());
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
+        let changed = agent.apply_follow_ups("resp-2".into(), "p1", Vec::new());
         assert!(changed);
         assert!(agent.follow_ups.is_none());
     }
     #[test]
     fn apply_follow_ups_empty_for_unseen_id_does_not_poison_ring() {
         let mut agent = make_agent();
-        assert!(!agent.apply_follow_ups("resp-1".into(), Vec::new()));
+        assert!(!agent.apply_follow_ups("resp-1".into(), "p1", Vec::new()));
         assert!(agent.follow_ups.is_none());
-        assert!(agent.apply_follow_ups("resp-1".into(), vec!["a".into()]));
+        assert!(agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]));
         assert_eq!(agent.follow_ups.as_ref().unwrap().suggestions, vec!["a"]);
         let mut agent = make_agent();
-        agent.apply_follow_ups("shown".into(), vec!["x".into()]);
-        agent.apply_follow_ups("resp-2".into(), Vec::new());
-        let changed = agent.apply_follow_ups("resp-2".into(), vec!["b".into()]);
+        agent.apply_follow_ups("shown".into(), "p1", vec!["x".into()]);
+        agent.apply_follow_ups("resp-2".into(), "p1", Vec::new());
+        let changed = agent.apply_follow_ups("resp-2".into(), "p1", vec!["b".into()]);
         assert!(
             changed,
             "non-empty for the previously-empty resp-2 must render"
@@ -2476,43 +2440,43 @@ pub(crate) mod test_fixtures {
     #[test]
     fn apply_follow_ups_empty_retract_allows_same_id_redelivery() {
         let mut agent = make_agent();
-        assert!(agent.apply_follow_ups("resp-1".into(), vec!["a".into()]));
+        assert!(agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]));
         assert_eq!(agent.follow_ups.as_ref().unwrap().suggestions, vec!["a"]);
-        assert!(agent.apply_follow_ups("resp-1".into(), Vec::new()));
+        assert!(agent.apply_follow_ups("resp-1".into(), "p1", Vec::new()));
         assert!(agent.follow_ups.is_none());
         assert!(
             !agent.follow_up_seen.contains_key("resp-1"),
             "an empty retraction of the shown chips must drop the id from the seen-ring"
         );
-        let changed = agent.apply_follow_ups("resp-1".into(), vec!["b".into()]);
+        let changed = agent.apply_follow_ups("resp-1".into(), "p1", vec!["b".into()]);
         assert!(
             changed,
             "non-empty re-delivery for a retracted id must render"
         );
         assert_eq!(agent.follow_ups.as_ref().unwrap().suggestions, vec!["b"]);
-        assert!(agent.apply_follow_ups("resp-2".into(), vec!["c".into()]));
-        let changed_old = agent.apply_follow_ups("resp-1".into(), vec!["b".into()]);
+        assert!(agent.apply_follow_ups("resp-2".into(), "p1", vec!["c".into()]));
+        let changed_old = agent.apply_follow_ups("resp-1".into(), "p1", vec!["b".into()]);
         assert!(!changed_old, "a superseded older id stays rejected");
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-2");
     }
     #[test]
     fn clear_then_superseded_redelivery_is_ignored() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         agent.clear_follow_ups();
-        let changed = agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
+        let changed = agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         assert!(!changed, "a cleared response's re-delivery is ignored");
         assert!(agent.follow_ups.is_none());
     }
     #[test]
     fn apply_follow_ups_old_response_rejected_after_many_newer() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-0".into(), vec!["first".into()]);
+        agent.apply_follow_ups("resp-0".into(), "p1", vec!["first".into()]);
         for i in 1..=200 {
-            agent.apply_follow_ups(format!("resp-{i}"), vec![format!("s{i}")]);
+            agent.apply_follow_ups(format!("resp-{i}"), "p1", vec![format!("s{i}")]);
         }
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-200");
-        let changed = agent.apply_follow_ups("resp-0".into(), vec!["first".into()]);
+        let changed = agent.apply_follow_ups("resp-0".into(), "p1", vec!["first".into()]);
         assert!(!changed, "a long-superseded response stays rejected");
         let fu = agent.follow_ups.as_ref().unwrap();
         assert_eq!(fu.response_id, "resp-200");
@@ -2521,21 +2485,21 @@ pub(crate) mod test_fixtures {
     #[test]
     fn apply_follow_ups_generation_is_monotonic() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         assert_eq!(agent.follow_up_seen.get("resp-1"), Some(&0));
         assert_eq!(agent.follow_up_next_gen, 1);
-        agent.apply_follow_ups("resp-1".into(), vec!["a2".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a2".into()]);
         assert_eq!(agent.follow_up_next_gen, 1);
-        agent.apply_follow_ups("resp-2".into(), vec!["b".into()]);
+        agent.apply_follow_ups("resp-2".into(), "p1", vec!["b".into()]);
         assert_eq!(agent.follow_up_seen.get("resp-2"), Some(&1));
         assert_eq!(agent.follow_up_next_gen, 2);
-        assert!(!agent.apply_follow_ups("resp-1".into(), vec!["a".into()]));
+        assert!(!agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]));
         assert_eq!(agent.follow_up_next_gen, 2);
     }
     #[test]
     fn reconnect_reload_finalize_clears_follow_up_chips() {
         let mut agent = make_agent();
-        assert!(agent.apply_follow_ups("resp-1".into(), vec!["a".into(), "b".into()]));
+        assert!(agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into(), "b".into()]));
         assert!(agent.follow_ups.is_some(), "chips shown before the reload");
         assert!(agent.follow_up_seen.contains_key("resp-1"));
         assert!(agent.follow_up_next_gen > 0);
@@ -2584,7 +2548,7 @@ pub(crate) mod test_fixtures {
     #[test]
     fn reconnect_reload_failure_also_clears_follow_up_chips() {
         let mut agent = make_agent();
-        assert!(agent.apply_follow_ups("resp-1".into(), vec!["a".into()]));
+        assert!(agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]));
         assert!(agent.follow_ups.is_some());
         agent.session.prompt_history_loading = true;
         agent.begin_session_reload(1);
@@ -2777,9 +2741,9 @@ pub(crate) mod test_fixtures {
     #[test]
     fn apply_follow_ups_empty_clears_hit_areas() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         agent.follow_up_chips = vec![ratatui::layout::Rect::new(0, 0, 5, 1)];
-        agent.apply_follow_ups("resp-1".into(), Vec::new());
+        agent.apply_follow_ups("resp-1".into(), "p1", Vec::new());
         assert!(agent.follow_ups.is_none());
         assert!(
             agent.follow_up_chips.is_empty(),
@@ -2789,7 +2753,7 @@ pub(crate) mod test_fixtures {
     #[test]
     fn clear_follow_ups_drops_chips_and_hit_areas() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["a".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         agent.follow_up_chips = vec![ratatui::layout::Rect::new(0, 0, 5, 1)];
         agent.clear_follow_ups();
         assert!(agent.follow_ups.is_none());
@@ -2803,7 +2767,7 @@ pub(crate) mod test_fixtures {
     fn apply_follow_ups_current_turn_redelivery_rerenders_after_clear() {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("p1".into());
-        assert!(agent.apply_follow_ups_with_prompt("resp-1".into(), Some("p1"), vec!["a".into()]));
+        assert!(agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]));
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-1");
         agent.clear_follow_ups();
         assert!(agent.follow_ups.is_none());
@@ -2811,8 +2775,7 @@ pub(crate) mod test_fixtures {
             agent.follow_up_seen.contains_key("resp-1"),
             "adoption keeps the seen ring (no un-record)"
         );
-        let changed =
-            agent.apply_follow_ups_with_prompt("resp-1".into(), Some("p1"), vec!["a".into()]);
+        let changed = agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         assert!(
             changed,
             "re-delivery of the adopted turn's follow_ups must re-render"
@@ -2826,18 +2789,17 @@ pub(crate) mod test_fixtures {
     fn apply_follow_ups_prior_turn_replay_does_not_revive() {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("p1".into());
-        assert!(agent.apply_follow_ups_with_prompt("resp-1".into(), Some("p1"), vec!["a".into()]));
+        assert!(agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]));
         agent.session.current_prompt_id = Some("p2".into());
         agent.clear_follow_ups();
         assert!(agent.follow_ups.is_none());
-        let changed =
-            agent.apply_follow_ups_with_prompt("resp-1".into(), Some("p1"), vec!["a".into()]);
+        let changed = agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         assert!(
             !changed,
             "a prior turn's replay must not revive stale chips"
         );
         assert!(agent.follow_ups.is_none(), "no stale chips were revived");
-        assert!(agent.apply_follow_ups_with_prompt("resp-2".into(), Some("p2"), vec!["b".into()]));
+        assert!(agent.apply_follow_ups("resp-2".into(), "p2", vec!["b".into()]));
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-2");
     }
     /// FINDING B (stamped path): a LATE FIRST-TIME (never-seen) `grow/follow_ups`
@@ -2848,10 +2810,9 @@ pub(crate) mod test_fixtures {
     fn apply_follow_ups_late_prior_turn_first_time_rejected() {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("p2".into());
-        assert!(agent.apply_follow_ups_with_prompt("resp-2".into(), Some("p2"), vec!["b".into()]));
+        assert!(agent.apply_follow_ups("resp-2".into(), "p2", vec!["b".into()]));
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-2");
-        let changed =
-            agent.apply_follow_ups_with_prompt("resp-1".into(), Some("p1"), vec!["a".into()]);
+        let changed = agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]);
         assert!(
             !changed,
             "a never-seen prior-turn follow_ups must not render over the active turn"
@@ -2873,7 +2834,7 @@ pub(crate) mod test_fixtures {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("p1".into());
         assert!(
-            agent.apply_follow_ups_with_prompt("resp-1".into(), Some("p1"), vec!["a".into()]),
+            agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]),
             "the active turn's first follow_ups must render"
         );
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-1");
@@ -2886,27 +2847,10 @@ pub(crate) mod test_fixtures {
         let mut agent = make_agent();
         agent.session.current_prompt_id = None;
         assert!(
-            agent.apply_follow_ups_with_prompt("resp-1".into(), Some("p1"), vec!["a".into()]),
+            agent.apply_follow_ups("resp-1".into(), "p1", vec!["a".into()]),
             "a stamped follow_ups with no active turn must still render (turn just completed)"
         );
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-1");
-    }
-    /// None-fallback (older shells / no promptId): with no turn identity on the
-    /// notification AND a newer turn active, a late first-time arrival cannot be
-    /// distinguished from the new turn's first follow_ups, so it follows the
-    /// legacy newest-wins (renders). This path is not reachable for current
-    /// shells (which always stamp `promptId`) or for buffer-replays (suppressed
-    /// upstream by the `_meta["grow/replayed"]` gate); it is pinned here so the
-    /// stamped-path fix above is understood to be the deterministic guard.
-    #[test]
-    fn apply_follow_ups_none_prompt_first_time_follows_legacy_newest_wins() {
-        let mut agent = make_agent();
-        agent.session.current_prompt_id = Some("p2".into());
-        assert!(
-            agent.apply_follow_ups_with_prompt("resp-x".into(), None, vec!["a".into()]),
-            "a None-promptId first-time arrival follows legacy newest-wins"
-        );
-        assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-x");
     }
     /// FIX (buffer-before-adoption): a stamped `grow/follow_ups` for a turn that
     /// is NOT yet current (its `session/update` adoption raced behind the ext
@@ -2916,8 +2860,7 @@ pub(crate) mod test_fixtures {
     fn apply_follow_ups_buffered_before_adoption_flushes_on_adoption() {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("p1".into());
-        let changed =
-            agent.apply_follow_ups_with_prompt("resp-2".into(), Some("p2"), vec!["b".into()]);
+        let changed = agent.apply_follow_ups("resp-2".into(), "p2", vec!["b".into()]);
         assert!(
             !changed,
             "a not-yet-current turn's follow_ups must not render immediately"
@@ -2947,7 +2890,7 @@ pub(crate) mod test_fixtures {
     fn apply_follow_ups_buffered_superseded_turn_does_not_revive() {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("p1".into());
-        assert!(!agent.apply_follow_ups_with_prompt("resp-2".into(), Some("p2"), vec!["b".into()]));
+        assert!(!agent.apply_follow_ups("resp-2".into(), "p2", vec!["b".into()]));
         assert!(agent.follow_up_pending.contains_key("p2"));
         agent.session.current_prompt_id = Some("p3".into());
         assert!(
@@ -2958,7 +2901,7 @@ pub(crate) mod test_fixtures {
             agent.follow_ups.is_none(),
             "the never-adopted p2 buffer must not revive on a different adoption"
         );
-        assert!(agent.apply_follow_ups_with_prompt("resp-3".into(), Some("p3"), vec!["c".into()]));
+        assert!(agent.apply_follow_ups("resp-3".into(), "p3", vec!["c".into()]));
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-3");
         assert!(
             agent.follow_up_pending.contains_key("p2"),
@@ -2973,9 +2916,9 @@ pub(crate) mod test_fixtures {
         agent.session.current_prompt_id = Some("cur".into());
         let total = super::MAX_PENDING_FOLLOW_UPS + 1;
         for i in 0..total {
-            assert!(!agent.apply_follow_ups_with_prompt(
+            assert!(!agent.apply_follow_ups(
                 format!("resp-{i}"),
-                Some(&format!("p{i}")),
+                &format!("p{i}"),
                 vec!["x".into()],
             ));
         }
@@ -3001,16 +2944,8 @@ pub(crate) mod test_fixtures {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("p-stale".into());
         agent.session.loading_replay = true;
-        assert!(!agent.apply_follow_ups_with_prompt(
-            "resp-run".into(),
-            Some("p-run"),
-            vec!["go".into()],
-        ));
-        assert!(!agent.apply_follow_ups_with_prompt(
-            "resp-old".into(),
-            Some("p-old"),
-            vec!["stale".into()],
-        ));
+        assert!(!agent.apply_follow_ups("resp-run".into(), "p-run", vec!["go".into()],));
+        assert!(!agent.apply_follow_ups("resp-old".into(), "p-old", vec!["stale".into()],));
         assert!(agent.follow_up_pending.contains_key("p-run"));
         assert!(agent.follow_up_pending.contains_key("p-old"));
         agent.reset_follow_ups_for_reload_preserving(Some("p-run"));
@@ -3040,11 +2975,7 @@ pub(crate) mod test_fixtures {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("p-run".into());
         agent.session.loading_replay = true;
-        assert!(agent.apply_follow_ups_with_prompt(
-            "resp-run".into(),
-            Some("p-run"),
-            vec!["go".into()],
-        ));
+        assert!(agent.apply_follow_ups("resp-run".into(), "p-run", vec!["go".into()],));
         assert_eq!(
             agent.follow_ups.as_ref().unwrap().response_id,
             "resp-run",
@@ -3055,11 +2986,7 @@ pub(crate) mod test_fixtures {
             agent.follow_up_pending.is_empty(),
             "displayed chips are NOT in the pending buffer"
         );
-        assert!(!agent.apply_follow_ups_with_prompt(
-            "resp-old".into(),
-            Some("p-old"),
-            vec!["stale".into()],
-        ));
+        assert!(!agent.apply_follow_ups("resp-old".into(), "p-old", vec!["stale".into()],));
         assert!(agent.follow_up_pending.contains_key("p-old"));
         agent.reset_follow_ups_for_reload_preserving(Some("p-run"));
         assert!(
@@ -3087,7 +3014,7 @@ pub(crate) mod test_fixtures {
     fn reset_for_reload_clears_pending_buffer() {
         let mut agent = make_agent();
         agent.session.current_prompt_id = Some("cur".into());
-        assert!(!agent.apply_follow_ups_with_prompt("r".into(), Some("future"), vec!["a".into()],));
+        assert!(!agent.apply_follow_ups("r".into(), "future", vec!["a".into()],));
         assert!(agent.follow_up_pending.contains_key("future"));
         agent.reset_follow_ups_for_reload();
         assert!(
@@ -3099,7 +3026,7 @@ pub(crate) mod test_fixtures {
     #[test]
     fn follow_up_chip_click_maps_to_suggestion_text() {
         let mut agent = make_agent();
-        agent.apply_follow_ups("resp-1".into(), vec!["First".into(), "Second".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["First".into(), "Second".into()]);
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let theme = crate::theme::Theme::current();
@@ -3153,8 +3080,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

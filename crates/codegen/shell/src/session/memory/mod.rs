@@ -1,18 +1,6 @@
-//! Memory system shim.
+//! Session-specific integration for the standalone `memory` crate.
 //!
-//! The memory "core engine" now lives in the standalone `memory`
-//! crate. This module re-exports that crate's public surface under the
-//! historical `crate::session::memory::*` paths so the ~30 reverse-dependency
-//! call sites in this crate keep compiling unchanged.
-//!
-//! Only `hooks` stays here: it is session glue (depends on
-//! `crate::sampling` and `crate::session::helpers::session_compact`) and is
-//! not part of the relocatable core engine.
+//! The engine is consumed directly through `memory::*`; only lifecycle hooks
+//! that depend on shell session state live here.
 
 pub mod hooks;
-
-pub use memory::{
-    EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams, MemoryIndex, MemoryScope,
-    MemoryStorage, backend, chunker, dream, dream_lock, embed_missing_chunks, embedding, index,
-    init_sqlite_vec, mmr, query_expansion, schema, search, storage, text_utils, watcher,
-};

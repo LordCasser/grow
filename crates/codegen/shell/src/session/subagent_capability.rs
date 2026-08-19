@@ -512,7 +512,7 @@ mod tests {
                     None,
                     vec![],
                     vec![],
-                    false,
+                    diagnostics::enums::PermissionMode::Ask,
                     None,
                     false,
                 );

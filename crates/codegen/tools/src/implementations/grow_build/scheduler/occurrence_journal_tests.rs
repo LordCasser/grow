@@ -16,7 +16,6 @@ fn task(id: &str, recurring: bool, durable: bool) -> ScheduledTask {
         prompt: format!("run {id}"),
         recurring,
         durable,
-        foreground: true,
         created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
         last_fired_at: None,
         expires_at: None,
@@ -55,6 +54,10 @@ fn valid_occurrence_json(id_suffix: u64, task_id: &str, revision: u64) -> serde_
             "removal": { "generation": GENERATION, "revision": revision + 1 },
         }),
     )
+}
+
+fn journal(entries: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({ "entries": entries })
 }
 
 fn state(tasks: Vec<ScheduledTask>, journal: serde_json::Value) -> SchedulerState {
@@ -136,7 +139,7 @@ fn validation_rejects_impossible_versions_and_non_rfc_identity() {
             "removal": { "generation": GENERATION, "revision": 2 },
         }),
     );
-    let state = state(Vec::new(), serde_json::Value::Array(vec![invalid]));
+    let state = state(Vec::new(), journal(vec![invalid]));
     let plan = state.reconcile_one_shot_occurrences();
     assert!(plan.recovery_required() && plan.blocked_task_ids().contains("bad-id"));
 }
@@ -152,7 +155,7 @@ fn exactly_fifty_round_trips_and_mutation_reports_journal_full() {
             )
         })
         .collect();
-    let mut state = state(Vec::new(), serde_json::Value::Array(entries));
+    let mut state = state(Vec::new(), journal(entries));
     assert_eq!(
         state.occurrence_journal.entries.len(),
         MAX_PENDING_ONE_SHOTS
@@ -174,6 +177,16 @@ fn exactly_fifty_round_trips_and_mutation_reports_journal_full() {
 }
 
 #[test]
+fn array_shaped_journal_is_not_loaded_as_current_state() {
+    let state = state(
+        vec![task("kept", true, true)],
+        serde_json::json!([valid_occurrence_json(42, "stale", 1)]),
+    );
+    assert!(state.occurrence_journal.entries.is_empty());
+    assert!(state.occurrence_journal.block_all_one_shots);
+}
+
+#[test]
 fn overflow_tail_suppresses_globally_and_never_serializes_a_fifty_first_entry() {
     let mut entries: Vec<_> = (0..MAX_PENDING_ONE_SHOTS)
         .map(|index| valid_occurrence_json(200 + index as u64, &format!("task-{index}"), 1))
@@ -181,7 +194,7 @@ fn overflow_tail_suppresses_globally_and_never_serializes_a_fifty_first_entry() 
     entries.push(valid_occurrence_json(999, "tail-task", 3));
     let state = state(
         vec![task("tail-task", false, true), task("other", false, true)],
-        serde_json::Value::Array(entries),
+        journal(entries),
     );
 
     let plan = state.reconcile_one_shot_occurrences();
@@ -224,7 +237,7 @@ fn malformed_missing_task_identity_blocks_all_one_shots_across_reload() {
     );
     let state = state(
         vec![task("due", false, true), task("recurring", true, true)],
-        serde_json::Value::Array(vec![malformed]),
+        journal(vec![malformed]),
     );
     let plan = state.reconcile_one_shot_occurrences();
     assert!(plan.block_all_one_shots() && plan.recovery_required());
@@ -274,7 +287,7 @@ async fn production_loader_preserves_tasks_and_quarantine_metadata() {
         serde_json::to_vec(&serde_json::json!({
             "state": { "grow_build.Scheduler": {
                 "tasks": [task("recurring", true, true)],
-                "occurrenceJournal": [invalid]
+                "occurrenceJournal": { "entries": [invalid] }
             } }
         }))
         .unwrap(),
@@ -320,7 +333,7 @@ async fn production_loader_preserves_tasks_and_quarantine_metadata() {
 fn reconciliation_exposes_only_persistence_and_suppression_foundation() {
     let state = state(
         vec![task("resurrected", false, true)],
-        serde_json::Value::Array(vec![valid_occurrence_json(10, "resurrected", 1)]),
+        journal(vec![valid_occurrence_json(10, "resurrected", 1)]),
     );
     let plan = state.reconcile_one_shot_occurrences();
     assert!(plan.requires_resources_persistence());
@@ -359,7 +372,7 @@ fn conflict_receipts_produce_diagnostics_and_suppress_every_task() {
             .collect();
         let mut state = state(
             ids.iter().map(|id| task(id, false, true)).collect(),
-            serde_json::Value::Array(entries),
+            journal(entries),
         );
         let plan = state.reconcile_one_shot_occurrences();
         assert!(plan.recovery_required());
@@ -381,9 +394,9 @@ fn conflict_receipts_produce_diagnostics_and_suppress_every_task() {
 }
 
 #[test]
-fn empty_journal_omits_legacy_field() {
+fn empty_journal_omits_optional_field() {
     let serialized = serde_json::to_value(SchedulerState {
-        tasks: vec![task("legacy", true, true)],
+        tasks: vec![task("loop", true, true)],
         ..Default::default()
     })
     .unwrap();

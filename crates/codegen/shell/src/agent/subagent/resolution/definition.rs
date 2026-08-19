@@ -1,5 +1,4 @@
 //! Production subagent definition discovery and tool-policy resolution.
-use super::config::{SubagentPersona, SubagentRole};
 use super::types::{EffectiveRuntimeConfig, ResolutionError};
 use agent::config::{AgentDefinition, IsolationMode};
 use agent::plugins::PluginRegistry;
@@ -173,23 +172,6 @@ pub fn resolve_goal_stage_definition(
         _ => None,
     }
 }
-/// Resolve the role selected by production: type-specific first, then persona.
-pub fn select_role<'a>(
-    subagent_type: &str,
-    overrides: &SubagentRuntimeOverrides,
-    roles: &'a HashMap<String, SubagentRole>,
-) -> (Option<&'a SubagentRole>, Option<String>) {
-    if let Some(role) = roles.get(subagent_type) {
-        return (Some(role), Some(subagent_type.to_string()));
-    }
-    let Some(persona) = overrides.persona.as_deref() else {
-        return (None, None);
-    };
-    match roles.get(persona) {
-        Some(role) => (Some(role), Some(persona.to_string())),
-        None => (None, None),
-    }
-}
 /// Fill runtime values whose defaults live on the resolved agent definition.
 pub fn apply_definition_runtime_defaults(
     runtime: &mut EffectiveRuntimeConfig,
@@ -241,16 +223,15 @@ pub fn apply_goal_object_tool_policy(definition: &mut AgentDefinition, planner_s
 }
 /// Resolve runtime overrides and definition defaults in the production order.
 pub fn resolve_runtime_config(
-    subagent_type: &str,
     overrides: &SubagentRuntimeOverrides,
-    roles: &HashMap<String, SubagentRole>,
-    personas: &HashMap<String, SubagentPersona>,
-    cwd: Option<&Path>,
     definition: &AgentDefinition,
 ) -> EffectiveRuntimeConfig {
-    let (role, role_name) = select_role(subagent_type, overrides, roles);
-    let mut runtime =
-        super::overrides::resolve_effective_overrides(overrides, role, personas, cwd, role_name);
+    let mut runtime = EffectiveRuntimeConfig {
+        model: overrides.model.clone(),
+        reasoning_effort: overrides.reasoning_effort.clone(),
+        capability_mode: overrides.capability_mode,
+        isolation: overrides.isolation.unwrap_or_default(),
+    };
     apply_definition_runtime_defaults(&mut runtime, definition);
     runtime
 }

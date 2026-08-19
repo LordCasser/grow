@@ -1,4 +1,4 @@
-use super::support::create_test_actor;
+use super::support::{create_test_actor, record_test_prompt, seed_test_timeline};
 
 use crate::sampling::ConversationItem;
 use crate::session::{RewindMode, RewindRequest};
@@ -11,17 +11,14 @@ fn prompt(text: &str, index: usize) -> ConversationItem {
 }
 
 async fn seed_compacted_timeline(actor: &super::SessionActor) {
-    actor
-        .chat_state_handle
-        .push_user_message(ConversationItem::system("SYS"));
-    actor
-        .chat_state_handle
-        .push_user_message(ConversationItem::user("UI0"));
+    let mut conversation = vec![
+        ConversationItem::system("SYS"),
+        ConversationItem::user("UI0"),
+    ];
     for index in 0..5 {
-        actor
-            .chat_state_handle
-            .push_user_message(prompt(&format!("P{index}"), index));
+        conversation.push(prompt(&format!("P{index}"), index));
     }
+    seed_test_timeline(actor, conversation, &["P0", "P1", "P2", "P3", "P4"]).await;
     actor
         .chat_state_handle
         .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
@@ -33,13 +30,65 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         ))
         .await
         .unwrap();
+    let (_, source_surface_revision) = actor
+        .chat_state_handle
+        .get_conversation_with_revision()
+        .await
+        .expect("chat-state actor must be live");
+    let materialized = actor
+        .chat_state_handle
+        .materialize_timeline(actor.session_id_string())
+        .await
+        .expect("compaction input must materialize");
+    let input_ref = materialized.input_ref;
+    let target = chat_state::SurfaceRange {
+        start: *materialized.surface_ids.first().unwrap(),
+        end: *materialized.surface_ids.last().unwrap(),
+        shadowed: materialized.surface_ids,
+    };
+    let sideband_id = uuid::Uuid::now_v7().to_string();
     actor
         .chat_state_handle
-        .replace_conversation_for_compaction(vec![
-            ConversationItem::system("SYS"),
-            ConversationItem::user("UI1"),
-            ConversationItem::user("SUMMARY"),
-        ]);
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Sideband(
+            chat_state::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: chat_state::SidebandPurpose::CompactionSummary,
+                input_refs: vec![input_ref.clone()],
+            },
+        ))
+        .await
+        .unwrap();
+    actor
+        .chat_state_handle
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+            chat_state::CompactionEvent::Summary {
+                id: "compact-5".into(),
+                input_ref,
+                result_ref: chat_state::TimelineRangeRef {
+                    timeline_id: sideband_id,
+                    first_seq: 2,
+                    last_seq: 2,
+                },
+                target: target.clone(),
+                source_tokens: 100,
+                summary_chars: 7,
+            },
+        ))
+        .await
+        .unwrap();
+    actor
+        .chat_state_handle
+        .replace_compaction_range(
+            target,
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("UI1"),
+                ConversationItem::user("SUMMARY"),
+            ],
+            source_surface_revision,
+        )
+        .await
+        .unwrap();
     actor
         .chat_state_handle
         .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
@@ -53,20 +102,12 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         .await
         .unwrap();
     actor.chat_state_handle.push_user_message(prompt("P5", 5));
+    record_test_prompt(actor, "P5").await;
     actor
         .chat_state_handle
         .push_assistant_response(ConversationItem::assistant("R5"));
     actor.chat_state_handle.push_user_message(prompt("P6", 6));
-
-    let mut snap = actor
-        .chat_state_handle
-        .snapshot()
-        .await
-        .expect("snapshot available");
-    snap.prompt_index = 7;
-    snap.prompt_texts = (0..7).map(|i| format!("P{i}")).collect();
-    snap.last_compaction_prompt_index = Some(5);
-    actor.chat_state_handle.restore_snapshot(snap);
+    record_test_prompt(actor, "P6").await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -134,14 +175,8 @@ async fn run_files_only_bound_scenario() {
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
 
-    let mut snap = actor
-        .chat_state_handle
-        .snapshot()
-        .await
-        .expect("snapshot available");
-    snap.prompt_index = 2;
-    snap.prompt_texts = vec!["P0".into(), "P1".into()];
-    actor.chat_state_handle.restore_snapshot(snap);
+    record_test_prompt(&actor, "P0").await;
+    record_test_prompt(&actor, "P1").await;
 
     // Out-of-range FilesOnly: exempt → reverts nothing (no snapshots) but
     // succeeds.

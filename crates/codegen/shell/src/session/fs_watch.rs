@@ -181,8 +181,8 @@ async fn refresh_codebase_graph_after_head_change(
     cmd.args(["diff", "--name-status", "ORIG_HEAD", "HEAD"])
         .current_dir(repo_root)
         .stdin(std::process::Stdio::null());
-    tools::util::detach_command(&mut cmd);
-    cmd.envs(tools::util::pager_env());
+    tty_utils::detach_command(&mut cmd);
+    cmd.envs(tty_utils::pager_env());
     let diff_output = cmd.output().await;
 
     match diff_output {

@@ -1,14 +1,11 @@
 //! Filesystem scanning for plugin directories.
 //!
-//! Discovers plugins from multiple sources in priority order:
+//! Discovers plugins from the canonical Grow sources in priority order:
 //! 1. CLI `--plugin-dir` paths (scope: `CliOverride`)
 //! 2. `.grow/plugins/*/` (scope: `Project`, walked from cwd to worktree root)
-//! 3. `.claude/plugins/*/` (scope: `Project`, compat)
-//! 4. `~/.grow/plugins/*/` (scope: `User`)
-//! 5. `~/.claude/plugins/*/` (scope: `User`, compat)
-//!    `~/.grow/installed-plugins/*/` (scope: `User`, marketplace installs)
-//!    Installed plugins from `~/.claude/plugins/installed_plugins.json` (scope: `User`)
-//! 6. Paths from `[plugins].paths` in config (scope: `ConfigPath`)
+//! 3. `$GROW_HOME/plugins/*/` (scope: `User`)
+//! 4. `$GROW_HOME/installed-plugins/*/` (scope: `User`, registry installs)
+//! 5. Paths from `[plugins].paths` in config (scope: `ConfigPath`)
 //!
 //! Deduplicates by canonical path and resolves name conflicts via
 //! the canonical source precedence.
@@ -18,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::manifest::{ManifestLoadResult, PluginManifest, load_manifest, name_from_dirname};
+use super::manifest::{PluginManifest, load_manifest};
 use super::trust::TrustStore;
 
 // ── Public types ──────────────────────────────────────────────────────
@@ -28,9 +25,9 @@ use super::trust::TrustStore;
 pub enum PluginScope {
     /// `--plugin-dir` (highest priority, always trusted)
     CliOverride = 0,
-    /// `.grow/plugins/` or `.claude/plugins/` in project (requires trust)
+    /// `.grow/plugins/` in project (requires trust)
     Project = 1,
-    /// `~/.grow/plugins/` or `~/.claude/plugins/` (always trusted)
+    /// `$GROW_HOME/plugins/` or registry installs (always trusted)
     User = 2,
     /// `[plugins].paths` in config (trust depends on location)
     ConfigPath = 3,
@@ -70,23 +67,8 @@ pub enum PluginOrigin {
     CliOverride,
     /// Project `.grow/plugins/`.
     ProjectGrow,
-    /// Project `.claude/plugins/`.
-    ProjectClaude,
     /// `$GROW_HOME/plugins/`.
     UserGrow,
-    /// `~/.claude/plugins/`.
-    UserClaude,
-    /// A compat marketplace clone (project `extraKnownMarketplaces`
-    /// or user `known_marketplaces.json`).
-    ClaudeMarketplace {
-        /// Marketplace name from the settings/registry entry.
-        marketplace: String,
-    },
-    /// Install recorded in `~/.claude/plugins/installed_plugins.json`.
-    ClaudeInstalled {
-        /// Marketplace name from the `name@marketplace` JSON key, when present.
-        marketplace: Option<String>,
-    },
     /// Grow's install registry (`~/.grow/installed-plugins`).
     MarketplaceInstall {
         /// Marketplace source display name (None for direct git/local installs).
@@ -131,7 +113,7 @@ impl std::fmt::Display for PluginId {
 /// A plugin candidate discovered on the filesystem.
 #[derive(Debug, Clone)]
 pub struct DiscoveredPlugin {
-    /// Parsed manifest (or synthetic for convention-based plugins).
+    /// Parsed canonical manifest.
     pub manifest: PluginManifest,
     /// Stable internal identity.
     pub id: PluginId,
@@ -208,60 +190,33 @@ impl DiscoveryConfig {
 
 // ── Discovery entry point ─────────────────────────────────────────────
 
-/// User plugin directories in priority order: `$GROW_HOME/plugins` then
-/// `~/.claude/plugins`.
-///
-/// Unlike agent discovery, plugins are intentionally NOT discovered from a
-/// legacy `~/.grow/plugins`: plugin trust, persisted plugin-data, and install
-/// paths all resolve under `grow_home()`, so a plugin scanned from the legacy
-/// tree would appear untrusted and lose its persisted state. Keeping plugins on
-/// `grow_home()` only avoids that half-initialized state.
-fn user_plugin_dirs(home: Option<&Path>, grow: Option<&Path>) -> Vec<(PathBuf, PluginOrigin)> {
-    let mut dirs = Vec::new();
-    if let Some(g) = grow {
-        dirs.push((g.join("plugins"), PluginOrigin::UserGrow));
-    }
-    if let Some(h) = home {
-        dirs.push((h.join(".claude").join("plugins"), PluginOrigin::UserClaude));
-    }
-    dirs
+/// The one user plugin directory owned by Grow.
+fn user_plugin_dirs(grow: Option<&Path>) -> Vec<(PathBuf, PluginOrigin)> {
+    grow.into_iter()
+        .map(|root| (root.join("plugins"), PluginOrigin::UserGrow))
+        .collect()
 }
 
-/// Origin for a project plugins parent dir: `.claude/plugins` vs `.grow/plugins`.
-fn project_plugins_dir_origin(plugins_dir: &Path) -> PluginOrigin {
-    let is_claude = plugins_dir
-        .parent()
-        .and_then(|p| p.file_name())
-        .is_some_and(|n| n == ".claude");
-    if is_claude {
-        PluginOrigin::ProjectClaude
-    } else {
-        PluginOrigin::ProjectGrow
-    }
-}
-
-/// Project-scoped plugin parent dirs (`.grow/plugins`, `.claude/plugins`) that
+/// Project-scoped plugin parent dirs (`.grow/plugins`) that
 /// exist along the `cwd`→git-worktree-root walk (inclusive), or just `cwd`'s own
 /// when `cwd` is not inside a git repo, paired with the resolved git worktree
 /// root (when any). This is the exact set [`discover_plugins`] scans for
 /// `PluginScope::Project`; the folder-trust gate reuses the same chain via
 /// [`project_plugin_dirs_in`] so detection and discovery can never drift. The
-/// returned root lets `discover_plugins` reuse it for the marketplace
-/// `resolve(root)` branch instead of resolving the repo a second time.
-pub fn project_plugin_dirs(cwd: Option<&Path>) -> (Vec<PathBuf>, Option<PathBuf>) {
+pub fn project_plugin_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
     let Some(cwd) = cwd else {
-        return (Vec::new(), None);
+        return Vec::new();
     };
     let chain = crate::repo::RepoDirChain::resolve(cwd);
-    (project_plugin_dirs_in(&chain.dirs), chain.git_root)
+    project_plugin_dirs_in(&chain.dirs)
 }
 
-/// Existing project plugin parent dirs (`.grow/plugins`, `.claude/plugins`)
+/// Existing project plugin parent dirs (`.grow/plugins`)
 /// under each dir of a precomputed cwd→git-root chain
 /// ([`crate::repo::RepoDirChain`]). The folder-trust gate reuses its one shared
 /// chain here so detection and discovery can never drift.
 pub fn project_plugin_dirs_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    crate::repo::existing_subdirs_along(chain_dirs, &[".grow/plugins", ".claude/plugins"])
+    crate::repo::existing_subdirs_along(chain_dirs, &[".grow/plugins"])
 }
 
 /// Discover all plugins from the filesystem.
@@ -298,50 +253,29 @@ pub fn discover_plugins(
         }
     }
 
-    // 2-3. Project plugins (.grow/plugins/, .claude/plugins/) — scan the SAME
+    // 2. Project plugins (.grow/plugins/) — scan the SAME
     // dirs the folder-trust gate detects, via the shared `project_plugin_dirs`
     // walk (cwd→git root), so discovery and gating can never drift.
     if let Some(cwd) = cwd {
-        let (project_dirs, git_root) = project_plugin_dirs(Some(cwd));
+        let project_dirs = project_plugin_dirs(Some(cwd));
         for plugins_dir in project_dirs {
-            let origin = project_plugins_dir_origin(&plugins_dir);
             scan_plugin_dir(
                 &plugins_dir,
                 PluginScope::Project,
-                origin,
+                PluginOrigin::ProjectGrow,
                 trust_store,
                 project_trusted,
                 &mut seen_paths,
                 &mut candidates,
             );
         }
-
-        // 3b. Marketplace plugins (extraKnownMarketplaces in .claude/settings.json).
-        // Reuse the git root resolved above (one walk, no second discover).
-        if let Some(ref root) = git_root {
-            for marketplace in &super::marketplace::resolve(root) {
-                for dir in &marketplace.plugin_dirs {
-                    collect_plugin(
-                        dir,
-                        PluginScope::Project,
-                        PluginOrigin::ClaudeMarketplace {
-                            marketplace: marketplace.name.clone(),
-                        },
-                        trust_store,
-                        project_trusted,
-                        &mut seen_paths,
-                        &mut candidates,
-                    );
-                }
-            }
-        }
     }
 
-    // 4-5. User plugins: $GROW_HOME/plugins, legacy ~/.grow/plugins, ~/.claude/plugins.
+    // 3. User plugins: $GROW_HOME/plugins.
     // Gate the grow plugins dir on user_grow_home() so a project's .grow/plugins
     // is never scanned as user-global when no home resolves.
     let grow = config::user_grow_home();
-    let plugin_dirs = user_plugin_dirs(dirs::home_dir().as_deref(), grow.as_deref());
+    let plugin_dirs = user_plugin_dirs(grow.as_deref());
     for (plugins_dir, origin) in plugin_dirs {
         if plugins_dir.is_dir() {
             scan_plugin_dir(
@@ -356,27 +290,7 @@ pub fn discover_plugins(
         }
     }
 
-    // 5a. Known marketplaces (~/.claude/plugins/known_marketplaces.json).
-    // Marketplace repos are cloned locally and registered here.
-    // Tracks marketplace installs in installed_plugins.json with explicit
-    // Each marketplace has a plugins/ (and optionally external_plugins/) subdirectory.
-    for marketplace in &super::marketplace::resolve_known_marketplaces() {
-        for dir in &marketplace.plugin_dirs {
-            collect_plugin(
-                dir,
-                PluginScope::User,
-                PluginOrigin::ClaudeMarketplace {
-                    marketplace: marketplace.name.clone(),
-                },
-                trust_store,
-                project_trusted,
-                &mut seen_paths,
-                &mut candidates,
-            );
-        }
-    }
-
-    // 5b. Installed plugins (from install registry's managed directory)
+    // 4. Installed plugins from Grow's install registry.
     {
         // Installed plugins are always User scope (auto-trusted).
         // The user explicitly installed them via marketplace or CLI,
@@ -392,41 +306,7 @@ pub fn discover_plugins(
         );
     }
 
-    // 5c. Installed plugins (~/.claude/plugins/installed_plugins.json).
-    // installPath entries (nested under cache/<marketplace>/<plugin>/<version>/).
-    // scope wins. Within same scope, first-found (alphabetical by canonical
-    // with explicit installPath entries (nested under cache/<marketplace>/<plugin>/<version>/).
-    // The plugin name is extracted from the JSON key ("name@marketplace").
-    if let Some(home) = dirs::home_dir() {
-        let installed_json = home
-            .join(".claude")
-            .join("plugins")
-            .join("installed_plugins.json");
-        for (name, marketplace, path) in read_claude_installed_plugins(&installed_json, cwd) {
-            if path.is_dir() {
-                let before = candidates.len();
-                collect_plugin(
-                    &path,
-                    PluginScope::User,
-                    PluginOrigin::ClaudeInstalled { marketplace },
-                    trust_store,
-                    project_trusted,
-                    &mut seen_paths,
-                    &mut candidates,
-                );
-                // Override dirname-derived name with the real name from the JSON key.
-                if candidates.len() > before {
-                    let plugin = candidates.last_mut().unwrap();
-                    if plugin.manifest.name != name {
-                        plugin.id = PluginId::new(plugin.scope, &plugin.canonical_root, &name);
-                        plugin.manifest.name = name;
-                    }
-                }
-            }
-        }
-    }
-
-    // 6. Config-path plugins
+    // 5. Config-path plugins
     for dir in &config.config_paths {
         if dir.is_dir() {
             collect_plugin(
@@ -627,53 +507,10 @@ fn collect_plugin(
         return;
     }
 
-    // Load manifest or derive from directory name
+    // A manifest is the plugin identity boundary. Directories without one are
+    // not plugins and are never interpreted by component heuristics.
     let manifest = match load_manifest(plugin_root) {
-        Ok(ManifestLoadResult::Found(m)) => *m,
-        Ok(ManifestLoadResult::NotFound) => {
-            // Convention-based: derive name from directory, check for
-            // skills/ or agents/ or .mcp.json or hooks/hooks.json
-            let Some(name) = name_from_dirname(plugin_root) else {
-                tracing::debug!(
-                    path = %plugin_root.display(),
-                    "cannot derive plugin name from directory; skipping"
-                );
-                return;
-            };
-
-            // Only treat as a plugin if it has at least one component
-            let has_skills =
-                plugin_root.join("skills").is_dir() || plugin_root.join("commands").is_dir();
-            let has_agents = plugin_root.join("agents").is_dir();
-            let has_mcp = plugin_root.join(".mcp.json").is_file();
-            let has_lsp = plugin_root.join(".lsp.json").is_file();
-            let has_hooks = plugin_root.join("hooks").join("hooks.json").is_file();
-
-            if !has_skills && !has_agents && !has_mcp && !has_lsp && !has_hooks {
-                tracing::debug!(
-                    path = %plugin_root.display(),
-                    "directory has no manifest and no recognized plugin components; skipping"
-                );
-                return;
-            }
-
-            PluginManifest {
-                name,
-                version: None,
-                description: None,
-                author: None,
-                homepage: None,
-                repository: None,
-                license: None,
-                keywords: vec![],
-                skills: None,
-                commands: None,
-                agents: None,
-                hooks: None,
-                mcp_servers: None,
-                lsp_servers: None,
-            }
-        }
+        Ok(manifest) => *manifest,
         Err(e) => {
             tracing::warn!(
                 path = %plugin_root.display(),
@@ -793,100 +630,6 @@ fn resolve_name_conflicts(candidates: &mut Vec<DiscoveredPlugin>) {
     }
 }
 
-// ── Compat installed_plugins.json types ───────────────────────────────
-
-/// Compat `installed_plugins.json` format.
-#[derive(serde::Deserialize)]
-struct ClaudeInstalledPlugins {
-    #[serde(default)]
-    plugins: HashMap<String, Vec<ClaudeInstalledEntry>>,
-}
-
-/// A single install entry within `installed_plugins.json`.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeInstalledEntry {
-    install_path: PathBuf,
-    scope: Option<String>,
-    project_path: Option<PathBuf>,
-}
-
-/// Whether a compat install entry should surface for this session `cwd`.
-///
-/// The `local` and `project` scopes are project-tied (as is any entry with
-/// a non-empty `projectPath`): only visible when `cwd` is under `project_path`
-/// (path-component prefix). Missing/empty project path or cwd cannot prove
-/// in-project, so they stay hidden. User/unscoped with no path always surface.
-fn claude_install_visible(
-    scope: Option<&str>,
-    project_path: Option<&Path>,
-    cwd: Option<&Path>,
-) -> bool {
-    let has_project_path = project_path.is_some_and(|p| !p.as_os_str().is_empty());
-    let project_gated = matches!(scope, Some("local") | Some("project")) || has_project_path;
-    if !project_gated {
-        return true;
-    }
-    let Some(project) = project_path.filter(|p| !p.as_os_str().is_empty()) else {
-        return false;
-    };
-    let Some(cwd) = cwd else {
-        return false;
-    };
-    let cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let project = dunce::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
-    cwd.starts_with(&project)
-}
-
-/// Read plugin names and install paths from compat `installed_plugins.json`.
-///
-/// Keys are `"plugin-name@marketplace"` — the plugin name is extracted from
-/// before `@`, the marketplace name from after it (when present).
-/// Returns `(name, marketplace, path)` tuples. Empty vec on any error.
-///
-/// Project-tied entries are filtered by `cwd` vs `projectPath` (see
-/// [`claude_install_visible`]).
-fn read_claude_installed_plugins(
-    json_path: &Path,
-    cwd: Option<&Path>,
-) -> Vec<(String, Option<String>, PathBuf)> {
-    let content = match std::fs::read_to_string(json_path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-    let registry: ClaudeInstalledPlugins = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                path = %json_path.display(),
-                error = %e,
-                "failed to parse installed_plugins.json"
-            );
-            return vec![];
-        }
-    };
-
-    registry
-        .plugins
-        .into_iter()
-        .flat_map(|(key, entries)| {
-            let mut parts = key.splitn(2, '@');
-            let name = parts.next().unwrap_or(&key).to_string();
-            let marketplace = parts.next().map(String::from);
-            entries
-                .into_iter()
-                .filter(|entry| {
-                    claude_install_visible(
-                        entry.scope.as_deref(),
-                        entry.project_path.as_deref(),
-                        cwd,
-                    )
-                })
-                .map(move |entry| (name.clone(), marketplace.clone(), entry.install_path))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,26 +652,17 @@ mod tests {
     }
 
     #[test]
-    fn user_plugin_dirs_are_grow_and_claude_only_no_legacy() {
-        let home = Path::new("/home/u");
+    fn user_plugin_dirs_are_owned_by_grow_home() {
         let grow = Path::new("/custom/growhome");
-        let dirs = user_plugin_dirs(Some(home), Some(grow));
-        assert!(dirs.contains(&(grow.join("plugins"), PluginOrigin::UserGrow)));
-        assert!(dirs.contains(&(
-            home.join(".claude").join("plugins"),
-            PluginOrigin::UserClaude
-        )));
-        // Plugins are not discovered from the legacy ~/.grow tree.
-        assert!(
-            !dirs
-                .iter()
-                .any(|(p, _)| p == &home.join(".grow").join("plugins"))
+        assert_eq!(
+            user_plugin_dirs(Some(grow)),
+            vec![(grow.join("plugins"), PluginOrigin::UserGrow)]
         );
     }
 
     #[test]
     fn user_plugin_dirs_empty_without_home_or_grow() {
-        assert!(user_plugin_dirs(None, None).is_empty());
+        assert!(user_plugin_dirs(None).is_empty());
     }
 
     #[test]
@@ -954,18 +688,6 @@ mod tests {
         assert_eq!(candidates[0].scope, PluginScope::CliOverride);
         assert_eq!(candidates[0].origin, PluginOrigin::CliOverride);
         assert!(candidates[0].trusted);
-    }
-
-    #[test]
-    fn project_plugins_dir_origin_distinguishes_grow_and_claude() {
-        assert_eq!(
-            project_plugins_dir_origin(Path::new("/repo/.grow/plugins")),
-            PluginOrigin::ProjectGrow
-        );
-        assert_eq!(
-            project_plugins_dir_origin(Path::new("/repo/.claude/plugins")),
-            PluginOrigin::ProjectClaude
-        );
     }
 
     #[test]
@@ -997,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_convention_plugin_no_manifest() {
+    fn discover_rejects_plugin_without_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path().join("plugins");
         make_convention_plugin(&plugins_dir, "my-tool");
@@ -1015,8 +737,7 @@ mod tests {
             &mut candidates,
         );
 
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].plugin_name(), "my-tool");
+        assert!(candidates.is_empty());
     }
 
     #[test]
@@ -1572,294 +1293,5 @@ mod tests {
             .find(|p| p.manifest.name == "proj-mcp")
             .expect("project plugin discovered");
         assert!(p.trusted, "trusted folder must allow the project plugin");
-    }
-
-    #[test]
-    fn discover_project_claude_plugin_records_claude_origin() {
-        // Unique name: discover_plugins also scans the dev machine's real
-        // user dirs, and this test finds its plugin by name.
-        let name = format!("proj-claude-tool-{}", std::process::id());
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join(".claude").join("plugins").join(&name);
-        std::fs::create_dir_all(plugin_dir.join("skills")).unwrap();
-        std::fs::write(
-            plugin_dir.join("plugin.json"),
-            format!(r#"{{"name": "{name}"}}"#),
-        )
-        .unwrap();
-
-        let trust = TrustStore::load_from(tmp.path().join("trust"));
-        let config = DiscoveryConfig::default();
-        let discovered = discover_plugins(Some(tmp.path()), &config, &trust, true);
-        let p = discovered
-            .iter()
-            .find(|p| p.manifest.name == name)
-            .expect("project claude plugin discovered");
-        assert_eq!(p.scope, PluginScope::Project);
-        assert_eq!(p.origin, PluginOrigin::ProjectClaude);
-    }
-
-    #[test]
-    fn read_claude_installed_plugins_json() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        // Create fake plugin directories matching the compat cache layout
-        let cache = tmp.path().join("cache");
-        let plugin_a = cache.join("marketplace-a").join("my-lsp").join("1.0.0");
-        let plugin_b = cache.join("marketplace-b").join("my-tool").join("2.0.0");
-        std::fs::create_dir_all(plugin_a.join("skills")).unwrap();
-        std::fs::create_dir_all(&plugin_b).unwrap();
-        std::fs::write(plugin_b.join("plugin.json"), r#"{"name": "my-tool"}"#).unwrap();
-
-        // Write installed_plugins.json
-        let json_path = tmp.path().join("installed_plugins.json");
-        let json = serde_json::json!({
-            "version": 2,
-            "plugins": {
-                "my-lsp@marketplace-a": [{
-                    "scope": "user",
-                    "installPath": plugin_a.to_string_lossy(),
-                    "version": "1.0.0"
-                }],
-                "my-tool@marketplace-b": [{
-                    "scope": "user",
-                    "installPath": plugin_b.to_string_lossy(),
-                    "version": "2.0.0"
-                }]
-            }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-
-        let results = read_claude_installed_plugins(&json_path, None);
-        assert_eq!(results.len(), 2);
-
-        let names: Vec<&str> = results.iter().map(|(n, _, _)| n.as_str()).collect();
-        assert!(names.contains(&"my-lsp"));
-        assert!(names.contains(&"my-tool"));
-
-        let paths: Vec<&PathBuf> = results.iter().map(|(_, _, p)| p).collect();
-        assert!(paths.contains(&&plugin_a));
-        assert!(paths.contains(&&plugin_b));
-
-        let lsp = results.iter().find(|(n, _, _)| n == "my-lsp").unwrap();
-        assert_eq!(lsp.1.as_deref(), Some("marketplace-a"));
-        let tool = results.iter().find(|(n, _, _)| n == "my-tool").unwrap();
-        assert_eq!(tool.1.as_deref(), Some("marketplace-b"));
-    }
-
-    #[test]
-    fn read_claude_installed_plugins_key_without_marketplace() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin = tmp.path().join("bare");
-        std::fs::create_dir_all(&plugin).unwrap();
-        let json_path = tmp.path().join("installed_plugins.json");
-        let json = serde_json::json!({
-            "plugins": { "bare": [{ "installPath": plugin.to_string_lossy() }] }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-
-        let results = read_claude_installed_plugins(&json_path, None);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "bare");
-        assert_eq!(results[0].1, None);
-    }
-
-    #[test]
-    fn claude_local_install_included_when_cwd_under_project() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("proj");
-        let nested = project.join("src");
-        let plugin = tmp.path().join("cache").join("local-plug");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::create_dir_all(&plugin).unwrap();
-        let json_path = tmp.path().join("installed_plugins.json");
-        let json = serde_json::json!({
-            "plugins": {
-                "local-plug@mp": [{
-                    "scope": "local",
-                    "projectPath": project.to_string_lossy(),
-                    "installPath": plugin.to_string_lossy()
-                }]
-            }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-
-        let results = read_claude_installed_plugins(&json_path, Some(&nested));
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "local-plug");
-        assert_eq!(results[0].2, plugin);
-    }
-
-    #[test]
-    fn claude_local_install_excluded_when_cwd_outside_project() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("proj");
-        let other = tmp.path().join("other");
-        let plugin = tmp.path().join("cache").join("local-plug");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::create_dir_all(&plugin).unwrap();
-        let json_path = tmp.path().join("installed_plugins.json");
-        let json = serde_json::json!({
-            "plugins": {
-                "local-plug@mp": [{
-                    "scope": "local",
-                    "projectPath": project.to_string_lossy(),
-                    "installPath": plugin.to_string_lossy()
-                }]
-            }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-
-        let results = read_claude_installed_plugins(&json_path, Some(&other));
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn claude_user_and_unscoped_installs_included_regardless_of_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("proj");
-        let other = tmp.path().join("other");
-        let user_plugin = tmp.path().join("cache").join("user-plug");
-        let bare_plugin = tmp.path().join("cache").join("bare-plug");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::create_dir_all(&user_plugin).unwrap();
-        std::fs::create_dir_all(&bare_plugin).unwrap();
-        let json_path = tmp.path().join("installed_plugins.json");
-        let json = serde_json::json!({
-            "plugins": {
-                "user-plug@mp": [{
-                    "scope": "user",
-                    "installPath": user_plugin.to_string_lossy()
-                }],
-                "bare-plug@mp": [{
-                    "installPath": bare_plugin.to_string_lossy()
-                }],
-                "local-plug@mp": [{
-                    "scope": "local",
-                    "projectPath": project.to_string_lossy(),
-                    "installPath": tmp.path().join("cache").join("local-plug").to_string_lossy()
-                }]
-            }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-
-        let results = read_claude_installed_plugins(&json_path, Some(&other));
-        let names: Vec<&str> = results.iter().map(|(n, _, _)| n.as_str()).collect();
-        assert!(names.contains(&"user-plug"));
-        assert!(names.contains(&"bare-plug"));
-        assert!(!names.contains(&"local-plug"));
-    }
-
-    #[test]
-    fn claude_local_install_excluded_without_project_path_or_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin = tmp.path().join("cache").join("local-plug");
-        std::fs::create_dir_all(&plugin).unwrap();
-        let json_path = tmp.path().join("installed_plugins.json");
-        let json = serde_json::json!({
-            "plugins": {
-                "no-path@mp": [{
-                    "scope": "local",
-                    "installPath": plugin.to_string_lossy()
-                }],
-                "empty-path@mp": [{
-                    "scope": "local",
-                    "projectPath": "",
-                    "installPath": plugin.to_string_lossy()
-                }]
-            }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-
-        assert!(read_claude_installed_plugins(&json_path, Some(tmp.path())).is_empty());
-
-        let project = tmp.path().join("proj");
-        std::fs::create_dir_all(&project).unwrap();
-        let json = serde_json::json!({
-            "plugins": {
-                "has-path@mp": [{
-                    "scope": "local",
-                    "projectPath": project.to_string_lossy(),
-                    "installPath": plugin.to_string_lossy()
-                }]
-            }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-        assert!(read_claude_installed_plugins(&json_path, None).is_empty());
-    }
-
-    #[test]
-    fn claude_install_visible_path_boundary_not_string_prefix() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("proj");
-        let sibling = tmp.path().join("proj-other");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&sibling).unwrap();
-        assert!(claude_install_visible(
-            Some("local"),
-            Some(project.as_path()),
-            Some(project.as_path())
-        ));
-        assert!(!claude_install_visible(
-            Some("local"),
-            Some(project.as_path()),
-            Some(sibling.as_path())
-        ));
-    }
-
-    #[test]
-    fn claude_project_install_excluded_when_cwd_outside_project() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("proj");
-        let other = tmp.path().join("other");
-        let plugin = tmp.path().join("cache").join("team-plug");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::create_dir_all(&plugin).unwrap();
-        let json_path = tmp.path().join("installed_plugins.json");
-        let json = serde_json::json!({
-            "plugins": {
-                "team-plug@mp": [{
-                    "scope": "project",
-                    "projectPath": project.to_string_lossy(),
-                    "installPath": plugin.to_string_lossy()
-                }]
-            }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-
-        assert!(read_claude_installed_plugins(&json_path, Some(&other)).is_empty());
-        let results = read_claude_installed_plugins(&json_path, Some(&project));
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "team-plug");
-    }
-
-    #[test]
-    fn claude_entry_with_project_path_gated_even_without_local_scope() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("proj");
-        let other = tmp.path().join("other");
-        let plugin = tmp.path().join("cache").join("path-only");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::create_dir_all(&plugin).unwrap();
-        let json_path = tmp.path().join("installed_plugins.json");
-        let json = serde_json::json!({
-            "plugins": {
-                "path-only@mp": [{
-                    "projectPath": project.to_string_lossy(),
-                    "installPath": plugin.to_string_lossy()
-                }]
-            }
-        });
-        std::fs::write(&json_path, serde_json::to_string(&json).unwrap()).unwrap();
-
-        assert!(read_claude_installed_plugins(&json_path, Some(&other)).is_empty());
-        assert_eq!(
-            read_claude_installed_plugins(&json_path, Some(&project)).len(),
-            1
-        );
     }
 }

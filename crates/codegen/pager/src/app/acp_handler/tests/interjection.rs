@@ -131,7 +131,7 @@
         agent.session.current_prompt_id = Some("p1".into());
         insert_running_task(agent, "t10", "sleep 10");
 
-        simulate_task_output_wait_call(agent, "wait-1", "t10", 30_000);
+        simulate_task_output_wait_call(agent, "wait-1", &["t10"], 30_000);
         assert!(agent.renders_parked());
         assert_eq!(count_turn_markers(agent), 0);
 
@@ -144,7 +144,7 @@
             &mut agent.scrollback,
         ));
 
-        simulate_task_output_wait_call(agent, "wait-2", "t10", 30_000);
+        simulate_task_output_wait_call(agent, "wait-2", &["t10"], 30_000);
         assert!(agent.renders_parked(), "the re-park renders parked again");
         assert_eq!(count_turn_markers(agent), 0, "and still writes no marker");
     }

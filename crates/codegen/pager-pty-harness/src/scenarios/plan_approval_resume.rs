@@ -1,7 +1,7 @@
 //! Plan-approval chrome restored by the shell after quit + resume.
 //!
 //! When Plan approval is parked and the user quits, the shell persists
-//! `approval_pending = true` in `session-control.json`. On `--continue` the
+//! `approval_pending = true` as a Timeline Control event. On `--continue` the
 //! shell re-issues the `grow/plan_approval` reverse-request — a real live ACP
 //! waiter — so the pager re-shows approval chrome through its normal path with
 //! no pager-side disk logic. Approving then leaves plan mode and starts the
@@ -10,6 +10,7 @@
 //! This FAILS without the shell re-park (PR2 product change): no reverse-request
 //! reaches the resumed pager, so no approval chrome appears.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
@@ -139,8 +140,8 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
 }
 
 /// Mark the persisted session as having a parked plan approval: write `plan.md`
-/// and flip `approval_pending` to `true` in `session-control.json` for every
-/// session dir under the sandbox home.
+/// and append a Control event to `timeline.jsonl` for every session directory
+/// under the sandbox home.
 fn seed_parked_approval(home: &Path) -> Result<usize> {
     let sessions_root = home.join(".grow").join("sessions");
     if !sessions_root.is_dir() {
@@ -162,7 +163,7 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
             }
             let dir = sess_ent.path();
             std::fs::write(dir.join("plan.md"), PLAN_BODY).context("write plan.md")?;
-            write_awaiting_plan_mode(&dir.join("session-control.json"))?;
+            append_awaiting_plan_control(&dir.join("timeline.jsonl"))?;
             seeded += 1;
         }
     }
@@ -175,41 +176,77 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
     Ok(seeded)
 }
 
-/// Round-trip the shell-written atomic control snapshot and park Plan
-/// approval, preserving Goal and every unrelated field. The harness mirrors
-/// only the public JSON shape instead of depending on the heavy shell crate.
-fn write_awaiting_plan_mode(path: &Path) -> Result<()> {
-    let mut value: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "architecture_version": 1,
-                "control_revision": 1,
-                "behavior": {
-                    "state": { "Plan": "AwaitingApproval" },
-                    "approval_pending": true,
-                    "reminder_count": 0,
-                    "plan_artifact_revision": 1,
-                    "plan_artifact_hash": blake3::hash(PLAN_BODY.as_bytes()).to_hex().to_string(),
-                },
-            })
-        });
-    let obj = value
+/// Round-trip the latest shell-written Control snapshot and append the next
+/// monotonic event, preserving Goal and every unrelated field. The harness
+/// mirrors only the public Timeline JSON shape instead of depending on shell.
+fn append_awaiting_plan_control(path: &Path) -> Result<()> {
+    let raw = std::fs::read_to_string(path).context("read timeline.jsonl")?;
+    let mut expected_seq = 0_u64;
+    let mut timeline_version = None;
+    let mut latest_control = None;
+    let mut latest_revision = 0_u64;
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let value: serde_json::Value =
+            serde_json::from_str(line).context("parse Timeline event")?;
+        let version = value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .context("Timeline event version must be an integer")?;
+        if timeline_version
+            .replace(version)
+            .is_some_and(|seen| seen != version)
+        {
+            bail!("Timeline schema version changed within one ledger");
+        }
+        let seq = value
+            .get("seq")
+            .and_then(serde_json::Value::as_u64)
+            .context("Timeline event seq must be an integer")?;
+        if seq != expected_seq {
+            bail!("Timeline seq {seq} is not contiguous; expected {expected_seq}");
+        }
+        expected_seq = expected_seq.saturating_add(1);
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("control") {
+            let control = value
+                .get("event")
+                .and_then(serde_json::Value::as_object)
+                .context("Timeline control event must be an object")?;
+            latest_revision = control
+                .get("revision")
+                .and_then(serde_json::Value::as_u64)
+                .context("Timeline control revision must be an integer")?;
+            latest_control = Some(
+                control
+                    .get("snapshot")
+                    .cloned()
+                    .context("Timeline control event must carry a snapshot")?,
+            );
+        }
+    }
+    let revision = latest_revision.saturating_add(1).max(1);
+    let mut snapshot = latest_control.unwrap_or_else(|| {
+        serde_json::json!({
+            "architecture_version": 1,
+            "control_revision": revision,
+            "behavior": {
+                "state": { "Plan": "AwaitingApproval" },
+                "approval_pending": true,
+                "reminder_count": 0,
+                "plan_artifact_revision": 1,
+                "plan_artifact_hash": blake3::hash(PLAN_BODY.as_bytes()).to_hex().to_string(),
+            },
+        })
+    });
+    let obj = snapshot
         .as_object_mut()
-        .context("session-control.json must be a JSON object")?;
+        .context("Timeline control snapshot must be a JSON object")?;
     obj.insert("architecture_version".into(), serde_json::json!(1));
-    let revision = obj
-        .get("control_revision")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
-        .saturating_add(1);
     obj.insert("control_revision".into(), serde_json::json!(revision));
     let behavior = obj
         .entry("behavior")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .context("session-control.json behavior must be an object")?;
+        .context("Timeline control behavior must be an object")?;
     // The Plan phase and transport flag must agree for a valid re-park.
     behavior.insert(
         "state".into(),
@@ -222,7 +259,31 @@ fn write_awaiting_plan_mode(path: &Path) -> Result<()> {
         "plan_artifact_hash".into(),
         serde_json::json!(blake3::hash(PLAN_BODY.as_bytes()).to_hex().to_string()),
     );
-    std::fs::write(path, serde_json::to_vec_pretty(&value)?)
-        .context("write session-control.json")?;
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let event = serde_json::json!({
+        "version": timeline_version.context("Timeline must contain a seeded event")?,
+        "seq": expected_seq,
+        "at_ms": at_ms,
+        "type": "control",
+        "event": {
+            "revision": revision,
+            "snapshot": snapshot,
+        },
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .context("open timeline.jsonl for append")?;
+    if !raw.is_empty() && !raw.ends_with('\n') {
+        file.write_all(b"\n")?;
+    }
+    serde_json::to_writer(&mut file, &event)?;
+    file.write_all(b"\n")?;
+    file.sync_all()
+        .context("durably append Timeline control event")?;
     Ok(())
 }

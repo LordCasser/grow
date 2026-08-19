@@ -141,7 +141,7 @@ fn auto_mode_config_from_toml(
 
 /// Free-function form of [`resolve_auto_permission_mode_enabled`] for call
 /// sites without a `RemoteSettings` handle (the launch decision in
-/// `effective_auto_for_launch`, the agent's `session_auto_mode` guard, and the
+/// launch permission resolver, the agent's session-mode guard, and the
 /// pager mode cycle / settings). Reads env + requirements + the effective
 /// `config.toml` (user overlaid on managed) from disk plus the cached
 /// remote tier. Defaults `true` so Auto is available unless pinned off.

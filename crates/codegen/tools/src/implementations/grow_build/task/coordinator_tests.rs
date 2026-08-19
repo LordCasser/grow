@@ -82,7 +82,6 @@ impl ChildRunner for TestRunner {
                         return ChildRunOutput {
                             result: cancelled_result(&request),
                             completion_data: (),
-                            snapshot_ref: None,
                         };
                     }
                     _ = start.recv() => {}
@@ -91,11 +90,7 @@ impl ChildRunner for TestRunner {
             if !reporter
                 .started(StartedChild {
                     child_session_id: request.id.clone(),
-                    persona: None,
                     resumed_from: request.resume_from.clone(),
-                    child_cwd: request.cwd.clone().unwrap_or_default(),
-                    worktree_path: None,
-                    effective_model_id: "test-model".to_owned(),
                     // Mock definition resolution: this type declares background.
                     definition_background: request.subagent_type == "background-default",
                     control: TestControl {
@@ -108,7 +103,6 @@ impl ChildRunner for TestRunner {
                 return ChildRunOutput {
                     result: cancelled_result(&request),
                     completion_data: (),
-                    snapshot_ref: None,
                 };
             }
             let _ = started.send(request.id.clone());
@@ -132,7 +126,6 @@ impl ChildRunner for TestRunner {
             ChildRunOutput {
                 result,
                 completion_data: (),
-                snapshot_ref: None,
             }
         })
     }

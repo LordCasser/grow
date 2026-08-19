@@ -41,7 +41,7 @@ pub fn hook_spec_to_info(spec: &::hooks::config::HookSpec) -> HookInfo {
         HookEventName::Notification => HookEvent::Notification,
         // Subagent
         HookEventName::SubagentStart => HookEvent::SubagentStart,
-        HookEventName::SubagentStop | HookEventName::SubagentEnd => HookEvent::SubagentStop,
+        HookEventName::SubagentStop => HookEvent::SubagentStop,
         // Compaction
         HookEventName::PreCompact => HookEvent::PreCompact,
         HookEventName::PostCompact => HookEvent::PostCompact,
@@ -113,31 +113,29 @@ pub(crate) const ADVERTISED_BLOCKING_EVENTS: &[::hooks::event::HookEventName] = 
     ::hooks::event::HookEventName::SubagentStop,
 ];
 
-pub(crate) const ADVERTISED_DECISIONS: &[&str] = &["deny", "block"];
+pub(crate) const ADVERTISED_DECISIONS: &[&str] = &["deny"];
 
 pub(crate) const ADVERTISED_STOP_SIGNALS: &[&str] =
     &["continue", "stopReason", "additionalContext"];
 
-/// Only `Deny` blocks; every other value proceeds (fail-open).
+/// Only `Deny` blocks. Unknown wire values are malformed and fail open at the
+/// reverse-request boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ClientHookDecision {
     #[default]
     Continue,
-    #[serde(alias = "block")]
     Deny,
-    #[serde(other)]
-    Other,
 }
 
 /// Response payload for `grow/hooks/run` (client to agent). `Default` (used on
 /// timeout, transport error, or a malformed reply) proceeds.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ClientHookResponse {
     #[serde(default)]
     pub decision: ClientHookDecision,
-    #[serde(default, alias = "reason")]
+    #[serde(default)]
     pub system_message: Option<String>,
     #[serde(default, rename = "continue")]
     pub continue_: Option<bool>,
@@ -148,8 +146,8 @@ pub(crate) struct ClientHookResponse {
 }
 
 /// Parse client hooks from `session/new` `_meta["grow/hooks"]`, shaped
-/// `{ "<Event>": [{ matcher, hookCallbackIds }] }` (PascalCase or snake_case
-/// events). Each `matcher` is compiled with the agent's [`HookMatcher`] so client
+/// `{ "<event>": [{ matcher, hookCallbackIds }] }` with canonical snake_case
+/// events. Each `matcher` is compiled with the agent's [`HookMatcher`] so client
 /// and file hooks match identically. Unknown events, malformed groups, invalid
 /// matchers, and callback-less groups are skipped; absent meta yields no hooks.
 pub(crate) fn parse_client_hooks(meta: Option<&acp::Meta>) -> ClientHooks {
@@ -175,9 +173,7 @@ pub(crate) fn parse_client_hooks(meta: Option<&acp::Meta>) -> ClientHooks {
             .filter_map(|group| parse_hook_group(event, group))
             .collect();
         if !groups.is_empty() {
-            // Key by the canonical event so a registration under an alias (e.g.
-            // `SubagentEnd`) still matches the event the agent fires (`SubagentStop`).
-            hooks.entry(event.canonical()).or_default().extend(groups);
+            hooks.entry(event).or_default().extend(groups);
         }
     }
     hooks
@@ -353,7 +349,7 @@ mod tests {
     fn parse_client_hooks_parses_valid_groups() {
         let meta = serde_json::json!({
             "grow/hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "matcher": "run_terminal_command", "hookCallbackIds": ["cb_0"] },
                     { "matcher": null, "hookCallbackIds": ["cb_1"] },
                     { "matcher": "*", "hookCallbackIds": ["cb_2"] }
@@ -385,7 +381,7 @@ mod tests {
         let meta = serde_json::json!({
             "NotARealEvent": [{ "hookCallbackIds": ["x"] }],
             "grow/hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "matcher": "[invalid", "hookCallbackIds": ["bad_regex"] },
                     { "matcher": "run_terminal_command", "hookCallbackIds": [] },
                     { "matcher": "read_file", "hookCallbackIds": ["good"] }
@@ -403,7 +399,7 @@ mod tests {
     fn parse_client_hooks_reads_group_timeout() {
         let meta = serde_json::json!({
             "grow/hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "hookCallbackIds": ["a"], "timeout": 5.0 },
                     { "hookCallbackIds": ["b"], "timeout": 0 },
                     { "hookCallbackIds": ["c"] },
@@ -416,18 +412,6 @@ mod tests {
         assert_eq!(groups[1].timeout, None); // non-positive -> default
         assert_eq!(groups[2].timeout, None); // absent -> default
         assert_eq!(groups[3].timeout, Some(std::time::Duration::from_secs(600))); // capped
-    }
-
-    /// A registration under the `SubagentEnd` alias must land on the canonical
-    /// `SubagentStop` key the agent fires.
-    #[test]
-    fn parse_client_hooks_canonicalizes_subagent_alias() {
-        let meta = serde_json::json!({
-            "grow/hooks": { "SubagentEnd": [{ "hookCallbackIds": ["cb"] }] }
-        });
-        let hooks = parse_client_hooks(meta.as_object());
-        assert!(hooks.contains_key(&HookEventName::SubagentStop));
-        assert!(!hooks.contains_key(&HookEventName::SubagentEnd));
     }
 
     /// Reconnect refresh applies hooks only when the load meta carries `grow/hooks`:
@@ -443,15 +427,14 @@ mod tests {
 
         let set = reconnect_client_hooks(
             serde_json::json!({
-                "grow/hooks": { "PreToolUse": [{ "hookCallbackIds": ["cb"] }] }
+                "grow/hooks": { "pre_tool_use": [{ "hookCallbackIds": ["cb"] }] }
             })
             .as_object(),
         );
         assert!(set.is_some_and(|h| h.contains_key(&HookEventName::PreToolUse)));
     }
 
-    /// `deny` parses to `Deny` (+ optional message); everything else fails open:
-    /// unknown values to `Other`, missing/empty/default to `Continue`.
+    /// `deny` parses to `Deny` (+ optional message); missing/default proceeds.
     #[test]
     fn client_hook_response_deserialization() {
         let deny: ClientHookResponse =
@@ -459,9 +442,9 @@ mod tests {
         assert_eq!(deny.decision, ClientHookDecision::Deny);
         assert_eq!(deny.system_message.as_deref(), Some("blocked"));
 
-        let unknown: ClientHookResponse =
-            serde_json::from_str(r#"{"decision":"maybe_later"}"#).unwrap();
-        assert_eq!(unknown.decision, ClientHookDecision::Other);
+        assert!(
+            serde_json::from_str::<ClientHookResponse>(r#"{"decision":"maybe_later"}"#).is_err()
+        );
 
         let empty: ClientHookResponse = serde_json::from_str("{}").unwrap();
         assert_eq!(empty.decision, ClientHookDecision::Continue);
@@ -480,12 +463,12 @@ mod tests {
         assert_eq!(stop.stop_reason.as_deref(), Some("budget"));
         assert_eq!(stop.additional_context.as_deref(), Some("ctx"));
 
-        // Literal stop-hook output parses on the raw wire: `block` aliases
-        // `deny` and `reason` aliases `systemMessage`.
-        let blocked: ClientHookResponse =
-            serde_json::from_str(r#"{"decision":"block","reason":"run the tests"}"#).unwrap();
-        assert_eq!(blocked.decision, ClientHookDecision::Deny);
-        assert_eq!(blocked.system_message.as_deref(), Some("run the tests"));
+        assert!(
+            serde_json::from_str::<ClientHookResponse>(
+                r#"{"decision":"block","reason":"run the tests"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -547,7 +530,7 @@ mod tests {
             transcript_path: None,
             client_identifier: None,
             prompt_id: None,
-            permission_mode: Some("default".into()),
+            permission_mode: Some("ask".into()),
             payload: HookPayload::PreToolUse {
                 tool_name: "run_terminal_command".into(),
                 tool_use_id: "call_1".into(),
@@ -569,6 +552,6 @@ mod tests {
         assert_eq!(value["toolName"], "run_terminal_command");
         assert_eq!(value["toolInput"]["command"], "ls");
         assert_eq!(value["toolInputTruncated"], true);
-        assert_eq!(value["permissionMode"], "default");
+        assert_eq!(value["permissionMode"], "ask");
     }
 }

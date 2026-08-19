@@ -86,9 +86,9 @@ pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROW_AUTO_COMPACT_T
 ///
 /// Precedence (highest first):
 ///   1. env `GROW_AUTO_COMPACT_THRESHOLD_PERCENT`
-///   2. user TOML `[model.<id>].auto_compact_threshold_percent`
+///   2. user TOML `[provider.<id>.models.<model>].auto_compact_threshold_percent`
 ///      (read from `cfg.config_models`; the effective merge of user +
-///      managed `[model.<id>]` sections)
+///      managed provider-model entries)
 ///   3. user TOML `[session].auto_compact_threshold_percent`
 ///      (read from `cfg.session.auto_compact_threshold_percent: Option<u8>`)
 ///   4. remote settings per-model `ModelInfo.auto_compact_threshold_percent`
@@ -262,8 +262,8 @@ mod compaction_tool_choice_tests {
 #[cfg(test)]
 mod pre_prune_tests {
     use super::{
-        resolve_compaction_pre_prune_from as resolve, resolve_compaction_pre_prune_token_budget_from
-            as resolve_budget,
+        resolve_compaction_pre_prune_from as resolve,
+        resolve_compaction_pre_prune_token_budget_from as resolve_budget,
     };
 
     #[test]
@@ -292,7 +292,10 @@ mod pre_prune_tests {
 
     #[test]
     fn budget_env_over_config_over_remote() {
-        assert_eq!(resolve_budget(Some("2048"), Some(100), Some(200)), Some(2048));
+        assert_eq!(
+            resolve_budget(Some("2048"), Some(100), Some(200)),
+            Some(2048)
+        );
         assert_eq!(resolve_budget(None, Some(100), Some(200)), Some(100));
         assert_eq!(resolve_budget(None, None, Some(200)), Some(200));
     }

@@ -38,8 +38,6 @@ const SIMPLE_MODE_DEFAULT: bool = true;
 const VIM_MODE_DEFAULT: bool = false;
 const SHOW_THINKING_BLOCKS_DEFAULT: bool = true;
 const GROUP_TOOL_VERBS_DEFAULT: bool = true;
-/// Collapsed-Edit-blocks rollout flag defaults OFF (legacy expanded diffs).
-const COLLAPSED_EDIT_BLOCKS_DEFAULT: bool = false;
 /// Next-prompt suggestions (tab autocomplete ghost text) default ON.
 const PROMPT_SUGGESTIONS_DEFAULT: bool = true;
 const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
@@ -319,39 +317,6 @@ pub fn set_group_tool_verbs(enabled: bool) {
     GROUP_TOOL_VERBS_LOADED.with(|l| l.set(true));
 }
 
-// -- Collapsed edit blocks -----------------------------------------------------
-
-thread_local! {
-    static COLLAPSED_EDIT_BLOCKS_CURRENT: Cell<bool> =
-        const { Cell::new(COLLAPSED_EDIT_BLOCKS_DEFAULT) };
-    static COLLAPSED_EDIT_BLOCKS_LOADED: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Read cached `collapsed_edit_blocks`, seeding from `[ui]` on first call.
-/// Default OFF when unset. Startup may override via resolve. Consulted only
-/// when the pager.toml `[scrollback.blocks.edit]` shape keys are unset (see
-/// `EditBlockConfig::effective_expanded` / `effective_line_summary`).
-pub fn load_collapsed_edit_blocks() -> bool {
-    COLLAPSED_EDIT_BLOCKS_LOADED.with(|loaded| {
-        if !loaded.get() {
-            COLLAPSED_EDIT_BLOCKS_CURRENT.with(|c| {
-                c.set(load_bool_from_effective_config(
-                    "collapsed_edit_blocks",
-                    COLLAPSED_EDIT_BLOCKS_DEFAULT,
-                ))
-            });
-            loaded.set(true);
-        }
-    });
-    COLLAPSED_EDIT_BLOCKS_CURRENT.with(|c| c.get())
-}
-
-/// Replace cached `collapsed_edit_blocks`.
-pub fn set_collapsed_edit_blocks(enabled: bool) {
-    COLLAPSED_EDIT_BLOCKS_CURRENT.with(|c| c.set(enabled));
-    COLLAPSED_EDIT_BLOCKS_LOADED.with(|l| l.set(true));
-}
-
 // -- Prompt suggestions (tab autocomplete) -----------------------------------
 
 thread_local! {
@@ -622,7 +587,6 @@ pub fn prime(ui: &UiConfig) {
     let _ = load_render_mermaid();
     let _ = load_show_thinking_blocks();
     let _ = load_group_tool_verbs();
-    let _ = load_collapsed_edit_blocks();
     let _ = load_prompt_suggestions();
     // `default_selected_permission` owns its own cache in `permission_cursor`.
     crate::appearance::permission_cursor::prime();
@@ -641,34 +605,12 @@ fn load_bool_from_effective_config(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// Resolve the unified text-selection mode from a parsed `UiConfig`.
-///
-/// Precedence:
-/// 1. Explicit canonical `[ui].keep_text_selection` (`flash` | `hold` |
-///    `word_select`) always wins — Settings and hand-edits must stick even if a
-///    retired `double_click_action` key is still on disk.
-/// 2. Else retired `double_click_action = "word_select"` migrates to
-///    `word_select` (pre-unification / hand-edited configs only; Settings
-///    clears it on any write via `set_keep_text_selection`).
-/// 3. Else legacy bool / `selection_highlight_duration_ms` fallback (`hold` vs
-///    `flash`).
+/// Resolve the canonical text-selection mode from a parsed `UiConfig`.
 fn text_selection_from_ui(ui: &UiConfig) -> TextSelection {
-    if let Some(kind) = ui
-        .keep_text_selection
+    ui.keep_text_selection
         .as_deref()
         .and_then(TextSelection::from_canonical)
-    {
-        return kind;
-    }
-    // Legacy only when keep_text_selection is unset/non-canonical.
-    if ui.double_click_action.as_deref() == Some("word_select") {
-        return TextSelection::WordSelect;
-    }
-    if ui.keep_text_selection_enabled() {
-        TextSelection::Hold
-    } else {
-        TextSelection::Flash
-    }
+        .unwrap_or(KEEP_TEXT_SELECTION_DEFAULT)
 }
 
 fn load_keep_text_selection_from_effective_config() -> TextSelection {
@@ -738,19 +680,6 @@ mod tests {
             GROUP_TOOL_VERBS_DEFAULT,
             ui.group_tool_verbs.unwrap_or(GROUP_TOOL_VERBS_DEFAULT)
         );
-        assert_eq!(
-            COLLAPSED_EDIT_BLOCKS_DEFAULT,
-            ui.collapsed_edit_blocks
-                .unwrap_or(COLLAPSED_EDIT_BLOCKS_DEFAULT)
-        );
-        // Deliberate constant pin: the rollout contract is default-OFF.
-        #[allow(clippy::assertions_on_constants)]
-        {
-            assert!(
-                !COLLAPSED_EDIT_BLOCKS_DEFAULT,
-                "collapsed_edit_blocks must default OFF (rollout flag)"
-            );
-        }
         assert_eq!(
             PROMPT_SUGGESTIONS_DEFAULT,
             ui.prompt_suggestions.unwrap_or(PROMPT_SUGGESTIONS_DEFAULT)
@@ -864,18 +793,6 @@ mod tests {
             assert!(!load_group_tool_verbs());
             set_group_tool_verbs(true);
             assert!(load_group_tool_verbs());
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[test]
-    fn set_then_load_round_trips_collapsed_edit_blocks() {
-        std::thread::spawn(|| {
-            set_collapsed_edit_blocks(true);
-            assert!(load_collapsed_edit_blocks());
-            set_collapsed_edit_blocks(false);
-            assert!(!load_collapsed_edit_blocks());
         })
         .join()
         .unwrap();
@@ -1113,20 +1030,6 @@ mod tests {
     }
 
     #[test]
-    fn prime_honors_legacy_duration_zero_via_ui_config() {
-        std::thread::spawn(|| {
-            let ui = UiConfig {
-                selection_highlight_duration_ms: Some(0),
-                ..UiConfig::default()
-            };
-            prime(&ui);
-            assert_eq!(load_keep_text_selection(), TextSelection::Hold);
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[test]
     fn prime_resolves_word_select_from_keep_text_selection() {
         std::thread::spawn(|| {
             let ui = UiConfig {
@@ -1138,51 +1041,6 @@ mod tests {
             assert_eq!(ts, TextSelection::WordSelect);
             assert!(ts.holds(), "word_select must hold the highlight");
             assert!(ts.selects_word(), "word_select must enable word selection");
-        })
-        .join()
-        .unwrap();
-    }
-
-    /// Backward-compat: the retired hidden `double_click_action = "word_select"`
-    /// flag migrates onto the unified `word_select` mode when
-    /// `keep_text_selection` is unset.
-    #[test]
-    fn prime_migrates_legacy_double_click_action_flag() {
-        std::thread::spawn(|| {
-            let ui = UiConfig {
-                double_click_action: Some("word_select".into()),
-                ..UiConfig::default()
-            };
-            prime(&ui);
-            assert_eq!(load_keep_text_selection(), TextSelection::WordSelect);
-        })
-        .join()
-        .unwrap();
-    }
-
-    /// Explicit `keep_text_selection` must beat a leftover
-    /// `double_click_action = "word_select"` so Settings/hand-edits stick and
-    /// the legacy key cannot re-override on every prime/load.
-    #[test]
-    fn explicit_keep_text_selection_wins_over_legacy_double_click() {
-        std::thread::spawn(|| {
-            for (paired, want) in [
-                ("flash", TextSelection::Flash),
-                ("hold", TextSelection::Hold),
-                ("word_select", TextSelection::WordSelect),
-            ] {
-                let ui = UiConfig {
-                    keep_text_selection: Some(paired.into()),
-                    double_click_action: Some("word_select".into()),
-                    ..UiConfig::default()
-                };
-                prime(&ui);
-                assert_eq!(
-                    load_keep_text_selection(),
-                    want,
-                    "explicit keep_text_selection={paired} must win over double_click_action"
-                );
-            }
         })
         .join()
         .unwrap();

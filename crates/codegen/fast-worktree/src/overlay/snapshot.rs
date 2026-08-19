@@ -32,13 +32,8 @@ struct OverlayMetadata {
     kind: String,
     /// Path to the btrfs snapshot root (the subvolume to pass to `btrfs subvolume delete`).
     ///
-    /// - **New layout:** `<wt_base>/root` — the entire overlay_root is snapshotted,
-    ///   and `root/upper/` is the overlayfs upper dir.
-    /// - **Old layout (via alias):** `<wt_base>/upper` — the upper dir was itself the
-    ///   btrfs subvolume and also the overlayfs upper dir.
-    ///
-    /// In both cases, this field is the correct path for `btrfs subvolume delete`.
-    #[serde(alias = "snapshot_upper")]
+    /// `<wt_base>/root`: the entire overlay root is snapshotted and
+    /// `root/upper/` is the overlayfs upper directory.
     snapshot_root: PathBuf,
     /// Path to the overlay work dir.
     work_dir: PathBuf,
@@ -646,7 +641,7 @@ mod tests {
     fn test_metadata_deserialization_from_fixture() {
         let json = r#"{
             "type": "overlay",
-            "snapshot_upper": "/var/lib/repo-fuse/instance/worktrees/abc123/upper",
+            "snapshot_root": "/var/lib/repo-fuse/instance/worktrees/abc123/upper",
             "work_dir": "/var/lib/repo-fuse/instance/worktrees/abc123/work",
             "lower_dir": "/var/lib/repo-fuse/instance/fuse-lower",
             "mount_target": "/home/user/.grow/worktrees/abc123",
@@ -655,7 +650,6 @@ mod tests {
 
         let meta: OverlayMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(meta.kind, "overlay");
-        // "snapshot_upper" in JSON is deserialized into snapshot_root via serde alias
         assert_eq!(
             meta.snapshot_root,
             PathBuf::from("/var/lib/repo-fuse/instance/worktrees/abc123/upper")
@@ -748,7 +742,7 @@ mod tests {
         // (full removal needs a live btrfs host).
         let json = r#"{
             "type": "overlay",
-            "snapshot_upper": "/var/lib/repo-fuse/instance/worktrees/wt1/upper",
+            "snapshot_root": "/var/lib/repo-fuse/instance/worktrees/wt1/upper",
             "work_dir": "/var/lib/repo-fuse/instance/worktrees/wt1/work",
             "lower_dir": "/var/lib/repo-fuse/instance/fuse-lower",
             "mount_target": "/home/user/.grow/worktrees/wt1",
@@ -760,7 +754,6 @@ mod tests {
             meta.mount_target,
             PathBuf::from("/home/user/.grow/worktrees/wt1")
         );
-        // "snapshot_upper" in JSON maps to snapshot_root via serde alias
         assert_eq!(
             meta.snapshot_root,
             PathBuf::from("/var/lib/repo-fuse/instance/worktrees/wt1/upper")

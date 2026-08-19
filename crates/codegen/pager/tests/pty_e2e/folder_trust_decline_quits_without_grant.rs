@@ -9,7 +9,7 @@ use super::common::*;
 #[ignore]
 async fn folder_trust_decline_quits_without_grant() {
     let content = ContentController::start().await.expect("start content");
-    let repo = git_repo_with_mcp_json();
+    let repo = git_repo_with_project_mcp();
     let env_refs = trust_env(true);
     let cwd = repo.path().to_str().expect("utf8 repo path");
 

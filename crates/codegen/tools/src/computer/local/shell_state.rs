@@ -297,7 +297,7 @@ impl ShellState {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        crate::util::detach_command(&mut cmd);
+        tty_utils::detach_command(&mut cmd);
         // Apply the policy before the `export -p` snapshot so the replayed state
         // is already filtered; otherwise the restore would undo it. No-op unless set.
         //
@@ -313,7 +313,7 @@ impl ShellState {
             );
         }
         crate::util::apply_shell_environment_policy(&mut cmd, shell_env_policy);
-        cmd.envs(crate::util::pager_env());
+        cmd.envs(tty_utils::pager_env());
         #[allow(clippy::disallowed_methods)] // one-shot init run, waited on here
         let mut child = cmd.spawn().map_err(|e| {
             crate::computer::types::ComputerError::io(format!(

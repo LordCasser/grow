@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "process", "io-util", "macros", "time"] }
 tracing = { workspace = true }
+tty-utils = { workspace = true }
 shell = { workspace = true }
 tar = { workspace = true }
 tools = { workspace = true }

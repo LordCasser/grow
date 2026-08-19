@@ -471,14 +471,7 @@ pub fn acp_tool_update(
             ))
         }
         ToolOutput::AskUserQuestion(ask) => {
-            let message = match ask {
-                tools::types::output::AskUserQuestionOutput::UserAnswered { message } => {
-                    message.clone()
-                }
-                tools::types::output::AskUserQuestionOutput::QuestionsSent { message, .. } => {
-                    message.clone()
-                }
-            };
+            let message = &ask.message;
             Some(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),
                 acp::ToolCallUpdateFields::new()
@@ -556,7 +549,6 @@ mod tests {
     fn test_acp_tool_update_read_file_success() {
         let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
             content: "file content".to_string(),
-            content_concise: None,
             absolute_path: PathBuf::from("/project/src/main.rs"),
             offset: None,
             limit: None,
@@ -690,7 +682,6 @@ mod tests {
         // raw_output_json uses serde directly, so it must round-trip with ToolOutput deserialization
         let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
             content: "content".to_string(),
-            content_concise: None,
             absolute_path: PathBuf::from("/project/src/main.rs"),
             offset: None,
             limit: None,
@@ -816,7 +807,6 @@ mod tests {
         .unwrap();
         let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
             content: "content".to_string(),
-            content_concise: None,
             absolute_path: PathBuf::from("/root/.grow/worktrees/myproject/ab-123/src/main.rs"),
             offset: None,
             limit: None,
@@ -1036,7 +1026,6 @@ mod tests {
     fn test_no_rewriter_preserves_original_paths() {
         let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
             content: "content".to_string(),
-            content_concise: None,
             absolute_path: PathBuf::from("/root/.grow/worktrees/myproject/ab-123/src/main.rs"),
             offset: None,
             limit: None,

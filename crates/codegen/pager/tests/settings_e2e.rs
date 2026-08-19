@@ -58,7 +58,6 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "show_thinking_blocks",
     "prompt_suggestions",
     "group_tool_verbs",
-    "collapsed_edit_blocks",
     "respect_manual_folds",
     "hunk_tracker_mode",
     // Contextual-hints group + its per-tip child toggles (exercised via the
@@ -261,12 +260,6 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("group_tool_verbs", Action::SetGroupToolVerbs(b)) => {
             assert_eq!(b, expected, "SetGroupToolVerbs value differs from expected")
-        }
-        ("collapsed_edit_blocks", Action::SetCollapsedEditBlocks(b)) => {
-            assert_eq!(
-                b, expected,
-                "SetCollapsedEditBlocks value differs from expected"
-            )
         }
         ("invert_scroll", Action::SetInvertScroll(b)) => {
             assert_eq!(b, expected, "SetInvertScroll value differs from expected")
@@ -1762,7 +1755,6 @@ fn registry_kind_membership_through_pr_14() {
         vec![
             "compact_mode",
             "group_tool_verbs",
-            "collapsed_edit_blocks",
             "invert_scroll",
             "display_refresh_auto_cadence",
             "prompt_suggestions",
@@ -1934,7 +1926,6 @@ fn defaults_round_trip_through_registry() {
             "show_thinking_blocks" => SettingValue::Bool(true),
             "prompt_suggestions" => SettingValue::Bool(true),
             "group_tool_verbs" => SettingValue::Bool(true),
-            "collapsed_edit_blocks" => SettingValue::Bool(false),
             "respect_manual_folds" => SettingValue::Bool(false),
             // Per-tip contextual-hint children default ON (inherit → true).
             "contextual_hints.undo" => SettingValue::Bool(true),
@@ -2014,7 +2005,6 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetShowThinkingBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetPromptSuggestions(_))
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
-            | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
             | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_)) => {}
             other => panic!(
@@ -2759,7 +2749,7 @@ fn pr6_permission_mode_does_not_support_preview() {
         } => {
             assert!(
                 !supports_preview,
-                "permission_mode MUST be supports_preview: false — toggling YOLO has \
+                "permission_mode MUST be supports_preview: false — toggling always-approve has \
                  irreversible side effects (drains permission_queue) so per-keystroke \
                  preview is unsafe",
             );
@@ -2777,14 +2767,14 @@ fn pr6_current_value_for_reads_ui_default() {
     let mut ui = UiConfig::default();
     ui.permission_mode = Some("auto".to_string());
     let snapshot = PagerLocalSnapshot {
-        yolo_mode: true,
+        permission_mode: shell::util::config::PermissionMode::AlwaysApprove,
         ..PagerLocalSnapshot::default()
     };
 
     assert_eq!(
         current_value_for("permission_mode", &ui, &snapshot),
         Some(SettingValue::Enum("auto")),
-        "active-session yolo must not override the persistent default",
+        "active-session always-approve must not override the persistent default",
     );
 
     // A different persistent value still wins over active-session state.
@@ -2819,7 +2809,7 @@ fn pr6_enter_on_permission_mode_row_enters_picking_enum() {
             assert_eq!(
                 original_value,
                 &SettingValue::Enum("ask"),
-                "default snapshot yolo_mode=false → original 'ask'"
+                "default snapshot always_approve_mode=false → original 'ask'"
             );
         }
         other => panic!("expected PickingEnum mode, got {other:?}"),
@@ -2987,7 +2977,7 @@ fn pr6_picker_seeds_choices_idx_from_ui_default() {
     }
 }
 
-/// Exactly 4 canonical choices: {ask, auto, always-approve, default}.
+/// Exactly three canonical choices: {ask, auto, always-approve}.
 #[test]
 fn pr6_permission_mode_choices_use_canonical_strings() {
     let reg = SettingsRegistry::defaults();
@@ -2998,8 +2988,8 @@ fn pr6_permission_mode_choices_use_canonical_strings() {
     };
     assert_eq!(
         canonicals.len(),
-        4,
-        "permission_mode catalog must be exactly {{ask, auto, always-approve, default}} — adding a \
+        3,
+        "permission_mode catalog must be exactly {{ask, auto, always-approve}} — adding a \
          choice requires updating action_for_enum_commit, apply_setting_rollback, \
          PermissionModeKind, AND load_permission_mode (PR 11 contract)",
     );
@@ -3014,30 +3004,6 @@ fn pr6_permission_mode_choices_use_canonical_strings() {
     assert!(
         canonicals.contains(&"always-approve"),
         "permission_mode must include 'always-approve' canonical (shell schema)"
-    );
-    assert!(
-        canonicals.contains(&"default"),
-        "permission_mode must include 'default' canonical (PR 11 — agent's \
-         default permission behavior)"
-    );
-}
-
-/// Search "yolo" finds exactly `permission_mode`.
-#[test]
-fn pr6_search_yolo_matches_permission_mode() {
-    let reg = SettingsRegistry::defaults();
-    let hits = reg.search("yolo");
-    assert_eq!(
-        hits.len(),
-        1,
-        "search('yolo') must return exactly one result (permission_mode) — \
-         found {} results: {:?}",
-        hits.len(),
-        hits.iter().map(|m| m.key).collect::<Vec<_>>(),
-    );
-    assert_eq!(
-        hits[0].key, "permission_mode",
-        "search('yolo') unique result must be permission_mode"
     );
 }
 
@@ -3141,63 +3107,8 @@ fn pr6_mouse_click_on_permission_mode_indicator_opens_picker_in_one_click() {
 }
 
 // ---------------------------------------------------------------------------
-// permission_mode 3-state tests (default/ask/always-approve)
+// permission_mode canonical-state tests (ask/auto/always-approve)
 // ---------------------------------------------------------------------------
-
-/// Picking "Default" updates the persistent default.
-#[test]
-fn pr11_picker_commit_for_default_dispatches_set_permission_mode_default() {
-    use pager::app::actions::PermissionModeKind;
-    let reg = SettingsRegistry::defaults();
-    let meta = reg.find("permission_mode").unwrap();
-    let choices = match &meta.kind {
-        SettingKind::Enum { choices, .. } => *choices,
-        _ => panic!("permission_mode must be Enum"),
-    };
-    let default_idx = choices
-        .iter()
-        .position(|c| c.canonical == "default")
-        .expect("permission_mode must include the 'default' choice (PR 11)");
-    let initial_idx = choices
-        .iter()
-        .position(|c| c.canonical == "ask")
-        .expect("'ask' canonical must be present");
-    assert_ne!(
-        default_idx, initial_idx,
-        "test invariant: 'default' must be a distinct choice from 'ask'"
-    );
-
-    let mut s = make_state();
-    navigate_to(&mut s, "permission_mode");
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert!(
-        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. } if key == "permission_mode"),
-        "Enter on permission_mode row must open the picker, got {:?}",
-        s.mode(),
-    );
-    let steps = default_idx as isize - initial_idx as isize;
-    let nav_key = if steps > 0 {
-        KeyCode::Down
-    } else {
-        KeyCode::Up
-    };
-    for _ in 0..steps.unsigned_abs() {
-        let _ = handle_settings_key(&mut s, &press(nav_key));
-    }
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    match outcome {
-        SettingsKeyOutcome::Action(Action::SetDefaultPermissionMode(
-            PermissionModeKind::Default,
-        )) => {}
-        other => panic!(
-            "Enter on 'default' must commit SetDefaultPermissionMode(Default), got {other:?}"
-        ),
-    }
-    assert!(
-        matches!(s.mode(), SettingsModalMode::Browse),
-        "Enter commit must return to Browse"
-    );
-}
 
 /// Picking "Ask" updates the persistent default.
 #[test]
@@ -3249,44 +3160,6 @@ fn pr11_picker_commit_for_ask_dispatches_set_permission_mode_ask() {
     }
 }
 
-/// Returns "default" when `ui.permission_mode == "default"` and yolo=false.
-#[test]
-fn pr11_current_value_for_returns_default_when_ui_says_default() {
-    use pager::settings::current_value_for;
-    let ui = UiConfig {
-        permission_mode: Some("default".into()),
-        ..UiConfig::default()
-    };
-    let pager = PagerLocalSnapshot {
-        yolo_mode: false,
-        ..PagerLocalSnapshot::default()
-    };
-    assert_eq!(
-        current_value_for("permission_mode", &ui, &pager),
-        Some(SettingValue::Enum("default")),
-        "ui.permission_mode = 'default' + yolo=false → 'default'"
-    );
-}
-
-/// Active-session Permission never overrides the persistent default row.
-#[test]
-fn pr11_current_value_for_ignores_active_session_yolo() {
-    use pager::settings::current_value_for;
-    let ui = UiConfig {
-        permission_mode: Some("default".into()),
-        ..UiConfig::default()
-    };
-    let pager = PagerLocalSnapshot {
-        yolo_mode: true,
-        ..PagerLocalSnapshot::default()
-    };
-    assert_eq!(
-        current_value_for("permission_mode", &ui, &pager),
-        Some(SettingValue::Enum("default")),
-        "active-session Permission must not leak into Settings",
-    );
-}
-
 /// Missing persistent value resolves to Ask even if the active session uses
 /// Always Approve.
 #[test]
@@ -3297,7 +3170,7 @@ fn pr11_current_value_for_none_uses_ask_default() {
         ..UiConfig::default()
     };
     let pager = PagerLocalSnapshot {
-        yolo_mode: true,
+        permission_mode: shell::util::config::PermissionMode::AlwaysApprove,
         ..PagerLocalSnapshot::default()
     };
     assert_eq!(
@@ -3312,7 +3185,7 @@ fn pr11_current_value_for_none_uses_ask_default() {
 fn pr11_current_value_for_falls_through_to_ask() {
     use pager::settings::current_value_for;
     let pager = PagerLocalSnapshot {
-        yolo_mode: false,
+        permission_mode: shell::util::config::PermissionMode::Ask,
         ..PagerLocalSnapshot::default()
     };
     // Explicit "ask" → "ask"
@@ -3360,8 +3233,8 @@ fn pr11_current_value_for_falls_through_to_ask() {
 fn pr11_permission_mode_kind_canonical_round_trip() {
     use pager::app::actions::PermissionModeKind;
     for kind in [
-        PermissionModeKind::Default,
         PermissionModeKind::Ask,
+        PermissionModeKind::Auto,
         PermissionModeKind::AlwaysApprove,
     ] {
         let canonical = kind.as_canonical();
@@ -3391,7 +3264,6 @@ fn pr11_permission_mode_kind_canonical_strings_match_choices_catalog() {
         .expect("permission_mode must be registered");
 
     for kind in [
-        PermissionModeKind::Default,
         PermissionModeKind::Ask,
         PermissionModeKind::Auto,
         PermissionModeKind::AlwaysApprove,
@@ -3404,8 +3276,8 @@ fn pr11_permission_mode_kind_canonical_strings_match_choices_catalog() {
     }
     assert_eq!(
         catalog_canonicals.len(),
-        4,
-        "catalog must be exactly {{ask, auto, always-approve, default}} — adding a fifth \
+        3,
+        "catalog must be exactly {{ask, auto, always-approve}} — adding a fourth \
          choice requires adding a PermissionModeKind variant AND updating action_for_enum_commit \
          + apply_setting_rollback + load_permission_mode + this test (PR 11 contract)",
     );
@@ -3417,11 +3289,7 @@ fn pr11_permission_mode_kind_is_always_approve_projection() {
     use pager::app::actions::PermissionModeKind;
     assert!(PermissionModeKind::AlwaysApprove.is_always_approve());
     assert!(!PermissionModeKind::Ask.is_always_approve());
-    assert!(
-        !PermissionModeKind::Default.is_always_approve(),
-        "PR 11: Default must project onto yolo=false — it's an alias for Ask at runtime, \
-         NOT an alias for AlwaysApprove"
-    );
+    assert!(!PermissionModeKind::Auto.is_always_approve());
 }
 
 // cycle_mode delegation tests live in `dispatch.rs::tests`.
@@ -5105,8 +4973,8 @@ fn mouse_click_on_screen_mode_indicator_opens_picker_in_one_click() {
 
 // ---------------------------------------------------------------------------
 // hunk_tracker_mode (SHELL Enum, Advanced, restart_required, no preview).
-// Catalog [agent_only, all_dirty, off]; `disabled` aliases `off` at parse
-// time. Mirrors the render_mermaid enum tests (keyboard ↔ mouse parity).
+// Catalog [agent_only, all_dirty, off]. Mirrors the render_mermaid enum tests
+// (keyboard ↔ mouse parity).
 // ---------------------------------------------------------------------------
 
 /// Enter on the `hunk_tracker_mode` row opens the picker seeded at the
@@ -6565,112 +6433,6 @@ fn group_tool_verbs_renders_under_appearance_category_shell_owned() {
         respect_idx + 1,
         group_idx,
         "group_tool_verbs must be immediately below respect_manual_folds; \
-         Appearance order: {keys:?}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// collapsed_edit_blocks — SHELL-owned Bool (Appearance, default false)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn collapsed_edit_blocks_space_dispatches_typed_setter() {
-    // Seed the live cache to the shipped default (bypasses the disk seed so a
-    // host [ui] override can't flip the expected toggle direction).
-    pager::appearance::cache::set_collapsed_edit_blocks(false);
-    let mut s = make_state();
-    navigate_to(&mut s, "collapsed_edit_blocks");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "collapsed_edit_blocks", true);
-}
-
-#[test]
-fn collapsed_edit_blocks_enter_dispatches_typed_setter() {
-    pager::appearance::cache::set_collapsed_edit_blocks(false);
-    let mut s = make_state();
-    navigate_to(&mut s, "collapsed_edit_blocks");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "collapsed_edit_blocks", true);
-}
-
-#[test]
-fn collapsed_edit_blocks_mouse_click_two_stage_toggles() {
-    pager::appearance::cache::set_collapsed_edit_blocks(false);
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "collapsed_edit_blocks") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "first click on a different row body should only select, got: {outcome:?}"
-    );
-    assert_eq!(s.selected, row_y as usize);
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    // Default is false → toggle dispatches true.
-    assert_set_bool_action(outcome, "collapsed_edit_blocks", true);
-}
-
-#[test]
-fn collapsed_edit_blocks_cache_on_dispatches_off() {
-    // When the live cache is on (remote settings/team enable), toggle turns it off.
-    pager::appearance::cache::set_collapsed_edit_blocks(true);
-    let mut s = SettingsModalState::new(
-        Arc::new(SettingsRegistry::defaults()),
-        UiConfig::default(),
-        PagerLocalSnapshot::default(),
-    );
-    navigate_to(&mut s, "collapsed_edit_blocks");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "collapsed_edit_blocks", false);
-    // Restore default (off) for other tests that share the process cache.
-    pager::appearance::cache::set_collapsed_edit_blocks(false);
-}
-
-#[test]
-fn collapsed_edit_blocks_renders_under_appearance_category_shell_owned() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("collapsed_edit_blocks")
-        .expect("collapsed_edit_blocks must be registered");
-    assert_eq!(meta.category, SettingCategory::Appearance);
-    assert_eq!(meta.owner, SettingOwner::Shell);
-    match &meta.kind {
-        SettingKind::Bool { default } => {
-            assert!(!*default, "default must be false (rollout flag ships OFF)")
-        }
-        other => panic!("expected Bool kind for collapsed_edit_blocks, got {other:?}"),
-    }
-    // Must sit immediately below group_tool_verbs in the registry order.
-    let keys: Vec<&str> = reg
-        .all()
-        .iter()
-        .filter(|m| m.category == SettingCategory::Appearance)
-        .map(|m| m.key)
-        .collect();
-    let group_idx = keys
-        .iter()
-        .position(|k| *k == "group_tool_verbs")
-        .expect("group_tool_verbs in Appearance");
-    let collapsed_idx = keys
-        .iter()
-        .position(|k| *k == "collapsed_edit_blocks")
-        .expect("collapsed_edit_blocks in Appearance");
-    assert_eq!(
-        group_idx + 1,
-        collapsed_idx,
-        "collapsed_edit_blocks must be immediately below group_tool_verbs; \
          Appearance order: {keys:?}"
     );
 }

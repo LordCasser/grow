@@ -15,8 +15,7 @@ const LEADER_VERSION: &str = match option_env!("VERSION_WITH_COMMIT") {
 };
 use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
-    LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError, ServerMessage, read_message,
-    write_message,
+    LEADER_PROTOCOL_VERSION, ProtocolError, ServerMessage, read_message, write_message,
 };
 use super::transport::{LeaderListener, LeaderStream};
 use crate::agent::activity::AgentActivity;
@@ -139,14 +138,8 @@ impl LeaderServerControlState {
             cpu_profile: Arc::new(Mutex::new(CpuProfileManager::new())),
         }
     }
-    fn leader_capabilities(&self) -> LeaderCapabilities {
-        let manager = self.cpu_profile.lock();
-        LeaderCapabilities {
-            control_v1: true,
-            runtime_cpu_profile: manager.runtime_cpu_profile(),
-            profile_formats: manager.profile_formats().to_vec(),
-            relaunch_v1: true,
-        }
+    fn runtime_cpu_profile(&self) -> bool {
+        self.cpu_profile.lock().runtime_cpu_profile()
     }
 }
 /// Rewrite JSON-RPC request ID **in place** by prefixing with client ID to
@@ -200,13 +193,12 @@ fn extract_session_id(json: &serde_json::Value) -> Option<String> {
     let params = json.get("params")?;
     params
         .get("sessionId")
-        .or_else(|| params.get("session_id"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| {
             params
                 .get("params")
-                .and_then(|inner| inner.get("sessionId").or_else(|| inner.get("session_id")))
+                .and_then(|inner| inner.get("sessionId"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         })
@@ -271,15 +263,6 @@ fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
 ///   `[provider.*]`/`[models]` hot-reload,
 ///   auth change, response-header etag refresh). Every connected client's
 ///   model picker must refresh, not just the most recently active one.
-/// - `grow/mcp/servers_updated` — the MCP catalog resolved/changed (managed
-///   connectors fetched in the background after `initialize`). Deliberately
-///   session-agnostic on the wire (no `sessionId`, see
-///   `extensions::mcp::notify_servers_updated`); the push fires seconds after
-///   `initialize` returns, so last-active-client fallback routinely delivered
-///   it to the wrong client (or dropped it) in multi-client leaders — managed
-///   connectors then "disappeared" from every other client's `/mcp` view.
-///   Broadcast is safe: the pager handler only debounce-refetches `mcp/list`
-///   for agents with an open extensions modal.
 /// - `grow/announcements/update` — the announcements list changed (startup
 ///   one-shot or the periodic settings refresh). Session-agnostic; every
 ///   client renders its own banner, so last-active-client fallback would
@@ -293,32 +276,17 @@ fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
 fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
-        Some(
-            "grow/sessions/changed"
-                | "grow/models/update"
-                | "grow/mcp/servers_updated"
-                | "grow/announcements/update"
-        )
+        Some("grow/sessions/changed" | "grow/models/update" | "grow/announcements/update")
     )
 }
-/// Whether a payload is the `grow/scheduled_task_inject_prompt` notification.
-///
-/// This notification tells the receiving client to enqueue AND drive a
-/// scheduled (`/loop`) cron prompt. Unlike ordinary `sessionId`-bearing
-/// notifications (which fan out to every subscriber so each renders an
-/// identical stream), it must be routed to the SINGLE session driver: if every
-/// attached client received it, each would enqueue + try to drive the same cron
-/// turn, duplicating it (phantom `#N` queue entries, competing drivers, stuck
-/// turns). The other clients render the resulting turn from the broadcast
-/// `session/update` deltas, exactly like any other turn the driver runs.
 /// The namespaced method a leader payload carries, normalizing the two ext wire
 /// forms the gateway produces:
 ///   - direct:  `{"method":"grow/foo", ...}`                                 -> `grow/foo`
 ///   - wrapped: `{"method":"_grow/foo","params":{"method":"grow/foo",...}}`  -> `grow/foo`
 ///
 /// Gateway-forwarded ext methods/notifications (`ext_method` / `ext_notification`
-/// — e.g. `ask_user_question`, `plan_approval`, `scheduled_task_inject_prompt`,
-/// `session_notification`) arrive WRAPPED: a top-level `_`-prefixed method with
+/// — e.g. `ask_user_question`, `plan_approval`, `session_notification`) arrive
+/// WRAPPED: a top-level `_`-prefixed method with
 /// the real method + params nested one level under `params`. Plain methods
 /// (`session/request_permission`, `session/update`, …) arrive direct. Anything
 /// that classifies a payload by method name MUST use this — matching the raw
@@ -349,19 +317,6 @@ fn interaction_inner_params(json: &serde_json::Value) -> Option<&serde_json::Val
         Some(params)
     }
 }
-/// Whether a payload is the `grow/scheduled_task_inject_prompt` notification.
-///
-/// This notification tells the receiving client to enqueue AND drive a
-/// scheduled (`/loop`) cron prompt. Unlike ordinary `sessionId`-bearing
-/// notifications (which fan out to every subscriber so each renders an
-/// identical stream), it must be routed to the SINGLE session driver: if every
-/// attached client received it, each would enqueue + try to drive the same cron
-/// turn, duplicating it (phantom `#N` queue entries, competing drivers, stuck
-/// turns). The other clients render the resulting turn from the broadcast
-/// `session/update` deltas, exactly like any other turn the driver runs.
-fn is_scheduled_task_inject_prompt(json: &serde_json::Value) -> bool {
-    method_of(json) == Some("grow/scheduled_task_inject_prompt")
-}
 /// Whether a payload is a blocking *interaction* reverse-request — a tool
 /// permission, `ask_user_question`, or plan-approval. Unlike other
 /// reverse-requests (driver-only), these are **shared**: broadcast to every
@@ -378,20 +333,14 @@ fn is_interaction_request(json: &serde_json::Value) -> bool {
 /// `InteractionResolved`. The ext-methods (`ask_user_question` /
 /// `plan_approval`) carry it directly under (inner) `params`;
 /// `request_permission` nests it under `toolCall`. Tolerant of the gateway
-/// wrapper (via `interaction_inner_params`) and camel/snake spelling.
+/// wrapper (via `interaction_inner_params`).
 fn extract_interaction_tool_call_id(json: &serde_json::Value) -> Option<String> {
     let params = interaction_inner_params(json)?;
-    if let Some(id) = params
-        .get("toolCallId")
-        .or_else(|| params.get("tool_call_id"))
-        .and_then(|v| v.as_str())
-    {
+    if let Some(id) = params.get("toolCallId").and_then(|v| v.as_str()) {
         return Some(id.to_string());
     }
-    let tc = params.get("toolCall").or_else(|| params.get("tool_call"))?;
+    let tc = params.get("toolCall")?;
     tc.get("toolCallId")
-        .or_else(|| tc.get("tool_call_id"))
-        .or_else(|| tc.get("id"))
         .and_then(|v| v.as_str())
         .map(String::from)
 }
@@ -399,7 +348,8 @@ fn extract_interaction_tool_call_id(json: &serde_json::Value) -> Option<String> 
 /// `grow/session_notification` whose `update.sessionUpdate ==
 /// "interaction_resolved"`), return its `tool_call_id` so the leader can evict
 /// the cached interaction request (first-answer-wins). Tolerant of the gateway
-/// wrapper and camel/snake spelling for the inner field.
+/// wrapper; Grow extension update fields use their canonical snake-case wire
+/// spelling.
 fn extract_interaction_resolved_tool_call_id(json: &serde_json::Value) -> Option<String> {
     if method_of(json) != Some("grow/session_notification") {
         return None;
@@ -410,7 +360,6 @@ fn extract_interaction_resolved_tool_call_id(json: &serde_json::Value) -> Option
     }
     update
         .get("tool_call_id")
-        .or_else(|| update.get("toolCallId"))
         .and_then(|v| v.as_str())
         .map(String::from)
 }
@@ -419,8 +368,7 @@ fn extract_interaction_resolved_tool_call_id(json: &serde_json::Value) -> Option
 fn extract_session_id_from_result(json: &serde_json::Value) -> Option<String> {
     let result = json.get("result")?;
     result
-        .get("session_id")
-        .or_else(|| result.get("sessionId"))
+        .get("sessionId")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -535,11 +483,11 @@ fn live_descendant_sessions(
 /// Inject client capabilities into a session/new request, **in place**.
 ///
 /// If the payload is a session/new request:
-/// - If the client has yolo_mode enabled, injects `yoloMode: true` into the request's `_meta` object.
+/// - Injects the client's canonical `permissionMode` into `_meta` when absent.
 /// - If the client has default_model set and the request doesn't already have a modelId,
 ///   injects `modelId` into the request's `_meta` object.
 /// - Injects `clientIdentifier` so the agent can track which client owns each session
-///   (used for scoping `yolo_mode_changed` broadcasts in leader mode).
+///   (used for client-scoped launch defaults in leader mode).
 ///
 /// Returns `true` when `json` was mutated.
 fn inject_capabilities_into_session_new(
@@ -548,18 +496,6 @@ fn inject_capabilities_into_session_new(
     client_type: &str,
     client_id: ClientId,
 ) -> bool {
-    let has_model = capabilities
-        .default_model
-        .as_ref()
-        .is_some_and(|m| !m.is_empty());
-    if !capabilities.yolo_mode
-        && !capabilities.auto_mode
-        && !has_model
-        && client_type.is_empty()
-        && !capabilities.code_nav_enabled
-    {
-        return false;
-    }
     let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let is_session_new = method == AGENT_METHOD_NAMES.session_new;
     let is_session_load = method == AGENT_METHOD_NAMES.session_load;
@@ -573,16 +509,17 @@ fn inject_capabilities_into_session_new(
             .or_insert_with(|| serde_json::json!({}));
         if let Some(meta_obj) = meta.as_object_mut() {
             mutated = true;
-            if is_session_new && capabilities.yolo_mode && !meta_obj.contains_key("yoloMode") {
-                meta_obj.insert("yoloMode".to_string(), serde_json::json!(true));
-                debug!("Injected yoloMode=true into session/new request");
-            }
-            if capabilities.auto_mode
-                && !capabilities.yolo_mode
-                && !meta_obj.contains_key("autoMode")
-            {
-                meta_obj.insert("autoMode".to_string(), serde_json::json!(true));
-                debug!("Injected autoMode=true into session request");
+            if !meta_obj.contains_key("permissionMode") {
+                meta_obj.insert(
+                    "permissionMode".to_string(),
+                    serde_json::json!(crate::util::config::permission_mode_canonical_str(
+                        capabilities.permission_mode,
+                    )),
+                );
+                debug!(
+                    mode = ?capabilities.permission_mode,
+                    "Injected permissionMode into session request"
+                );
             }
             if is_session_new
                 && let Some(ref model_id) = capabilities.default_model
@@ -676,72 +613,22 @@ fn inject_client_identity_into_initialize(
     }
     (mutated, true)
 }
-/// Extract yolo_mode change from grow/yolo_mode_changed notification.
-///
-/// Returns Some(yolo_mode) if this is a yolo mode change notification.
-fn extract_yolo_mode_change(json: &serde_json::Value) -> Option<bool> {
+/// Extract the canonical permission-mode selection from its session-scoped
+/// notification.
+fn extract_permission_mode_change(
+    json: &serde_json::Value,
+) -> Option<crate::util::config::PermissionMode> {
     let method = json.get("method")?.as_str()?;
-    if method != "grow/yolo_mode_changed" {
+    if method != "grow/permission_mode_changed" {
         return None;
     }
     let params = json.get("params")?;
-    params.get("yolo_mode").and_then(|v| v.as_bool())
-}
-/// Extract the auto-mode intent from an `grow/yolo_mode_changed` notification, so
-/// the leader can keep `ClientCapabilities.auto_mode` fresh the same way it tracks
-/// `yolo_mode`. Without this, a stale connect-time `auto_mode` capability would be
-/// injected into later `session/new` requests, re-enabling Auto after the user opted
-/// out. Returns `None` when the notification doesn't change auto state.
-fn extract_auto_mode_change(json: &serde_json::Value) -> Option<bool> {
-    let method = json.get("method")?.as_str()?;
-    if method != "grow/yolo_mode_changed" {
-        return None;
-    }
-    let params = json.get("params")?;
-    if let Some(b) = params.get("auto_mode").and_then(|v| v.as_bool()) {
-        return Some(b);
-    }
-    match params.get("permission_mode").and_then(|v| v.as_str()) {
-        Some("auto") => Some(true),
-        Some("always-approve" | "ask" | "default") => Some(false),
+    match params.get("permissionMode").and_then(|v| v.as_str()) {
+        Some("ask") => Some(crate::util::config::PermissionMode::Ask),
+        Some("auto") => Some(crate::util::config::PermissionMode::Auto),
+        Some("always-approve") => Some(crate::util::config::PermissionMode::AlwaysApprove),
         _ => None,
     }
-}
-/// Inject `clientIdentifier` into a `yolo_mode_changed` notification's params.
-///
-/// In leader mode, multiple clients share one agent. Without this injection, the agent
-/// can't tell which client sent the yolo toggle and updates ALL sessions. With the
-/// `clientIdentifier` in params, the agent scopes the update to only sessions owned
-/// by the sending client.
-///
-/// Mutates `json` in place; returns `true` when mutated.
-fn inject_client_identity_into_yolo_notification(
-    json: &mut serde_json::Value,
-    client_type: &str,
-) -> bool {
-    if client_type.is_empty() {
-        return false;
-    }
-    let is_yolo = json
-        .get("method")
-        .and_then(|m| m.as_str())
-        .is_some_and(|m| m == "grow/yolo_mode_changed");
-    if !is_yolo {
-        return false;
-    }
-    let mut mutated = false;
-    if let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) {
-        params.insert(
-            "clientIdentifier".to_string(),
-            serde_json::json!(client_type),
-        );
-        mutated = true;
-        debug!(
-            client_type,
-            "Injected clientIdentifier into yolo_mode_changed notification"
-        );
-    }
-    mutated
 }
 /// Build a JSON-RPC error response for requests that arrive before the leader is ready.
 ///
@@ -810,7 +697,6 @@ fn extract_model_id_from_set_model(json: &serde_json::Value) -> Option<String> {
     let params = json.get("params")?;
     params
         .get("modelId")
-        .or_else(|| params.get("model_id"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
@@ -821,29 +707,29 @@ fn cpu_profile_status_payload(status: CpuProfileStatus) -> ControlPayload {
             active: false,
             stopping: false,
             started_at: None,
-            svg_path: None,
+            artifact_path: None,
             frequency_hz: None,
         },
         CpuProfileStatus::Active {
             started_at,
-            svg_path,
+            artifact_path,
             frequency_hz,
         } => ControlPayload::CpuProfileStatus {
             active: true,
             stopping: false,
             started_at: Some(started_at),
-            svg_path: Some(svg_path),
+            artifact_path: Some(artifact_path),
             frequency_hz: Some(frequency_hz),
         },
         CpuProfileStatus::Stopping {
             started_at,
-            svg_path,
+            artifact_path,
             frequency_hz,
         } => ControlPayload::CpuProfileStatus {
             active: false,
             stopping: true,
             started_at: Some(started_at),
-            svg_path: Some(svg_path),
+            artifact_path: Some(artifact_path),
             frequency_hz: Some(frequency_hz),
         },
     }
@@ -867,7 +753,6 @@ fn leader_info_payload(control_state: &LeaderServerControlState) -> ControlPaylo
         cpu_profile_active,
         cpu_profile_stopping,
         profile_started_at,
-        profile_formats: manager.profile_formats().to_vec(),
     }
 }
 fn handle_control_command(
@@ -892,11 +777,11 @@ fn handle_control_command(
             match status {
                 CpuProfileStatus::Active {
                     started_at,
-                    svg_path,
+                    artifact_path,
                     frequency_hz,
                 } => Ok(ControlPayload::CpuProfileStarted {
                     pid: control_state.metadata.pid,
-                    svg_path,
+                    artifact_path,
                     frequency_hz,
                     started_at,
                 }),
@@ -905,11 +790,11 @@ fn handle_control_command(
                 }
                 CpuProfileStatus::Stopping {
                     started_at,
-                    svg_path,
+                    artifact_path,
                     frequency_hz,
                 } => Ok(cpu_profile_status_payload(CpuProfileStatus::Stopping {
                     started_at,
-                    svg_path,
+                    artifact_path,
                     frequency_hz,
                 })),
             }
@@ -939,7 +824,7 @@ async fn handle_stop_cpu_profile(
     })??;
     Ok(ControlPayload::CpuProfileStopped {
         pid,
-        svg_path: result.svg_path,
+        artifact_path: result.artifact_path,
         started_at: result.started_at,
         stopped_at: result.stopped_at,
     })
@@ -982,7 +867,7 @@ async fn finalize_cpu_profile_on_shutdown(control_state: LeaderServerControlStat
     match result {
         Ok(Ok(result)) => {
             info!(
-                path = %result.svg_path.display(),
+                path = %result.artifact_path.display(),
                 started_at = %result.started_at,
                 stopped_at = %result.stopped_at,
                 "Finalized active CPU profile during leader shutdown"
@@ -1266,7 +1151,7 @@ pub async fn run_leader_server(
                         client.client_type = client_type;
                         client.registered = true;
                         client_count.fetch_add(1, Ordering::Relaxed);
-                        debug!(client_id = id.0, ?mode, yolo_mode = client.capabilities.yolo_mode, client_type = %client.client_type, "Client registered");
+                        debug!(client_id = id.0, ?mode, permission_mode = ?client.capabilities.permission_mode, client_type = %client.client_type, "Client registered");
                         ::diagnostics::unified_log::info(
                             "leader.client.registered",
                             None,
@@ -1457,18 +1342,12 @@ pub async fn run_leader_server(
                         );
                     }
                     if let (Some(json), Some(client)) = (json.as_ref(), clients.get_mut(&id)) {
-                        if let Some(yolo_mode) = extract_yolo_mode_change(json) {
-                            client.capabilities.yolo_mode = yolo_mode;
+                        if let Some(mode) = extract_permission_mode_change(json) {
+                            client.capabilities.permission_mode = mode;
                             debug!(
                                 client_id = id.0,
-                                yolo_mode, "Updated client yolo_mode from notification"
-                            );
-                        }
-                        if let Some(auto_mode) = extract_auto_mode_change(json) {
-                            client.capabilities.auto_mode = auto_mode;
-                            debug!(
-                                client_id = id.0,
-                                auto_mode, "Updated client auto_mode from notification"
+                                ?mode,
+                                "Updated client permission mode from notification"
                             );
                         }
                     }
@@ -1494,10 +1373,6 @@ pub async fn run_leader_server(
                             &client.capabilities,
                             &client.client_type,
                             id,
-                        );
-                        payload_mutated |= inject_client_identity_into_yolo_notification(
-                            json,
-                            &client.client_type,
                         );
                     }
                     let rewritten = json.as_mut().and_then(|j| rewrite_request_id(j, id));
@@ -1789,7 +1664,6 @@ pub async fn run_leader_server(
                 let is_reverse_request = json
                     .as_ref()
                     .is_some_and(|j| j.get("id").is_some() && j.get("method").is_some());
-                let is_inject_prompt = json.as_ref().is_some_and(is_scheduled_task_inject_prompt);
                 let is_interaction =
                     is_reverse_request && json.as_ref().is_some_and(is_interaction_request);
                 if is_interaction
@@ -1825,32 +1699,29 @@ pub async fn run_leader_server(
                 {
                     let child_event = json.as_ref().and_then(extract_child_session_event);
                     let event_seq = json.as_ref().and_then(event_seq_of);
-                    if (is_reverse_request && !is_interaction) || is_inject_prompt {
+                    if is_reverse_request && !is_interaction {
                         if let Some(&driver_id) = session_driver.get(sid.as_str()) {
                             if let Some(client) = clients.get(&driver_id) {
                                 if let Err(e) =
                                     client.tx.try_send(ClientOutbound::Acp(payload.clone()))
                                 {
-                                    warn!(client_id = driver_id.0, session_id = sid.as_str(), is_inject = is_inject_prompt, error = %e, "Failed to route driver-only message (channel closed)");
+                                    warn!(client_id = driver_id.0, session_id = sid.as_str(), error = %e, "Failed to route driver-only message (channel closed)");
                                 } else {
                                     trace!(
                                         client_id = driver_id.0,
                                         session_id = sid.as_str(),
-                                        is_inject = is_inject_prompt,
                                         "Routed driver-only message to driver"
                                     );
                                 }
                             } else {
                                 trace!(
                                     session_id = sid.as_str(),
-                                    is_inject = is_inject_prompt,
                                     "Dropping driver-only message: no live driver"
                                 );
                             }
                         } else {
                             trace!(
                                 session_id = sid.as_str(),
-                                is_inject = is_inject_prompt,
                                 "Dropping driver-only message: session has no driver"
                             );
                         }
@@ -2049,19 +1920,31 @@ async fn run_client_session(
         ClientMessage::Register {
             client_type,
             mode,
+            protocol_version,
             capabilities,
         } => {
+            if protocol_version != LEADER_PROTOCOL_VERSION {
+                write_message(
+                    &mut writer,
+                    &ServerMessage::Error {
+                        code: 4,
+                        message: format!(
+                            "leader protocol mismatch: client={protocol_version}, leader={LEADER_PROTOCOL_VERSION}"
+                        ),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             let ready = *ready_rx.borrow();
             write_message(
                 &mut writer,
                 &ServerMessage::Registered {
                     client_id: client_id.0,
                     ready,
-                    leader_protocol_version: Some(LEADER_PROTOCOL_VERSION),
-                    leader_binary_version: Some(
-                        control_state.metadata.leader_binary_version.clone(),
-                    ),
-                    leader_capabilities: Some(control_state.leader_capabilities()),
+                    leader_protocol_version: LEADER_PROTOCOL_VERSION,
+                    leader_binary_version: control_state.metadata.leader_binary_version.clone(),
+                    runtime_cpu_profile: control_state.runtime_cpu_profile(),
                 },
             )
             .await?;
@@ -2114,7 +1997,7 @@ async fn run_client_session(
             client_type.clone(),
         ))
         .await;
-    info!(client_id = client_id.0, client_type = %client_type, ?mode, yolo_mode = capabilities.yolo_mode, client_version = ?capabilities.client_version, "Client registered");
+    info!(client_id = client_id.0, client_type = %client_type, ?mode, permission_mode = ?capabilities.permission_mode, client_version = ?capabilities.client_version, "Client registered");
     loop {
         tokio::select! {
             biased;
@@ -2589,6 +2472,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: client_type.into(),
                 mode,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -2608,6 +2492,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -2620,19 +2505,14 @@ mod tests {
                 ready,
                 leader_protocol_version,
                 leader_binary_version,
-                leader_capabilities,
+                runtime_cpu_profile,
             } => {
                 assert!(ready);
                 assert!(client_id > 0);
-                assert_eq!(leader_protocol_version, Some(LEADER_PROTOCOL_VERSION));
+                assert_eq!(leader_protocol_version, LEADER_PROTOCOL_VERSION);
+                assert_eq!(leader_binary_version, env!("CARGO_PKG_VERSION"));
                 assert_eq!(
-                    leader_binary_version.as_deref(),
-                    Some(env!("CARGO_PKG_VERSION"))
-                );
-                let capabilities = leader_capabilities.expect("leader capabilities metadata");
-                assert!(capabilities.control_v1);
-                assert_eq!(
-                    capabilities.runtime_cpu_profile,
+                    runtime_cpu_profile,
                     CpuProfileManager::new().runtime_cpu_profile()
                 );
             }
@@ -2653,6 +2533,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -2677,7 +2558,7 @@ mod tests {
                     active: false,
                     stopping: false,
                     started_at: None,
-                    svg_path: None,
+                    artifact_path: None,
                     frequency_hz: None,
                 }),
             } if request_id == "status-1"
@@ -2730,7 +2611,7 @@ mod tests {
             .await
             .expect("in-flight stop should complete")
             .unwrap();
-        assert_eq!(stop_result.svg_path, output_path);
+        assert_eq!(stop_result.artifact_path, output_path);
         assert!(output_path.exists());
         assert!(matches!(
             control_state.cpu_profile.lock().status(),
@@ -2755,11 +2636,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let runtime_cpu_profile = client
-            .registration()
-            .leader_capabilities
-            .as_ref()
-            .is_some_and(|capabilities| capabilities.runtime_cpu_profile);
+        let runtime_cpu_profile = client.registration().runtime_cpu_profile;
         assert!(
             !runtime_cpu_profile,
             "unsupported stub server must report runtime_cpu_profile=false"
@@ -2775,7 +2652,7 @@ mod tests {
                 active: false,
                 stopping: false,
                 started_at: None,
-                svg_path: None,
+                artifact_path: None,
                 frequency_hz: None,
             }
         ));
@@ -2814,6 +2691,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -2838,6 +2716,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -2868,6 +2747,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "grow-tui".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -2904,6 +2784,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "grow-tui".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -2950,21 +2831,6 @@ mod tests {
         )));
         assert!(!is_session_load_request(&pv(
             r#"{"jsonrpc":"2.0","id":1,"result":{}}"#
-        )));
-    }
-    #[test]
-    fn is_scheduled_task_inject_prompt_detects_only_inject() {
-        assert!(is_scheduled_task_inject_prompt(&pv(
-            r#"{"method":"grow/scheduled_task_inject_prompt","params":{"sessionId":"s1","taskId":"t1","prompt":"echo hi"}}"#
-        )));
-        assert!(is_scheduled_task_inject_prompt(&pv(
-            r#"{"method":"_grow/scheduled_task_inject_prompt","params":{"method":"grow/scheduled_task_inject_prompt","params":{"sessionId":"s1","taskId":"t1","prompt":"echo hi"}}}"#
-        )));
-        assert!(!is_scheduled_task_inject_prompt(&pv(
-            r#"{"method":"grow/scheduled_task_fired","params":{"sessionId":"s1"}}"#
-        )));
-        assert!(!is_scheduled_task_inject_prompt(&pv(
-            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1"}}"#
         )));
     }
     #[test]
@@ -3251,13 +3117,13 @@ mod tests {
         assert_eq!(json["id"], "456|\"abc-123\"");
     }
     #[test]
-    fn inject_capabilities_adds_yolo_mode_to_session_new() {
+    fn inject_capabilities_adds_permission_mode_to_session_new() {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: crate::util::config::PermissionMode::AlwaysApprove,
             default_model: None,
             ..Default::default()
         };
@@ -3268,19 +3134,16 @@ mod tests {
             "",
             ClientId(1)
         ));
-        assert_eq!(json["params"]["_meta"]["yoloMode"], true);
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "always-approve");
     }
-    /// Leader capabilities.auto_mode seeds `_meta.autoMode` on session/new
-    /// (the real ConnectFlags.default_auto_mode entry path).
     #[test]
-    fn inject_capabilities_adds_auto_mode_to_session_new() {
+    fn inject_capabilities_adds_auto_permission_mode_to_session_new() {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            auto_mode: true,
-            yolo_mode: false,
+            permission_mode: crate::util::config::PermissionMode::Auto,
             default_model: None,
             ..Default::default()
         };
@@ -3291,19 +3154,17 @@ mod tests {
             "",
             ClientId(1)
         ));
-        assert_eq!(json["params"]["_meta"]["autoMode"], true);
-        assert!(json["params"]["_meta"].get("yoloMode").is_none());
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "auto");
     }
-    /// session/load also receives autoMode (reconnect path).
+    /// session/load receives the same canonical mode (reconnect path).
     #[test]
-    fn inject_capabilities_adds_auto_mode_to_session_load() {
+    fn inject_capabilities_adds_permission_mode_to_session_load() {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1"}}}}"#,
             AGENT_METHOD_NAMES.session_load
         );
         let caps = ClientCapabilities {
-            auto_mode: true,
-            yolo_mode: false,
+            permission_mode: crate::util::config::PermissionMode::Auto,
             ..Default::default()
         };
         let mut json = pv(&payload);
@@ -3313,38 +3174,13 @@ mod tests {
             "grow-tui",
             ClientId(1)
         ));
-        assert_eq!(json["params"]["_meta"]["autoMode"], true);
-    }
-    /// Yolo suppresses autoMode injection even when auto_mode capability is set.
-    #[test]
-    fn inject_capabilities_yolo_suppresses_auto_mode() {
-        let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
-            AGENT_METHOD_NAMES.session_new
-        );
-        let caps = ClientCapabilities {
-            auto_mode: true,
-            yolo_mode: true,
-            ..Default::default()
-        };
-        let mut json = pv(&payload);
-        assert!(inject_capabilities_into_session_new(
-            &mut json,
-            &caps,
-            "",
-            ClientId(1)
-        ));
-        assert_eq!(json["params"]["_meta"]["yoloMode"], true);
-        assert!(
-            json["params"]["_meta"].get("autoMode").is_none(),
-            "yolo must not also inject autoMode"
-        );
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "auto");
     }
     #[test]
     fn inject_capabilities_skips_non_session_new() {
         let mut json = pv(r#"{"jsonrpc":"2.0","method":"other/method","id":1,"params":{}}"#);
         let caps = ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: crate::util::config::PermissionMode::AlwaysApprove,
             default_model: None,
             ..Default::default()
         };
@@ -3357,25 +3193,24 @@ mod tests {
         assert!(json["params"].get("_meta").is_none());
     }
     #[test]
-    fn inject_capabilities_skips_when_yolo_mode_false() {
+    fn inject_capabilities_emits_ask_explicitly() {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            yolo_mode: false,
+            permission_mode: crate::util::config::PermissionMode::Ask,
             default_model: None,
             ..Default::default()
         };
         let mut json = pv(&payload);
-        let before = json.clone();
-        assert!(!inject_capabilities_into_session_new(
+        assert!(inject_capabilities_into_session_new(
             &mut json,
             &caps,
             "",
             ClientId(1)
         ));
-        assert_eq!(json, before);
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "ask");
     }
     #[test]
     fn inject_capabilities_preserves_existing_meta() {
@@ -3384,7 +3219,7 @@ mod tests {
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: crate::util::config::PermissionMode::AlwaysApprove,
             default_model: None,
             ..Default::default()
         };
@@ -3396,7 +3231,7 @@ mod tests {
             ClientId(1)
         ));
         assert_eq!(json["params"]["_meta"]["foo"], "bar");
-        assert_eq!(json["params"]["_meta"]["yoloMode"], true);
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "always-approve");
     }
     #[test]
     fn inject_capabilities_adds_default_model_to_session_new() {
@@ -3405,7 +3240,7 @@ mod tests {
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            yolo_mode: false,
+            permission_mode: crate::util::config::PermissionMode::Ask,
             default_model: Some("grow-3-fast".to_string()),
             ..Default::default()
         };
@@ -3417,16 +3252,16 @@ mod tests {
             ClientId(1)
         ));
         assert_eq!(json["params"]["_meta"]["modelId"], "grow-3-fast");
-        assert!(json["params"]["_meta"].get("yoloMode").is_none());
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "ask");
     }
     #[test]
-    fn inject_capabilities_adds_both_yolo_and_model() {
+    fn inject_capabilities_adds_both_permission_mode_and_model() {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: crate::util::config::PermissionMode::AlwaysApprove,
             default_model: Some("grow-3-fast".to_string()),
             ..Default::default()
         };
@@ -3437,7 +3272,7 @@ mod tests {
             "",
             ClientId(1)
         ));
-        assert_eq!(json["params"]["_meta"]["yoloMode"], true);
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "always-approve");
         assert_eq!(json["params"]["_meta"]["modelId"], "grow-3-fast");
     }
     #[test]
@@ -3447,7 +3282,7 @@ mod tests {
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            yolo_mode: false,
+            permission_mode: crate::util::config::PermissionMode::Ask,
             default_model: Some("grow-3-fast".to_string()),
             ..Default::default()
         };
@@ -3456,56 +3291,25 @@ mod tests {
         assert_eq!(json["params"]["_meta"]["modelId"], "custom-model");
     }
     #[test]
-    fn extract_yolo_mode_change_returns_value() {
-        let payload =
-            r#"{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{"yolo_mode":true}}"#;
-        assert_eq!(extract_yolo_mode_change(&pv(payload)), Some(true));
-        let payload =
-            r#"{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{"yolo_mode":false}}"#;
-        assert_eq!(extract_yolo_mode_change(&pv(payload)), Some(false));
-    }
-    #[test]
-    fn extract_yolo_mode_change_returns_none_for_other_methods() {
-        let payload = r#"{"jsonrpc":"2.0","method":"other/method","params":{"yolo_mode":true}}"#;
-        assert_eq!(extract_yolo_mode_change(&pv(payload)), None);
-    }
-    /// Branch 1: an explicit `auto_mode` flag wins, even over `permission_mode`.
-    #[test]
-    fn extract_auto_mode_change_explicit_flag_wins() {
-        let payload =
-            r#"{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{"auto_mode":true}}"#;
-        assert_eq!(extract_auto_mode_change(&pv(payload)), Some(true));
-        let payload =
-            r#"{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{"auto_mode":false}}"#;
-        assert_eq!(extract_auto_mode_change(&pv(payload)), Some(false));
-        let payload = r#"{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{"auto_mode":false,"permission_mode":"auto"}}"#;
-        assert_eq!(extract_auto_mode_change(&pv(payload)), Some(false));
-    }
-    /// Branch 2: with no explicit flag, derive from `permission_mode`.
-    #[test]
-    fn extract_auto_mode_change_derives_from_permission_mode() {
-        let payload = r#"{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{"permission_mode":"auto"}}"#;
-        assert_eq!(extract_auto_mode_change(&pv(payload)), Some(true));
-        for mode in ["ask", "always-approve", "default"] {
+    fn extract_permission_mode_change_accepts_only_canonical_notification() {
+        for (mode, expected) in [
+            ("ask", crate::util::config::PermissionMode::Ask),
+            ("auto", crate::util::config::PermissionMode::Auto),
+            (
+                "always-approve",
+                crate::util::config::PermissionMode::AlwaysApprove,
+            ),
+        ] {
             let payload = format!(
-                r#"{{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{{"permission_mode":"{mode}"}}}}"#
+                r#"{{"jsonrpc":"2.0","method":"grow/permission_mode_changed","params":{{"sessionId":"s","permissionMode":"{mode}"}}}}"#
             );
             assert_eq!(
-                extract_auto_mode_change(&pv(&payload)),
-                Some(false),
-                "permission_mode={mode} must clear auto"
+                extract_permission_mode_change(&pv(&payload)),
+                Some(expected),
             );
         }
-    }
-    /// Branch 3: None when there's no auto signal — wrong method, or a bare yolo
-    /// toggle (no `auto_mode`, no `permission_mode`) must NOT change auto state.
-    #[test]
-    fn extract_auto_mode_change_returns_none_when_no_auto_signal() {
-        let payload = r#"{"jsonrpc":"2.0","method":"other/method","params":{"auto_mode":true}}"#;
-        assert_eq!(extract_auto_mode_change(&pv(payload)), None);
-        let payload =
-            r#"{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{"yolo_mode":true}}"#;
-        assert_eq!(extract_auto_mode_change(&pv(payload)), None);
+        let malformed = r#"{"jsonrpc":"2.0","method":"grow/permission_mode_changed","params":{"sessionId":"s","permissionMode":"default"}}"#;
+        assert_eq!(extract_permission_mode_change(&pv(malformed)), None);
     }
     #[test]
     fn extract_model_id_from_set_model_returns_value() {
@@ -3516,17 +3320,6 @@ mod tests {
         assert_eq!(
             extract_model_id_from_set_model(&pv(&payload)),
             Some("grow-3-fast".to_string())
-        );
-    }
-    #[test]
-    fn extract_model_id_from_set_model_handles_snake_case() {
-        let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"session_id":"sess-123","model_id":"grow-3"}}}}"#,
-            AGENT_METHOD_NAMES.session_set_model
-        );
-        assert_eq!(
-            extract_model_id_from_set_model(&pv(&payload)),
-            Some("grow-3".to_string())
         );
     }
     #[test]
@@ -3619,7 +3412,7 @@ mod tests {
     #[test]
     fn patch_initialize_response_noop_for_non_initialize_response() {
         let mut json = pv(
-            r#"{"jsonrpc":"2.0","id":1,"result":{"session_id":"sess-1","models":{"currentModelId":"grow-3","availableModels":[]}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-1","models":{"currentModelId":"grow-3","availableModels":[]}}}"#,
         );
         let before = json.clone();
         assert!(!patch_initialize_response_model(
@@ -3630,11 +3423,6 @@ mod tests {
     }
     #[test]
     fn extract_session_id_from_result_works() {
-        let payload = r#"{"jsonrpc":"2.0","result":{"session_id":"sess-123"},"id":1}"#;
-        assert_eq!(
-            extract_session_id_from_result(&pv(payload)),
-            Some("sess-123".to_string())
-        );
         let payload = r#"{"jsonrpc":"2.0","result":{"sessionId":"sess-456"},"id":1}"#;
         assert_eq!(
             extract_session_id_from_result(&pv(payload)),
@@ -3647,16 +3435,11 @@ mod tests {
         assert_eq!(extract_session_id_from_result(&pv(payload)), None);
         let payload = r#"{"jsonrpc":"2.0","error":{"code":-1,"message":"fail"},"id":1}"#;
         assert_eq!(extract_session_id_from_result(&pv(payload)), None);
-        let payload = r#"{"jsonrpc":"2.0","method":"test","params":{"session_id":"abc"},"id":1}"#;
+        let payload = r#"{"jsonrpc":"2.0","method":"test","params":{"sessionId":"abc"},"id":1}"#;
         assert_eq!(extract_session_id_from_result(&pv(payload)), None);
     }
     #[test]
     fn extract_session_id_from_params_works() {
-        let payload = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"session_id":"sess-789"}}"#;
-        assert_eq!(
-            extract_session_id(&pv(payload)),
-            Some("sess-789".to_string())
-        );
         let payload = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-abc"}}"#;
         assert_eq!(
             extract_session_id(&pv(payload)),
@@ -3670,7 +3453,7 @@ mod tests {
             extract_session_id(&pv(payload)),
             Some("sess-nested".to_string())
         );
-        let payload = r#"{"jsonrpc":"2.0","method":"_grow/fs_notify","params":{"method":"grow/fs_notify","params":{"session_id":"sess-nested-2","event":{}}}}"#;
+        let payload = r#"{"jsonrpc":"2.0","method":"_grow/fs_notify","params":{"method":"grow/fs_notify","params":{"sessionId":"sess-nested-2","event":{}}}}"#;
         assert_eq!(
             extract_session_id(&pv(payload)),
             Some("sess-nested-2".to_string())
@@ -3724,34 +3507,13 @@ mod tests {
         assert!(extract_child_session_event(&pv(payload)).is_none());
     }
     #[test]
-    fn inject_capabilities_skips_empty_default_model() {
+    fn inject_capabilities_ignores_empty_default_model_but_emits_mode() {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            yolo_mode: false,
-            default_model: Some("".to_string()),
-            ..Default::default()
-        };
-        let mut json = pv(&payload);
-        let before = json.clone();
-        assert!(!inject_capabilities_into_session_new(
-            &mut json,
-            &caps,
-            "",
-            ClientId(1)
-        ));
-        assert_eq!(json, before);
-    }
-    #[test]
-    fn inject_capabilities_skips_empty_model_with_yolo_mode() {
-        let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
-            AGENT_METHOD_NAMES.session_new
-        );
-        let caps = ClientCapabilities {
-            yolo_mode: true,
+            permission_mode: crate::util::config::PermissionMode::Ask,
             default_model: Some("".to_string()),
             ..Default::default()
         };
@@ -3762,29 +3524,49 @@ mod tests {
             "",
             ClientId(1)
         ));
-        assert_eq!(json["params"]["_meta"]["yoloMode"], true);
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "ask");
         assert!(json["params"]["_meta"].get("modelId").is_none());
     }
     #[test]
-    fn inject_capabilities_no_model_no_yolo_returns_unchanged() {
+    fn inject_capabilities_ignores_empty_model_with_always_approve() {
         let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp","_meta":{{"yoloMode":true}}}}}}"#,
+            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
             AGENT_METHOD_NAMES.session_new
         );
         let caps = ClientCapabilities {
-            yolo_mode: false,
-            default_model: None,
+            permission_mode: crate::util::config::PermissionMode::AlwaysApprove,
+            default_model: Some("".to_string()),
             ..Default::default()
         };
         let mut json = pv(&payload);
-        let before = json.clone();
-        assert!(!inject_capabilities_into_session_new(
+        assert!(inject_capabilities_into_session_new(
             &mut json,
             &caps,
             "",
             ClientId(1)
         ));
-        assert_eq!(json, before);
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "always-approve");
+        assert!(json["params"]["_meta"].get("modelId").is_none());
+    }
+    #[test]
+    fn inject_capabilities_preserves_explicit_permission_mode() {
+        let payload = format!(
+            r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp","_meta":{{"permissionMode":"auto"}}}}}}"#,
+            AGENT_METHOD_NAMES.session_new
+        );
+        let caps = ClientCapabilities {
+            permission_mode: crate::util::config::PermissionMode::Ask,
+            default_model: None,
+            ..Default::default()
+        };
+        let mut json = pv(&payload);
+        assert!(inject_capabilities_into_session_new(
+            &mut json,
+            &caps,
+            "",
+            ClientId(1)
+        ));
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "auto");
     }
     #[test]
     fn inject_capabilities_adds_client_identifier_to_session_new() {
@@ -3834,7 +3616,7 @@ mod tests {
             json["params"]["_meta"]["clientIdentifier"],
             "grow-code-extension"
         );
-        assert!(json["params"]["_meta"].get("yoloMode").is_none());
+        assert_eq!(json["params"]["_meta"]["permissionMode"], "ask");
         assert!(json["params"]["_meta"].get("modelId").is_none());
     }
     #[test]
@@ -3879,26 +3661,6 @@ mod tests {
         assert_eq!(extract_target_client_id(&pv(no_meta)), None);
         let no_key = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","_meta":{"isReplay":true}}}"#;
         assert_eq!(extract_target_client_id(&pv(no_key)), None);
-    }
-    #[test]
-    fn inject_yolo_notification_adds_client_identifier() {
-        let mut json = pv(
-            r#"{"jsonrpc":"2.0","method":"grow/yolo_mode_changed","params":{"yolo_mode":true}}"#,
-        );
-        assert!(inject_client_identity_into_yolo_notification(
-            &mut json, "grow-tui"
-        ));
-        assert_eq!(json["params"]["clientIdentifier"], "grow-tui");
-        assert_eq!(json["params"]["yolo_mode"], true);
-    }
-    #[test]
-    fn inject_yolo_notification_skips_non_yolo_methods() {
-        let mut json = pv(r#"{"jsonrpc":"2.0","method":"grow/other","params":{"data":1}}"#);
-        let before = json.clone();
-        assert!(!inject_client_identity_into_yolo_notification(
-            &mut json, "grow-tui"
-        ));
-        assert_eq!(json, before);
     }
     #[test]
     fn inject_client_identity_adds_identifier_to_initialize() {
@@ -4007,8 +3769,9 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities {
-                    yolo_mode: false,
+                    permission_mode: crate::util::config::PermissionMode::Ask,
                     default_model: Some("provider/default".to_string()),
                     ..Default::default()
                 },
@@ -4204,6 +3967,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -4476,6 +4240,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -4511,6 +4276,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -4556,6 +4322,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -4657,6 +4424,7 @@ mod tests {
                 &ClientMessage::Register {
                     client_type: "test".into(),
                     mode: ClientMode::Stdio,
+                    protocol_version: LEADER_PROTOCOL_VERSION,
                     capabilities: ClientCapabilities::default(),
                 },
             )
@@ -4709,7 +4477,7 @@ mod tests {
         let (sock_path, cancel, response_tx, mut acp_rx) =
             setup_persistent_server_with_agent(&temp).await;
         let (mut reader, mut writer) = connect_and_register(&sock_path, "grow-tui").await;
-        let load_req = r#"{"jsonrpc":"2.0","method":"session/load","id":1,"params":{"session_id":"sess_replay"}}"#;
+        let load_req = r#"{"jsonrpc":"2.0","method":"session/load","id":1,"params":{"sessionId":"sess_replay"}}"#;
         write_message(
             &mut writer,
             &ClientMessage::Acp {
@@ -4724,7 +4492,7 @@ mod tests {
         const REPLAY_COUNT: usize = 500;
         for i in 0..REPLAY_COUNT {
             let notification = format!(
-                r#"{{"jsonrpc":"2.0","method":"session/notification","params":{{"session_id":"sess_replay","updates":[{{"type":"message_start","message_id":"msg_{i}"}}]}}}}"#,
+                r#"{{"jsonrpc":"2.0","method":"session/notification","params":{{"sessionId":"sess_replay","updates":[{{"type":"message_start","message_id":"msg_{i}"}}]}}}}"#,
             );
             response_tx.send(notification).unwrap();
         }
@@ -5001,42 +4769,6 @@ mod tests {
         );
         cancel.cancel();
     }
-    /// A `grow/scheduled_task_inject_prompt` (cron `/loop` fire) must be routed
-    /// to the SINGLE session driver, not fanned out to every subscriber. If it
-    /// broadcast, each attached dashboard would enqueue + try to drive the same
-    /// cron turn (phantom `#N` queue rows, competing drivers, stuck turns). The
-    /// other clients render the resulting turn from the broadcast deltas.
-    #[tokio::test]
-    async fn scheduled_task_inject_prompt_routes_to_driver_only() {
-        let temp = TempDir::new().unwrap();
-        let (sock_path, cancel, response_tx, mut acp_rx) =
-            setup_persistent_server_with_agent(&temp).await;
-        let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
-        load_session(&mut writer_a, "sess-cron").await;
-        complete_load(&mut acp_rx, &response_tx).await;
-        let _ = next_acp_payload(&mut reader_a).await;
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
-        load_session(&mut writer_b, "sess-cron").await;
-        complete_load(&mut acp_rx, &response_tx).await;
-        let _ = next_acp_payload(&mut reader_b).await;
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        let inject = r#"{"method":"_grow/scheduled_task_inject_prompt","params":{"method":"grow/scheduled_task_inject_prompt","params":{"sessionId":"sess-cron","taskId":"task-1","prompt":"echo hello","humanSchedule":"every 1m"}}}"#;
-        response_tx.send(inject.to_string()).unwrap();
-        let got_a = next_acp_payload(&mut reader_a).await;
-        let got_b = next_acp_payload(&mut reader_b).await;
-        assert!(
-            got_a
-                .as_deref()
-                .is_some_and(|p| p.contains("scheduled_task_inject_prompt")),
-            "driver A must receive the cron inject_prompt, got {got_a:?}"
-        );
-        assert!(
-            got_b.is_none(),
-            "non-driver B must NOT receive the cron inject_prompt, got {got_b:?}"
-        );
-        cancel.cancel();
-    }
     /// A blocking interaction reverse-request (permission / `ask_user_question` /
     /// plan-approval) is SHARED: broadcast to every subscriber so any client can
     /// render + answer the modal. Contrast
@@ -5143,6 +4875,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: client_type.into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )
@@ -5851,7 +5584,7 @@ mod tests {
         let (mut reader_a, _writer_a) = connect_and_register(&sock_path, "client-a").await;
         let (mut reader_b, _writer_b) = connect_and_register(&sock_path, "client-b").await;
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let changed = r#"{"jsonrpc":"2.0","method":"grow/sessions/changed","params":{"upserted":[{"sessionId":"sess-roster","cwd":"/repo","isWorktree":false,"yolo":false,"activity":"working","resident":true,"lastChangeUnixMs":1,"origin":{"kind":"local"}}],"removed":[]}}"#;
+        let changed = r#"{"jsonrpc":"2.0","method":"grow/sessions/changed","params":{"upserted":[{"sessionId":"sess-roster","cwd":"/repo","isWorktree":false,"permissionMode":"ask","activity":"working","resident":true,"lastChangeUnixMs":1,"origin":{"kind":"local"}}],"removed":[]}}"#;
         response_tx.send(changed.to_string()).unwrap();
         let got_a = next_acp_payload(&mut reader_a).await;
         let got_b = next_acp_payload(&mut reader_b).await;
@@ -5891,37 +5624,6 @@ mod tests {
         );
         cancel.cancel();
     }
-    /// `grow/mcp/servers_updated` is a machine-wide MCP-catalog notification
-    /// with no sessionId (session-agnostic by design); it must broadcast to
-    /// every registered client so managed connectors don't vanish from clients
-    /// that weren't last-active when the post-initialize background fetch
-    /// resolved. Uses the production wire form (`_`-prefixed ext notification
-    /// with the real method nested in params).
-    #[tokio::test]
-    async fn mcp_servers_updated_broadcasts_to_all_clients() {
-        let temp = TempDir::new().unwrap();
-        let (sock_path, cancel, response_tx) = setup_persistent_server(&temp).await;
-        let (mut reader_a, _writer_a) = connect_and_register(&sock_path, "client-a").await;
-        let (mut reader_b, _writer_b) = connect_and_register(&sock_path, "client-b").await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let update = r#"{"jsonrpc":"2.0","method":"_grow/mcp/servers_updated","params":{"method":"grow/mcp/servers_updated","params":{"mcpServers":[{"name":"grow_managed_slack","source":"managed"}]}}}"#;
-        response_tx.send(update.to_string()).unwrap();
-        let got_a = next_acp_payload(&mut reader_a).await;
-        let got_b = next_acp_payload(&mut reader_b).await;
-        assert!(
-            got_a
-                .as_deref()
-                .is_some_and(|p| p.contains("grow_managed_slack")),
-            "client A must receive the MCP catalog broadcast, got {got_a:?}"
-        );
-        assert!(
-            got_b
-                .as_deref()
-                .is_some_and(|p| p.contains("grow_managed_slack")),
-            "client B must receive the MCP catalog broadcast, got {got_b:?}"
-        );
-        cancel.cancel();
-    }
     /// The broadcast classifier must accept both wire forms (`_`-prefixed
     /// production ext notifications and direct methods) for the machine-wide
     /// set, and reject sessionful / unrelated methods.
@@ -5934,9 +5636,6 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"grow/models/update","params":{}}"#
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
-            r#"{"jsonrpc":"2.0","method":"grow/mcp/servers_updated","params":{}}"#
-        )));
-        assert!(is_machine_wide_broadcast_notification(&pv(
             r#"{"jsonrpc":"2.0","method":"grow/announcements/update","params":{}}"#
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
@@ -5944,9 +5643,6 @@ mod tests {
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
             r#"{"jsonrpc":"2.0","method":"_grow/models/update","params":{}}"#
-        )));
-        assert!(is_machine_wide_broadcast_notification(&pv(
-            r#"{"jsonrpc":"2.0","method":"_grow/mcp/servers_updated","params":{"method":"grow/mcp/servers_updated","params":{"mcpServers":[]}}}"#
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
             r#"{"jsonrpc":"2.0","method":"_grow/announcements/update","params":{"method":"grow/announcements/update","params":{"gen":2,"announcements":[]}}}"#
@@ -5963,7 +5659,7 @@ mod tests {
     #[test]
     fn inject_capabilities_sets_code_nav_enabled_true() {
         let caps = ClientCapabilities {
-            yolo_mode: false,
+            permission_mode: crate::util::config::PermissionMode::Ask,
             default_model: None,
             client_version: None,
             code_nav_enabled: true,
@@ -5984,7 +5680,7 @@ mod tests {
     #[test]
     fn inject_capabilities_sets_code_nav_enabled_false() {
         let caps = ClientCapabilities {
-            yolo_mode: false,
+            permission_mode: crate::util::config::PermissionMode::Ask,
             default_model: None,
             client_version: None,
             code_nav_enabled: false,
@@ -6004,7 +5700,7 @@ mod tests {
     #[test]
     fn inject_capabilities_injects_code_nav_into_session_load() {
         let caps = ClientCapabilities {
-            yolo_mode: false,
+            permission_mode: crate::util::config::PermissionMode::Ask,
             default_model: None,
             client_version: None,
             code_nav_enabled: true,
@@ -6286,6 +5982,7 @@ mod tests {
                 &ClientMessage::Register {
                     client_type: client_type.into(),
                     mode: ClientMode::Stdio,
+                    protocol_version: LEADER_PROTOCOL_VERSION,
                     capabilities: ClientCapabilities::default(),
                 },
             )
@@ -6332,6 +6029,7 @@ mod tests {
             &ClientMessage::Register {
                 client_type: "test-a".into(),
                 mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
             },
         )

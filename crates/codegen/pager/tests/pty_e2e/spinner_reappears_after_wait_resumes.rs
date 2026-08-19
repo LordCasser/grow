@@ -57,7 +57,7 @@ async fn spinner_reappears_after_wait_resumes() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

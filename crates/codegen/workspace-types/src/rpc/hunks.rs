@@ -184,31 +184,16 @@ pub struct HunkLineInfoWire {
 }
 
 /// Wire mirror of `hunk_tracker::types::HunkSource`.
-///
-/// `Unknown` (`#[serde(other)]`) keeps decoding forward-tolerant: an
-/// unrecognized `type` tag from a newer server decodes here instead of failing
-/// the whole structured response. The server only ever produces the known
-/// variants.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum HunkSourceWire {
-    AgentEdit {
-        prompt_index: usize,
-    },
+    AgentEdit { prompt_index: usize },
     ExternalEditOnAgentFile,
     External,
-    #[serde(other)]
-    Unknown,
 }
 
 /// Wire mirror of `hunk_tracker::types::FileContentStatus`.
-///
-/// `Deserialize` is hand-written so an unrecognized status from a newer server
-/// decodes to [`Unknown`](Self::Unknown) rather than failing the whole
-/// structured response. A plain string enum cannot use `#[serde(other)]` (only
-/// allowed on internally/adjacently tagged enums), hence the manual impl. The
-/// server only produces the known variants.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FileContentStatusWire {
     #[default]
@@ -218,24 +203,6 @@ pub enum FileContentStatusWire {
     LfsPointer,
     Symlink,
     Full,
-    /// A status string this client does not know (a newer server variant).
-    Unknown,
-}
-
-impl<'de> Deserialize<'de> for FileContentStatusWire {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
-            "missing" => Self::Missing,
-            "binary" => Self::Binary,
-            "tooLarge" => Self::TooLarge,
-            "lfsPointer" => Self::LfsPointer,
-            "symlink" => Self::Symlink,
-            "full" => Self::Full,
-            // Forward-tolerant: an unknown status decodes here.
-            _ => Self::Unknown,
-        })
-    }
 }
 
 /// Wire mirror of `hunk_tracker::types::FileContentView`.
@@ -384,30 +351,30 @@ mod tests {
     }
 
     #[test]
-    fn hunk_source_wire_unknown_type_decodes_tolerantly() {
-        // An unrecognized `type` tag from a newer server decodes to Unknown
-        // rather than erroring.
-        let src: HunkSourceWire =
-            serde_json::from_value(serde_json::json!({ "type": "futureSource" })).unwrap();
-        assert!(matches!(src, HunkSourceWire::Unknown));
+    fn hunk_source_wire_rejects_unknown_type() {
+        assert!(
+            serde_json::from_value::<HunkSourceWire>(serde_json::json!({
+                "type": "futureSource"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
-    fn file_content_status_wire_unknown_decodes_tolerantly() {
-        // An unrecognized status string decodes to Unknown.
-        let status: FileContentStatusWire =
-            serde_json::from_value(serde_json::json!("futureStatus")).unwrap();
-        assert_eq!(status, FileContentStatusWire::Unknown);
-        // Embedded in a FileContentEntryWire, the whole structured response still
-        // decodes.
-        let entry: FileContentEntryWire = serde_json::from_value(serde_json::json!({
-            "path": "/x.rs",
-            "baseline": { "status": "futureStatus" },
-            "current": { "status": "full", "byteLen": 1, "content": "a" },
-            "isAgentFile": false,
-            "staged": false
-        }))
-        .unwrap();
-        assert_eq!(entry.baseline.status, FileContentStatusWire::Unknown);
+    fn file_content_status_wire_rejects_unknown_status() {
+        assert!(
+            serde_json::from_value::<FileContentStatusWire>(serde_json::json!("futureStatus"))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<FileContentEntryWire>(serde_json::json!({
+                "path": "/x.rs",
+                "baseline": { "status": "futureStatus" },
+                "current": { "status": "full", "byteLen": 1, "content": "a" },
+                "isAgentFile": false,
+                "staged": false
+            }))
+            .is_err()
+        );
     }
 }

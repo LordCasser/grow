@@ -311,13 +311,13 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
                 })
                 .expect("reconnecting tab exists");
             // plan_reconnect_load equivalent: session id + session cwd +
-            // yolo/auto/cursor meta.
+            // canonical permission/cursor metadata.
             let cwd = if agent.session.cwd.as_os_str().is_empty() {
                 a.app.cwd.clone()
             } else {
                 agent.session.cwd.clone()
             };
-            let mut meta = serde_json::json!({ "yoloMode": false, "autoMode": false });
+            let mut meta = serde_json::json!({ "permissionMode": "ask" });
             if let Some(ref cursor) = agent.last_seen_event_id {
                 meta["cursor"] = serde_json::Value::String(cursor.clone());
             }

@@ -1,5 +1,5 @@
 //! Pure text-classification helpers shared by the memory flush
-//! (`session::helpers::memory_flush`) and dream (`session::memory::dream`)
+//! (`session::helpers::memory_flush`) and dream (`memory::dream`)
 //! response-processing paths.
 //!
 //! These live here, in the memory subsystem, so `dream` no longer reaches

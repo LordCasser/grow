@@ -8,7 +8,6 @@ fn model_with_support(id: &str, supports: bool) -> (acp::ModelId, acp::ModelInfo
     let id = acp::ModelId::new(Arc::from(id));
     let meta = if supports {
         Some(serde_json::json!({
-            "supportsReasoningEffort": true,
             "reasoningEffort": "medium",
             "reasoningEfforts": [
                 { "id": "deep", "value": "xhigh", "label": "Deep" },

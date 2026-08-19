@@ -84,7 +84,6 @@ async fn maybe_wake_for_deferred_completion(
         task_wake_fallback: None,
         respond_to,
         persist_ack: None,
-        parsed_prompt_tx: None,
         queue_meta: None,
     };
     let mut state = session.state.lock().await;
@@ -95,29 +94,33 @@ async fn maybe_wake_for_deferred_completion(
         SessionActor::maybe_start_running_task(session, completion_tx).await;
     }
 }
-/// The `YoloToggled` event to emit after `set_yolo_mode(requested)`, given the
-/// previous state and the post-call ACTUAL state (read back via
-/// `is_yolo_mode()`). Returns `Some(actual)` only on a real change.
-///
-/// Callers MUST pass the read-back `actual`, never the request: under the
-/// always-approve pin the manager clamps a requested ON to OFF, so reporting the
-/// request would announce (event + diagnostics + log) a turn-on that never
-/// happened.
-pub(super) fn yolo_toggle_report(was: bool, actual: bool) -> Option<bool> {
+/// Returns the authoritative mode only when the manager accepted a real
+/// transition. Callers pass the post-clamp read-back, never the request.
+pub(super) fn permission_mode_change(
+    was: ::diagnostics::enums::PermissionMode,
+    actual: ::diagnostics::enums::PermissionMode,
+) -> Option<::diagnostics::enums::PermissionMode> {
     (was != actual).then_some(actual)
 }
 #[cfg(test)]
-mod yolo_toggle_report_tests {
-    use super::yolo_toggle_report;
-    /// A pin-clamped enable (requested ON but actual stays OFF) reports no
-    /// change, so no spurious "turned on" event/diagnostics is emitted. Real
-    /// flips report the actual new state.
+mod permission_mode_change_tests {
+    use super::permission_mode_change;
+    use ::diagnostics::enums::PermissionMode;
+
     #[test]
     fn reports_actual_state_change_only() {
-        assert_eq!(yolo_toggle_report(false, false), None);
-        assert_eq!(yolo_toggle_report(false, true), Some(true));
-        assert_eq!(yolo_toggle_report(true, false), Some(false));
-        assert_eq!(yolo_toggle_report(true, true), None);
+        assert_eq!(
+            permission_mode_change(PermissionMode::Ask, PermissionMode::Ask),
+            None
+        );
+        assert_eq!(
+            permission_mode_change(PermissionMode::Ask, PermissionMode::Auto),
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(
+            permission_mode_change(PermissionMode::Auto, PermissionMode::AlwaysApprove),
+            Some(PermissionMode::AlwaysApprove)
+        );
     }
 }
 /// Best-effort removal of this session's per-session scratch staging on
@@ -708,7 +711,9 @@ pub(super) async fn run_session(
                                 session.memory.save_on_end,
                             );
                             session_end_result = match &result {
-                                crate::session::memory::hooks::SessionEndResult::Written(_) => "written",
+                                crate::session::memory::hooks::SessionEndResult::Written(_) => {
+                                    "written"
+                                }
                                 crate::session::memory::hooks::SessionEndResult::Skipped => "skipped",
                                 crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
                             };
@@ -722,7 +727,10 @@ pub(super) async fn run_session(
                                 recovery_searches = telem.compaction_recovery_count,
                                 "MEMORY_SESSION_END: channel closed, session summary saved"
                             );
-                            if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
+                            if let crate::session::memory::hooks::SessionEndResult::Written(
+                                ref path_str,
+                            ) = result
+                            {
                                 session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
                                 session.send_grow_notification(GrowSessionUpdate::MemorySessionSaved {
                                     path: path_str.clone(),
@@ -817,7 +825,7 @@ pub(super) async fn run_session(
                             s.resume_plan_approval(completion_tx).await;
                         });
                     }
-                    SessionCommand::QueuePrompt { prompt_id, prompt_blocks, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, admission, respond_to, persist_ack, parsed_prompt_tx } => {
+                    SessionCommand::QueuePrompt { prompt_id, prompt_blocks, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, admission, respond_to, persist_ack } => {
                         let (actor_admitted, task_wake_fallback) = match admission {
                             Some(admission) => {
                                 let fallback = session
@@ -878,7 +886,7 @@ pub(super) async fn run_session(
                             );
                         }
                         session
-                            .queue_input(prompt_blocks, prompt_id, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, task_wake_fallback, respond_to, persist_ack, parsed_prompt_tx)
+                            .queue_input(prompt_blocks, prompt_id, origin, turn_kind, client_identifier, screen_mode, verbatim, json_schema, task_wake_fallback, respond_to, persist_ack)
                             .await;
                         if !maybe_start_pending_manual_compaction(
                             session.clone(),
@@ -917,6 +925,17 @@ pub(super) async fn run_session(
                             .await;
                         }
                         let _ = respond_to.send(result.map(|_| ()));
+                    }
+                    SessionCommand::SetSessionTitle { title, respond_to } => {
+                        // A user title wins permanently. Taking the capability
+                        // here prevents a later prompt from launching a title
+                        // Sideband; an already-running Sideband still fails
+                        // closed when it attempts to append after this event.
+                        session.session_title_route.borrow_mut().take();
+                        let result = session
+                            .commit_session_title(title, chat_state::SessionTitleSource::User)
+                            .await;
+                        let _ = respond_to.send(result);
                     }
                     SessionCommand::QueryPromptStatus { prompt_id, respond_to } => {
                         use crate::session::prompt_queue::PromptStatus;
@@ -1415,7 +1434,6 @@ pub(super) async fn run_session(
                                 Some(&cwd),
                                 &skills_config,
                                 pr.as_deref(),
-                                s.rebuild_spec.compat,
                             )
                             .await;
                             tracing::info!(skills = new_skills.len(), "refreshed skill baseline after bundle sync");
@@ -1440,28 +1458,27 @@ pub(super) async fn run_session(
                             }
                         });
                     }
-                    SessionCommand::SetYoloMode { enabled } => {
-                        let was = session.permissions.is_yolo_mode();
-                        tracing::info!("Session received SetYoloMode: {}", enabled);
-                        session.permissions.set_yolo_mode(enabled);
-                        // Report the ACTUAL state, not the request: the manager
-                        // clamps a requested ON to OFF under the always-approve
-                        // pin, so emitting `enabled` would announce a turn-on
-                        // that never happened.
-                        let actual = session.permissions.is_yolo_mode();
-                        if let Some(enabled) = yolo_toggle_report(was, actual) {
-                            session.emit_event(crate::session::events::Event::YoloToggled { enabled });
+                    SessionCommand::SetPermissionMode { mode } => {
+                        let was = session.permissions.mode();
+                        let mode = if mode.is_auto()
+                            && !crate::util::config::auto_permission_mode_enabled_from_disk()
+                        {
+                            crate::util::config::PermissionMode::Ask
+                        } else {
+                            mode
+                        };
+                        tracing::info!(?mode, "Session received SetPermissionMode");
+                        session.permissions.set_mode(mode);
+                        let actual = session.permissions.mode();
+                        if permission_mode_change(was, actual).is_some() {
+                            session.emit_event(
+                                crate::session::events::Event::PermissionModeChanged {
+                                    previous_mode: was,
+                                    mode: actual,
+                                },
+                            );
                         }
-                    }
-                    SessionCommand::SetAutoMode { enabled } => {
-                        // Feature gate: a runtime request to enable auto is
-                        // honored only when the feature is enabled, so a
-                        // client notification can't bypass the gate.
-                        let enabled = enabled
-                            && crate::util::config::auto_permission_mode_enabled_from_disk();
-                        tracing::info!("Session received SetAutoMode: {}", enabled);
-                        session.permissions.set_auto_mode(enabled);
-                        if enabled {
+                        if actual.is_auto() {
                             session.wire_permission_auto_llm_classifier().await;
                         } else {
                             session.permissions.set_llm_side_query_wired(false);
@@ -1674,7 +1691,7 @@ pub(super) async fn run_session(
                             let prefix = format!(
                                 "{}{}",
                                 name,
-                                crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+                                workspace_types::MCP_TOOL_NAME_DELIMITER
                             );
                             let removed_count = session
                                 .agent
@@ -1758,7 +1775,7 @@ pub(super) async fn run_session(
                             let prefix = format!(
                                 "{}{}",
                                 name,
-                                crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
+                                workspace_types::MCP_TOOL_NAME_DELIMITER
                             );
                             let removed_count = session
                                 .agent
@@ -1793,87 +1810,11 @@ pub(super) async fn run_session(
                             let _ = respond_to.send(Ok(()));
                         });
                     }
-                    SessionCommand::ToggleMcpTool { server_name, tool_name, enabled, is_managed_gateway, respond_to } => {
-                        if is_managed_gateway {
-                            let mut disabled_tools = crate::util::config::get_all_mcp_disabled_tools(std::path::Path::new(&session.session_info.cwd));
-                            if tool_name.is_empty() {
-                                let set = disabled_tools
-                                    .entry(crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY.to_string())
-                                    .or_default();
-                                if enabled {
-                                    set.remove(&server_name);
-                                } else {
-                                    set.insert(server_name.clone());
-                                }
-                                if set.is_empty() {
-                                    disabled_tools.remove(crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY);
-                                }
-                            } else if enabled {
-                                if let Some(set) = disabled_tools.get_mut(&server_name) {
-                                    set.remove(&tool_name);
-                                    if set.is_empty() {
-                                        disabled_tools.remove(&server_name);
-                                    }
-                                }
-                            } else {
-                                disabled_tools
-                                    .entry(server_name.clone())
-                                    .or_default()
-                                    .insert(tool_name.clone());
-                            }
-
-                            session
-                                .refresh_mcp_snapshot_and_schedule_reminder_with_disabled(
-                                    &disabled_tools,
-                                )
-                                .await;
-                            session.refresh_goal_harness_enabled().await;
-
-                            let disabled_vec: Vec<String> = if tool_name.is_empty() {
-                                disabled_tools
-                                    .get(crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY)
-                                    .map(|s| s.iter().cloned().collect())
-                                    .unwrap_or_default()
-                            } else {
-                                disabled_tools
-                                    .get(&server_name)
-                                    .map(|s| s.iter().cloned().collect())
-                                    .unwrap_or_default()
-                            };
-                            let notifications = session.notifications.gateway.clone();
-                            let session_id = session.session_info.id.0.clone();
-                            let server_for_persist = if tool_name.is_empty() {
-                                crate::util::config::MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY.to_string()
-                            } else {
-                                server_name.clone()
-                            };
-                            tokio::task::spawn_local(async move {
-                                if let Err(e) = crate::util::config::save_mcp_disabled_tools(
-                                    &server_for_persist,
-                                    &disabled_vec,
-                                ).await {
-                                    tracing::warn!(
-                                        server = server_for_persist.as_str(),
-                                        error = %e,
-                                        "Failed to persist disabled_tools to config"
-                                    );
-                                }
-                                let payload = crate::extensions::mcp::McpToolsChanged {
-                                    session_id: session_id.to_string(),
-                                    server_name: String::new(),
-                                    tools: Vec::new(),
-                                };
-                                if let Ok(params) = serde_json::value::to_raw_value(&payload) {
-                                    notifications.forward_fire_and_forget(acp::ExtNotification::new("grow/mcp/tools_changed", params.into()));
-                                }
-                                let _ = respond_to.send(Ok(()));
-                            });
-                            continue;
-                        }
+                    SessionCommand::ToggleMcpTool { server_name, tool_name, enabled, respond_to } => {
                         let qualified = format!(
                             "{}{}{}",
                             server_name,
-                            crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER,
+                            workspace_types::MCP_TOOL_NAME_DELIMITER,
                             tool_name,
                         );
                         let mut mcp_state = session.mcp_state.lock().await;
@@ -1961,29 +1902,25 @@ pub(super) async fn run_session(
                                     "Failed to persist disabled_tools to config"
                                 );
                             }
-                            // Emit the
-                            // typed McpToolsChanged shape with
-                            // `sessionId` populated so the pager
-                            // can route via `find_session_match`.
-                            // The toggle-tool path is not
-                            // server-scoped (the disable mask
-                            // applies to one server but the
-                            // pager refetches the full catalog),
-                            // so `server_name` / `tools` stay
-                            // empty and skip-if-empty drops them
-                            // from the wire — identical bytes to
-                            // the previous payload save for the
-                            // additional `sessionId` field.
-                            let payload = crate::extensions::mcp::McpToolsChanged {
+                            // The persisted disable mask changed the canonical
+                            // catalog. The producer does not retain a complete
+                            // UI projection here, so the absent `tools` field
+                            // asks the client to refresh from `mcp/list`.
+                            let payload = crate::extensions::mcp::McpServerStatusPayload {
                                 session_id: session_id.to_string(),
-                                server_name: String::new(),
-                                tools: Vec::new(),
+                                name: server_for_persist,
+                                status: crate::extensions::mcp::McpServerStatus::Ready,
+                                reason: crate::extensions::mcp::McpServerStatusReason::ConfigChanged,
+                                detail: None,
+                                tools: None,
                             };
                             if let Ok(params) =
                                 serde_json::value::to_raw_value(&payload)
                             {
-                                notifications.forward_fire_and_forget(acp::ExtNotification::new(crate::extensions::mcp::mcp_methods::TOOLS_CHANGED
-                                        , params.into()));
+                                notifications.forward_fire_and_forget(acp::ExtNotification::new(
+                                    crate::extensions::mcp::SERVER_STATUS_METHOD,
+                                    params.into(),
+                                ));
                             }
                             let _ = respond_to.send(Ok(()));
                         });
@@ -2038,15 +1975,6 @@ pub(super) async fn run_session(
                             ).await;
                             let _ = respond_to.send(result);
                         });
-                    }
-                    SessionCommand::GetManagedGatewayDisabledTools { respond_to } => {
-                        let disabled_tools = crate::util::config::get_all_mcp_disabled_tools(
-                            std::path::Path::new(&session.session_info.cwd),
-                        );
-                        let _ = respond_to.send(disabled_tools);
-                    }
-                    SessionCommand::RefreshMcpSearchIndex => {
-                        session.refresh_mcp_snapshot_and_schedule_reminder().await;
                     }
                     SessionCommand::AdvertiseCommands => {
                         session.send_available_commands_update().await;
@@ -2219,7 +2147,6 @@ pub(super) async fn run_session(
                                 task_wake_fallback: None,
                                 respond_to,
                                 persist_ack: None,
-                                parsed_prompt_tx: None,
                                 queue_meta: None,
                             });
                         }
@@ -2293,9 +2220,15 @@ pub(super) async fn run_session(
                                     session.memory.save_on_end,
                                 );
                                 session_end_result = match &result {
-                                    crate::session::memory::hooks::SessionEndResult::Written(_) => "written",
-                                    crate::session::memory::hooks::SessionEndResult::Skipped => "skipped",
-                                    crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
+                                    crate::session::memory::hooks::SessionEndResult::Written(_) => {
+                                        "written"
+                                    }
+                                    crate::session::memory::hooks::SessionEndResult::Skipped => {
+                                        "skipped"
+                                    }
+                                    crate::session::memory::hooks::SessionEndResult::Failed(_) => {
+                                        "failed"
+                                    }
                                 };
                                 total_chunks_at_end = storage.total_chunk_count();
                                 let telem = session.memory.diagnostics_snapshot();
@@ -2308,7 +2241,10 @@ pub(super) async fn run_session(
                                     "MEMORY_SESSION_END: session summary saved"
                                 );
                                 // Reindex + embed the written file so it's searchable next session
-                                if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
+                                if let crate::session::memory::hooks::SessionEndResult::Written(
+                                    ref path_str,
+                                ) = result
+                                {
                                     session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
                                     session.send_grow_notification(GrowSessionUpdate::MemorySessionSaved {
                                         path: path_str.clone(),

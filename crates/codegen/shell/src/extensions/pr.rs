@@ -82,8 +82,8 @@ async fn gh_pr_view_by_branch(cwd: &str, branch: &str) -> Option<PrData> {
     ])
     .current_dir(cwd)
     .stdin(std::process::Stdio::null());
-    tools::util::detach_command(&mut cmd);
-    cmd.envs(tools::util::pager_env());
+    tty_utils::detach_command(&mut cmd);
+    cmd.envs(tty_utils::pager_env());
     // gh colorizes even piped --json output under CLICOLOR_FORCE or
     // GH_FORCE_TTY (inherited from terminal-launched dev environments), and
     // forcing beats NO_COLOR in gh's precedence; there is no --no-color flag
@@ -137,8 +137,8 @@ async fn gh_pr_is_in_merge_queue(cwd: &str, pr_url: &str) -> bool {
     ])
     .current_dir(cwd)
     .stdin(std::process::Stdio::null());
-    tools::util::detach_command(&mut cmd);
-    cmd.envs(tools::util::pager_env());
+    tty_utils::detach_command(&mut cmd);
+    cmd.envs(tty_utils::pager_env());
     // Forcing (CLICOLOR_FORCE/GH_FORCE_TTY) beats NO_COLOR in gh's precedence.
     cmd.env("NO_COLOR", "1");
     cmd.env("CLICOLOR_FORCE", "0");

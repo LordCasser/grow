@@ -44,8 +44,6 @@ pub struct AppearanceConfig {
     pub show_plan_chip: bool,
     /// Alt-screen (fullscreen) policy from the `[terminal]` section.
     pub alt_screen: crate::terminal::AltScreenMode,
-    /// Experimental scrollback-native minimal mode (`[terminal] minimal`).
-    pub minimal: bool,
     /// Pinned live-region height (rows) in minimal mode. Clamped to
     /// `[3, term_height - 1]` at runtime.
     pub minimal_live_rows: u16,
@@ -458,15 +456,11 @@ pub struct EditBlockConfig {
     pub accent: Option<Color>,
     pub gutter_bg: bool,
     pub indent_bg: bool,
-    /// Show the +N/-M line summary in the collapsed header. `None` (default)
-    /// follows the shell-owned `collapsed_edit_blocks` flag; an explicit
-    /// pager.toml value pins the shape regardless of the flag.
-    pub line_summary: Option<bool>,
+    /// Show the +N/-M line summary in the collapsed header.
+    pub line_summary: bool,
     /// When true, Edit blocks start in Expanded mode showing the diff; when
-    /// false, they start Collapsed (one-line summary). `None` (default)
-    /// follows the shell-owned `collapsed_edit_blocks` flag; an explicit
-    /// pager.toml value pins the shape regardless of the flag.
-    pub expanded_by_default: Option<bool>,
+    /// false, they start Collapsed (one-line summary).
+    pub expanded_by_default: bool,
     /// Separator between diff hunks.
     /// Options: "…" (ellipsis, default), "───" (line), "⋯" (midline), "" (none).
     pub hunk_separator: String,
@@ -485,29 +479,11 @@ impl Default for EditBlockConfig {
             accent: None,
             gutter_bg: false,
             indent_bg: false,
-            line_summary: None,
-            expanded_by_default: None,
+            line_summary: true,
+            expanded_by_default: false,
             hunk_separator: "…".to_string(),
             dual_line_numbers: false,
         }
-    }
-}
-
-impl EditBlockConfig {
-    /// Effective "Edit blocks start expanded" default. The single policy
-    /// point pairing the two owners: an explicit pager.toml value wins;
-    /// unset defers to the shell-owned `collapsed_edit_blocks` flag
-    /// (flag on = collapsed one-liner, off = legacy expanded diff).
-    pub fn effective_expanded(&self, collapsed_edit_blocks: bool) -> bool {
-        self.expanded_by_default.unwrap_or(!collapsed_edit_blocks)
-    }
-
-    /// Effective collapsed-header `+N/-M` diffstat toggle. Same pairing as
-    /// [`Self::effective_expanded`]: explicit value wins; unset shows the
-    /// diffstat exactly when the flag collapses Edits (the one-liner view
-    /// is what the summary exists for).
-    pub fn effective_line_summary(&self, collapsed_edit_blocks: bool) -> bool {
-        self.line_summary.unwrap_or(collapsed_edit_blocks)
     }
 }
 
@@ -775,9 +751,6 @@ pub struct RawTerminalConfig {
     /// "always" — always enter fullscreen, even in control mode / Zellij.
     /// "never" — never enter fullscreen; run inline in main scrollback.
     pub alt_screen: RawAltScreenMode,
-    /// Experimental scrollback-native rendering mode. Finalized blocks are
-    /// printed into the terminal's native scrollback. Default false.
-    pub minimal: bool,
     /// Pinned live-region height (rows) for minimal mode. Default 10.
     pub minimal_live_rows: Option<u16>,
     /// Maximum rows for a single committed block in minimal mode. Default 2000.
@@ -794,7 +767,6 @@ impl Default for RawTerminalConfig {
     fn default() -> Self {
         Self {
             alt_screen: RawAltScreenMode::Auto,
-            minimal: false,
             minimal_live_rows: None,
             minimal_max_commit_rows: None,
             minimal_collapse_thinking: false,
@@ -1159,13 +1131,9 @@ pub struct RawEditBlockConfig {
     /// true = skip indent, false = include indent in background.
     pub indent_bg: bool,
     /// Show the +N/-M line summary in the collapsed header.
-    /// Commented out (unset), it follows the `[ui] collapsed_edit_blocks`
-    /// flag in config.toml; uncomment to pin either way.
     pub line_summary: Option<bool>,
     /// Start Edit blocks expanded (showing the diff) instead of as a
-    /// collapsed one-line summary. Commented out (unset), it follows the
-    /// `[ui] collapsed_edit_blocks` flag in config.toml (flag on =
-    /// collapsed); uncomment to pin either way.
+    /// collapsed one-line summary.
     pub expanded_by_default: Option<bool>,
     /// Separator between diff hunks. Options: "…" (default), "───", "⋯", "" (none).
     pub hunk_separator: Option<String>,
@@ -1453,7 +1421,6 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
             disable_plugins: raw.disable_plugins,
             show_plan_chip: raw.show_plan_chip,
             alt_screen: raw.terminal.alt_screen.into(),
-            minimal: raw.terminal.minimal,
             minimal_live_rows: raw.terminal.minimal_live_rows.unwrap_or(10),
             minimal_max_commit_rows: raw.terminal.minimal_max_commit_rows.unwrap_or(2000),
             minimal_collapse_thinking: raw.terminal.minimal_collapse_thinking,
@@ -1590,8 +1557,8 @@ impl From<RawEditBlockConfig> for EditBlockConfig {
             accent: raw.accent.to_option(),
             gutter_bg: raw.gutter_bg,
             indent_bg: raw.indent_bg,
-            line_summary: raw.line_summary,
-            expanded_by_default: raw.expanded_by_default,
+            line_summary: raw.line_summary.unwrap_or(true),
+            expanded_by_default: raw.expanded_by_default.unwrap_or(false),
             hunk_separator: raw.hunk_separator.unwrap_or_else(|| "…".to_string()),
             dual_line_numbers: raw.dual_line_numbers,
         }
@@ -1802,12 +1769,11 @@ fn lookup_named_color(name: &str) -> Result<Color, String> {
 impl RawAppearanceConfig {
     pub fn to_toml_with_comments() -> String {
         let mut config = Self::default();
-        // Template-only materialization: these default to None (the shell's
-        // `[ui] collapsed_edit_blocks` flag decides), which the serializer
-        // would omit entirely. Show the flag-off shape as commented lines so
-        // the keys stay discoverable; commenting-out below keeps them inert.
-        config.scrollback.blocks.edit.expanded_by_default = Some(true);
-        config.scrollback.blocks.edit.line_summary = Some(false);
+        // Template-only materialization: optional raw keys would otherwise be
+        // omitted. The generated lines are commented below and show the
+        // canonical built-in shape.
+        config.scrollback.blocks.edit.expanded_by_default = Some(false);
+        config.scrollback.blocks.edit.line_summary = Some(true);
         let toml_str = toml_edit::ser::to_string_pretty(&config).expect("serialize default");
         let mut doc: DocumentMut = toml_str.parse().expect("parse toml");
 
@@ -2360,66 +2326,27 @@ gutter_bg = true
         }
     }
 
-    /// The single policy point pairing the pager.toml shape keys with the
-    /// shell-owned `collapsed_edit_blocks` flag: unset keys follow the flag
-    /// (on = collapsed one-liner with diffstat, off = legacy expanded diff
-    /// without it); explicit values pin the shape in both directions.
+    /// Edit blocks have one canonical default shape; pager.toml may still
+    /// override the user-facing presentation explicitly.
     #[test]
-    fn effective_edit_shape_follows_flag_unless_pinned() {
-        let unset = EditBlockConfig::default();
-        assert!(unset.effective_expanded(false), "flag off: expanded");
-        assert!(
-            !unset.effective_line_summary(false),
-            "flag off: no diffstat"
-        );
-        assert!(!unset.effective_expanded(true), "flag on: collapsed");
-        assert!(unset.effective_line_summary(true), "flag on: diffstat");
-
-        let pinned = EditBlockConfig {
-            expanded_by_default: Some(true),
-            line_summary: Some(true),
-            ..EditBlockConfig::default()
-        };
-        assert!(
-            pinned.effective_expanded(true),
-            "explicit expanded beats the flag"
-        );
-        assert!(
-            pinned.effective_line_summary(false),
-            "explicit diffstat beats the flag"
-        );
-        let pinned = EditBlockConfig {
-            expanded_by_default: Some(false),
-            line_summary: Some(false),
-            ..EditBlockConfig::default()
-        };
-        assert!(
-            !pinned.effective_expanded(false),
-            "explicit collapse beats the flag"
-        );
-        assert!(
-            !pinned.effective_line_summary(true),
-            "explicit no-diffstat beats the flag"
-        );
+    fn edit_shape_defaults_to_collapsed_with_diffstat() {
+        let edit = EditBlockConfig::default();
+        assert!(!edit.expanded_by_default);
+        assert!(edit.line_summary);
     }
 
-    /// The two flag-deferred edit keys default to `None` (omitted by the
-    /// serializer), but the template must still document them as commented
-    /// lines showing the flag-off shape.
+    /// Optional raw keys are omitted by the serializer unless materialized,
+    /// but the template must still document the canonical defaults.
     #[test]
-    fn template_documents_flag_deferred_edit_keys() {
+    fn template_documents_edit_shape_defaults() {
         let template = RawAppearanceConfig::to_toml_with_comments();
         assert!(
-            template.contains("# expanded_by_default = true"),
+            template.contains("# expanded_by_default = false"),
             "expanded_by_default missing from template:\n{template}"
         );
         assert!(
-            template.contains("# line_summary = false"),
+            template.contains("# line_summary = true"),
             "line_summary missing from template:\n{template}"
-        );
-        assert!(
-            template.contains("collapsed_edit_blocks"),
-            "doc comments must point at the [ui] flag:\n{template}"
         );
     }
 
@@ -2489,24 +2416,11 @@ gutter_bg = true
         );
     }
 
-    /// A config written before the key existed must still parse and keep K9.
     #[test]
-    fn minimal_collapse_thinking_defaults_off_and_old_configs_parse() {
+    fn minimal_collapse_thinking_defaults_off() {
         let empty: RawAppearanceConfig = toml::from_str("").expect("empty config must parse");
         assert!(!empty.terminal.minimal_collapse_thinking);
         assert!(!AppearanceConfig::from(empty).minimal_collapse_thinking);
-
-        let legacy: RawAppearanceConfig =
-            toml::from_str("[terminal]\nminimal = true\nminimal_live_rows = 12\n")
-                .expect("legacy config must parse");
-        let cfg: AppearanceConfig = legacy.into();
-        assert!(cfg.minimal);
-        assert_eq!(cfg.minimal_live_rows, 12);
-        assert!(
-            !cfg.minimal_collapse_thinking,
-            "a config written before the key existed must keep the K9 default"
-        );
-
         assert!(!AppearanceConfig::default().minimal_collapse_thinking);
     }
 

@@ -52,17 +52,27 @@
                     tools: Vec::new(),
                     enabled: true,
                     source: "local".into(),
-                    wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
-                    is_managed_gateway: false,
                 },
             ]));
         }
 
-        let tools = Some(serde_json::json!([
-            { "name": "t1", "description": "one", "enabled": true },
-            { "name": "t2", "enabled": true },
-        ]));
+        let tools = Some(vec![
+            shell::extensions::mcp::McpToolEntry {
+                name: "t1".into(),
+                display_name: None,
+                description: Some("one".into()),
+                meta: None,
+                enabled: true,
+            },
+            shell::extensions::mcp::McpToolEntry {
+                name: "t2".into(),
+                display_name: None,
+                description: None,
+                meta: None,
+                enabled: true,
+            },
+        ]);
         let notif = make_server_status_notif("sess-owner", "alpha", McpServerStatus::Ready, tools);
         let redraw = handle_mcp_server_status(&notif, &mut app);
         assert!(
@@ -433,46 +443,6 @@
         );
     }
 
-    /// A present-but-non-array `tools` field must drop ONLY the tools
-    /// update. The `status` field still applies — we do not drop the
-    /// whole push.
-    #[test]
-    fn server_status_lenient_tools_decoding_still_applies_status() {
-        use crate::views::extensions_modal::TabDataState;
-        use crate::views::mcps_modal::McpServerDisplayStatus;
-        use shell::extensions::mcp::McpServerStatus;
-        let mut app = make_app_two_agents();
-        seed_owner_agent_with_open_modal(&mut app);
-
-        // tools = arbitrary non-array shape (a future shell might emit
-        // something like `{ added: [], removed: [] }`). Must NOT take
-        // down the status update.
-        let bad_tools = Some(serde_json::json!({"added": [], "removed": []}));
-        let notif =
-            make_server_status_notif("sess-owner", "alpha", McpServerStatus::Ready, bad_tools);
-        let _ = handle_mcp_server_status(&notif, &mut app);
-
-        let modal = app
-            .agents
-            .get(&AgentId(0))
-            .unwrap()
-            .extensions_modal
-            .as_ref()
-            .unwrap();
-        let TabDataState::Loaded(ref servers) = modal.mcps_data else {
-            panic!("modal still Loaded");
-        };
-        assert_eq!(
-            servers[0].status,
-            McpServerDisplayStatus::Ready,
-            "malformed tools must not take down the status update"
-        );
-        // tool_count / tools were preserved (we dropped the tools
-        // update, not overwrote with empty).
-        assert_eq!(servers[0].tool_count, 0);
-        assert!(servers[0].tools.is_empty());
-    }
-
     /// Pin that the pager deserializes against the *shell's*
     /// `McpServerStatus` enum, so a future new variant doesn't need a
     /// pager change to be recognized. Round-trip through
@@ -480,12 +450,11 @@
     #[test]
     fn server_status_round_trips_shell_canonical_type() {
         use shell::extensions::mcp::{
-            McpServerSource, McpServerStatus, McpServerStatusPayload, McpServerStatusReason,
+            McpServerStatus, McpServerStatusPayload, McpServerStatusReason,
         };
         let payload = McpServerStatusPayload {
             session_id: "s".into(),
             name: "alpha".into(),
-            source: McpServerSource::Local,
             status: McpServerStatus::Ready,
             reason: McpServerStatusReason::Initialized,
             detail: None,
@@ -497,127 +466,6 @@
         assert!(json.contains("\"ready\""));
     }
 
-    /// `servers_updated` has NO `sessionId` on the wire. The handler
-    /// must broadcast to every agent with an open modal, NOT fall
-    /// through to `active_view`.
-    #[test]
-    fn servers_updated_broadcasts_to_every_agent_with_open_modal() {
-        let mut app = make_app_two_agents();
-        // Open modals on BOTH agents — broadcast must hit both.
-        seed_owner_agent_with_open_modal(&mut app);
-        {
-            let active = app.agents.get_mut(&AgentId(1)).unwrap();
-            active.extensions_modal = Some(make_mcps_modal_with_servers(vec![
-                crate::views::mcps_modal::McpServerInfo {
-                    name: "beta".into(),
-                    display_name: None,
-                    status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
-                    tool_count: 0,
-                    setup_required: false,
-                    setup: None,
-                    setup_values: std::collections::HashMap::new(),
-                    tools: Vec::new(),
-                    enabled: true,
-                    source: "local".into(),
-                    wire_source: crate::views::mcps_modal::McpWireSource::Local,
-                    plugin_name: None,
-                    is_managed_gateway: false,
-                },
-            ]));
-        }
-
-        let notif = make_servers_updated_notif();
-        let redraw = handle_mcp_servers_updated(&notif, &mut app);
-
-        assert!(
-            redraw,
-            "active agent had its modal open — redraw must be requested"
-        );
-        assert_eq!(
-            app.pending_effects.len(),
-            2,
-            "servers_updated must broadcast: one FetchMcpsList per agent with an open modal"
-        );
-        let mut targets: Vec<usize> = app
-            .pending_effects
-            .iter()
-            .filter_map(|e| match e {
-                Effect::FetchMcpsList {
-                    agent_id, cache, ..
-                } => {
-                    assert!(*cache, "broadcast must use the debounced cache=true path");
-                    Some(agent_id.0)
-                }
-                _ => None,
-            })
-            .collect();
-        targets.sort();
-        assert_eq!(targets, vec![0, 1]);
-    }
-
-    /// Agents without an open modal must NOT receive a refetch (cheap
-    /// path) even though they are eligible to receive the broadcast in
-    /// principle.
-    #[test]
-    fn servers_updated_skips_agents_with_closed_modal() {
-        let mut app = make_app_two_agents();
-        // Only agent 1 (foregrounded) has a modal.
-        {
-            let active = app.agents.get_mut(&AgentId(1)).unwrap();
-            active.extensions_modal = Some(make_mcps_modal_with_servers(Vec::new()));
-        }
-        let notif = make_servers_updated_notif();
-        let _ = handle_mcp_servers_updated(&notif, &mut app);
-        assert_eq!(
-            app.pending_effects.len(),
-            1,
-            "agent 0 has no modal open — must NOT receive a refetch"
-        );
-        let Effect::FetchMcpsList { agent_id, .. } = app.pending_effects.first().unwrap() else {
-            panic!();
-        };
-        assert_eq!(
-            *agent_id,
-            AgentId(1),
-            "only the agent with an open modal gets the refetch"
-        );
-    }
-
-    /// A second `servers_updated` push that lands before agent A's
-    /// pending fetch drains must coalesce for agent A but still
-    /// schedule fresh for agent B if B's first push was never seen.
-    #[test]
-    fn servers_updated_per_agent_coalescing() {
-        let mut app = make_app_two_agents();
-        seed_owner_agent_with_open_modal(&mut app);
-        let notif = make_servers_updated_notif();
-        let _ = handle_mcp_servers_updated(&notif, &mut app);
-        assert_eq!(app.pending_effects.len(), 1);
-
-        // Second push: owner is now coalesced (agent 0 has pending);
-        // but we add a modal to agent 1 — that agent's push must NOT
-        // be dropped just because agent 0 has a pending fetch.
-        {
-            let active = app.agents.get_mut(&AgentId(1)).unwrap();
-            active.extensions_modal = Some(make_mcps_modal_with_servers(Vec::new()));
-        }
-        let _ = handle_mcp_servers_updated(&notif, &mut app);
-        assert_eq!(
-            app.pending_effects.len(),
-            2,
-            "agent 1's first push must schedule a fetch despite agent 0 having a pending one"
-        );
-        let mut targets: Vec<usize> = app
-            .pending_effects
-            .iter()
-            .filter_map(|e| match e {
-                Effect::FetchMcpsList { agent_id, .. } => Some(agent_id.0),
-                _ => None,
-            })
-            .collect();
-        targets.sort();
-        assert_eq!(targets, vec![0, 1]);
-    }
 
     /// `mcp_initialized` wire shape `{ sessionId, mcpToolCount, elapsedMs }`
     /// — sessionId routing applies; the matched agent's
@@ -647,7 +495,7 @@
         }
 
         let notif = make_mcp_initialized_notif_for("sess-owner");
-        let _ = handle_mcp_tools_changed(&notif, &mut app);
+        let _ = handle_mcp_initialized(&notif, &mut app);
 
         assert!(
             app.agents
@@ -668,19 +516,19 @@
     }
 
     #[test]
-    fn tools_changed_post_h2_routes_to_owning_agent_not_active_view() {
+    fn catalog_delta_routes_refresh_to_owning_agent_not_active_view() {
         let mut app = make_app_two_agents();
         seed_owner_agent_with_open_modal(&mut app);
         // Active agent has NO modal — a route-by-active-view path
         // would no-op. Routing by sessionId must schedule a fetch
         // against the OWNER agent (agent 0).
-        let notif = make_tools_changed_notif_post_h2("sess-owner");
-        let _ = handle_mcp_tools_changed(&notif, &mut app);
+        let notif = make_catalog_refresh_notif("sess-owner", "linear");
+        let _ = handle_mcp_server_status(&notif, &mut app);
 
         assert_eq!(
             app.pending_effects.len(),
             1,
-            "tools_changed with sessionId must route to the owner"
+            "catalog delta with sessionId must route to the owner"
         );
         let Effect::FetchMcpsList { agent_id, .. } =
             app.pending_effects.first().expect("effect scheduled")
@@ -690,36 +538,28 @@
         assert_eq!(
             *agent_id,
             AgentId(0),
-            "tools_changed with sessionId must route to the owner, not the active view"
+            "catalog delta with sessionId must route to the owner, not the active view"
         );
     }
 
-    /// Forward/backward-compat guard: older shells emit
-    /// `{ serverName, tools }` with NO sessionId. The pager must
-    /// gracefully fall back to `active_view`.
-
     #[test]
-    fn tools_changed_pre_h2_falls_back_to_active_view() {
+    fn catalog_delta_without_session_id_is_rejected() {
         let mut app = make_app_two_agents();
-        // Active agent (agent 1) gets a modal; owner (agent 0) does not.
-        {
-            let active = app.agents.get_mut(&AgentId(1)).unwrap();
-            active.extensions_modal = Some(make_mcps_modal_with_servers(Vec::new()));
-        }
-        let notif = make_tools_changed_notif_pre_h2();
-        let _ = handle_mcp_tools_changed(&notif, &mut app);
+        app.agents.get_mut(&AgentId(1)).unwrap().extensions_modal =
+            Some(make_mcps_modal_with_servers(Vec::new()));
+        let raw = serde_json::value::to_raw_value(
+            &serde_json::json!({
+                "name": "orphan",
+                "status": "ready",
+                "reason": "config_changed"
+            }),
+        )
+        .unwrap();
+        let notif = acp::ExtNotification::new(
+            "grow/mcp/server_status",
+            std::sync::Arc::from(raw),
+        );
 
-        assert_eq!(
-            app.pending_effects.len(),
-            1,
-            "legacy payload without sessionId falls back to active view"
-        );
-        let Effect::FetchMcpsList { agent_id, .. } = app.pending_effects.first().unwrap() else {
-            panic!();
-        };
-        assert_eq!(
-            *agent_id,
-            AgentId(1),
-            "legacy fallback targets the foregrounded agent"
-        );
+        assert!(!handle_mcp_server_status(&notif, &mut app));
+        assert!(app.pending_effects.is_empty());
     }

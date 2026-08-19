@@ -45,7 +45,6 @@ session_picker_grouped = true       # session picker 按仓库分组
 permission_mode = "ask"             # ask | auto | always-approve
 max_thoughts_width = 120
 fork_secondary_model = "deepseek/deepseek-chat" # 留空则跟随主模型
-yolo = false                        # always-approve 的旧布尔入口；优先使用 permission_mode
 compact_mode = false
 simple_mode = true                  # true=readline 输入；false=实验性 Vim 输入
 vim_mode = false                    # 仅控制 scrollback 的 Vim 导航
@@ -65,7 +64,6 @@ remember_tool_approvals = false
 keep_text_selection = "flash"       # flash | hold | word_select
 show_thinking_blocks = true
 group_tool_verbs = true
-collapsed_edit_blocks = false
 prompt_suggestions = true
 cursor_blink = true                 # 删除本行则继承终端光标样式
 screen_mode = "fullscreen"          # fullscreen | minimal
@@ -74,7 +72,6 @@ follow_up_behavior = "queue"         # queue | steer：steer 时运行中的 tur
 
 # 主题名取决于已安装主题；不确定时保持未配置。
 # theme = "dark"
-# ui_theme = "dark"
 # auto_dark_theme = "dark"
 # auto_light_theme = "light"
 
@@ -135,7 +132,7 @@ stream_tool_calls = true
 # 辅助模型必须同样存在于 provider/model catalog。未配置 image_description 时，
 # read_file 读取的图片以及扫描/混合 PDF 的渲染页面直接交给当前主模型；
 # 纯文本层 PDF 默认走 Markdown 文本提取，不经过图像路由。
-# session_summary = "deepseek/deepseek-chat"
+# session_title = "deepseek/deepseek-chat"
 # image_description = "vision/provider-model"
 # prompt_suggestion = "deepseek/deepseek-chat"
 
@@ -159,7 +156,6 @@ query_params = {}
 env_http_headers = {}               # { "X-Tenant" = "TENANT_TOKEN_ENV" }
 
 # api_key = "sk-..."                # 不推荐：明文保存在 TOML
-# api_base_url = "https://..."      # API-key 认证时单独使用的 URL
 # auth_provider = "corporate"       # 引用 [auth_provider.corporate]
 # context_window = 128000            # Provider 默认；模型级配置优先
 
@@ -176,17 +172,24 @@ max_retries = 3
 hidden = false
 stream_tool_calls = true
 
+# 可选的停滞检测器。它属于具体模型，而不是 provider 或全局目录；
+# enabled=true 且 max_nudges_per_session=0 时只观测、不注入提醒。
+[provider.deepseek.models.deepseek-chat.laziness_detector]
+enabled = false
+max_nudges_per_session = 0
+# idle_threshold_ms = 10000
+# min_confidence = 0.7
+# include_reasoning = true
+
 # 下列字段可在模型级覆盖 provider 或 [models]：
 # model = "actual-api-routing-slug"
 # base_url = "https://model-specific.example/v1"
-# api_base_url = "https://api-key-specific.example/v1"
 # api_backend = "responses"
 # api_key = "sk-..."
 # env_key = "MODEL_SPECIFIC_API_KEY"
 # auth_provider = "corporate"
 # temperature = 0.7
 # top_p = 0.95
-# reasoning_effort = "high"          # 单一默认；reasoning_efforts 的 default 更精确
 # extra_headers = { "X-Model-Header" = "value" }
 # query_params = { api-version = "2026-07-22" }
 # env_http_headers = { "X-Tenant" = "TENANT_TOKEN_ENV" }
@@ -266,36 +269,7 @@ plan = true
 explore = "deepseek/deepseek-chat"
 "review/backend" = "deepseek/deepseek-chat"
 
-# 推荐用 ~/.grow/agents/**/*.md 定义 Agent。下面是仍受支持的可选 role/persona
-# spawn preset；它们不会建立固定父子层级。
-[subagents.roles.researcher]
-description = "Read-only repository research"
-default_capability_mode = "read-only" # read-only | read-write | execute | all
-reasoning_effort = "high"
-prompt_file = ".grow/prompts/researcher.md"
-default_isolation = "none"          # none | worktree
-# model = "deepseek/deepseek-chat"  # 可选 spawn 路由；通常优先用 [subagents.models]
-
-[subagents.personas.concise]
-description = "Concise technical reviewer"
-instructions = "Report evidence first and avoid filler."
-instructions_file = ".grow/personas/concise.md"
-default_isolation = "none"
-reasoning_effort = "high"
-# model = "deepseek/deepseek-chat"
-
-[[subagents.personas.concise.inputs]]
-name = "review_target"
-io_type = "file"
-required = true
-description = "Path to the file or review brief"
-
-[[subagents.personas.concise.outputs]]
-name = "review_report"
-io_type = "text"
-required = true
-description = "Prioritized review findings"
-
+# 角色、行为指令、工具集、能力上限与默认隔离只在 Agent Markdown 中定义。
 # 主 Agent 能否看到某个子 Agent，由 Agent Markdown 的 tools: Agent(...) 决定；
 # 未声明或留空 tools 时，可见全部发现且启用的内置与用户 Agent。见 agent.md.example。
 
@@ -313,12 +287,9 @@ tool_search = true                   # MCP tool search/discovery
 web_fetch = true
 ask_user_question = true
 session_recap = true
-two_pass_compaction = false
 write_file = true
 cancel_rewind = true
 auto_wake = true
-compaction_mode = "summary"          # summary | transcript | segments
-compaction_detail = "verbose"        # none | minimal | balanced | verbose
 compaction_verbatim_input = true
 subagent_worktree_snapshot = false
 mcp_liveness_watchers = true
@@ -480,7 +451,7 @@ enabled = false
 remote-tools = ["dangerous_tool"]
 
 # -----------------------------------------------------------------------------
-# Skills、兼容目录与插件
+# Skills、自定义目录与插件
 # -----------------------------------------------------------------------------
 
 [skills]
@@ -491,21 +462,6 @@ disabled = ["experimental-skill"]
 [paths]
 extra_skill_dirs = ["~/.custom/skills"]
 extra_rule_dirs = ["~/.custom/rules"]
-
-# 每个兼容单元默认 true。关闭后 Grow 不扫描对应产品的目录。
-[compat.cursor]
-skills = false
-rules = false
-agents = false
-mcps = false
-hooks = false
-
-[compat.claude]
-skills = false
-rules = false
-agents = false
-mcps = false
-hooks = false
 
 [plugins]
 paths = ["~/my-plugins/custom-tools"]

@@ -419,7 +419,7 @@ async fn bounded_connect(
 }
 /// Main entry point: connect to agent, init terminal, run event loop, restore.
 ///
-/// If a session ID is provided via `--resume` / `--load` / `--continue`, the
+/// If a session ID is provided via `--resume` / `--continue`, the
 /// pager skips the welcome screen and immediately loads that session (replaying
 /// its history). Sessions not found locally are restored from remote storage.
 ///
@@ -614,13 +614,7 @@ pub async fn run(
     let remote_permission_mode = remote_settings
         .as_ref()
         .and_then(|s| s.permission_mode.as_deref());
-    let launch_yolo = shell::util::config::effective_yolo_for_launch(
-        args.yolo,
-        args.permission_mode_flag.as_deref(),
-        remote_permission_mode,
-    );
-    let launch_auto = shell::util::config::effective_auto_for_launch(
-        args.yolo,
+    let launch_permission = shell::util::config::effective_permission_mode_for_launch(
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
@@ -647,8 +641,7 @@ pub async fn run(
             &args.allow_rules,
             &args.deny_rules,
         ),
-        default_yolo_mode: launch_yolo.yolo,
-        default_auto_mode: launch_auto && !launch_yolo.yolo,
+        default_permission_mode: launch_permission.mode,
     };
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
     let alt_screen_config_mode = config_watcher.current().alt_screen;
@@ -669,7 +662,6 @@ pub async fn run(
         args.minimal,
         args.fullscreen,
         config_screen_mode,
-        config_watcher.current().minimal,
     );
     let screen_mode = screen_mode_relaunch::resolve_screen_mode(
         screen_mode_override,
@@ -772,7 +764,6 @@ pub async fn run(
         crate::acp::spawn::AgentShutdownGuard::new(cancel.clone(), connection.agent_thread.take());
     let effective_args = PagerArgs {
         resume_session: None,
-        load_session: None,
         continue_last_session: false,
         session_id: None,
         fork_session: false,
@@ -1854,17 +1845,6 @@ mod tests {
         assert_eq!(args.session_to_resume(), Some("abc-123"));
     }
     #[test]
-    fn cli_load_alias_parses_session_id() {
-        let args = try_parse_pager(&["grow-pager", "--load", "abc-123"]).unwrap();
-        assert_eq!(args.session_to_resume(), Some("abc-123"));
-    }
-    #[test]
-    fn cli_resume_preferred_over_load() {
-        let mut args = try_parse_pager(&["grow-pager", "--resume", "from-resume"]).unwrap();
-        args.load_session = Some("from-load".into());
-        assert_eq!(args.session_to_resume(), Some("from-resume"));
-    }
-    #[test]
     fn cli_continue_flag_parses() {
         let args = try_parse_pager(&["grow-pager", "--continue"]).unwrap();
         assert!(args.continue_last_session);
@@ -1902,11 +1882,6 @@ mod tests {
     #[test]
     fn cli_continue_conflicts_with_resume() {
         let result = try_parse_pager(&["grow-pager", "--continue", "--resume", "abc"]);
-        assert!(result.is_err());
-    }
-    #[test]
-    fn cli_continue_conflicts_with_load() {
-        let result = try_parse_pager(&["grow-pager", "--continue", "--load", "abc"]);
         assert!(result.is_err());
     }
     #[test]

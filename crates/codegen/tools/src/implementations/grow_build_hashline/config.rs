@@ -148,7 +148,7 @@ impl HashlineSchemeParams {
 
     /// Build a `ToolDefinition` with scheme-aware description rendering.
     ///
-    /// Shared by all 3 hashline tools' `versioned_definition` overrides.
+    /// Shared by all 3 hashline tools' `finalized_definition` overrides.
     pub fn build_tool_definition(
         &self,
         template: &str,

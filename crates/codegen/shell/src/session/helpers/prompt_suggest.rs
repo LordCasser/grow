@@ -15,7 +15,7 @@
 
 use crate::config::PromptSuggestModelPin;
 use crate::sampling::ConversationItem;
-use crate::session::helpers::chat::floor_char_boundary;
+use crate::session::helpers::text::floor_char_boundary;
 
 /// Model used for suggestion calls when nothing pins one (no env /
 /// `[models] prompt_suggestion` / remote setting / client hint — see

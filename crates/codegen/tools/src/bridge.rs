@@ -225,20 +225,16 @@ impl ToolBridge {
 
     /// Seed the AGENTS.md tracker.
     ///
-    /// `compat` gates which rules dirs and agent filenames runtime discovery
-    /// scans. Defaults to all-on at the caller for historical behavior.
     pub async fn seed_agents_md(
         &self,
         initial_paths: Vec<std::path::PathBuf>,
         git_root: Option<std::path::PathBuf>,
         initial_chain: Vec<std::path::PathBuf>,
         gitignore: Option<ignore::gitignore::Gitignore>,
-        compat: crate::types::compat::CompatConfig,
     ) {
         let registry = &*self.registry;
         let mut res = registry.resources.lock().await;
         if let Some(tracker) = res.get_mut::<AgentsMdTracker>() {
-            tracker.set_compat(compat);
             tracker
                 .seed(initial_paths, git_root, initial_chain, gitignore)
                 .await;
@@ -290,8 +286,6 @@ impl ToolBridge {
         startup_skills: Vec<crate::implementations::skills::types::SkillInfo>,
         display_cwd: Option<String>,
         context_window_tokens: Option<u64>,
-        skill_budget_percent: Option<f64>,
-        compat: crate::types::compat::CompatConfig,
     ) {
         let registry = &*self.registry;
         let mut res = registry.resources.lock().await;
@@ -299,36 +293,17 @@ impl ToolBridge {
         // so listing headers and descriptions use the correct (possibly randomized) names.
         let renderer = res.get::<TemplateRenderer>();
         let skill_tool_name = renderer.and_then(|r| r.render("${{ tools.by_kind.skill }}").ok());
-        let read_tool_name = renderer.and_then(|r| r.render("${{ tools.by_kind.read }}").ok());
         let tracker = res.get_or_default::<crate::types::skill_discovery_tracker::SkillManager>();
         if let Some(name) = skill_tool_name {
             tracker.set_skill_tool_name(name);
         }
-        if let Some(name) = read_tool_name {
-            tracker.set_read_tool_name(name);
-        }
-        tracker.set_compat(compat);
         tracker.seed(
             cwd,
             git_root,
             startup_skills,
             display_cwd,
             context_window_tokens,
-            skill_budget_percent,
         );
-    }
-
-    /// Enable XML formatting for mid-session skill announcements.
-    ///
-    /// When set, `take_pending()` produces `<agent_skill>` XML rows instead of
-    /// markdown, matching the startup `<agent_skills>` preamble format.
-    pub async fn set_skill_listing_xml_format(&self, enabled: bool) {
-        let registry = &*self.registry;
-        let mut res = registry.resources.lock().await;
-        if let Some(tracker) = res.get_mut::<crate::types::skill_discovery_tracker::SkillManager>()
-        {
-            tracker.set_xml_format(enabled);
-        }
     }
 
     /// Seed the gitignore filter so `read_file` and `search_replace` refuse
@@ -686,7 +661,11 @@ impl ToolBridge {
         let state = res.get_or_default::<State<ReportedTaskCompletions>>();
         completed
             .into_iter()
-            .filter(|t| task_owned_by_session(t, my_owner.as_deref()))
+            .filter(|task| {
+                my_owner
+                    .as_deref()
+                    .is_some_and(|owner| task_owned_by_session(task, owner))
+            })
             .filter(|t| !reserved_ids.contains(&t.task_id))
             .filter(|t| state.mark_reported(&t.task_id))
             .collect()
@@ -887,8 +866,8 @@ mod tests {
 
         assert!(ids.contains(&"mine-task"), "own task must drain: {ids:?}");
         assert!(
-            ids.contains(&"unowned-task"),
-            "unowned task must drain (backwards compat): {ids:?}"
+            !ids.contains(&"unowned-task"),
+            "ownerless task must not enter a session transcript: {ids:?}"
         );
         assert!(
             !ids.contains(&"parent-task"),

@@ -1414,51 +1414,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_max_output_tokens_is_ignored_and_run_charges_totals() {
-        use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
-             let r = agent(\"work\", #{ max_output_tokens: 900 });\n\
-             complete(r.output);"
-                .into(),
-        )
-        .unwrap();
-        let (run_id, outcome_rx) = manager
-            .launch(
-                resolved,
-                LaunchSpec {
-                    agent_budget: Some(2),
-                    ..spec()
-                },
-            )
-            .unwrap();
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("spawn") else {
-            panic!("expected spawn");
-        };
-        assert_eq!(req.runtime_overrides.output_token_budget, None);
-        let id = req.id.clone();
-        let _ = req.result_tx.send(SubagentResult {
-            success: true,
-            output: std::sync::Arc::from("done"),
-            subagent_id: id.clone(),
-            child_session_id: id,
-            output_tokens_used: 120,
-            total_tokens_used: 120,
-            ..Default::default()
-        });
-        assert!(matches!(
-            outcome_rx.await.unwrap(),
-            WorkflowOutcome::Completed { .. }
-        ));
-        let state = manager.tracker.lock().get(&run_id).unwrap();
-        assert_eq!(state.agents_used, 1);
-        assert_eq!(state.agent_budget, Some(2));
-    }
-
-    #[tokio::test]
     async fn children_spawn_without_output_clamp() {
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 

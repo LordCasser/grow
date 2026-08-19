@@ -27,18 +27,20 @@ impl ChatStateActor {
     ///
     /// # Repair invariant
     ///
-    /// The `BuildConversationRequest` command handler calls
-    /// `ensure_conversation_integrity()` on the actor's own conversation
-    /// **before** this function runs. The clone therefore starts from an
-    /// already-repaired state, so there is no need to run
+    /// This method durably repairs the actor's own Surface before cloning it,
+    /// so there is no need to run
     /// `dedup_duplicate_tool_results` / `repair_dangling_tool_calls` on the
     /// clone — those would be O(n) no-ops.
-    pub(super) fn build_conversation_request(
+    pub(super) async fn build_conversation_request(
         &mut self,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         persist_memory_reminder: bool,
-    ) -> ConversationRequest {
+    ) -> Result<ConversationRequest, crate::commands::TimelineWriteError> {
+        self.ensure_conversation_integrity_durably(
+            sampling_types::DanglingToolCallReason::UserCancelled,
+        )
+        .await?;
         let needs_prune = should_prune(
             self.state.total_tokens,
             self.state.sampling_config.context_window,
@@ -50,7 +52,8 @@ impl ChatStateActor {
             let mut conversation = self.state.timeline.surface().to_vec();
             let injected = inject_memory_reminder(&mut conversation, reminder);
             if injected {
-                self.install_conversation(conversation, false, MessageCause::MemoryContext);
+                self.replace_conversation_durably(conversation, MessageCause::MemoryContext)
+                    .await?;
                 memory_reminder = None;
             }
         }
@@ -118,7 +121,7 @@ impl ChatStateActor {
         }
 
         // Step 4: Assemble request
-        ConversationRequest {
+        Ok(ConversationRequest {
             items,
             tools: tool_definitions,
             tool_choice: None,
@@ -129,7 +132,7 @@ impl ChatStateActor {
             prompt_cache_key: None,
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_output: None,
-        }
+        })
     }
 }
 

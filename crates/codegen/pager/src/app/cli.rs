@@ -89,7 +89,6 @@ See ~/.grow/README.md for more information.
         enterprise: bool,
     },
     /// Print version information
-    #[command(visible_alias = "v")]
     Version {
         /// Emit machine-readable JSON output.
         #[arg(long)]
@@ -163,16 +162,8 @@ pub struct AgentArgs {
     #[arg(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
     /// Reasoning effort for reasoning models
-    #[clap(
-        long = "reasoning-effort",
-        visible_alias = "effort",
-        value_name = "EFFORT",
-        overrides_with = "reasoning_effort"
-    )]
+    #[clap(long = "reasoning-effort", value_name = "EFFORT")]
     pub reasoning_effort: Option<String>,
-    /// Auto-approve all tool executions
-    #[arg(long = "always-approve", alias = "yolo")]
-    pub yolo: bool,
     /// Path to an agent profile file.
     #[arg(long = "agent-profile", value_name = "PATH")]
     pub agent_profile: Option<PathBuf>,
@@ -287,7 +278,7 @@ Commands:
 )]
 pub struct PagerArgs {
     /// Print version
-    #[arg(short = 'v', short_alias = 'V', long = "version", action = ArgAction::SetTrue)]
+    #[arg(short = 'v', long = "version", action = ArgAction::SetTrue)]
     pub version: bool,
     /// Working directory.
     #[arg(long)]
@@ -311,37 +302,19 @@ pub struct PagerArgs {
         value_hint = ValueHint::FilePath
     )]
     pub debug_file: Option<PathBuf>,
-    /// Auto-approve all tool executions.
-    #[clap(
-        long = "always-approve",
-        alias = "yolo",
-        alias = "dangerously-skip-permissions"
-    )]
-    pub yolo: bool,
     /// Trust this folder and persist the decision to the trust store.
-    #[arg(long = "trust", alias = "trust-folder", hide = true)]
+    #[arg(long = "trust", hide = true)]
     pub trust: bool,
-    /// Permission allow rule (compat alias: --allowedTools).
-    #[arg(
-        long = "allow",
-        alias = "allowedTools",
-        value_name = "RULE",
-        value_delimiter = ','
-    )]
+    /// Permission allow rule.
+    #[arg(long = "allow", value_name = "RULE", value_delimiter = ',')]
     pub allow_rules: Vec<String>,
-    /// Permission deny rule (compat alias: --disallowedTools).
-    #[arg(
-        long = "deny",
-        alias = "disallowedTools",
-        value_name = "RULE",
-        value_delimiter = ','
-    )]
+    /// Permission deny rule.
+    #[arg(long = "deny", value_name = "RULE", value_delimiter = ',')]
     pub deny_rules: Vec<String>,
     /// Single-turn prompt. Prints the response to stdout and exits.
     #[clap(
         short = 'p',
         long = "single",
-        alias = "print",
         value_name = "PROMPT",
         conflicts_with_all = &["prompt_json",
         "prompt_file"]
@@ -383,32 +356,13 @@ pub struct PagerArgs {
     #[clap(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
     /// Reasoning effort for reasoning models
-    #[clap(
-        long = "reasoning-effort",
-        visible_alias = "effort",
-        value_name = "EFFORT",
-        overrides_with = "reasoning_effort"
-    )]
+    #[clap(long = "reasoning-effort", value_name = "EFFORT")]
     pub reasoning_effort: Option<String>,
     /// Extra rules to append to the system prompt.
-    #[clap(long = "rules", alias = "append-system-prompt")]
+    #[clap(long = "rules")]
     pub rules: Option<String>,
-    /// Compaction mode [summary|transcript|segments]: `summary` (default) adds
-    /// no pointer; `transcript` points at the raw transcript; `segments`
-    /// persists per-segment markdown to grep. Sets `GROW_COMPACTION_MODE`.
-    #[clap(long = "compaction-mode", value_name = "MODE", hide = true)]
-    pub compaction_mode: Option<String>,
-    /// Segments verbatim detail [none|minimal|balanced|verbose] (default
-    /// `verbose`). Only affects `--compaction-mode segments`. Sets
-    /// `GROW_COMPACTION_DETAIL`.
-    #[clap(long = "compaction-detail", value_name = "DETAIL", hide = true)]
-    pub compaction_detail: Option<String>,
-    /// Override the agent's system prompt (compat alias: --system-prompt).
-    #[clap(
-        long = "system-prompt-override",
-        alias = "system-prompt",
-        value_name = "PROMPT"
-    )]
+    /// Override the agent's system prompt.
+    #[clap(long = "system-prompt-override", value_name = "PROMPT")]
     pub system_prompt_override: Option<String>,
     /// Resume a session by ID or title, or the most recent if omitted.
     /// Non-ID values match session titles for the current directory
@@ -423,14 +377,6 @@ pub struct PagerArgs {
         conflicts_with_all = ["continue_last_session"]
     )]
     pub resume_session: Option<String>,
-    /// Resume a previous session by session ID (alias for --resume).
-    #[arg(
-        long = "load",
-        value_name = "SESSION_ID",
-        hide = true,
-        conflicts_with_all = ["continue_last_session"]
-    )]
-    pub load_session: Option<String>,
     /// Set by [`Self::pin_local_resume_target`]: the resume target was
     /// resolved (or definitively missed) before the OS sandbox, so
     /// materialization must not re-run local title selection.
@@ -446,8 +392,7 @@ pub struct PagerArgs {
     #[arg(
         short = 'c',
         long = "continue",
-        conflicts_with_all = ["resume_session",
-        "load_session"]
+        conflicts_with_all = ["resume_session"]
     )]
     pub continue_last_session: bool,
     /// Use a specific session UUID for a **new** conversation (must be a valid
@@ -466,7 +411,7 @@ pub struct PagerArgs {
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
-    #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree")]
+    #[arg(long = "worktree-ref", requires = "worktree")]
     pub worktree_ref: Option<String>,
     /// Check out the original session's commit when resuming.
     #[arg(long = "restore-code", requires = "resume_session")]
@@ -510,7 +455,7 @@ pub struct PagerArgs {
         long = "permission-mode",
         value_name = "MODE",
         value_parser = clap::builder::PossibleValuesParser::new(
-            shell::agent::config::PermissionMode::VALID_VALUES
+            ["ask", "auto", "always-approve"]
         )
     )]
     pub permission_mode_flag: Option<String>,
@@ -543,8 +488,7 @@ pub struct PagerArgs {
     /// Override the client identifier sent to the agent.
     #[arg(long = "client-identifier", value_name = "ID", hide = true)]
     pub client_identifier: Option<String>,
-    /// Hunk tracker mode: agent_only, all_dirty, or off ("disabled" is an
-    /// alias for off, which turns the hunk tracker off entirely).
+    /// Hunk tracker mode: agent_only, all_dirty, or off.
     #[arg(long = "hunk-tracker-mode", value_name = "MODE", hide = true)]
     pub hunk_tracker_mode: Option<String>,
     /// Enable terminal support for the agent.
@@ -675,15 +619,12 @@ impl PagerArgs {
         }
         Ok(self)
     }
-    /// Get the session ID to resume, from either --resume or --load (hidden alias).
+    /// Get the explicit session ID passed to `--resume`.
     ///
     /// Returns `None` when `--resume` was used without a value (the empty-string
     /// sentinel). Use [`resume_most_recent`] to detect that case.
     pub fn session_to_resume(&self) -> Option<&str> {
-        self.resume_session
-            .as_deref()
-            .or(self.load_session.as_deref())
-            .filter(|s| !s.is_empty())
+        self.resume_session.as_deref().filter(|s| !s.is_empty())
     }
     /// Whether `--resume` was used without a session ID (meaning "resume most recent").
     pub fn resume_most_recent(&self) -> bool {
@@ -727,7 +668,7 @@ impl PagerArgs {
         let explicit = self.sandbox.as_deref().filter(|s| !s.is_empty());
         Self::resolve_startup_sandbox(explicit, saved.map(String::from))
     }
-    /// Pin an explicit non-UUID, non-chat resume/load target to its canonical
+    /// Pin an explicit non-UUID resume target to its canonical
     /// local session id, before the (irreversible) OS sandbox is applied.
     ///
     /// Resolving once — recorded via `resume_target_pinned` so materialization
@@ -762,15 +703,7 @@ impl PagerArgs {
         let Some(id) = pinned.id() else {
             return Ok(());
         };
-        if self
-            .resume_session
-            .as_deref()
-            .is_some_and(|s| !s.is_empty())
-        {
-            self.resume_session = Some(id);
-        } else if self.load_session.as_deref().is_some_and(|s| !s.is_empty()) {
-            self.load_session = Some(id);
-        }
+        self.resume_session = Some(id);
         Ok(())
     }
     /// The sandbox profile persisted with the session being resumed, if any.
@@ -831,7 +764,7 @@ mod tests {
     use super::*;
     #[test]
     fn version_flags_parse_as_early_intent_without_exiting() {
-        for flag in ["--version", "-v", "-V"] {
+        for flag in ["--version", "-v"] {
             let args = PagerArgs::try_parse_from(["grow", flag]).expect("version flag parses");
             assert!(args.version, "{flag} must set the early version intent");
             assert!(args.command.is_none());
@@ -1223,47 +1156,32 @@ mod tests {
         assert_eq!(c.initial_prompt(), None);
     }
     #[test]
-    fn trust_flag_parses_on_pager_and_alias() {
+    fn trust_flag_parses_on_pager() {
         let bare = PagerArgs::try_parse_from(["grow"]).expect("bare grow parses");
         assert!(!bare.trust);
         let long = PagerArgs::try_parse_from(["grow", "--trust"]).expect("--trust parses");
         assert!(long.trust);
-        let alias =
-            PagerArgs::try_parse_from(["grow", "--trust-folder"]).expect("--trust-folder parses");
-        assert!(alias.trust);
     }
     #[test]
-    fn reasoning_effort_and_effort_alias_parse_same_field() {
+    fn reasoning_effort_parses() {
         let long = PagerArgs::try_parse_from(["grow", "--reasoning-effort", "high"])
             .expect("--reasoning-effort parses");
         assert_eq!(long.reasoning_effort.as_deref(), Some("high"));
-        let alias =
-            PagerArgs::try_parse_from(["grow", "--effort", "high"]).expect("--effort alias parses");
-        assert_eq!(alias.reasoning_effort.as_deref(), Some("high"));
     }
     #[test]
     fn reasoning_effort_accepts_max_and_remapped_ids() {
-        let max = PagerArgs::try_parse_from(["grow", "--effort", "max"]).expect("max parses");
+        let max =
+            PagerArgs::try_parse_from(["grow", "--reasoning-effort", "max"]).expect("max parses");
         assert_eq!(max.reasoning_effort.as_deref(), Some("max"));
         let deep =
             PagerArgs::try_parse_from(["grow", "--reasoning-effort", "deep"]).expect("deep parses");
         assert_eq!(deep.reasoning_effort.as_deref(), Some("deep"));
     }
     #[test]
-    fn reasoning_effort_last_flag_wins_when_both_names_set() {
+    fn agent_reasoning_effort_parses() {
         let args =
-            PagerArgs::try_parse_from(["grow", "--reasoning-effort", "low", "--effort", "high"])
-                .expect("both effort flag names parse");
-        assert_eq!(args.reasoning_effort.as_deref(), Some("high"));
-        let reverse =
-            PagerArgs::try_parse_from(["grow", "--effort", "high", "--reasoning-effort", "low"])
-                .expect("both effort flag names parse (reverse order)");
-        assert_eq!(reverse.reasoning_effort.as_deref(), Some("low"));
-    }
-    #[test]
-    fn agent_args_effort_alias_parses() {
-        let args = PagerArgs::try_parse_from(["grow", "agent", "--effort", "max", "stdio"])
-            .expect("agent --effort parses");
+            PagerArgs::try_parse_from(["grow", "agent", "--reasoning-effort", "max", "stdio"])
+                .expect("agent --reasoning-effort parses");
         let Command::Agent(agent) = args.command.expect("agent subcommand") else {
             panic!("expected agent subcommand");
         };

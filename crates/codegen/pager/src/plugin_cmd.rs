@@ -16,7 +16,7 @@ use clap::Subcommand;
 use serde::Serialize;
 
 use agent::plugins::install_registry::{InstallKind, InstallRegistry};
-use agent::plugins::manifest::{ManifestLoadResult, PluginManifest, load_manifest};
+use agent::plugins::manifest::{PluginManifest, load_manifest};
 use plugin_marketplace::SourceKind;
 use plugin_marketplace::git::SourceCacheLease;
 use shell::plugin::{self, RepoUpdateOutcome, UninstallError};
@@ -42,10 +42,6 @@ enum PluginEntry {
         version: Option<String>,
         description: Option<String>,
         marketplace: String,
-        skill_count: usize,
-        has_hooks: bool,
-        has_agents: bool,
-        has_mcp: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         components: Option<extension_types::PluginComponents>,
     },
@@ -104,7 +100,6 @@ pub enum PluginCommand {
         trust: bool,
     },
     /// Uninstall an installed plugin by name
-    #[command(visible_alias = "rm", visible_alias = "remove")]
     Uninstall {
         /// Plugin name (as shown by `grow plugin list`).
         name: String,
@@ -326,10 +321,7 @@ fn available_plugins(registry: &InstallRegistry) -> Vec<PluginEntry> {
     let config = shell::config::load_effective_config()
         .ok()
         .unwrap_or(toml::Value::Table(toml::map::Map::new()));
-    let mut sources = plugin_marketplace::load_sources(&config);
-    sources.extend(plugin_marketplace::load_extra_sources_from_settings(
-        &sources,
-    ));
+    let sources = plugin_marketplace::load_sources(&config);
 
     let mut entries = Vec::new();
     for source in &sources {
@@ -337,7 +329,11 @@ fn available_plugins(registry: &InstallRegistry) -> Vec<PluginEntry> {
         let root = resolve_marketplace_root(source);
         let Some((root, lease)) = root else { continue };
 
-        for plugin in plugin_marketplace::scan_marketplace(&root).entries {
+        let Ok(scan) = plugin_marketplace::scan_marketplace(&root) else {
+            drop(lease);
+            continue;
+        };
+        for plugin in scan.entries {
             let already_installed =
                 plugin_marketplace::installer::find_installed_marketplace_plugin(
                     registry,
@@ -353,10 +349,6 @@ fn available_plugins(registry: &InstallRegistry) -> Vec<PluginEntry> {
                 version: plugin.version,
                 description: plugin.description,
                 marketplace: source.name.clone(),
-                skill_count: plugin.skill_count,
-                has_hooks: plugin.has_hooks,
-                has_agents: plugin.has_agents,
-                has_mcp: plugin.has_mcp,
                 components: plugin.components,
             });
         }
@@ -663,7 +655,7 @@ fn cmd_details(name: &str) -> Result<()> {
         println!("    {pname}{ver}{sub}");
     }
 
-    if let Ok(ManifestLoadResult::Found(manifest)) = load_manifest(&repo.path) {
+    if let Ok(manifest) = load_manifest(&repo.path) {
         if let Some(ref desc) = manifest.description {
             println!("  description: {desc}");
         }
@@ -678,7 +670,7 @@ fn cmd_validate(path: &str) -> Result<()> {
         bail!("Not a directory: {path}");
     }
     match load_manifest(&root) {
-        Ok(ManifestLoadResult::Found(manifest)) => {
+        Ok(manifest) => {
             manifest
                 .validate()
                 .map_err(|e| anyhow::anyhow!("Manifest validation failed: {e}"))?;
@@ -693,14 +685,6 @@ fn cmd_validate(path: &str) -> Result<()> {
             print_component_summary(&manifest, &root);
             Ok(())
         }
-        Ok(ManifestLoadResult::NotFound) => {
-            println!(
-                "No plugin.json found. Grow discovers skills, agents, and hooks \
-                 automatically from standard directories. A manifest is only needed \
-                 for custom paths or metadata."
-            );
-            Ok(())
-        }
         Err(e) => bail!("Failed to load manifest: {e}"),
     }
 }
@@ -711,12 +695,11 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
         bail!("Not a directory: {path}");
     }
     let version = match load_manifest(&root) {
-        Ok(ManifestLoadResult::Found(m)) => m.version.ok_or_else(|| {
+        Ok(m) => m.version.ok_or_else(|| {
             anyhow::anyhow!(
                 "No `version` field in plugin.json. Set a version to use `grow plugin tag`."
             )
         })?,
-        Ok(ManifestLoadResult::NotFound) => bail!("No plugin.json found in {path}."),
         Err(e) => bail!("Failed to load manifest: {e}"),
     };
 
@@ -784,10 +767,7 @@ async fn run_marketplace(cmd: MarketplaceCommand) -> Result<()> {
     let config = shell::config::load_effective_config()
         .ok()
         .unwrap_or(toml::Value::Table(toml::map::Map::new()));
-    let mut sources = plugin_marketplace::load_sources(&config);
-    sources.extend(plugin_marketplace::load_extra_sources_from_settings(
-        &sources,
-    ));
+    let sources = plugin_marketplace::load_sources(&config);
 
     match cmd {
         MarketplaceCommand::List { json } => marketplace_list(&sources, json),
@@ -866,13 +846,6 @@ fn marketplace_add(
         MarketplaceAddInput::GitUrl(u) => u.clone(),
         MarketplaceAddInput::LocalPath(p) => p.display().to_string(),
     };
-
-    // Local paths never match the git-URL allowlist, so a restricted
-    // strictKnownMarketplaces policy blocks them — intentionally fail-closed.
-    let allowlist = &workspace::permission::resolution::managed_settings().marketplace_allowlist;
-    if allowlist.is_restricted() && !allowlist.is_url_allowed(&identity) {
-        bail!("Marketplace source blocked: {}", allowlist.block_reason());
-    }
 
     let already_configured = match &input {
         MarketplaceAddInput::GitUrl(git_url) => {
@@ -1025,8 +998,7 @@ fn marketplace_remove(
         }
     }
 
-    // Fallback: settings.json / known_marketplaces.json.
-    if !removed_from_config && !plugin::try_remove_source_from_json_files(&identity) {
+    if !removed_from_config {
         eprintln!(
             "Warning: source was found but could not be removed from config files.\n\
              It may be defined in a managed or read-only settings file."

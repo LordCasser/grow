@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn origin_client_info_from_meta_uses_client_type_when_identifier_absent() {
         let meta = serde_json::json!({
-            "clientType": "grow_pager",
+            "clientType": "grow-pager",
             "clientVersion": "0.1.2",
         })
         .as_object()

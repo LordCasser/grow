@@ -8,7 +8,14 @@ use tokio::sync::mpsc;
 
 use crate::actor::ChatStateActor;
 use crate::events::ChatStateEvent;
-use crate::persistence::{MockChatPersistence, MockPersistenceReceiver, PersistenceRecord};
+use crate::persistence::{MockPersistenceReceiver, MockTimelinePersistence, PersistenceRecord};
+
+fn persisted_messages(record: &PersistenceRecord) -> Option<&crate::MessageEvent> {
+    match record {
+        PersistenceRecord::Timeline(event) => event.messages(),
+        PersistenceRecord::Flush => None,
+    }
+}
 
 /// Helper to build a `SamplingConfig` for tests.
 fn test_config() -> SamplingConfig {
@@ -33,6 +40,101 @@ fn test_config_with_window(context_window: u64) -> SamplingConfig {
     }
 }
 
+fn marked_user(text: impl Into<String>, prompt_index: usize) -> ConversationItem {
+    let mut item = ConversationItem::user(text);
+    item.set_prompt_index(prompt_index);
+    item
+}
+
+fn compaction_summary_facts(
+    id: &str,
+    target: crate::SurfaceRange,
+) -> (crate::SidebandSpawnEvent, crate::CompactionEvent) {
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    let input_ref = crate::TimelineRangeRef {
+        timeline_id: "test-timeline".into(),
+        first_seq: 0,
+        last_seq: 0,
+    };
+    let spawn = crate::SidebandSpawnEvent {
+        sideband_id: sideband_id.clone(),
+        purpose: crate::SidebandPurpose::CompactionSummary,
+        input_refs: vec![input_ref.clone()],
+    };
+    let summary = crate::CompactionEvent::Summary {
+        id: id.into(),
+        input_ref,
+        result_ref: crate::TimelineRangeRef {
+            timeline_id: sideband_id,
+            first_seq: 2,
+            last_seq: 2,
+        },
+        target,
+        source_tokens: 100,
+        summary_chars: 7,
+    };
+    (spawn, summary)
+}
+
+async fn record_compaction_summary(
+    handle: &crate::handle::ChatStateHandle,
+    id: &str,
+) -> crate::SurfaceRange {
+    let materialized = handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .expect("test Timeline must materialize");
+    let target = crate::SurfaceRange {
+        start: *materialized.surface_ids.first().expect("non-empty Surface"),
+        end: *materialized.surface_ids.last().expect("non-empty Surface"),
+        shadowed: materialized.surface_ids,
+    };
+    let (spawn, summary) = compaction_summary_facts(id, target.clone());
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Sideband(spawn))
+        .await
+        .unwrap();
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(summary))
+        .await
+        .unwrap();
+    target
+}
+
+async fn record_prompt(handle: &crate::handle::ChatStateHandle, text: impl Into<String>) {
+    static NEXT_TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = crate::TurnId(NEXT_TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let prompt_index = handle.get_prompt_index().await;
+    handle.record_timeline_event(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+        id,
+        identity: crate::TurnIdentity {
+            origin: "user".into(),
+            turn_kind: "user".into(),
+            goal_id: None,
+            stage_id: None,
+        },
+        model_id: "test-model".into(),
+        input_message_count: handle.get_conversation_len().await,
+        prompt_index,
+        prompt_text: text.into(),
+        input_kind: crate::TurnInputKind::Prompt,
+        redirect_kind: None,
+    }));
+    handle.record_timeline_event(crate::TimelineEventKind::Turn(crate::TurnEvent::Ended {
+        id,
+        outcome: "completed".into(),
+        duration_ms: 1,
+        tool_count: 0,
+        terminal: crate::TurnTerminal {
+            stop_reason: "end_turn".into(),
+            completion_kind: "completed".into(),
+        },
+        cancellation_category: None,
+        details: None,
+    }));
+    let _ = handle.get_prompt_index().await;
+}
+
 /// Test harness that spawns an actor and keeps the event + persistence channels.
 struct TestHarness {
     handle: crate::handle::ChatStateHandle,
@@ -55,26 +157,26 @@ impl TestHarness {
     }
 
     fn with_config(items: Vec<ConversationItem>, config: SamplingConfig) -> Self {
-        let (mock, persistence_rx) = MockChatPersistence::new();
+        let (mock, persistence_rx) = MockTimelinePersistence::new();
         Self::with_persistence(items, config, mock, persistence_rx)
     }
 
     fn with_manual_timeline_ack(items: Vec<ConversationItem>) -> Self {
-        let (mock, persistence_rx) = MockChatPersistence::new_with_manual_timeline_ack();
+        let (mock, persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
         Self::with_persistence(items, test_config(), mock, persistence_rx)
     }
 
     fn with_persistence(
         items: Vec<ConversationItem>,
         config: SamplingConfig,
-        mock: MockChatPersistence,
+        mock: MockTimelinePersistence,
         mut persistence_rx: MockPersistenceReceiver,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let token = tokio_util::sync::CancellationToken::new();
         let handle = ChatStateActor::spawn(items, config, Box::new(mock), event_tx, token.clone());
         // Seed events are persisted at actor creation so later sequence numbers
-        // can be replayed without consulting chat_history.jsonl.
+        // can be replayed from the Timeline alone.
         persistence_rx.drain();
         Self {
             handle,
@@ -107,13 +209,120 @@ impl TestHarness {
     }
 }
 
+async fn replace_test_surface(
+    handle: &crate::handle::ChatStateHandle,
+    items: Vec<ConversationItem>,
+) {
+    let (_, source_revision) = handle
+        .get_conversation_with_revision()
+        .await
+        .expect("actor must provide Surface revision");
+    handle
+        .replace_context_durably(items, source_revision)
+        .await
+        .unwrap();
+}
+
+async fn commit_compaction_range(
+    handle: &crate::handle::ChatStateHandle,
+    items: Vec<ConversationItem>,
+) {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = format!(
+        "test-compaction-{}",
+        NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let source_items = handle.get_conversation_len().await;
+    let (_, source_surface_revision) = handle
+        .get_conversation_with_revision()
+        .await
+        .expect("actor must provide compaction source");
+    let prompt_index = handle.get_prompt_index().await;
+    let result_items = items.len();
+    handle.record_timeline_event(crate::TimelineEventKind::Compaction(
+        crate::CompactionEvent::Started {
+            id: id.clone(),
+            source_items,
+            prompt_index,
+        },
+    ));
+    let target = record_compaction_summary(handle, &id).await;
+    handle
+        .replace_compaction_range(target, items, source_surface_revision)
+        .await
+        .unwrap();
+    handle.record_timeline_event(crate::TimelineEventKind::Compaction(
+        crate::CompactionEvent::Completed {
+            id,
+            source_items,
+            result_items,
+            duration_ms: 1,
+        },
+    ));
+    let _ = handle.get_conversation_len().await;
+}
+
+#[tokio::test]
+async fn compaction_rejects_a_stale_surface_without_hiding_late_messages() {
+    let h = TestHarness::with_conversation(vec![ConversationItem::system("system")]);
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Started {
+                id: "stale-compaction".into(),
+                source_items: 1,
+                prompt_index: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    let (_, source_revision) = h
+        .handle
+        .get_conversation_with_revision()
+        .await
+        .expect("actor must provide compaction source");
+
+    let target = record_compaction_summary(&h.handle, "stale-compaction").await;
+
+    h.handle
+        .push_user_message_durably(ConversationItem::user("arrived during compaction"))
+        .await
+        .unwrap();
+    let error = h
+        .handle
+        .replace_compaction_range(
+            target,
+            vec![ConversationItem::system("stale summary")],
+            source_revision,
+        )
+        .await
+        .expect_err("stale compaction must fail closed");
+    assert!(matches!(
+        error,
+        crate::TimelineWriteError::SurfaceChanged { .. }
+    ));
+
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Failed {
+                id: "stale-compaction".into(),
+                duration_ms: 1,
+                error: "surface changed".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let surface = h.handle.get_conversation().await;
+    assert_eq!(surface.len(), 2);
+    assert_eq!(surface[1].text_content(), "arrived during compaction");
+}
+
 // ============================================================================
 // Lifecycle tests
 // ============================================================================
 
 #[tokio::test]
 async fn actor_spawns_and_shuts_down_via_cancellation() {
-    let (mock, _rx) = MockChatPersistence::new();
+    let (mock, _rx) = MockTimelinePersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     let _handle = ChatStateActor::spawn(
@@ -128,8 +337,86 @@ async fn actor_spawns_and_shuts_down_via_cancellation() {
 }
 
 #[tokio::test]
+async fn partial_compaction_preserves_unselected_surface_identity() {
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("system"),
+        ConversationItem::project_instructions("rules"),
+        ConversationItem::user("old task"),
+        ConversationItem::assistant("old answer"),
+        ConversationItem::user("recent task"),
+        ConversationItem::assistant("recent answer"),
+    ]);
+    let before = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    let target = crate::SurfaceRange {
+        start: before.surface_ids[2],
+        end: before.surface_ids[3],
+        shadowed: before.surface_ids[2..=3].to_vec(),
+    };
+
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Started {
+                id: "partial-compaction".into(),
+                source_items: before.surface.len(),
+                prompt_index: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    let (spawn, summary) = compaction_summary_facts("partial-compaction", target.clone());
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Sideband(spawn))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(summary))
+        .await
+        .unwrap();
+    h.handle
+        .replace_compaction_range(
+            target,
+            vec![ConversationItem::user_meta("summary")],
+            before.surface_revision,
+        )
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Completed {
+                id: "partial-compaction".into(),
+                source_items: before.surface.len(),
+                result_items: 1,
+                duration_ms: 1,
+            },
+        ))
+        .await
+        .unwrap();
+
+    let after = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        after
+            .surface
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["system", "rules", "summary", "recent task", "recent answer"]
+    );
+    assert_eq!(&after.surface_ids[..2], &before.surface_ids[..2]);
+    assert_eq!(&after.surface_ids[3..], &before.surface_ids[4..]);
+    assert_ne!(after.surface_ids[2], before.surface_ids[2]);
+}
+
+#[tokio::test]
 async fn actor_shuts_down_when_all_handles_dropped() {
-    let (mock, _rx) = MockChatPersistence::new();
+    let (mock, _rx) = MockTimelinePersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     let handle = ChatStateActor::spawn(vec![], test_config(), Box::new(mock), event_tx, token);
@@ -145,13 +432,41 @@ async fn restored_actor_replays_surface_and_continues_event_sequence() {
     ])
     .unwrap();
     timeline
-        .replace_all(
-            vec![ConversationItem::user("summary")],
-            crate::MessageCause::Compaction,
-        )
+        .record(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Started {
+                id: "compact".into(),
+                source_items: 2,
+                prompt_index: 0,
+            },
+        ))
+        .unwrap();
+    let target = crate::SurfaceRange {
+        start: *timeline.surface_ids().first().unwrap(),
+        end: *timeline.surface_ids().last().unwrap(),
+        shadowed: timeline.surface_ids().to_vec(),
+    };
+    let (spawn, summary) = compaction_summary_facts("compact", target.clone());
+    timeline
+        .record(crate::TimelineEventKind::Sideband(spawn))
+        .unwrap();
+    timeline
+        .record(crate::TimelineEventKind::Compaction(summary))
+        .unwrap();
+    timeline
+        .replace_compaction_range(target, vec![ConversationItem::user("summary")])
+        .unwrap();
+    timeline
+        .record(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Completed {
+                id: "compact".into(),
+                source_items: 2,
+                result_items: 1,
+                duration_ms: 1,
+            },
+        ))
         .unwrap();
     let expected_seq = timeline.next_seq();
-    let (mock, mut persistence_rx) = MockChatPersistence::new();
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     let handle = ChatStateActor::spawn_from_timeline_with_pruning(
@@ -195,7 +510,7 @@ async fn restored_actor_durably_repairs_dangling_tool_surface_before_launch() {
         },
     )])
     .unwrap();
-    let (mock, mut persistence_rx) = MockChatPersistence::new();
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let handle = ChatStateActor::spawn_from_timeline_with_pruning(
         timeline.events().to_vec(),
@@ -234,10 +549,7 @@ async fn push_user_message_appends_and_persists() {
     let records = h.drain_persistence();
     assert!(matches!(
         records.as_slice(),
-        [
-            PersistenceRecord::Timeline(_),
-            PersistenceRecord::Message(_)
-        ]
+        [PersistenceRecord::Timeline(_)]
     ));
 }
 
@@ -257,10 +569,7 @@ async fn push_user_message_durably_waits_for_timeline_commit() {
     let records = h.drain_persistence();
     assert!(matches!(
         records.as_slice(),
-        [
-            PersistenceRecord::Timeline(_),
-            PersistenceRecord::Message(_)
-        ]
+        [PersistenceRecord::Timeline(_)]
     ));
 }
 #[tokio::test]
@@ -275,10 +584,7 @@ async fn push_assistant_response_appends_and_persists() {
     let records = h.drain_persistence();
     assert!(matches!(
         records.as_slice(),
-        [
-            PersistenceRecord::Timeline(_),
-            PersistenceRecord::Message(_)
-        ]
+        [PersistenceRecord::Timeline(_)]
     ));
 }
 
@@ -294,10 +600,7 @@ async fn push_tool_result_appends_and_persists() {
     let records = h.drain_persistence();
     assert!(matches!(
         records.as_slice(),
-        [
-            PersistenceRecord::Timeline(_),
-            PersistenceRecord::Message(_)
-        ]
+        [PersistenceRecord::Timeline(_)]
     ));
 }
 
@@ -386,7 +689,8 @@ async fn prompt_usage_ledger_via_handle_resets_and_clears() {
             .model_calls,
         2
     );
-    h.handle.increment_prompt_index();
+    h.handle.push_user_message(marked_user("prompt", 0));
+    record_prompt(&h.handle, "prompt").await;
     assert!(
         h.handle
             .try_get_prompt_usage()
@@ -407,20 +711,9 @@ async fn prompt_usage_ledger_via_handle_resets_and_clears() {
 
     h.handle
         .record_model_call_usage(Some("m".into()), call.clone(), None, None);
-    let snap = h.handle.snapshot().await.unwrap();
-    h.handle.restore_snapshot(snap);
-    assert!(
-        h.handle
-            .try_get_prompt_usage()
-            .await
-            .ok()
-            .flatten()
-            .is_none()
-    );
-
     h.handle
         .record_model_call_usage(Some("m".into()), call, None, None);
-    h.handle.truncate_to_prompt_index(0).await;
+    h.handle.rewind_durably(0).await.unwrap();
     assert!(
         h.handle
             .try_get_prompt_usage()
@@ -533,8 +826,8 @@ async fn assistant_response_push_does_not_bump_estimated_delta() {
 async fn estimated_tokens_resets_on_truncate() {
     let mut h = TestHarness::new();
     h.handle.record_token_usage(100_000);
-    h.handle.push_user_message(ConversationItem::user("q1"));
-    h.handle.increment_prompt_index();
+    h.handle.push_user_message(marked_user("q1", 0));
+    record_prompt(&h.handle, "q1").await;
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
     h.handle
@@ -544,7 +837,7 @@ async fn estimated_tokens_resets_on_truncate() {
 
     // Rewind removes the tool result — delta must reset
     h.drain_events();
-    h.handle.truncate_to_prompt_index(0).await;
+    h.handle.rewind_durably(0).await.unwrap();
     let post_rewind = h.handle.get_estimated_total_tokens().await;
     assert!(
         post_rewind < 100_000,
@@ -553,9 +846,9 @@ async fn estimated_tokens_resets_on_truncate() {
 }
 
 #[tokio::test]
-async fn increment_prompt_index_emits_event() {
+async fn timeline_turn_start_emits_prompt_projection_event() {
     let mut h = TestHarness::new();
-    h.handle.increment_prompt_index();
+    record_prompt(&h.handle, "prompt").await;
     let event = h.next_event().await;
     assert!(matches!(
         event,
@@ -572,12 +865,12 @@ async fn replace_conversation_persists_and_emits_reset() {
     h.handle.push_user_message(ConversationItem::user("a"));
     h.handle.push_user_message(ConversationItem::user("b"));
 
-    // Drain the two Message records
+    // Drain the two Timeline message events.
     let _ = h.handle.get_conversation().await; // sync point
     h.drain_persistence();
 
     let new_items = vec![ConversationItem::system("compacted")];
-    h.handle.replace_conversation(new_items);
+    replace_test_surface(&h.handle, new_items).await;
 
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 1);
@@ -585,10 +878,7 @@ async fn replace_conversation_persists_and_emits_reset() {
     let records = h.drain_persistence();
     assert!(matches!(
         records.as_slice(),
-        [
-            PersistenceRecord::Timeline(_),
-            PersistenceRecord::ReplaceHistory(_)
-        ]
+        [PersistenceRecord::Timeline(_)]
     ));
 }
 
@@ -682,7 +972,8 @@ async fn atomic_image_rewrite_preserves_message_metadata_and_tool_pairing() {
     assert!(
         h.drain_persistence()
             .iter()
-            .any(|record| matches!(record, PersistenceRecord::ReplaceHistory(_)))
+            .filter_map(persisted_messages)
+            .any(|event| event.cause == crate::MessageCause::ImageRewrite)
     );
 }
 
@@ -731,23 +1022,22 @@ async fn failed_image_rewrite_persistence_leaves_memory_unchanged() {
 
 #[tokio::test]
 async fn failed_durable_rewind_leaves_surface_unchanged() {
-    let original = ConversationItem::user("original");
-    let mut h = TestHarness::with_manual_timeline_ack(vec![original.clone()]);
+    let original = marked_user("original", 0);
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    h.handle.push_user_message(original.clone());
+    record_prompt(&h.handle, "original").await;
     let handle = h.handle.clone();
-    let replace = async move {
-        handle
-            .replace_conversation_for_rewind(vec![ConversationItem::user("rewound")])
-            .await
+    let mut replace = std::pin::pin!(async move { handle.rewind_durably(0).await });
+    let acknowledge = tokio::select! {
+        result = &mut replace => panic!("rewind returned before persistence acknowledgement: {result:?}"),
+        acknowledge = h.persistence_rx.next_timeline_ack() => {
+            acknowledge.expect("Timeline acknowledgement")
+        }
     };
-    let reject = async {
-        h.persistence_rx
-            .next_timeline_ack()
-            .await
-            .expect("Timeline acknowledgement")
-            .send(Err(std::io::Error::other("simulated disk failure")))
-            .unwrap();
-    };
-    let (result, ()) = tokio::join!(replace, reject);
+    acknowledge
+        .send(Err(std::io::Error::other("simulated disk failure")))
+        .unwrap();
+    let result = replace.await;
     assert!(matches!(
         result,
         Err(crate::TimelineWriteError::Persistence(_))
@@ -788,6 +1078,48 @@ async fn failed_durable_user_message_leaves_surface_unchanged() {
 }
 
 #[tokio::test]
+async fn lost_timeline_ack_retries_the_exact_event_once() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    let handle = h.handle.clone();
+    let push = async move {
+        handle
+            .push_user_message_durably(ConversationItem::user("committed once"))
+            .await
+    };
+    let acknowledge = async {
+        let first = h
+            .persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("first Timeline acknowledgement");
+        drop(first);
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("retried Timeline acknowledgement")
+            .send(Ok(()))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(push, acknowledge);
+    result.unwrap();
+
+    let events = h
+        .drain_persistence()
+        .into_iter()
+        .filter_map(|record| match record {
+            crate::PersistenceRecord::Timeline(event) => Some(event),
+            crate::PersistenceRecord::Flush => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&events[0]).unwrap(),
+        serde_json::to_value(&events[1]).unwrap(),
+    );
+    assert_eq!(h.handle.get_conversation().await.len(), 1);
+}
+
+#[tokio::test]
 async fn compaction_reseed_carries_provider_overhead() {
     let h = TestHarness::new();
     // ~1k estimated tokens; provider reports 51k → 50k overhead.
@@ -799,7 +1131,7 @@ async fn compaction_reseed_carries_provider_overhead() {
         ConversationItem::system("sys"),
         ConversationItem::user("summary ".repeat(500)),
     ];
-    h.handle.replace_conversation_for_compaction(compacted);
+    commit_compaction_range(&h.handle, compacted).await;
 
     let total = h.handle.get_total_tokens().await;
     let estimate_only = 1_000u64;
@@ -827,7 +1159,7 @@ async fn compaction_reseed_scales_overhead_down_with_deleted_content() {
     let compacted = vec![ConversationItem::user("z".repeat(12_000))];
     let compacted_estimate = crate::estimate_conversation_tokens(&compacted);
     assert_eq!(compacted_estimate, 3_000);
-    h.handle.replace_conversation_for_compaction(compacted);
+    commit_compaction_range(&h.handle, compacted).await;
 
     let total = h.handle.get_total_tokens().await;
     assert_eq!(total, 6_525, "expected ratio-scaled overhead, got {total}");
@@ -853,7 +1185,7 @@ async fn compaction_reseed_excludes_post_response_deltas_from_overhead() {
         .push_tool_result(ConversationItem::tool_result("c1", "z".repeat(100_000)));
 
     let compacted = vec![ConversationItem::user("s".repeat(2_000))];
-    h.handle.replace_conversation_for_compaction(compacted);
+    commit_compaction_range(&h.handle, compacted).await;
 
     let total = h.handle.get_total_tokens().await;
     assert_eq!(
@@ -877,9 +1209,9 @@ async fn compaction_overhead_unaffected_by_pruning_after_last_response() {
             "x".repeat(200_000),
         ));
     }
-    h.handle.replace_conversation(conv.clone());
-    for _ in 0..12 {
-        h.handle.increment_prompt_index();
+    replace_test_surface(&h.handle, conv.clone()).await;
+    for index in 0..12 {
+        record_prompt(&h.handle, format!("q{index}")).await;
     }
 
     let estimate_at_response = crate::estimate_conversation_tokens(&conv);
@@ -899,7 +1231,7 @@ async fn compaction_overhead_unaffected_by_pruning_after_last_response() {
         ConversationItem::user("z".repeat(8_000)),
     ];
     let compacted_estimate = crate::estimate_conversation_tokens(&compacted);
-    h.handle.replace_conversation_for_compaction(compacted);
+    commit_compaction_range(&h.handle, compacted).await;
 
     let total = h.handle.get_total_tokens().await;
     let expected = (compacted_estimate as f64
@@ -913,67 +1245,12 @@ async fn compaction_overhead_unaffected_by_pruning_after_last_response() {
 }
 
 #[tokio::test]
-async fn restore_snapshot_preserves_frozen_estimate_for_overhead() {
-    let h = TestHarness::new();
-    h.handle
-        .push_user_message(ConversationItem::user("q".repeat(4000)));
-    let frozen = crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
-    let provider_total = frozen + 30_000;
-    h.handle.record_token_usage(provider_total);
-
-    // Rewind-style restore: trim the conversation, keep token fields.
-    let mut snap = h.handle.snapshot().await.unwrap();
-    assert_eq!(snap.estimate_at_last_response, frozen);
-    snap.conversation.truncate(0);
-    h.handle.restore_snapshot(snap);
-
-    let compacted = vec![ConversationItem::user("z".repeat(400))];
-    let compacted_estimate = crate::estimate_conversation_tokens(&compacted);
-    h.handle.replace_conversation_for_compaction(compacted);
-
-    let expected =
-        (compacted_estimate as f64 * (provider_total as f64 / frozen as f64)).round() as u64;
-    assert_eq!(
-        h.handle.get_total_tokens().await,
-        expected,
-        "overhead ratio must use the frozen estimate carried through the snapshot"
-    );
-}
-
-#[tokio::test]
-async fn restore_snapshot_without_frozen_estimate_falls_back_to_recompute() {
-    let h = TestHarness::new();
-    h.handle
-        .push_user_message(ConversationItem::user("q".repeat(4000)));
-    let provider_total = 31_000;
-    h.handle.record_token_usage(provider_total);
-
-    // Pre-field snapshot (serde default): estimate_at_last_response == 0.
-    let mut snap = h.handle.snapshot().await.unwrap();
-    snap.estimate_at_last_response = 0;
-    h.handle.restore_snapshot(snap);
-    let recomputed = crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
-
-    let compacted = vec![ConversationItem::user("z".repeat(400))];
-    let compacted_estimate = crate::estimate_conversation_tokens(&compacted);
-    h.handle.replace_conversation_for_compaction(compacted);
-
-    let total = h.handle.get_total_tokens().await;
-    let expected =
-        (compacted_estimate as f64 * (provider_total as f64 / recomputed as f64)).round() as u64;
-    assert_eq!(
-        total, expected,
-        "legacy snapshots must fall back to re-estimating the restored conversation"
-    );
-}
-
-#[tokio::test]
 async fn compaction_reseed_without_provider_count_matches_plain_estimate() {
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("hello"));
 
     let compacted = vec![ConversationItem::user("w".repeat(8000))];
-    h.handle.replace_conversation_for_compaction(compacted);
+    commit_compaction_range(&h.handle, compacted).await;
 
     let total = h.handle.get_total_tokens().await;
     assert_eq!(
@@ -989,8 +1266,7 @@ async fn non_compaction_replace_does_not_carry_overhead() {
         .push_user_message(ConversationItem::user("x".repeat(4000)));
     h.handle.record_token_usage(51_000);
 
-    h.handle
-        .replace_conversation(vec![ConversationItem::user("q".repeat(4000))]);
+    replace_test_surface(&h.handle, vec![ConversationItem::user("q".repeat(4000))]).await;
 
     let total = h.handle.get_total_tokens().await;
     assert_eq!(
@@ -1013,11 +1289,11 @@ async fn flush_calls_persistence_flush() {
 }
 
 #[tokio::test]
-async fn restore_snapshot_restores_all_fields() {
+async fn snapshot_projects_timeline_and_token_accounting() {
     let mut h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("msg"));
     h.handle.record_token_usage(500);
-    h.handle.increment_prompt_index();
+    record_prompt(&h.handle, "msg").await;
 
     // Drain events from the mutations above
     let _ = h.handle.get_conversation().await;
@@ -1028,19 +1304,8 @@ async fn restore_snapshot_restores_all_fields() {
     assert_eq!(snapshot.total_tokens, 500);
     assert_eq!(snapshot.conversation.len(), 1);
 
-    // Replace state
-    h.handle.replace_conversation(vec![]);
-    let _ = h.handle.get_conversation().await;
-
-    // Restore
-    h.handle.restore_snapshot(snapshot);
-
-    let conv = h.handle.get_conversation().await;
-    assert_eq!(conv.len(), 1);
-    let idx = h.handle.get_prompt_index().await;
-    assert_eq!(idx, 1);
-    let tokens = h.handle.get_total_tokens().await;
-    assert_eq!(tokens, 500);
+    assert_eq!(snapshot.prompt_texts, vec!["msg"]);
+    assert_eq!(snapshot.last_compaction_prompt_index, None);
 }
 
 // ============================================================================
@@ -1073,7 +1338,7 @@ async fn replace_system_head_swaps_head_and_preserves_turns() {
         ConversationItem::assistant("yo"),
     ]);
     let changed = h.handle.replace_system_head("new prompt").await;
-    assert_eq!(changed, Some(true));
+    assert!(matches!(changed, Ok(true)));
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 3, "must not wipe user/assistant turns");
     assert!(matches!(&conv[0], ConversationItem::System(s) if s.content.as_ref() == "new prompt"));
@@ -1089,9 +1354,8 @@ async fn replace_system_head_noop_when_head_matches_modulo_newline() {
     ]);
     let _ = h.drain_persistence(); // clear any seed writes
     let changed = h.handle.replace_system_head("same").await;
-    assert_eq!(
-        changed,
-        Some(false),
+    assert!(
+        matches!(changed, Ok(false)),
         "trailing-newline-only diff is a no-op"
     );
     let conv = h.handle.get_conversation().await;
@@ -1106,7 +1370,7 @@ async fn replace_system_head_noop_when_head_matches_modulo_newline() {
 async fn replace_system_head_inserts_when_absent() {
     let h = TestHarness::with_conversation(vec![ConversationItem::user("hi")]);
     let changed = h.handle.replace_system_head("sys").await;
-    assert_eq!(changed, Some(true));
+    assert!(matches!(changed, Ok(true)));
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 2, "inserts System at head, keeps the user turn");
     assert!(matches!(&conv[0], ConversationItem::System(s) if s.content.as_ref() == "sys"));
@@ -1123,7 +1387,7 @@ async fn replace_system_head_retains_concurrently_pushed_item() {
     h.handle
         .push_assistant_response(ConversationItem::assistant("in-flight turn output"));
     let changed = h.handle.replace_system_head("new").await;
-    assert_eq!(changed, Some(true));
+    assert!(matches!(changed, Ok(true)));
     let conv = h.handle.get_conversation().await;
     assert_eq!(
         conv.len(),
@@ -1147,7 +1411,7 @@ async fn replace_system_head_preserves_active_turn_capture() {
         .push_assistant_response(ConversationItem::assistant("in-flight"));
 
     let changed = h.handle.replace_system_head("new prompt").await;
-    assert_eq!(changed, Some(true));
+    assert!(matches!(changed, Ok(true)));
 
     let capture = h
         .handle
@@ -1164,6 +1428,36 @@ async fn replace_system_head_preserves_active_turn_capture() {
         &capture.messages[1],
         ConversationItem::Assistant(_)
     ));
+}
+
+#[tokio::test]
+async fn replace_system_head_does_not_advance_surface_when_commit_fails() {
+    let original = vec![
+        ConversationItem::system("old"),
+        ConversationItem::user("keep me"),
+    ];
+    let mut h = TestHarness::with_manual_timeline_ack(original.clone());
+    let handle = h.handle.clone();
+    let replace = async move { handle.replace_system_head("new").await };
+    let reject = async {
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("Timeline acknowledgement")
+            .send(Err(std::io::Error::other("simulated disk failure")))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(replace, reject);
+
+    assert!(matches!(
+        result,
+        Err(crate::TimelineWriteError::Persistence(_))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
+        serde_json::to_vec(&original).unwrap(),
+        "a rejected system-head event must not change Surface"
+    );
 }
 
 #[tokio::test]
@@ -1216,11 +1510,11 @@ async fn record_agent_edited_path_deduplicates() {
 }
 
 #[tokio::test]
-async fn cache_prompt_text_appends_in_order() {
+async fn prompt_texts_are_projected_from_timeline_turns() {
     let h = TestHarness::new();
-    h.handle.cache_prompt_text("first".to_string());
-    h.handle.cache_prompt_text("second".to_string());
-    h.handle.cache_prompt_text("third".to_string());
+    record_prompt(&h.handle, "first").await;
+    record_prompt(&h.handle, "second").await;
+    record_prompt(&h.handle, "third").await;
 
     let snap = h.handle.snapshot().await.unwrap();
     assert_eq!(snap.prompt_texts, vec!["first", "second", "third"]);
@@ -1283,9 +1577,12 @@ async fn multiple_push_and_query_interleave() {
 }
 
 #[tokio::test]
-async fn record_compaction_at_is_reflected_in_snapshot() {
-    let h = TestHarness::new();
-    h.handle.record_compaction_at(3);
+async fn completed_compaction_is_reflected_in_snapshot() {
+    let h = TestHarness::with_conversation(vec![ConversationItem::system("system")]);
+    for text in ["one", "two", "three"] {
+        record_prompt(&h.handle, text).await;
+    }
+    commit_compaction_range(&h.handle, vec![ConversationItem::system("compacted")]).await;
     let snap = h.handle.snapshot().await.unwrap();
     assert_eq!(snap.last_compaction_prompt_index, Some(3));
 }
@@ -1296,21 +1593,18 @@ async fn truncate_removes_items_after_target_prompt_index() {
 
     // Build 3 turns: system + 3x (user + assistant)
     h.handle.push_user_message(ConversationItem::system("sys"));
-    h.handle.push_user_message(ConversationItem::user("q1"));
-    h.handle.increment_prompt_index(); // 1
-    h.handle.cache_prompt_text("q1".to_string());
+    h.handle.push_user_message(marked_user("q1", 0));
+    record_prompt(&h.handle, "q1").await;
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
 
-    h.handle.push_user_message(ConversationItem::user("q2"));
-    h.handle.increment_prompt_index(); // 2
-    h.handle.cache_prompt_text("q2".to_string());
+    h.handle.push_user_message(marked_user("q2", 1));
+    record_prompt(&h.handle, "q2").await;
     h.handle
         .push_assistant_response(ConversationItem::assistant("a2"));
 
-    h.handle.push_user_message(ConversationItem::user("q3"));
-    h.handle.increment_prompt_index(); // 3
-    h.handle.cache_prompt_text("q3".to_string());
+    h.handle.push_user_message(marked_user("q3", 2));
+    record_prompt(&h.handle, "q3").await;
     h.handle
         .push_assistant_response(ConversationItem::assistant("a3"));
 
@@ -1320,7 +1614,7 @@ async fn truncate_removes_items_after_target_prompt_index() {
     h.drain_persistence();
 
     // Truncate to prompt_index 1 → keep sys, q1, a1 (stop before q2)
-    h.handle.truncate_to_prompt_index(1).await;
+    h.handle.rewind_durably(1).await.unwrap();
 
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 3); // sys + q1 + a1
@@ -1335,7 +1629,8 @@ async fn truncate_removes_items_after_target_prompt_index() {
     assert!(
         records
             .iter()
-            .any(|r| matches!(r, PersistenceRecord::ReplaceHistory(_)))
+            .filter_map(persisted_messages)
+            .any(|event| event.cause == crate::MessageCause::Rewind)
     );
 }
 
@@ -1344,15 +1639,15 @@ async fn truncate_to_zero_keeps_only_system() {
     let mut h = TestHarness::new();
 
     h.handle.push_user_message(ConversationItem::system("sys"));
-    h.handle.push_user_message(ConversationItem::user("q1"));
-    h.handle.increment_prompt_index();
+    h.handle.push_user_message(marked_user("q1", 0));
+    record_prompt(&h.handle, "q1").await;
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
 
     let _ = h.handle.get_prompt_index().await;
     h.drain_events();
 
-    h.handle.truncate_to_prompt_index(0).await;
+    h.handle.rewind_durably(0).await.unwrap();
 
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 1); // just "sys"
@@ -1361,16 +1656,28 @@ async fn truncate_to_zero_keeps_only_system() {
 }
 
 #[tokio::test]
-async fn truncate_is_noop_when_already_at_target() {
+async fn rewind_rejects_non_earlier_targets() {
     let mut h = TestHarness::new();
-    h.handle.increment_prompt_index(); // 1
+    record_prompt(&h.handle, "q1").await;
 
     let _ = h.handle.get_prompt_index().await;
     h.drain_events();
     h.drain_persistence();
 
-    h.handle.truncate_to_prompt_index(1).await;
-    h.handle.truncate_to_prompt_index(5).await;
+    assert!(matches!(
+        h.handle.rewind_durably(1).await,
+        Err(crate::TimelineWriteError::InvalidRewindTarget {
+            target: 1,
+            current: 1
+        })
+    ));
+    assert!(matches!(
+        h.handle.rewind_durably(5).await,
+        Err(crate::TimelineWriteError::InvalidRewindTarget {
+            target: 5,
+            current: 1
+        })
+    ));
 
     let idx = h.handle.get_prompt_index().await;
     assert_eq!(idx, 1);
@@ -1380,65 +1687,31 @@ async fn truncate_is_noop_when_already_at_target() {
 }
 
 // ============================================================================
-// Snapshot/restore comprehensive tests
+// Read-model snapshot tests
 // ============================================================================
 
 #[tokio::test]
-async fn snapshot_restore_preserves_all_fields() {
+async fn snapshot_combines_timeline_projection_and_runtime_metadata() {
     let h = TestHarness::new();
 
     // Set up state with non-default values for EVERY field
-    h.handle.push_user_message(ConversationItem::user("q1"));
+    h.handle.push_user_message(marked_user("q1", 0));
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
     h.handle.record_token_usage(999);
-    h.handle.increment_prompt_index();
+    record_prompt(&h.handle, "query 1").await;
     h.handle.record_agent_edited_path("src/foo.rs".to_string());
     h.handle.record_agent_edited_path("src/bar.rs".to_string());
-    h.handle.cache_prompt_text("query 1".to_string());
     h.handle.record_stream_start(12345);
     h.handle.record_turn_start(12340);
-    h.handle.record_compaction_at(0);
-
     let snapshot = h.handle.snapshot().await.unwrap();
-
-    // Mutate everything to different values
-    h.handle.replace_conversation(vec![]);
-    h.handle.record_token_usage(0);
-    h.handle.increment_prompt_index();
-    h.handle.record_stream_start(99999);
-    h.handle.record_turn_start(99990);
-    h.handle.record_compaction_at(99);
-
-    // Verify mutated
-    let _ = h.handle.get_prompt_index().await;
-    assert!(h.handle.get_conversation().await.is_empty());
-
-    // Restore from snapshot
-    h.handle.restore_snapshot(snapshot.clone());
-
-    // Verify ALL fields match
-    assert_eq!(
-        h.handle.get_conversation().await.len(),
-        snapshot.conversation.len()
-    );
-    assert_eq!(h.handle.get_total_tokens().await, snapshot.total_tokens);
-    assert_eq!(h.handle.get_prompt_index().await, snapshot.prompt_index);
-    assert_eq!(
-        h.handle.get_agent_edited_paths().await,
-        snapshot.agent_edited_paths
-    );
-
-    let meta = h.handle.get_notification_meta().await.unwrap();
-    assert_eq!(meta.stream_start_ms, snapshot.stream_start_ms);
-    assert_eq!(meta.turn_start_ms, snapshot.turn_start_ms);
-
-    let restored_snap = h.handle.snapshot().await.unwrap();
-    assert_eq!(restored_snap.prompt_texts, snapshot.prompt_texts);
-    assert_eq!(
-        restored_snap.last_compaction_prompt_index,
-        snapshot.last_compaction_prompt_index
-    );
+    assert_eq!(snapshot.conversation.len(), 2);
+    assert_eq!(snapshot.total_tokens, 999);
+    assert_eq!(snapshot.prompt_index, 1);
+    assert_eq!(snapshot.prompt_texts, vec!["query 1"]);
+    assert_eq!(snapshot.agent_edited_paths.len(), 2);
+    assert_eq!(snapshot.stream_start_ms, Some(12345));
+    assert_eq!(snapshot.turn_start_ms, Some(12340));
 }
 
 #[tokio::test]
@@ -1661,10 +1934,40 @@ async fn build_request_can_persist_memory_into_actor_state() {
     }
 
     let records = h.drain_persistence();
-    assert!(
-        records
-            .iter()
-            .any(|r| matches!(r, PersistenceRecord::ReplaceHistory(items) if matches!(items.first(), Some(ConversationItem::System(sys)) if sys.content.contains("Remember this"))))
+    assert!(records.iter().filter_map(persisted_messages).any(|event| {
+        event.cause == crate::MessageCause::MemoryContext
+            && matches!(event.items.first(), Some(ConversationItem::System(sys)) if sys.content.contains("Remember this"))
+    }));
+}
+
+#[tokio::test]
+async fn persistent_memory_context_does_not_advance_surface_when_commit_fails() {
+    let original = vec![ConversationItem::system("system")];
+    let mut h = TestHarness::with_manual_timeline_ack(original.clone());
+    let handle = h.handle.clone();
+    let build = async move {
+        handle
+            .build_request(vec![], Some("remember".to_owned()), true)
+            .await
+    };
+    let reject = async {
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("Timeline acknowledgement")
+            .send(Err(std::io::Error::other("simulated disk failure")))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(build, reject);
+
+    assert!(matches!(
+        result,
+        Err(crate::TimelineWriteError::Persistence(_))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
+        serde_json::to_vec(&original).unwrap(),
+        "a rejected memory-context event must not change Surface"
     );
 }
 
@@ -1736,7 +2039,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
         "Read main.rs, fix the typo, then run the tests",
     ));
 
-    h.handle.increment_prompt_index();
+    record_prompt(&h.handle, "tool turn").await;
 
     // ── Model response: 3 parallel tool calls ───────────────────────────
     // The model's single assistant message contains all 3 tool calls.
@@ -1987,12 +2290,13 @@ async fn parallel_tool_calls_with_rejection_persists_all_items() {
     // Sync point
     let _ = h.handle.get_conversation().await;
 
-    // All 6 items should have been persisted as Message records
+    // All 6 items should have been persisted as Timeline message events.
     let records = h.drain_persistence();
     let message_count = records
         .iter()
-        .filter(|r| matches!(r, PersistenceRecord::Message(_)))
-        .count();
+        .filter_map(persisted_messages)
+        .map(|event| event.items.len())
+        .sum::<usize>();
 
     assert_eq!(
         message_count, 6,
@@ -2473,10 +2777,9 @@ async fn turn_capture_survives_compaction_and_flags_it() {
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
 
-    h.handle
-        .replace_conversation_for_compaction(vec![ConversationItem::system("compacted")]);
+    commit_compaction_range(&h.handle, vec![ConversationItem::system("compacted")]).await;
 
-    h.handle.push_user_message(ConversationItem::user("q2"));
+    h.handle.push_user_message(marked_user("q2", 1));
 
     let capture = h
         .handle
@@ -2501,8 +2804,7 @@ async fn replace_conversation_without_compaction_does_not_set_flag() {
     h.handle.begin_turn_capture();
     h.handle.push_user_message(ConversationItem::user("q1"));
 
-    h.handle
-        .replace_conversation(vec![ConversationItem::system("new state")]);
+    replace_test_surface(&h.handle, vec![ConversationItem::system("new state")]).await;
 
     let capture = h
         .handle
@@ -2561,42 +2863,19 @@ async fn begin_capture_clears_previous_buffer() {
 async fn truncate_clears_turn_capture() {
     let h = TestHarness::new();
 
-    h.handle.push_user_message(ConversationItem::user("q1"));
-    h.handle.increment_prompt_index();
+    h.handle.push_user_message(marked_user("q1", 0));
+    record_prompt(&h.handle, "q1").await;
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
 
     h.handle.begin_turn_capture();
-    h.handle.push_user_message(ConversationItem::user("q2"));
-    h.handle.increment_prompt_index();
+    h.handle.push_user_message(marked_user("q2", 1));
+    record_prompt(&h.handle, "q2").await;
 
-    h.handle.truncate_to_prompt_index(1).await;
+    h.handle.rewind_durably(1).await.unwrap();
 
     let result = h.handle.take_turn_messages().await;
     assert!(result.is_none());
-}
-
-#[tokio::test]
-async fn restore_snapshot_does_not_touch_turn_capture() {
-    let h = TestHarness::new();
-
-    let snapshot = h.handle.snapshot().await.unwrap();
-
-    h.handle.begin_turn_capture();
-    h.handle.push_user_message(ConversationItem::user("hello"));
-    h.handle
-        .push_assistant_response(ConversationItem::assistant("hi"));
-
-    h.handle.restore_snapshot(snapshot);
-
-    let capture = h
-        .handle
-        .take_turn_messages()
-        .await
-        .expect("capture should survive restore");
-
-    assert_eq!(capture.messages.len(), 2);
-    assert!(!capture.compaction_occurred);
 }
 
 #[tokio::test]
@@ -3085,7 +3364,7 @@ async fn fresh_subagent_bootstrap_has_system_message_after_replace() {
     // Build the system prompt and inject it (mirrors acp_session.rs lines 1287-1295).
     let system_prompt = "You are a helpful subagent.".to_string();
     let conversation = vec![ConversationItem::system(system_prompt.clone())];
-    h.handle.replace_conversation(conversation);
+    replace_test_surface(&h.handle, conversation).await;
 
     // After the sync the system message must be available for compaction.
     let sys = h.handle.get_system_message().await.unwrap();
@@ -3122,7 +3401,7 @@ async fn forked_subagent_bootstrap_replaces_parent_system_message() {
     if let Some(ConversationItem::System(sys)) = conversation.first_mut() {
         sys.content = child_prompt.clone().into();
     }
-    h.handle.replace_conversation(conversation);
+    replace_test_surface(&h.handle, conversation).await;
 
     // The system message must now be the child's prompt, not the parent's.
     let sys = h.handle.get_system_message().await.unwrap();
@@ -3144,8 +3423,8 @@ async fn forked_subagent_bootstrap_replaces_parent_system_message() {
 /// conversation grows to a predictable length.
 async fn push_turns(handle: &crate::handle::ChatStateHandle, turns: usize, content_len: usize) {
     for i in 0..turns {
-        handle.push_user_message(ConversationItem::user(format!("q{i}")));
-        handle.increment_prompt_index();
+        handle.push_user_message(marked_user(format!("q{i}"), i));
+        record_prompt(handle, format!("q{i}")).await;
         handle.push_assistant_response(ConversationItem::assistant(format!("a{i}")));
         handle.push_tool_result(ConversationItem::tool_result(
             format!("call_{i}"),
@@ -3161,10 +3440,10 @@ async fn push_turns(handle: &crate::handle::ChatStateHandle, turns: usize, conte
 #[tokio::test]
 async fn prune_retained_no_op_when_session_is_young() {
     use crate::actor::ChatStateActor;
-    use crate::persistence::MockChatPersistence;
+    use crate::persistence::MockTimelinePersistence;
     use crate::types::PruningConfig;
 
-    let (mock, _rx) = MockChatPersistence::new();
+    let (mock, _rx) = MockTimelinePersistence::new();
     let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     let config = PruningConfig {
@@ -3201,10 +3480,10 @@ async fn prune_retained_no_op_when_session_is_young() {
 #[tokio::test]
 async fn prune_retained_hard_clears_old_tool_results() {
     use crate::actor::ChatStateActor;
-    use crate::persistence::MockChatPersistence;
+    use crate::persistence::MockTimelinePersistence;
     use crate::types::PruningConfig;
 
-    let (mock, _rx) = MockChatPersistence::new();
+    let (mock, _rx) = MockTimelinePersistence::new();
     let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     let config = PruningConfig {
@@ -3253,10 +3532,10 @@ async fn prune_retained_hard_clears_old_tool_results() {
 #[tokio::test]
 async fn prune_retained_disabled_is_noop() {
     use crate::actor::ChatStateActor;
-    use crate::persistence::MockChatPersistence;
+    use crate::persistence::MockTimelinePersistence;
     use crate::types::PruningConfig;
 
-    let (mock, _rx) = MockChatPersistence::new();
+    let (mock, _rx) = MockTimelinePersistence::new();
     let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     let config = PruningConfig {
@@ -3293,14 +3572,14 @@ async fn prune_retained_disabled_is_noop() {
 #[tokio::test]
 async fn prune_retained_bounds_long_session_footprint() {
     use crate::actor::ChatStateActor;
-    use crate::persistence::MockChatPersistence;
+    use crate::persistence::MockTimelinePersistence;
     use crate::types::PruningConfig;
 
     const TURNS: usize = 50; // enough turns to clear many old tool results
     const CONTENT_LEN: usize = 50_000; // 50 KB per tool result
     const PLACEHOLDER_LEN: usize = "[Tool result omitted — too old]".len();
 
-    let (mock, _rx) = MockChatPersistence::new();
+    let (mock, _rx) = MockTimelinePersistence::new();
     let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     let config = PruningConfig {
@@ -3359,15 +3638,15 @@ async fn prune_retained_bounds_long_session_footprint() {
     );
 }
 
-/// Rewind (truncate_to_prompt_index) still produces the correct item count
+/// Durable Timeline rewind still produces the correct item count
 /// after in-memory pruning has cleared some old tool results.
 #[tokio::test]
 async fn prune_retained_rewind_still_correct() {
     use crate::actor::ChatStateActor;
-    use crate::persistence::MockChatPersistence;
+    use crate::persistence::MockTimelinePersistence;
     use crate::types::PruningConfig;
 
-    let (mock, mut rx) = MockChatPersistence::new();
+    let (mock, mut rx) = MockTimelinePersistence::new();
     let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     // Aggressive pruning to make in-memory pruning fire quickly.
@@ -3389,7 +3668,7 @@ async fn prune_retained_rewind_still_correct() {
     push_turns(&handle, 6, 1_000).await;
 
     // Rewind to prompt index 3 (keep turns 0..3 = 9 items).
-    handle.truncate_to_prompt_index(3).await;
+    handle.rewind_durably(3).await.unwrap();
 
     let conv = handle.get_conversation().await;
     assert_eq!(
@@ -3432,10 +3711,10 @@ async fn prune_retained_rewind_still_correct() {
 #[tokio::test]
 async fn prune_retained_synthetic_user_does_not_advance_age() {
     use crate::actor::ChatStateActor;
-    use crate::persistence::MockChatPersistence;
+    use crate::persistence::MockTimelinePersistence;
     use crate::types::PruningConfig;
 
-    let (mock, _rx) = MockChatPersistence::new();
+    let (mock, _rx) = MockTimelinePersistence::new();
     let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
     let config = PruningConfig {
@@ -3455,7 +3734,7 @@ async fn prune_retained_synthetic_user_does_not_advance_age() {
     // Three real turns, each with a large tool result.
     for i in 0..3usize {
         handle.push_user_message(ConversationItem::user(format!("real q{i}")));
-        handle.increment_prompt_index(); // prompt_index = i+1
+        record_prompt(&handle, format!("real q{i}")).await;
         handle.push_assistant_response(ConversationItem::assistant(format!("a{i}")));
         handle.push_tool_result(ConversationItem::tool_result(
             format!("call_{i}"),
@@ -3470,7 +3749,7 @@ async fn prune_retained_synthetic_user_does_not_advance_age() {
 
     // Fourth real turn starts: prompt_index → 4, pruning fires inside push_user_message.
     handle.push_user_message(ConversationItem::user("real q3"));
-    handle.increment_prompt_index(); // prompt_index = 4
+    record_prompt(&handle, "real q3").await;
 
     // Sync
     let conv = handle.get_conversation().await;
@@ -3570,10 +3849,14 @@ async fn sampling_config_survives_compaction_replacement() {
 
     // Simulate compaction: replace conversation with compacted history.
     // The compacted history has system + user summary, NO AssistantItem.
-    h.handle.replace_conversation_for_compaction(vec![
-        ConversationItem::system("You are a helpful assistant."),
-        ConversationItem::user("Compaction summary: user asked to fix a bug..."),
-    ]);
+    commit_compaction_range(
+        &h.handle,
+        vec![
+            ConversationItem::system("You are a helpful assistant."),
+            ConversationItem::user("Compaction summary: user asked to fix a bug..."),
+        ],
+    )
+    .await;
 
     // Post-compaction: SamplingConfig MUST be preserved.
     let post = h.handle.get_sampling_config().await.unwrap();
@@ -3652,10 +3935,14 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
     );
 
     // Compaction replaces conversation — no AssistantItem in compacted history.
-    h.handle.replace_conversation_for_compaction(vec![
-        ConversationItem::system("sys"),
-        ConversationItem::user("compacted summary"),
-    ]);
+    commit_compaction_range(
+        &h.handle,
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("compacted summary"),
+        ],
+    )
+    .await;
 
     // Metadata gone.
     let meta = h.handle.get_last_model_metadata().await;
@@ -4269,45 +4556,6 @@ async fn prefix_stable_after_tool_result_pruning() {
     }
 }
 
-/// `BackendToolCall` items (web search) must serialize stably across
-/// turns. Once emitted, a backend tool call sits at a fixed position
-/// in the conversation list and the wire input.
-#[tokio::test]
-async fn prefix_stable_after_session_resume() {
-    let h = TestHarness::with_conversation(vec![
-        ConversationItem::system("sys"),
-        ConversationItem::user("hello"),
-    ]);
-
-    let req1 = h.handle.build_request(vec![], None, false).await.unwrap();
-
-    h.handle
-        .push_assistant_response(ConversationItem::assistant("hi"));
-    h.handle.push_user_message(ConversationItem::user("q2"));
-
-    let req2 = h.handle.build_request(vec![], None, false).await.unwrap();
-
-    let snapshot = h.handle.snapshot().await.unwrap();
-
-    h.handle
-        .replace_conversation(vec![ConversationItem::system("different")]);
-
-    h.handle.restore_snapshot(snapshot);
-
-    let req3 = h.handle.build_request(vec![], None, false).await.unwrap();
-
-    assert_prefix_stable_pair(&req1, &req3, "after session resume");
-
-    let body2 = serialize_via_public_api(&req2);
-    let body3 = serialize_via_public_api(&req3);
-    let input2 = body2["input"].as_array().unwrap();
-    let input3 = body3["input"].as_array().unwrap();
-    assert_eq!(
-        input2, input3,
-        "restored snapshot must produce identical request items"
-    );
-}
-
 // ============================================================================
 // Out-of-band history repair (grow/session/repair)
 // ============================================================================
@@ -4344,7 +4592,7 @@ async fn repair_history_command_strips_orphan_and_persists() {
     assert_eq!(h.handle.get_conversation().await.len(), 5);
     assert!(h.drain_persistence().is_empty(), "dry run must not persist");
 
-    // Real repair: orphan stripped, fix persisted via a full history replace.
+    // Real repair: orphan stripped, fix persisted as one Timeline replacement.
     let report = h.handle.repair_history(false, None).await.unwrap().unwrap();
     assert!(report.changed());
     assert_eq!(report.stripped_tool_result_ids, vec!["call_LOST"]);
@@ -4356,15 +4604,13 @@ async fn repair_history_command_strips_orphan_and_persists() {
         ConversationItem::ToolResult(tr) if tr.tool_call_id == "call_LOST"
     )));
 
-    let replaced = h
-        .drain_persistence()
-        .into_iter()
-        .find_map(|r| match r {
-            PersistenceRecord::ReplaceHistory(items) => Some(items),
-            _ => None,
-        })
-        .expect("repair must persist a full history replace");
-    assert_eq!(replaced.len(), 4);
+    let records = h.drain_persistence();
+    let replaced = records
+        .iter()
+        .filter_map(persisted_messages)
+        .find(|event| event.cause == crate::MessageCause::IntegrityRepair)
+        .expect("repair must persist one Timeline replacement");
+    assert_eq!(replaced.items.len(), 4);
 
     // Idempotent: a second repair reports no changes and persists nothing.
     let report = h.handle.repair_history(false, None).await.unwrap().unwrap();
@@ -4437,11 +4683,13 @@ async fn repair_history_does_not_mutate_when_timeline_commit_fails() {
         serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
         serde_json::to_vec(&corrupted).unwrap()
     );
-    assert!(
-        !h.drain_persistence()
+    assert_eq!(
+        h.drain_persistence()
             .iter()
-            .any(|record| matches!(record, PersistenceRecord::ReplaceHistory(_))),
-        "derived cache must not advance after a failed Timeline commit"
+            .filter_map(persisted_messages)
+            .count(),
+        1,
+        "the failed durable attempt is recorded by the mock exactly once"
     );
 }
 
@@ -4451,7 +4699,7 @@ async fn repair_history_does_not_mutate_when_timeline_commit_fails() {
 
 /// Full happy path: a planned oversized tool result is replaced by
 /// head + marker + tail, structural fields survive, `total_tokens` drops,
-/// the history snapshot is persisted through `replace_history`, and no UI
+/// one Timeline replacement is persisted, and no UI
 /// event is published (the pager renders streamed wire events and must not
 /// be disturbed by pruning stored state).
 #[tokio::test]
@@ -4524,20 +4772,26 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
 
     assert_eq!(h.handle.get_total_tokens().await, report.tokens_after);
 
-    // Persisted as a Timeline replacement plus a refreshed projection cache;
-    // no per-message appends.
+    // Persisted as exactly one Timeline replacement.
     let records = h.drain_persistence();
-    assert!(matches!(
-        records.first(),
-        Some(PersistenceRecord::Timeline(_))
-    ));
-    let PersistenceRecord::ReplaceHistory(items) = &records[1] else {
-        panic!("expected ReplaceHistory, got {records:?}");
-    };
-    assert_eq!(items.len(), 2);
-    let ConversationItem::ToolResult(persisted) = &items[1] else {
-        panic!("expected tool result in persisted history");
-    };
+    let events = records
+        .iter()
+        .filter_map(persisted_messages)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events.len(),
+        1,
+        "expected one Timeline replacement: {records:?}"
+    );
+    assert_eq!(events[0].cause, crate::MessageCause::ToolResultPrune);
+    let persisted = events[0]
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .expect("expected tool result in replacement event");
     assert!(persisted.content.contains(super::mutations::PRUNE_MARKER));
 
     // Pruning must not disturb the rendered UI: no events at all.
@@ -4621,6 +4875,47 @@ async fn prune_tool_results_never_appears_to_increase_usage() {
     assert!(h.drain_events().is_empty());
 }
 
+#[tokio::test]
+async fn prune_tool_results_does_not_mutate_when_timeline_commit_fails() {
+    use compaction::{PruneItem, PrunePlan};
+
+    let original = vec![ConversationItem::tool_result("call-1", "x".repeat(4000))];
+    let mut h = TestHarness::with_manual_timeline_ack(original.clone());
+    let handle = h.handle.clone();
+    let prune = async move {
+        handle
+            .prune_tool_results(PrunePlan {
+                items: vec![PruneItem {
+                    index: 0,
+                    tokens_before: 1000,
+                    budget_tokens: 50,
+                    estimated_savings: 950,
+                }],
+            })
+            .await
+    };
+    let reject = async {
+        h.persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("Timeline acknowledgement")
+            .send(Err(std::io::Error::other("simulated disk failure")))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(prune, reject);
+    assert!(matches!(
+        result,
+        Err(crate::commands::PruneError::Timeline(
+            crate::TimelineWriteError::Persistence(_)
+        ))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
+        serde_json::to_vec(&original).unwrap(),
+        "rejected pruning must not change the live Surface"
+    );
+}
+
 /// A prune command and a concurrent `PushToolResult` serialize inside the
 /// actor: whichever lands first, the other is not lost and both effects are
 /// durable.
@@ -4663,22 +4958,20 @@ async fn prune_tool_results_interleaves_with_push_without_losing_messages() {
     assert_eq!(fresh.tool_call_id, "call-2");
     assert_eq!(fresh.content.as_ref(), "fresh-result");
 
-    // Both effects are durable: the push as an append, the prune as a
-    // full-history replacement (their order may vary).
+    // Both effects are represented by Timeline events (their order may vary).
     let records = h.drain_persistence();
-    assert!(records.iter().any(|r| matches!(
-        r,
-        PersistenceRecord::Message(item)
-            if matches!(item, ConversationItem::ToolResult(tr) if tr.tool_call_id == "call-2")
-    )));
-    assert!(records.iter().any(|r| matches!(
-        r,
-        PersistenceRecord::ReplaceHistory(items)
-            if items
-                .iter()
-                .any(|i| matches!(i, ConversationItem::ToolResult(tr)
-                    if tr.content.contains(super::mutations::PRUNE_MARKER)))
-    )));
+    assert!(records.iter().filter_map(persisted_messages).any(|event| {
+        event.items.iter().any(
+            |item| matches!(item, ConversationItem::ToolResult(tr) if tr.tool_call_id == "call-2"),
+        )
+    }));
+    assert!(records.iter().filter_map(persisted_messages).any(|event| {
+        event.cause == crate::MessageCause::ToolResultPrune
+            && event.items.iter().any(|item| {
+                matches!(item, ConversationItem::ToolResult(tr)
+                    if tr.content.contains(super::mutations::PRUNE_MARKER))
+            })
+    }));
 }
 
 /// Defensive plan entries are skipped with diagnostics instead of panicking:

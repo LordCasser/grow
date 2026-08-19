@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -6,11 +7,9 @@ use crate::extensions::notification::SessionNotification;
 use crate::sampling::ConversationItem;
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
-use crate::session::signals::SessionSignals;
 use crate::session::wire_tags::{
     AVAILABLE_COMMANDS_UPDATE_PREFIX, REWIND_MARKER, USER_MESSAGE_CHUNK,
 };
-use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
 use sampling_types::ReasoningEffort;
 use workspace::session::file_state::RewindPoint;
@@ -26,21 +25,259 @@ pub(crate) mod summary_write;
 /// On-disk file names, relative to a session directory. Single source of truth for
 /// the storage adapter and the session/state and session/import extensions.
 pub(crate) const SUMMARY_FILE: &str = "summary.json";
-pub(crate) const PLAN_FILE: &str = "plan.json";
-pub(crate) const SESSION_CONTROL_FILE: &str = "session-control.json";
-pub(crate) const LEGACY_BEHAVIOR_STATE_FILE: &str = "behavior.json";
-pub(crate) const SIGNALS_FILE: &str = "signals.json";
-pub(crate) const LEGACY_GOAL_STATE_FILE: &str = "goal/state.json";
-pub(crate) const ANNOUNCEMENT_STATE_FILE: &str = "announcement_state.json";
-pub(crate) const CHAT_HISTORY_FILE: &str = "chat_history.jsonl";
 pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 pub(crate) const TIMELINE_FILE: &str = "timeline.jsonl";
+pub(crate) const SIDEBANDS_DIR: &str = "sidebands";
+
+pub(crate) type SidebandLedgers = BTreeMap<String, Vec<chat_state::SidebandEvent>>;
+
+fn completed_sideband_result<'a>(
+    ledgers: &'a SidebandLedgers,
+    sideband_id: &str,
+    result_seq: u64,
+    owner: &str,
+) -> io::Result<&'a chat_state::SidebandResult> {
+    let result_index = usize::try_from(result_seq).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{owner} result seq exceeds platform capacity"),
+        )
+    })?;
+    let events = ledgers.get(sideband_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{owner} references missing sideband {sideband_id}"),
+        )
+    })?;
+    let result = events
+        .get(result_index)
+        .and_then(|event| match &event.kind {
+            chat_state::SidebandEventKind::Result(result) => Some(result),
+            _ => None,
+        });
+    let terminal_index = result_index.checked_add(1).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{owner} result seq exceeds platform capacity"),
+        )
+    })?;
+    let completed = matches!(
+        events.get(terminal_index).map(|event| &event.kind),
+        Some(chat_state::SidebandEventKind::End(
+            chat_state::SidebandEnd {
+                outcome: chat_state::SidebandOutcome::Completed,
+                error: None,
+            }
+        ))
+    ) && events.len() == terminal_index.saturating_add(1);
+    match (result, completed) {
+        (Some(result), true) => Ok(result),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{owner} references unproven result {sideband_id}/{result_seq}"),
+        )),
+    }
+}
+
+/// Read every committed record from the canonical Timeline ledger.
+///
+/// A non-newline-terminated tail was never committed and is ignored. Every
+/// complete record is parsed strictly; missing ledgers and interior corruption
+/// fail closed for every consumer, including resume, history, and search.
+pub(crate) fn read_timeline_file(path: &Path) -> io::Result<Vec<chat_state::TimelineEvent>> {
+    read_committed_jsonl_file(path, "mandatory Timeline ledger")
+}
+
+/// Read and validate the canonical Timeline for one explicit session
+/// directory. This is the only cross-crate disk projection entry point.
+pub fn read_timeline_in_session_dir(dir: &Path) -> io::Result<chat_state::Timeline> {
+    let events = read_timeline_file(&dir.join(TIMELINE_FILE))?;
+    chat_state::Timeline::from_events(events)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// Read complete records from an append-only JSONL ledger. A torn final
+/// record was never acknowledged and is ignored; all complete records remain
+/// strict. Callers choose the ledger-specific missing-file diagnostic.
+pub(crate) fn read_committed_jsonl_file<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    description: &str,
+) -> io::Result<Vec<T>> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{description} is missing: {}", path.display()),
+            )
+        } else {
+            error
+        }
+    })?;
+    let complete_len = if bytes.last().is_none_or(|byte| *byte == b'\n') {
+        bytes.len()
+    } else {
+        bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1)
+    };
+    bytes[..complete_len]
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty())
+        .map(|(index, line)| {
+            serde_json::from_slice(line).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: {error}", path.display(), index + 1),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Validate every persisted independent ledger against its parent Timeline,
+/// including title events whose provenance crosses the ledger boundary.
+pub(crate) fn validate_sideband_ledgers(
+    parent_timeline_id: &str,
+    parent: &chat_state::Timeline,
+    ledgers: &SidebandLedgers,
+) -> io::Result<()> {
+    let spawns = parent
+        .events()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Sideband(spawn) => {
+                Some((spawn.sideband_id.as_str(), (event.seq.get(), spawn)))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for (sideband_id, events) in ledgers {
+        let (spawn_seq, spawn) = spawns.get(sideband_id.as_str()).copied().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("sideband {sideband_id} has no parent spawn fact"),
+            )
+        })?;
+        if events.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("sideband {sideband_id} ledger is empty"),
+            ));
+        }
+        let timeline = chat_state::SidebandTimeline::from_events(events.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        timeline
+            .validate_parent(parent_timeline_id, spawn_seq, spawn)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    }
+
+    for (_, spawn) in spawns.values() {
+        if let Some(input_ref) = spawn
+            .input_refs
+            .iter()
+            .find(|input_ref| input_ref.timeline_id != parent_timeline_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "sideband {} references foreign Timeline {}",
+                    spawn.sideband_id, input_ref.timeline_id
+                ),
+            ));
+        }
+    }
+
+    for event in parent.events() {
+        let chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Summary {
+            result_ref,
+            summary_chars,
+            ..
+        }) = &event.kind
+        else {
+            continue;
+        };
+        let result = completed_sideband_result(
+            ledgers,
+            &result_ref.timeline_id,
+            result_ref.first_seq,
+            "compaction/summary",
+        )?;
+        if result.raw_output.chars().count() != *summary_chars {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "compaction/summary character count does not match sideband {}/{}",
+                    result_ref.timeline_id, result_ref.first_seq
+                ),
+            ));
+        }
+    }
+
+    for event in parent.events() {
+        let chat_state::TimelineEventKind::SessionTitle(title) = &event.kind else {
+            continue;
+        };
+        match &title.source {
+            chat_state::SessionTitleSource::User => {}
+            chat_state::SessionTitleSource::Generated {
+                sideband_id,
+                result_seq,
+            } => {
+                completed_sideband_result(
+                    ledgers,
+                    sideband_id,
+                    *result_seq,
+                    "generated session/title",
+                )?;
+            }
+            chat_state::SessionTitleSource::Fallback {
+                sideband_id,
+                terminal_seq,
+            } => {
+                let terminal_index = usize::try_from(*terminal_seq).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "fallback session/title terminal seq exceeds platform capacity",
+                    )
+                })?;
+                let terminal = ledgers
+                    .get(sideband_id)
+                    .and_then(|events| events.get(terminal_index));
+                if !matches!(
+                    terminal.map(|event| &event.kind),
+                    Some(chat_state::SidebandEventKind::End(
+                        chat_state::SidebandEnd {
+                            outcome: chat_state::SidebandOutcome::Failed
+                                | chat_state::SidebandOutcome::Cancelled,
+                            error: Some(_),
+                        }
+                    ))
+                ) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "fallback session/title references unproven terminal event {sideband_id}/{terminal_seq}"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Write `bytes` to `path` by writing a uniquely named sibling temp file and
 /// renaming it over the target, so a crash or a concurrent writer never leaves a
 /// torn file. The temp is removed on failure.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_bytes_atomic_inner(path, bytes, false)
+}
+
+pub(crate) fn write_bytes_atomic_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_bytes_atomic_inner(path, bytes, true)
 }
 
 fn write_bytes_atomic_inner(path: &Path, bytes: &[u8], durable: bool) -> io::Result<()> {
@@ -145,6 +382,77 @@ pub(crate) fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "durable file sync is unsupported on this platform",
+    ))
+}
+
+/// Atomically publish `source` at `target` without ever replacing an existing
+/// filesystem object.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+    use nix::fcntl::{AT_FDCWD, RenameFlags, renameat2};
+    renameat2(
+        AT_FDCWD,
+        source,
+        AT_FDCWD,
+        target,
+        RenameFlags::RENAME_NOREPLACE,
+    )
+    .map_err(|error| match error {
+        nix::errno::Errno::EEXIST => {
+            io::Error::new(io::ErrorKind::AlreadyExists, target.display().to_string())
+        }
+        nix::errno::Errno::EINVAL | nix::errno::Errno::ENOSYS | nix::errno::Errno::EOPNOTSUPP => {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "atomic no-replace rename is unsupported",
+            )
+        }
+        error => io::Error::from(error),
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target_c = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    // SAFETY: both pointers remain live NUL-terminated path strings for this call.
+    if unsafe { libc::renamex_np(source.as_ptr(), target_c.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EEXIST) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            target_c.to_string_lossy().into_owned(),
+        )),
+        Some(code) if code == libc::EINVAL || code == libc::ENOTSUP => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic no-replace rename is unsupported",
+        )),
+        _ => Err(error),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+    // Windows rename already refuses an existing destination.
+    std::fs::rename(source, target)
+}
+
+#[cfg(not(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    windows
+)))]
+pub(crate) fn rename_no_replace(_source: &Path, _target: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unsupported",
     ))
 }
 
@@ -289,76 +597,6 @@ pub enum SessionUpdate {
     Grow(Box<SessionNotification>),
 }
 
-/// Scan the durable update log from newest to oldest for a successful Goal
-/// finalization terminal. This closes the crash window between persisting the
-/// regular turn's sole terminal and committing the Goal `Complete` receipt.
-pub(crate) fn has_successful_goal_finalization(
-    updates_path: &Path,
-    goal_id: &str,
-) -> io::Result<bool> {
-    let bytes = std::fs::read(updates_path)?;
-    for raw_line in bytes.split(|byte| *byte == b'\n').rev() {
-        let Ok(line) = std::str::from_utf8(raw_line.trim_ascii()) else {
-            continue;
-        };
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(update) = SessionUpdateEnvelope::from_str(line) else {
-            continue;
-        };
-        let SessionUpdate::Grow(notification) = update else {
-            continue;
-        };
-        if let crate::extensions::notification::SessionUpdate::TurnCompleted {
-            identity: Some(identity),
-            stop_reason,
-            ..
-        } = &notification.update
-            && identity.origin == "goal_finalization"
-            && identity.goal_id.as_deref() == Some(goal_id)
-        {
-            return Ok(stop_reason == "end_turn");
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(test)]
-mod goal_finalization_reconcile_tests {
-    use super::*;
-
-    #[test]
-    fn finds_only_successful_structured_goal_finalization_terminal() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("updates.jsonl");
-        let notification = crate::extensions::notification::SessionNotification {
-            session_id: acp::SessionId::new("session"),
-            update: crate::extensions::notification::SessionUpdate::TurnCompleted {
-                prompt_id: "prompt".into(),
-                identity: Some(crate::extensions::notification::TurnIdentity {
-                    origin: "goal_finalization".into(),
-                    turn_kind: "internal".into(),
-                    goal_id: Some("goal-1".into()),
-                    stage_id: Some(4),
-                }),
-                stop_reason: "end_turn".into(),
-                agent_result: None,
-                usage: None,
-            },
-            meta: None,
-        };
-        let update = SessionUpdate::Grow(Box::new(notification));
-        let envelope = SessionUpdateEnvelope::from_update(&update).unwrap();
-        let mut bytes = serde_json::to_vec(&envelope).unwrap();
-        bytes.push(b'\n');
-        std::fs::write(&path, bytes).unwrap();
-
-        assert!(has_successful_goal_finalization(&path, "goal-1").unwrap());
-        assert!(!has_successful_goal_finalization(&path, "goal-2").unwrap());
-    }
-}
-
 impl serde::Serialize for SessionUpdate {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -386,7 +624,7 @@ impl<'de> serde::Deserialize<'de> for SessionUpdate {
     where
         D: serde::Deserializer<'de>,
     {
-        // Deserialize to a JSON value first to handle both envelope and legacy formats
+        // `updates.jsonl` and wire consumers share one method/params envelope.
         let value = serde_json::Value::deserialize(deserializer)?;
         SessionUpdateEnvelope::from_value(value).map_err(serde::de::Error::custom)
     }
@@ -434,28 +672,25 @@ impl SessionUpdateEnvelope {
 
     /// Convert this envelope back into a SessionUpdate.
     pub(crate) fn into_update(self) -> Result<SessionUpdate, serde_json::Error> {
-        if self.method == GROW_SESSION_UPDATE_METHOD {
-            let notification: SessionNotification = serde_json::from_value(self.params)?;
-            Ok(SessionUpdate::Grow(Box::new(notification)))
-        } else {
-            // ACP notification (method == "session/update" or unknown)
-            let notification: acp::SessionNotification = serde_json::from_value(self.params)?;
-            Ok(SessionUpdate::Acp(Box::new(notification)))
+        match self.method.as_str() {
+            GROW_SESSION_UPDATE_METHOD => {
+                let notification: SessionNotification = serde_json::from_value(self.params)?;
+                Ok(SessionUpdate::Grow(Box::new(notification)))
+            }
+            ACP_SESSION_UPDATE_METHOD => {
+                let notification: acp::SessionNotification = serde_json::from_value(self.params)?;
+                Ok(SessionUpdate::Acp(Box::new(notification)))
+            }
+            method => Err(invalid_update_envelope(format!(
+                "unsupported session update method {method:?}"
+            ))),
         }
     }
 
-    /// Try to parse from a JSON value, handling both envelope format and legacy raw format.
+    /// Parse the canonical method/params envelope from a JSON value.
     pub(crate) fn from_value(value: serde_json::Value) -> Result<SessionUpdate, serde_json::Error> {
-        // Check if this looks like an envelope (has "method" field)
-        if value.get("method").is_some() {
-            let envelope: SessionUpdateEnvelope = serde_json::from_value(value)?;
-            envelope.into_update()
-        } else {
-            // Backwards compatibility: old format without envelope wrapper
-            // Treat as raw ACP notification
-            let notification: acp::SessionNotification = serde_json::from_value(value)?;
-            Ok(SessionUpdate::Acp(Box::new(notification)))
-        }
+        let envelope: SessionUpdateEnvelope = serde_json::from_value(value)?;
+        envelope.into_update()
     }
 
     /// Parse a session update directly from a JSON string, avoiding intermediate `Value` allocation.
@@ -466,28 +701,31 @@ impl SessionUpdateEnvelope {
     pub(crate) fn from_str(line: &str) -> Result<SessionUpdate, serde_json::Error> {
         #[derive(serde::Deserialize)]
         struct BorrowedEnvelope<'a> {
-            #[serde(default)]
-            method: Option<&'a str>,
+            method: &'a str,
             #[serde(borrow)]
             params: &'a serde_json::value::RawValue,
         }
 
-        // Try to parse as envelope first (has "method" + "params")
-        if let Ok(envelope) = serde_json::from_str::<BorrowedEnvelope<'_>>(line) {
-            let raw_params = envelope.params.get();
-            return if envelope.method == Some(GROW_SESSION_UPDATE_METHOD) {
+        let envelope = serde_json::from_str::<BorrowedEnvelope<'_>>(line)?;
+        let raw_params = envelope.params.get();
+        match envelope.method {
+            GROW_SESSION_UPDATE_METHOD => {
                 let notification: SessionNotification = serde_json::from_str(raw_params)?;
                 Ok(SessionUpdate::Grow(Box::new(notification)))
-            } else {
+            }
+            ACP_SESSION_UPDATE_METHOD => {
                 let notification: acp::SessionNotification = serde_json::from_str(raw_params)?;
                 Ok(SessionUpdate::Acp(Box::new(notification)))
-            };
+            }
+            method => Err(invalid_update_envelope(format!(
+                "unsupported session update method {method:?}"
+            ))),
         }
-
-        // Backwards compatibility: legacy format without envelope
-        let notification: acp::SessionNotification = serde_json::from_str(line)?;
-        Ok(SessionUpdate::Acp(Box::new(notification)))
     }
+}
+
+fn invalid_update_envelope(message: String) -> serde_json::Error {
+    serde_json::Error::io(io::Error::new(io::ErrorKind::InvalidData, message))
 }
 
 /// All persisted data for a session
@@ -496,20 +734,16 @@ pub struct PersistedData {
     pub summary: Summary,
     /// Immutable conversation facts. This is the restart source of truth.
     pub timeline_events: Vec<chat_state::TimelineEvent>,
-    pub chat_history: Vec<ConversationItem>,
     /// All session updates (ACP updates and Grow extension updates) in chronological order
     pub updates: Vec<SessionUpdate>,
-    pub plan_state: Option<TodoState>,
-    /// Persisted atomic Behavior/Goal control plane.
-    pub session_control: Option<crate::session::control::SessionControlSnapshot>,
+    /// Latest Behavior/Goal projection folded from Timeline `Control` events.
+    pub control_snapshot: Option<crate::session::control::SessionControlSnapshot>,
     /// Rewind points for session rewind functionality
     pub rewind_points: Vec<RewindPoint>,
-    /// Persisted session signals (None for sessions created before signals persistence)
-    pub signals: Option<SessionSignals>,
-    /// Persisted announcement tracking state (None for sessions before this feature)
+    /// Latest session-signals projection folded from Timeline observations.
+    pub signals: Option<crate::session::signals::SessionSignals>,
+    /// Latest announcement projection folded from Timeline observations.
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
-    /// A control snapshot existed but was invalid, or obsolete split state was discarded.
-    pub session_control_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
@@ -518,35 +752,26 @@ pub struct PersistedData {
 pub struct PersistedDataLight {
     pub summary: Summary,
     pub timeline_events: Vec<chat_state::TimelineEvent>,
-    pub chat_history: Vec<ConversationItem>,
-    pub plan_state: Option<TodoState>,
-    pub session_control: Option<crate::session::control::SessionControlSnapshot>,
+    pub control_snapshot: Option<crate::session::control::SessionControlSnapshot>,
     // No `rewind_points` field: the resume path defers them (loaded lazily by
     // `FileStateTracker`). Use `load_session` for the eager set.
-    /// Persisted session signals (None for sessions created before signals persistence)
-    pub signals: Option<SessionSignals>,
-    /// Persisted announcement tracking state (None for sessions before this feature)
+    /// Latest session-signals projection folded from Timeline observations.
+    pub signals: Option<crate::session::signals::SessionSignals>,
+    /// Latest announcement projection folded from Timeline observations.
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
-    pub session_control_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
 /// Result of copying session data
 #[derive(Debug, Clone)]
 pub struct CopySessionResult {
-    pub chat_messages_copied: usize,
+    pub surface_items_copied: usize,
     pub updates_copied: usize,
-    pub plan_state_copied: bool,
-    /// Whether `session-control.json` was copied.
-    pub session_control_copied: bool,
-    pub signals_copied: bool,
-    /// Whether `tool_state.json` (persisted tool state, e.g. TodoState) was copied.
-    pub tool_state_copied: bool,
-    /// Whether `announcement_state.json` was copied.
-    pub announcement_state_copied: bool,
-    /// Number of `compaction/segment_*.md` (+ `INDEX.md`) files copied from the
-    /// source session's compaction archive. `0` when disabled or none exist.
-    pub compaction_segments_copied: usize,
+    /// Whether a sanitized control event was seeded into the child Timeline.
+    pub control_event_seeded: bool,
+    /// Number of immutable large-prompt blobs referenced by the selected
+    /// Surface and copied into the child lineage.
+    pub prompt_blobs_copied: usize,
 }
 
 /// Options for copying session data during fork
@@ -577,31 +802,15 @@ pub struct CopySessionOptions {
     pub fork_context_source: Option<String>,
     /// Parent prompt/turn ID that triggered this fork.
     pub fork_parent_prompt_id: Option<String>,
-    /// Whether to copy the plan state file. Defaults to `true`.
-    pub copy_plan_state: bool,
-    /// Whether to copy the plan mode state file. Defaults to `true`.
-    pub copy_session_control: bool,
-    /// Whether to copy the signals file. Defaults to `true`.
-    pub copy_signals: bool,
-    /// Whether to copy `tool_state.json` (persisted tool state). Defaults to `true`.
-    pub copy_tool_state: bool,
-    /// Whether to copy `announcement_state.json`. Defaults to `true`.
-    pub copy_announcement_state: bool,
-    /// Whether to copy the `compaction/` segment archive (`segment_*.md` +
-    /// `INDEX.md`, the verbose pre-compaction transcripts). Defaults to
-    /// `false` — these can be large and most copy paths don't need them. Forks
-    /// enable it so the child retains the parent's pre-compaction history.
-    pub copy_compaction_segments: bool,
-    /// When true, apply fork-safety filtering to copied chat history:
+    /// Whether to seed sanitized parent control into the child Timeline.
+    pub inherit_control: bool,
+    /// When true, apply fork-safety filtering to the copied Surface:
     /// - Strip synthetic user messages (doom loop warnings, compaction metadata)
     /// - Truncate at the last complete turn boundary
     /// - Remove trailing incomplete assistant responses
     pub fork_filter: bool,
-    /// Number of inherited parent conversation items. Stored in the child's
-    /// summary so compaction can preserve the inherited prefix.
-    pub inherited_prefix_len: Option<usize>,
     /// When true, strip `reasoning` (thinking/reasoning_content) from all
-    /// assistant messages in the copied chat history.
+    /// assistant messages in the copied Surface.
     ///
     /// Set for forks so that the new session does not inherit the prior
     /// model's chain-of-thought -- each fork starts with a clean slate
@@ -623,14 +832,8 @@ impl Default for CopySessionOptions {
             session_kind: None,
             fork_context_source: None,
             fork_parent_prompt_id: None,
-            copy_plan_state: true,
-            copy_session_control: true,
-            copy_signals: true,
-            copy_tool_state: true,
-            copy_announcement_state: true,
-            copy_compaction_segments: false,
+            inherit_control: true,
             fork_filter: false,
-            inherited_prefix_len: None,
             strip_reasoning: false,
             source_workspace_dir: None,
         }
@@ -790,21 +993,15 @@ pub trait StorageAdapter: Send + Sync {
     /// Returns the Summary (creates if needed, loads if exists)
     async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary>;
 
-    /// Set the session title unconditionally (manual `/rename`); last write
-    /// wins. Also marks the title manual (`Summary::title_is_manual`) so
-    /// clients restore the prompt-border title on resume.
-    async fn update_session_title(&self, info: &Info, session_title: String) -> io::Result<()>;
-
-    /// Set the session title only if the session has no title yet, used by
-    /// automatic LLM title generation so it never overwrites a manual
-    /// `/rename`. Never marks the title manual. Returns `true` if the title
-    /// was written, `false` if an existing title was preserved. The check and
-    /// write are atomic under the summary lock, so a concurrent manual rename
-    /// always wins.
-    async fn set_generated_title_if_absent(
+    /// Repair the denormalized title cache from an already-validated canonical
+    /// Timeline fold. Ordinary writers never call this path. Returns false for
+    /// a stale/idempotent sequence.
+    async fn repair_session_title_projection(
         &self,
         info: &Info,
-        session_title: String,
+        event_seq: u64,
+        title: String,
+        source: chat_state::SessionTitleSource,
     ) -> io::Result<bool>;
 
     /// Append a session update (ACP update or Grow extension update) and increment counter
@@ -833,9 +1030,6 @@ pub trait StorageAdapter: Send + Sync {
         )))
     }
 
-    /// Append a chat message and increment counter.
-    async fn append_chat_message(&self, info: &Info, message: &ConversationItem) -> io::Result<()>;
-
     /// Append one immutable conversation event without rewriting prior facts.
     async fn append_timeline_event(
         &self,
@@ -855,18 +1049,23 @@ pub trait StorageAdapter: Send + Sync {
         ))
     }
 
-    /// Update the current model in summary (delegates to
-    /// `update_current_model_and_agent` with `agent_name = None`).
-    async fn update_current_model(&self, info: &Info, model_id: &acp::ModelId) -> io::Result<()> {
-        self.update_current_model_and_agent(info, model_id, None, None)
-            .await
+    /// Durably append one event to a short-lived sideband's independent
+    /// Timeline. Implementations must preserve contiguous sequence identity.
+    async fn append_sideband_event_durable(
+        &self,
+        _info: &Info,
+        _event: &chat_state::SidebandEvent,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable sideband append is unsupported",
+        ))
     }
 
     /// Update the current model and agent name in summary.
     /// `agent_name` is the resolved agent definition name
     /// persisted so session resume doesn't depend on the mutable model catalog.
-    /// `None` leaves the existing `agent_name` unchanged (used by legacy callers
-    /// that only update the model ID).
+    /// `None` preserves the corresponding persisted field.
     async fn update_current_model_and_agent(
         &self,
         info: &Info,
@@ -881,26 +1080,6 @@ pub trait StorageAdapter: Send + Sync {
         info: &Info,
         commit: Option<String>,
         branch: Option<String>,
-    ) -> io::Result<()>;
-
-    /// Write/update the plan state
-    async fn write_plan_state(&self, info: &Info, state: &TodoState) -> io::Result<()>;
-
-    /// Atomically write Behavior selection and Goal runtime state.
-    async fn write_session_control(
-        &self,
-        info: &Info,
-        state: &crate::session::control::SessionControlSnapshot,
-    ) -> io::Result<()>;
-
-    /// Write/update the session signals snapshot
-    async fn write_signals(&self, info: &Info, signals: &SessionSignals) -> io::Result<()>;
-
-    /// Write/update the announcement tracking state
-    async fn write_announcement_state(
-        &self,
-        info: &Info,
-        state: &crate::session::announcement_state::AnnouncementState,
     ) -> io::Result<()>;
 
     async fn write_workflow_run_state(
@@ -949,13 +1128,6 @@ pub trait StorageAdapter: Send + Sync {
     /// loaded) in-memory tracker, so historical points can't be lost.
     async fn merge_rewind_points_from(&self, info: &Info, target_index: usize) -> io::Result<()>;
 
-    /// Replace the entire chat history (used for compaction and rewind)
-    async fn replace_chat_history(
-        &self,
-        info: &Info,
-        messages: &[ConversationItem],
-    ) -> io::Result<()>;
-
     /// Copy session data from source to target, transforming session IDs
     /// The `options` parameter allows setting parent session tracking and model overrides.
     async fn copy_session_data(
@@ -965,20 +1137,12 @@ pub trait StorageAdapter: Send + Sync {
         options: CopySessionOptions,
     ) -> io::Result<CopySessionResult>;
 
-    /// Load only user prompts from a session's updates file.
-    /// This is an optimized method that avoids loading chat_history, plan_state, etc.
-    /// Returns user prompts in chronological order.
-    async fn load_prompts_only(&self, info: &Info) -> io::Result<Vec<String>>;
-    /// Load assistant text content from a session's updates file.
-    /// Returns assistant responses in chronological order, extracted from ContentChunk text.
-    async fn load_assistant_text(&self, info: &Info) -> io::Result<Vec<String>>;
+    /// Load the current branch's typed user-authored inputs from Timeline.
+    async fn load_prompt_records(&self, info: &Info) -> io::Result<Vec<chat_state::PromptRecord>>;
 
-    /// Load tool metadata from a session's updates file.
-    /// Per Phase 1 contract (ACP data model):
-    /// - Tool name: from `ToolCall.title` (display name; acp::ToolCall has no .name field)
-    /// - File paths: from `ToolCall.locations[].path` (ACP stores locations, not parsed arguments)
-    /// - Errors: skipped (no is_error field on acp::SessionUpdate::ToolCallUpdate)
-    async fn load_tool_metadata(&self, info: &Info) -> io::Result<Vec<String>>;
+    /// Get the path to the canonical Timeline ledger for bounded background
+    /// reads. Returns None when the backend cannot expose a local path.
+    fn timeline_file_path(&self, info: &Info) -> Option<std::path::PathBuf>;
 
     /// Get the path to the updates file for streaming reads.
     /// Returns None if the storage backend doesn't support streaming.
@@ -989,40 +1153,6 @@ pub trait StorageAdapter: Send + Sync {
     /// on-disk layout, so callers must use this rather than recomputing the path
     /// (it differs for non-default storage modes, e.g. subagent/fork sessions).
     fn rewind_points_file_path(&self, info: &Info) -> Option<std::path::PathBuf>;
-
-    /// Append a /btw side question entry to btw_history.jsonl
-    async fn append_btw(
-        &self,
-        info: &Info,
-        entry: &crate::session::persistence::BtwEntry,
-    ) -> io::Result<()>;
-
-    /// Write a compaction request artifact to `compaction_requests/{request_id}.json`.
-    /// Captures the exact request sent to the compaction model and the response
-    /// (or final error) it produced. Used for offline prompt iteration.
-    async fn write_compaction_request(
-        &self,
-        info: &Info,
-        request: &crate::extensions::notification::CompactionRequestFile,
-    ) -> io::Result<()>;
-
-    /// Write a recap request artifact to `recap_requests/{request_id}.json`.
-    /// Captures the exact request sent for `/recap` or auto recap and the
-    /// response (or error). Used for offline recap prompt / garble analysis.
-    async fn write_recap_request(
-        &self,
-        info: &Info,
-        request: &crate::extensions::notification::RecapRequestFile,
-    ) -> io::Result<()>;
-
-    /// Render+write `compaction/segment_NNN.md` (storage assigns the resume-safe
-    /// index) and append its `INDEX.md` row.
-    async fn write_compaction_segment(
-        &self,
-        info: &Info,
-        segment: &crate::extensions::notification::CompactionSegmentFile,
-    ) -> io::Result<()>;
-
 }
 
 pub use jsonl::JsonlStorageAdapter;
@@ -1031,10 +1161,9 @@ pub use jsonl::JsonlStorageAdapter;
 /// without parsing the notification payload.
 #[derive(serde::Deserialize)]
 pub(crate) struct RawLinePeek<'a> {
-    #[serde(default)]
-    pub method: Option<&'a str>,
-    #[serde(borrow, default)]
-    pub params: Option<&'a serde_json::value::RawValue>,
+    pub method: &'a str,
+    #[serde(borrow)]
+    pub params: &'a serde_json::value::RawValue,
 }
 
 /// Peeks at `update.sessionUpdate` tag and `_meta` without full deserialization.
@@ -1110,14 +1239,16 @@ fn filter_rewind_by<T>(items: Vec<T>, classify: impl Fn(&T) -> RewindStep) -> Ve
 /// Classify a raw JSONL line by peeking at its tag and `_meta` without fully
 /// deserializing the payload.
 fn rewind_step_for_line(line: &str) -> RewindStep {
-    let (raw_params, is_grow) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
-        let raw = env.params.map(|p| p.get()).unwrap_or(line);
-        (raw, env.method == Some(GROW_SESSION_UPDATE_METHOD))
-    } else {
-        (line, false)
+    let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) else {
+        return RewindStep::Other;
+    };
+    let is_grow = match env.method {
+        GROW_SESSION_UPDATE_METHOD => true,
+        ACP_SESSION_UPDATE_METHOD => false,
+        _ => return RewindStep::Other,
     };
 
-    let Some(u) = serde_json::from_str::<RawParamsPeek<'_>>(raw_params)
+    let Some(u) = serde_json::from_str::<RawParamsPeek<'_>>(env.params.get())
         .ok()
         .and_then(|p| p.update)
     else {
@@ -1423,62 +1554,67 @@ pub struct PreparedReplay<'a> {
     /// Rewind-filtered replay lines, each borrowed from the input transcript.
     pub lines: Vec<&'a str>,
     pub(crate) mark_replay: bool,
-    pub(crate) last_tokens: u64,
     /// Highest `eventId` counter across all live (rewind-filtered) lines, used
     /// to re-seed the process-global event counter on resume so post-load live
     /// events keep monotonically increasing ids (see
     /// [`crate::util::event_id::ensure_event_counter_at_least`]). `None` when no
-    /// line carried a parseable `eventId` (older shell).
+    /// line carried a parseable `eventId`.
     pub(crate) max_event_seq: Option<u64>,
     pub(crate) total_live: usize,
-    /// Replayed spawns with no matching finish (a rewind can drop the finish):
-    /// `(subagent_id, child_session_id)`, reconciled on load.
-    pub(crate) unfinished_subagents: Vec<(String, String)>,
+    /// UI cache coverage for canonical subagent lifecycle facts.
+    pub(crate) subagent_projections: SubagentProjectionState,
 }
 
-/// Unpaired spawns across the rewind-filtered timeline. Substring pre-filter
-/// keeps non-subagent lines off the JSON path.
-fn collect_unfinished_subagents(filtered: &[&str]) -> Vec<(String, String)> {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SubagentProjectionState {
+    pub spawned: std::collections::BTreeSet<String>,
+    pub finished: std::collections::BTreeSet<String>,
+}
+
+/// Coverage of canonical lifecycle facts already present in the replay cache.
+fn collect_subagent_projection_state(filtered: &[&str]) -> SubagentProjectionState {
     use crate::extensions::notification::SessionUpdate as Update;
-    let mut pending: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut state = SubagentProjectionState::default();
     for line in filtered {
         if !line.contains("subagent_spawned") && !line.contains("subagent_finished") {
             continue;
         }
-        // Parse the typed notification. Envelope lines nest it under `params`;
-        // legacy lines put it at the top level (fall back to the whole line,
-        // matching `filter_rewind_lines`).
-        let raw = serde_json::from_str::<RawLinePeek<'_>>(line)
-            .ok()
-            .and_then(|e| e.params.map(|p| p.get()))
-            .unwrap_or(line);
-        let Ok(notification) = serde_json::from_str::<SessionNotification>(raw) else {
+        let Ok(envelope) = serde_json::from_str::<RawLinePeek<'_>>(line) else {
+            continue;
+        };
+        if envelope.method != GROW_SESSION_UPDATE_METHOD {
+            continue;
+        }
+        let Ok(notification) = serde_json::from_str::<SessionNotification>(envelope.params.get())
+        else {
             continue;
         };
         match notification.update {
-            Update::SubagentSpawned {
-                subagent_id,
-                child_session_id,
-                ..
-            } => {
-                pending.insert(subagent_id, child_session_id);
+            Update::SubagentSpawned { subagent_id, .. } => {
+                state.spawned.insert(subagent_id);
             }
             Update::SubagentFinished { subagent_id, .. } => {
-                pending.remove(&subagent_id);
+                state.finished.insert(subagent_id);
             }
             _ => {}
         }
     }
-    pending.into_iter().collect()
+    state
 }
 
-/// The raw `_meta` object of a persisted line, if any, without allocating a
-/// `serde_json::Value`. Handles both the enveloped (`{method,params}`) and legacy
-/// (params-at-top-level) on-disk formats.
+/// The raw `_meta` object of a canonical persisted envelope, if any, without
+/// allocating a `serde_json::Value`.
 fn line_meta(line: &str) -> Option<&serde_json::value::RawValue> {
     let env = serde_json::from_str::<RawLinePeek<'_>>(line).ok()?;
-    let raw = env.params.map(|p| p.get()).unwrap_or(line);
-    serde_json::from_str::<RawParamsPeek<'_>>(raw).ok()?.meta
+    if !matches!(
+        env.method,
+        ACP_SESSION_UPDATE_METHOD | GROW_SESSION_UPDATE_METHOD
+    ) {
+        return None;
+    }
+    serde_json::from_str::<RawParamsPeek<'_>>(env.params.get())
+        .ok()?
+        .meta
 }
 
 /// The `"update":` object key (a protocol key, not an enum discriminant). The
@@ -1513,27 +1649,8 @@ pub(crate) fn line_is_available_commands_update(line: &str) -> bool {
 }
 
 // `_meta` protocol field names (not enum discriminants).
-/// `_meta` key holding the running token count. The serde `rename` below must
-/// match it by hand (serde attrs can't reference a const).
-const TOTAL_TOKENS_KEY: &str = "totalTokens";
 /// `_meta` key holding the per-event id used for cursor-based reconnect.
 const EVENT_ID_KEY: &str = "eventId";
-
-/// Extract `_meta.totalTokens` from a persisted update line without allocating a
-/// `serde_json::Value`. Returns `None` when the line carries no token count.
-fn line_total_tokens(line: &str) -> Option<u64> {
-    if !line.contains(TOTAL_TOKENS_KEY) {
-        return None;
-    }
-    #[derive(serde::Deserialize)]
-    struct TokensPeek {
-        #[serde(rename = "totalTokens")]
-        total_tokens: Option<u64>,
-    }
-    serde_json::from_str::<TokensPeek>(line_meta(line)?.get())
-        .ok()
-        .and_then(|t| t.total_tokens)
-}
 
 /// This line's `_meta.eventId`, if any. Cheap peek (no `Value`).
 fn line_event_id(line: &str) -> Option<std::borrow::Cow<'_, str>> {
@@ -1557,8 +1674,8 @@ fn line_has_event_id(line: &str, cursor_id: &str) -> bool {
     line_event_id(line).as_deref() == Some(cursor_id)
 }
 
-/// Rewind-filter, resolve the reconnect cursor, drop redundant command
-/// catalogs, and scan `totalTokens`. Pure data processing, no I/O.
+/// Rewind-filter, resolve the reconnect cursor, and drop redundant command
+/// catalogs. Pure UI replay processing, no agent-state recovery.
 ///
 /// The cursor is resolved before dropping ACUs, because an idle client often
 /// reconnects with an ACU's `eventId` as its cursor; resolving against the
@@ -1578,8 +1695,11 @@ pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> Prep
     for line in &filtered {
         if line.contains("eventId")
             && let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line)
-            && let Some(raw) = env.params.map(|p| p.get())
-            && let Ok(pp) = serde_json::from_str::<RawParamsPeek<'_>>(raw)
+            && matches!(
+                env.method,
+                ACP_SESSION_UPDATE_METHOD | GROW_SESSION_UPDATE_METHOD
+            )
+            && let Ok(pp) = serde_json::from_str::<RawParamsPeek<'_>>(env.params.get())
             && let Some(meta_raw) = pp.meta
             && let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_raw.get())
             && let Some(seq) = meta
@@ -1591,15 +1711,6 @@ pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> Prep
             max_event_seq = Some(max_event_seq.map_or(seq, |m| m.max(seq)));
         }
     }
-
-    // Last live update carrying `_meta.totalTokens` (reverse scan, last-wins) over
-    // the full surviving timeline, so the count reflects total session state.
-    // ACUs never carry `totalTokens`, so scanning the ACU-inclusive set is safe.
-    let last_tokens = filtered
-        .iter()
-        .rev()
-        .find_map(|l| line_total_tokens(l))
-        .unwrap_or(0);
 
     // Resolve the reconnect cursor against the ACU-inclusive set. `mark_replay`
     // is true for a full historical replay (no cursor, or cursor not found).
@@ -1644,10 +1755,9 @@ pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> Prep
     PreparedReplay {
         lines,
         mark_replay,
-        last_tokens,
         max_event_seq,
         total_live,
-        unfinished_subagents: collect_unfinished_subagents(&filtered),
+        subagent_projections: collect_subagent_projection_state(&filtered),
     }
 }
 
@@ -1664,526 +1774,6 @@ pub(crate) fn filter_delta_replay_lines(contents: &str) -> Vec<&str> {
 }
 
 // ============================================================================
-// Selective prompt-extraction parser
-// ============================================================================
-
-/// An event yielded by [`PromptExtractIterator`].
-///
-/// Each event represents the minimal information extracted from one
-/// `updates.jsonl` line without deserializing the full typed notification.
-#[derive(Debug, PartialEq)]
-pub enum PromptExtractEvent {
-    /// A text chunk from a `UserMessageChunk` ACP update.
-    ///
-    /// Multiple consecutive `UserTextChunk` events belong to the same user
-    /// message and should be concatenated by the caller. `prompt_index` is the
-    /// chunk `_meta.promptIndex` when the turn pipeline stamped one.
-    UserTextChunk {
-        text: String,
-        prompt_index: Option<usize>,
-    },
-
-    /// A `RewindMarker` Grow update: truncate accumulated prompts to this index.
-    ///
-    /// Any in-progress user message should be flushed before truncating.
-    RewindTo(usize),
-
-    /// Any other update type — signals that the current user message (if any)
-    /// has ended.
-    NotUserMessage,
-}
-
-impl PromptExtractEvent {
-    pub fn user_text(text: impl Into<String>) -> Self {
-        Self::UserTextChunk {
-            text: text.into(),
-            prompt_index: None,
-        }
-    }
-
-    pub fn user_text_pi(text: impl Into<String>, prompt_index: usize) -> Self {
-        Self::UserTextChunk {
-            text: text.into(),
-            prompt_index: Some(prompt_index),
-        }
-    }
-}
-
-/// Iterator that streams [`PromptExtractEvent`]s from a `updates.jsonl` file.
-///
-/// Unlike [`UpdatesIterator`], this never materialises a full
-/// `acp::SessionNotification` or `SessionNotification`. Instead it uses
-/// zero-copy `serde_json` deserialization with `&RawValue` to peek at the
-/// discriminant field and only extracts the one or two fields actually needed
-/// for prompt reconstruction:
-///
-/// - ACP `"user_message_chunk"` → `update.content.text`
-/// - Grow `"rewind_marker"`      → `update.target_prompt_index`
-/// - everything else             → [`PromptExtractEvent::NotUserMessage`]
-///
-/// Parse errors on individual lines are treated conservatively as
-/// `NotUserMessage` (matching the "skip malformed line" behavior of the
-/// original [`UpdatesIterator`]-based path, but safely terminating any
-/// in-progress user-message accumulation).
-pub struct PromptExtractIterator {
-    reader: std::io::BufReader<std::fs::File>,
-    line_buffer: String,
-}
-
-impl PromptExtractIterator {
-    /// Open a `updates.jsonl` file for selective prompt extraction.
-    ///
-    /// Returns `None` if the file does not exist.
-    pub fn open(path: &std::path::Path) -> std::io::Result<Option<Self>> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        let file = std::fs::File::open(path)?;
-        Ok(Some(Self {
-            reader: std::io::BufReader::new(file),
-            line_buffer: String::new(),
-        }))
-    }
-}
-
-impl Iterator for PromptExtractIterator {
-    type Item = PromptExtractEvent;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            self.line_buffer.clear();
-            match std::io::BufRead::read_line(&mut self.reader, &mut self.line_buffer) {
-                Ok(0) => return None, // EOF
-                Err(_) => return Some(PromptExtractEvent::NotUserMessage),
-                Ok(_) => {}
-            }
-
-            let line = self.line_buffer.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            return Some(parse_prompt_extract_event(line));
-        }
-    }
-}
-
-/// Assemble accumulated user-prompt strings from a stream of [`PromptExtractEvent`]s.
-///
-/// Encapsulates the accumulation, flush, and rewind-truncation rules in one
-/// place so that every caller — whether reading from disk or from an in-memory
-/// iterator — applies identical prompt-extraction semantics:
-///
-/// - Consecutive `UserTextChunk` events are concatenated into one prompt until
-///   a non-user event or a `promptIndex` change opens a new run.
-/// - Progressive counting (same as [`UserRunTurnTracker`]): every user run
-///   counts until the first `_meta.promptIndex`; after that only marked runs
-///   count (mid-turn phantoms are dropped from the list).
-/// - `NotUserMessage` flushes any in-progress prompt.
-/// - `RewindTo(n)` flushes then truncates the list to `n` **counted** prompts.
-///
-/// The resulting `Vec` is the resume `prompt_texts` / rewind-picker index
-/// space: `prompt_index == prompts.len()` after load, matching live turn
-/// stamping (not raw user-message count).
-pub fn collect_prompts_from_events(iter: impl Iterator<Item = PromptExtractEvent>) -> Vec<String> {
-    let mut prompts: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut in_user = false;
-    let mut current_run_pi: Option<usize> = None;
-    let mut current_counts = false;
-    let mut seen_marker = false;
-
-    fn flush(
-        prompts: &mut Vec<String>,
-        current: &mut String,
-        in_user: &mut bool,
-        current_run_pi: &mut Option<usize>,
-        current_counts: &mut bool,
-    ) {
-        if *in_user {
-            if *current_counts {
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    prompts.push(trimmed);
-                }
-            }
-            current.clear();
-            *in_user = false;
-            *current_run_pi = None;
-            *current_counts = false;
-        }
-    }
-
-    for event in iter {
-        match event {
-            PromptExtractEvent::UserTextChunk { text, prompt_index } => {
-                if prompt_index.is_some() {
-                    seen_marker = true;
-                }
-                let counts = if seen_marker {
-                    prompt_index.is_some()
-                } else {
-                    true
-                };
-                let new_run = if !in_user {
-                    true
-                } else if seen_marker || prompt_index.is_some() {
-                    prompt_index != current_run_pi
-                } else {
-                    false
-                };
-                if new_run {
-                    flush(
-                        &mut prompts,
-                        &mut current,
-                        &mut in_user,
-                        &mut current_run_pi,
-                        &mut current_counts,
-                    );
-                    in_user = true;
-                    current_run_pi = prompt_index;
-                    current_counts = counts;
-                    current.push_str(&text);
-                } else {
-                    current.push_str(&text);
-                    if current_run_pi.is_none() && prompt_index.is_some() {
-                        current_run_pi = prompt_index;
-                        current_counts = true;
-                    }
-                }
-            }
-            PromptExtractEvent::RewindTo(target_index) => {
-                // Flush any in-progress user message before truncating.
-                // Rewinding TO prompt N keeps prompts[0..N].
-                flush(
-                    &mut prompts,
-                    &mut current,
-                    &mut in_user,
-                    &mut current_run_pi,
-                    &mut current_counts,
-                );
-                prompts.truncate(target_index);
-            }
-            PromptExtractEvent::NotUserMessage => {
-                flush(
-                    &mut prompts,
-                    &mut current,
-                    &mut in_user,
-                    &mut current_run_pi,
-                    &mut current_counts,
-                );
-            }
-        }
-    }
-
-    flush(
-        &mut prompts,
-        &mut current,
-        &mut in_user,
-        &mut current_run_pi,
-        &mut current_counts,
-    );
-
-    prompts
-}
-/// Collect assistant text from a stream of [`SessionUpdate`]s.
-///
-/// Extracts `ContentChunk.text` from `AgentMessageChunk` updates.
-/// Capped at 100k chars total.
-///
-/// Note: This collector does not honor rewind markers (unlike PromptExtractIterator).
-/// Rewound-away branches may still contribute to FTS index. This is a known limitation;
-/// fix by using a rewind-aware replay model (future work).
-pub fn collect_assistant_text(
-    iter: impl Iterator<Item = io::Result<SessionUpdate>>,
-) -> Vec<String> {
-    const MAX_CHARS: usize = 100_000;
-    let mut texts: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut chars_emitted = 0usize;
-
-    for res in iter {
-        let update = match res {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::warn!(error = %e, "skipping malformed update in assistant text collector");
-                continue;
-            }
-        };
-        match update {
-            SessionUpdate::Acp(notification) => {
-                match notification.update {
-                    acp::SessionUpdate::AgentMessageChunk(chunk) => {
-                        if let acp::ContentBlock::Text(text_content) = chunk.content
-                            && !text_content.text.is_empty()
-                        {
-                            // Reserve space for separator before computing budget to avoid overshoot
-                            let sep_cost = usize::from(!current.is_empty());
-                            let budget = MAX_CHARS
-                                .saturating_sub(chars_emitted)
-                                .saturating_sub(sep_cost);
-                            if budget == 0 {
-                                continue;
-                            }
-                            let text = if text_content.text.len() > budget {
-                                // Truncate on a valid UTF-8 char boundary
-                                let mut end = budget;
-                                while end > 0 && !text_content.text.is_char_boundary(end) {
-                                    end -= 1;
-                                }
-                                &text_content.text[..end]
-                            } else {
-                                &text_content.text
-                            };
-                            if !current.is_empty() {
-                                current.push(' ');
-                                chars_emitted += 1;
-                            }
-                            current.push_str(text);
-                            chars_emitted += text.len();
-                        }
-                    }
-                    _ => {
-                        // End of assistant turn
-                        if !current.is_empty() {
-                            let t = current.trim().to_string();
-                            if !t.is_empty() {
-                                texts.push(t);
-                            }
-                            current.clear();
-                        }
-                    }
-                }
-            }
-            SessionUpdate::Grow(_) => {
-                if !current.is_empty() {
-                    let t = current.trim().to_string();
-                    if !t.is_empty() {
-                        texts.push(t);
-                    }
-                    current.clear();
-                }
-            }
-        }
-    }
-    if !current.is_empty() {
-        let t = current.trim().to_string();
-        if !t.is_empty() {
-            texts.push(t);
-        }
-    }
-    texts
-}
-
-/// Collect tool metadata from a stream of [`SessionUpdate`]s.
-///
-/// Per Phase 1 contract (ACP data model):
-/// - Tool name: from `ToolCall.title` (display name; acp::ToolCall has no .name)
-/// - File paths: from `ToolCall.locations[].path` (ACP stores locations, not raw arguments)
-/// - Errors: skipped (no is_error on acp::ToolCallUpdate)
-///
-/// Bounds:
-/// - Max 200 tool calls per session
-/// - Each extraction capped at 100k chars before final join
-///
-/// Note: This collector does not honor rewind markers (unlike PromptExtractIterator).
-/// Rewound-away branches may still contribute to FTS index. This is a known limitation;
-/// fix by using a rewind-aware replay model (future work).
-pub fn collect_tool_metadata(iter: impl Iterator<Item = io::Result<SessionUpdate>>) -> Vec<String> {
-    let mut meta: Vec<String> = Vec::new();
-    let mut tool_call_count = 0usize;
-    let mut chars_emitted = 0usize;
-
-    const MAX_TOOL_CALLS: usize = 200;
-    const MAX_CHARS: usize = 100_000;
-
-    for res in iter {
-        if tool_call_count >= MAX_TOOL_CALLS {
-            break;
-        }
-        let update = match res {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::warn!(error = %e, "skipping malformed update in tool metadata collector");
-                continue;
-            }
-        };
-        match update {
-            SessionUpdate::Acp(notification) => {
-                match notification.update {
-                    acp::SessionUpdate::ToolCall(tc) => {
-                        tool_call_count += 1;
-
-                        // Tool name from .title (acp::ToolCall has no .name field)
-                        if !tc.title.is_empty() {
-                            let budget = MAX_CHARS.saturating_sub(chars_emitted);
-                            if budget == 0 {
-                                continue;
-                            }
-                            let truncated = &tc.title[..tc.title.len().min(budget)];
-                            chars_emitted += truncated.len();
-                            meta.push(truncated.to_string());
-                        }
-
-                        // File paths from locations[].path
-                        for loc in &tc.locations {
-                            if let Some(path_str) = loc.path.to_str()
-                                && !path_str.is_empty()
-                            {
-                                let budget = MAX_CHARS.saturating_sub(chars_emitted);
-                                if budget == 0 {
-                                    continue;
-                                }
-                                let truncated = &path_str[..path_str.len().min(budget)];
-                                meta.push(truncated.to_string());
-                                chars_emitted += truncated.len();
-                            }
-                        }
-                    }
-                    acp::SessionUpdate::ToolCallUpdate(_) => {
-                        // Tool results come as ToolCallUpdate; no is_error field available
-                    }
-                    _ => {}
-                }
-            }
-            SessionUpdate::Grow(_) => {}
-        }
-    }
-    meta
-}
-
-// ---------------------------------------------------------------------------
-// Selective serde structs — only the fields we care about
-// ---------------------------------------------------------------------------
-
-/// Peek inside ACP or Grow `params` to read the `update.sessionUpdate` tag and
-/// any fields relevant to `user_message_chunk` or `rewind_marker`.
-///
-/// Works for both method types because both use the same `update.sessionUpdate`
-/// discriminant key in the params JSON.
-#[derive(serde::Deserialize)]
-struct ParamsPeek<'a> {
-    #[serde(borrow)]
-    update: UpdatePeek<'a>,
-}
-
-#[derive(serde::Deserialize)]
-struct UpdatePeek<'a> {
-    #[serde(rename = "sessionUpdate")]
-    session_update: &'a str,
-    /// Present only for `user_message_chunk`.
-    #[serde(borrow, default)]
-    content: Option<ContentPeek<'a>>,
-    /// Chunk `_meta` on ACP updates (carries `promptIndex` for real turns).
-    #[serde(default, rename = "_meta")]
-    meta: Option<RawChunkMetaPeek>,
-    /// Present only for `rewind_marker`.
-    target_prompt_index: Option<usize>,
-}
-
-/// Selective peek at a `user_message_chunk` content object.
-///
-/// Shared with the search collectors in [`search`] so the peeked fields and
-/// their escape-tolerance cannot drift between the prompt-extraction and
-/// indexing paths.
-#[derive(serde::Deserialize)]
-pub(crate) struct ContentPeek<'a> {
-    #[serde(rename = "type", default)]
-    pub content_type: Option<&'a str>,
-    // `Cow`, not `&str`: serde cannot borrow from JSON strings containing
-    // escapes, and the resulting parse error would drop the whole prompt.
-    #[serde(borrow, default)]
-    pub text: Option<std::borrow::Cow<'a, str>>,
-    #[serde(rename = "_meta", default)]
-    pub meta: Option<ContentMetaPeek<'a>>,
-}
-
-#[derive(serde::Deserialize)]
-pub(crate) struct ContentMetaPeek<'a> {
-    #[serde(borrow, default)]
-    pub bash_command: Option<std::borrow::Cow<'a, str>>,
-}
-
-/// Parse one `updates.jsonl` line into a [`PromptExtractEvent`].
-///
-/// Always returns an event: `NotUserMessage` for every line that is not a
-/// user-message chunk or rewind marker (including unparseable ones), so an
-/// in-progress prompt is always flushed conservatively.
-///
-/// Fast path: only those two kinds can produce a non-`NotUserMessage` event, and
-/// their discriminant appears verbatim, so a cheap substring pre-check skips the
-/// serde peeks for the vast majority of lines. A line merely embedding the
-/// discriminant in its content still falls through to the full parse.
-pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
-    if !line.contains(&*USER_MESSAGE_CHUNK) && !line.contains(&*REWIND_MARKER) {
-        return PromptExtractEvent::NotUserMessage;
-    }
-
-    // Step 1: try to extract the envelope (method + raw params).
-    let (raw_params, is_grow) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
-        let raw = env.params.map(|p| p.get()).unwrap_or(line);
-        let grow = env.method == Some(GROW_SESSION_UPDATE_METHOD);
-        (raw, grow)
-    } else {
-        // Not a valid envelope → try legacy format: the line IS the params.
-        (line, false)
-    };
-
-    // Step 2: parse the discriminant and relevant payload fields in one pass.
-    let Ok(peek) = serde_json::from_str::<ParamsPeek<'_>>(raw_params) else {
-        // Cannot determine update type → treat conservatively.
-        return PromptExtractEvent::NotUserMessage;
-    };
-
-    let tag = peek.update.session_update;
-
-    if !is_grow && tag == *USER_MESSAGE_CHUNK {
-        if let Some(content) = peek.update.content
-            && content.content_type == Some("text")
-            && let Some(text) = content.text
-        {
-            if content
-                .meta
-                .as_ref()
-                .is_some_and(|m| m.bash_command.is_some())
-            {
-                return PromptExtractEvent::NotUserMessage;
-            }
-            if peek
-                .update
-                .meta
-                .as_ref()
-                .is_some_and(|m| m.host_turn == Some(true))
-            {
-                return PromptExtractEvent::NotUserMessage;
-            }
-            let prompt_index = peek
-                .update
-                .meta
-                .as_ref()
-                .and_then(|m| m.prompt_index.map(|v| v as usize));
-            return PromptExtractEvent::UserTextChunk {
-                text: text.into_owned(),
-                prompt_index,
-            };
-        }
-        // user_message_chunk with non-text content (e.g., image) still ends
-        // any in-progress user message.
-        return PromptExtractEvent::NotUserMessage;
-    }
-
-    if is_grow && tag == *REWIND_MARKER {
-        if let Some(idx) = peek.update.target_prompt_index {
-            return PromptExtractEvent::RewindTo(idx);
-        }
-        // Malformed rewind_marker: treat conservatively (flush, no truncate).
-        return PromptExtractEvent::NotUserMessage;
-    }
-
-    PromptExtractEvent::NotUserMessage
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -2196,7 +1786,7 @@ mod tests {
     #[tokio::test]
     async fn durable_atomic_write_replaces_existing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(SESSION_CONTROL_FILE);
+        let path = dir.path().join("atomic-state.json");
         write_bytes_atomic_durable_async(&path, b"old".to_vec())
             .await
             .unwrap();
@@ -2206,6 +1796,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read(path).unwrap(), b"new");
+    }
+
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        windows
+    ))]
+    #[test]
+    fn no_replace_publication_preserves_an_existing_target() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(source.join("source-marker"), b"source").unwrap();
+        std::fs::write(target.join("target-marker"), b"target").unwrap();
+
+        let error = rename_no_replace(&source, &target).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(source.join("source-marker")).unwrap(),
+            b"source"
+        );
+        assert_eq!(
+            std::fs::read(target.join("target-marker")).unwrap(),
+            b"target"
+        );
     }
 
     /// Wrap an ACP notification as the envelope stored in updates.jsonl.
@@ -2220,353 +1837,6 @@ mod tests {
         format!(
             r#"{{"timestamp":1,"method":"_grow/session/update","params":{{"sessionId":"s","update":{session_update_json}}}}}"#
         )
-    }
-
-    // ── parse_prompt_extract_event unit tests ─────────────────────────────────
-
-    #[test]
-    fn acp_user_text_chunk_yields_user_text() {
-        let line = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello"}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::user_text("hello")
-        );
-    }
-
-    #[test]
-    fn acp_user_text_chunk_with_json_escapes_yields_user_text() {
-        // Escaped JSON strings cannot be borrowed as &str; a regression to a
-        // borrowed peek field would drop this prompt from extraction.
-        let line = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"multi\nline \"quoted\" caf\u00e9"}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::user_text("multi\nline \"quoted\" caf\u{e9}")
-        );
-        // An escaped bash command now parses too and must be excluded by the
-        // bash_command predicate (it used to be excluded by the parse failure).
-        let bash = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"! echo \"hi\"","_meta":{"bash_command":"echo \"hi\""}}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&bash),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    #[test]
-    fn acp_agent_message_chunk_yields_not_user() {
-        let line = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reply"}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    #[test]
-    fn acp_tool_result_yields_not_user() {
-        let line = acp_envelope(
-            r#"{"sessionUpdate":"tool_result","toolCallId":"c1","content":[{"type":"text","text":"big output"}]}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    #[test]
-    fn grow_rewind_marker_yields_rewind_to() {
-        let line = grow_envelope(
-            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":3,"created_at":"2024-01-01"}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::RewindTo(3)
-        );
-    }
-
-    #[test]
-    fn grow_rewind_to_zero_yields_rewind_to_zero() {
-        let line = grow_envelope(
-            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::RewindTo(0)
-        );
-    }
-
-    #[test]
-    fn grow_diff_review_yields_not_user() {
-        let line = grow_envelope(r#"{"sessionUpdate":"diff_review","content":[]}"#);
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    /// An ACP `user_message_chunk` with an image content block (not text) must
-    /// end the current user message without yielding any text.
-    #[test]
-    fn acp_user_message_chunk_image_yields_not_user() {
-        let line = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"image_url","url":"data:image/png;base64,abc"}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    /// Malformed JSON must produce `NotUserMessage` (conservative flush).
-    #[test]
-    fn malformed_json_yields_not_user() {
-        assert_eq!(
-            parse_prompt_extract_event("not json at all!!!"),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    /// Empty string — the iterator skips blanks, but a direct call must still
-    /// classify conservatively (the parser always yields an event now).
-    #[test]
-    fn empty_string_yields_not_user() {
-        assert_eq!(
-            parse_prompt_extract_event(""),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    /// A valid JSON object that has no recognisable ACP/Grow shape — NotUserMessage.
-    #[test]
-    fn unknown_json_object_yields_not_user() {
-        assert_eq!(
-            parse_prompt_extract_event(r#"{"foo":"bar"}"#),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    /// Legacy format: raw `acp::SessionNotification` without an outer envelope.
-    ///
-    /// Old sessions wrote `{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk",...}}`
-    /// directly without the `method`/`params` envelope.  The parser must still
-    /// extract user text from these lines.
-    #[test]
-    fn legacy_format_user_message_chunk() {
-        let line = r#"{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"legacy prompt"}}}"#;
-        assert_eq!(
-            parse_prompt_extract_event(line),
-            PromptExtractEvent::user_text("legacy prompt")
-        );
-    }
-
-    #[test]
-    fn legacy_format_non_user_update() {
-        let line = r#"{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
-        assert_eq!(
-            parse_prompt_extract_event(line),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    // ── PromptExtractIterator integration tests via tempfile ──────────────────
-
-    use std::io::Write as _;
-
-    fn write_updates_file(lines: &[&str]) -> tempfile::NamedTempFile {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        for line in lines {
-            writeln!(f, "{line}").unwrap();
-        }
-        f
-    }
-
-    fn collect_events(path: &std::path::Path) -> Vec<PromptExtractEvent> {
-        PromptExtractIterator::open(path)
-            .unwrap()
-            .unwrap()
-            .collect()
-    }
-
-    #[test]
-    fn iterator_single_user_prompt() {
-        let chunk = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello world"}}"#,
-        );
-        let other = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reply"}}"#,
-        );
-        let f = write_updates_file(&[&chunk, &other]);
-
-        let events = collect_events(f.path());
-        assert_eq!(events[0], PromptExtractEvent::user_text("hello world"));
-        assert_eq!(events[1], PromptExtractEvent::NotUserMessage);
-    }
-
-    #[test]
-    fn iterator_multi_chunk_user_message() {
-        let c1 = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"part1 "}}"#,
-        );
-        let c2 = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"part2"}}"#,
-        );
-        let end = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#,
-        );
-        let f = write_updates_file(&[&c1, &c2, &end]);
-
-        let events = collect_events(f.path());
-        assert_eq!(events[0], PromptExtractEvent::user_text("part1 "));
-        assert_eq!(events[1], PromptExtractEvent::user_text("part2"));
-        assert_eq!(events[2], PromptExtractEvent::NotUserMessage);
-    }
-
-    #[test]
-    fn iterator_rewind_marker_truncates() {
-        let chunk = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p1"}}"#,
-        );
-        let end = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"a1"}}"#,
-        );
-        let rewind = grow_envelope(
-            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
-        );
-        let f = write_updates_file(&[&chunk, &end, &rewind]);
-
-        let events = collect_events(f.path());
-        assert_eq!(events[0], PromptExtractEvent::user_text("p1"));
-        assert_eq!(events[1], PromptExtractEvent::NotUserMessage);
-        assert_eq!(events[2], PromptExtractEvent::RewindTo(0));
-    }
-
-    #[test]
-    fn iterator_skips_blank_lines() {
-        let chunk = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello"}}"#,
-        );
-        let f = write_updates_file(&["", "   ", &chunk, ""]);
-
-        let events = collect_events(f.path());
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0], PromptExtractEvent::user_text("hello"));
-    }
-
-    #[test]
-    fn iterator_malformed_line_does_not_panic() {
-        let bad = "this is not json !!!";
-        let good = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"ok"}}"#,
-        );
-        let f = write_updates_file(&[bad, &good]);
-
-        let events = collect_events(f.path());
-        // bad line → NotUserMessage; good line → UserTextChunk
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0], PromptExtractEvent::NotUserMessage);
-        assert_eq!(events[1], PromptExtractEvent::user_text("ok"));
-    }
-
-    #[test]
-    fn iterator_nonexistent_file_returns_none() {
-        let result =
-            PromptExtractIterator::open(std::path::Path::new("/nonexistent/updates.jsonl"));
-        assert!(result.unwrap().is_none());
-    }
-
-    /// Full round-trip: simulate a session with two user prompts, one rewind,
-    /// then a new prompt.  Assemble the events into prompts the same way
-    /// the session-search projection does.
-    #[test]
-    fn full_round_trip_with_rewind() {
-        // Turn 1: "first prompt"
-        let u1a = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"first "}}"#,
-        );
-        let u1b = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"prompt"}}"#,
-        );
-        let a1 = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer1"}}"#,
-        );
-        // Turn 2: "second prompt"
-        let u2 = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"second prompt"}}"#,
-        );
-        let a2 = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer2"}}"#,
-        );
-        // Rewind to before turn 2 (keep 1 prompt)
-        let rw = grow_envelope(
-            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
-        );
-        // Turn 2 (after rewind): "new second prompt"
-        let u3 = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"new second prompt"}}"#,
-        );
-        let a3 = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer3"}}"#,
-        );
-
-        let f = write_updates_file(&[&u1a, &u1b, &a1, &u2, &a2, &rw, &u3, &a3]);
-
-        let prompts =
-            collect_prompts_from_events(PromptExtractIterator::open(f.path()).unwrap().unwrap());
-
-        assert_eq!(prompts, vec!["first prompt", "new second prompt"]);
-    }
-
-    #[test]
-    fn collect_prompts_ignores_unmarked_phantoms_when_markers_present() {
-        let events = [
-            PromptExtractEvent::user_text_pi("hi", 0),
-            PromptExtractEvent::NotUserMessage,
-            PromptExtractEvent::user_text("!pwd phantom"),
-            PromptExtractEvent::NotUserMessage,
-            PromptExtractEvent::user_text_pi("echo hello", 1),
-            PromptExtractEvent::NotUserMessage,
-            PromptExtractEvent::user_text("echo hi instead"),
-            PromptExtractEvent::NotUserMessage,
-            PromptExtractEvent::user_text_pi("ty ty", 2),
-            PromptExtractEvent::NotUserMessage,
-        ];
-        let prompts = collect_prompts_from_events(events.into_iter());
-        assert_eq!(prompts, vec!["hi", "echo hello", "ty ty"]);
-    }
-
-    #[test]
-    fn collect_prompts_mixed_unmarked_prefix_then_markers() {
-        let events = [
-            PromptExtractEvent::user_text("old0"),
-            PromptExtractEvent::NotUserMessage,
-            PromptExtractEvent::user_text("old1"),
-            PromptExtractEvent::NotUserMessage,
-            PromptExtractEvent::user_text_pi("new2", 2),
-            PromptExtractEvent::NotUserMessage,
-            PromptExtractEvent::user_text("!pwd"),
-            PromptExtractEvent::NotUserMessage,
-            PromptExtractEvent::user_text_pi("new3", 3),
-            PromptExtractEvent::NotUserMessage,
-        ];
-        let prompts = collect_prompts_from_events(events.into_iter());
-        assert_eq!(prompts, vec!["old0", "old1", "new2", "new3"]);
-    }
-
-    #[test]
-    fn parse_extracts_prompt_index_from_update_meta() {
-        let line = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"},"_meta":{"promptIndex":3}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::user_text_pi("hi", 3)
-        );
     }
 
     fn user_chunk(text: &str, prompt_index: Option<usize>) -> SessionUpdate {
@@ -3228,7 +2498,6 @@ mod tests {
             Some(42),
             "max counter across all lines (suffix after last '-')"
         );
-        assert_eq!(prepared.last_tokens, 250);
     }
 
     #[test]
@@ -3349,26 +2618,6 @@ mod tests {
     }
 
     #[test]
-    fn prepare_replay_scans_last_total_tokens_across_kept_lines() {
-        let u = acp_envelope_with_meta(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"}}"#,
-            r#"{"totalTokens":10}"#,
-        );
-        let acu =
-            acp_envelope(r#"{"sessionUpdate":"available_commands_update","availableCommands":[]}"#);
-        let a = acp_envelope_with_meta(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"yo"}}"#,
-            r#"{"totalTokens":42}"#,
-        );
-        let raw = format!("{u}\n{acu}\n{a}\n");
-
-        let prepared = prepare_replay_lines(&raw, None);
-        // Last totalTokens wins; ACU lines (no tokens) don't disturb it.
-        assert_eq!(prepared.last_tokens, 42);
-        assert_eq!(prepared.lines.len(), 2);
-    }
-
-    #[test]
     fn prepare_replay_rewind_truncates_and_drops_acu() {
         let u0 = acp_envelope_with_meta(
             r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p0"}}"#,
@@ -3394,8 +2643,6 @@ mod tests {
         assert_eq!(prepared.lines.len(), 1);
         assert!(prepared.lines[0].contains("p1"));
         assert_eq!(prepared.total_live, 1);
-        // last_tokens recomputed from the surviving timeline (p1 = 9).
-        assert_eq!(prepared.last_tokens, 9);
         assert!(prepared.mark_replay);
     }
 
@@ -3430,55 +2677,6 @@ mod tests {
         let prepared = prepare_replay_lines(&raw, None);
         assert_eq!(prepared.lines, reference);
         assert_eq!(prepared.total_live, reference.len());
-        assert_eq!(prepared.last_tokens, 11); // last kept line carrying tokens
-    }
-
-    /// The prompt-extract fast-reject must not be fooled by lines that merely
-    /// contain the discriminant substring inside their content — the full parse
-    /// still classifies them by the real `sessionUpdate` tag.
-    #[test]
-    fn fast_reject_handles_discriminant_substring_in_content() {
-        let line = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"the user_message_chunk format"}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&line),
-            PromptExtractEvent::NotUserMessage
-        );
-    }
-
-    /// A `rewind_marker` appearing only inside content must NEVER become a
-    /// `RewindTo` (which would corrupt prompt_index / turn numbering).
-    #[test]
-    fn fast_reject_rewind_marker_in_content() {
-        // (a) agent message mentioning rewind_marker → NotUserMessage.
-        let agent = acp_envelope(
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"about rewind_marker semantics"}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&agent),
-            PromptExtractEvent::NotUserMessage
-        );
-
-        // (b) an ACP (non-grow) update carrying rewind_marker in content is NOT a
-        // real grow rewind_marker → NotUserMessage (no RewindTo).
-        let acp_rewindish = acp_envelope(
-            r#"{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"rewind_marker"}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&acp_rewindish),
-            PromptExtractEvent::NotUserMessage
-        );
-
-        // (c) a user_message_chunk whose text contains rewind_marker → still the
-        // user text (the discriminant is user_message_chunk).
-        let user = acp_envelope(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"explain rewind_marker please"}}"#,
-        );
-        assert_eq!(
-            parse_prompt_extract_event(&user),
-            PromptExtractEvent::user_text("explain rewind_marker please")
-        );
     }
 
     /// A user prompt whose text contains the literal escaped-JSON ACU
@@ -3533,8 +2731,7 @@ mod tests {
         assert!(prepared.lines[0].contains("yo"));
     }
 
-    /// A trailing `rewind_marker` empties the live set and yields
-    /// `last_tokens == 0` (the `unwrap_or(0)` path).
+    /// A trailing `rewind_marker` empties the live replay set.
     #[test]
     fn prepare_replay_trailing_rewind_marker_empties() {
         let u0 = acp_envelope_with_meta(
@@ -3548,10 +2745,9 @@ mod tests {
         let prepared = prepare_replay_lines(&raw, None);
         assert!(prepared.lines.is_empty());
         assert_eq!(prepared.total_live, 0);
-        assert_eq!(prepared.last_tokens, 0);
     }
 
-    /// An ACU as the final line is dropped without disturbing tokens.
+    /// An ACU as the final line is dropped.
     #[test]
     fn prepare_replay_trailing_acu_dropped() {
         let u = acp_envelope_with_meta(
@@ -3564,7 +2760,6 @@ mod tests {
         let prepared = prepare_replay_lines(&raw, None);
         assert_eq!(prepared.lines.len(), 1);
         assert!(prepared.lines[0].contains("hi"));
-        assert_eq!(prepared.last_tokens, 7);
         assert_eq!(prepared.total_live, 1);
     }
 
@@ -3602,7 +2797,6 @@ mod tests {
         assert!(!prepared.mark_replay);
         assert_eq!(prepared.lines.len(), 1);
         assert!(prepared.lines[0].contains("a1"));
-        assert_eq!(prepared.last_tokens, 12); // last token-bearing survivor
         assert_eq!(prepared.total_live, 2); // ACU-free survivors: u1, a1
     }
 
@@ -3645,7 +2839,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_replay_reports_spawn_without_finish() {
+    fn prepare_replay_reports_subagent_projection_coverage() {
         let spawn = |id: &str, child: &str| {
             format!(
                 r#"{{"method":"_grow/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_spawned","subagent_id":"{id}","parent_session_id":"s","child_session_id":"{child}","subagent_type":"general-purpose","description":"task"}},"_meta":{{"eventId":"s-1"}}}}}}"#
@@ -3653,10 +2847,9 @@ mod tests {
         };
         let finish = |id: &str| {
             format!(
-                r#"{{"method":"_grow/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_finished","subagent_id":"{id}","child_session_id":"c{id}","status":"completed","tool_calls":0,"turns":0,"duration_ms":0}},"_meta":{{"eventId":"s-2"}}}}}}"#
+                r#"{{"method":"_grow/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_finished","subagent_id":"{id}","child_session_id":"c{id}","status":"completed","tool_calls":0,"turns":0,"duration_ms":0,"tokens_used":0}},"_meta":{{"eventId":"s-2"}}}}}}"#
             )
         };
-        // `a` spawns and finishes (paired); `b` only spawns (orphan).
         let raw = format!(
             "{}\n{}\n{}\n",
             spawn("a", "ca"),
@@ -3665,37 +2858,27 @@ mod tests {
         );
         let prepared = prepare_replay_lines(&raw, None);
         assert_eq!(
-            prepared.unfinished_subagents,
-            vec![("b".to_string(), "cb".to_string())]
+            prepared.subagent_projections.spawned,
+            ["a".to_string(), "b".to_string()].into_iter().collect()
         );
-    }
-
-    /// Legacy lines put `sessionId`/`update` at the top level (no `params`
-    /// envelope); orphan detection must still pair them.
-    #[test]
-    fn collect_unfinished_subagents_handles_legacy_top_level_lines() {
-        let lines = vec![
-            r#"{"sessionId":"s","update":{"sessionUpdate":"subagent_spawned","subagent_id":"a","parent_session_id":"s","child_session_id":"ca","subagent_type":"general-purpose","description":"task"}}"#,
-            r#"{"sessionId":"s","update":{"sessionUpdate":"subagent_finished","subagent_id":"a","child_session_id":"ca","status":"completed","tool_calls":0,"turns":0,"duration_ms":0}}"#,
-            r#"{"sessionId":"s","update":{"sessionUpdate":"subagent_spawned","subagent_id":"b","parent_session_id":"s","child_session_id":"cb","subagent_type":"general-purpose","description":"task"}}"#,
-        ];
-        // `a` is paired (spawn+finish); `b` only spawned → orphan.
         assert_eq!(
-            collect_unfinished_subagents(&lines),
-            vec![("b".to_string(), "cb".to_string())]
+            prepared.subagent_projections.finished,
+            ["a".to_string()].into_iter().collect()
         );
     }
 
-    /// Resume idempotency seam: the finish the stream reconcile emits must
-    /// re-pair the orphan's spawn on the next resume (emit→serialize→collect),
+    /// Resume idempotency seam: the finish the projection repair emits must
+    /// re-pair the spawn on the next resume (emit→serialize→collect),
     /// so a second resume doesn't re-emit. Guards a `SubagentFinished` shape drift.
     #[test]
-    fn collect_pairs_a_reconcile_emitted_finish_with_its_spawn() {
+    fn collect_tracks_spawn_and_finish_projections_independently() {
         use crate::extensions::notification::{SessionNotification, SessionUpdate};
 
-        let spawn = r#"{"sessionId":"s","update":{"sessionUpdate":"subagent_spawned","subagent_id":"sa","parent_session_id":"s","child_session_id":"ca","subagent_type":"general-purpose","description":"task"}}"#.to_string();
+        let spawn = grow_envelope(
+            r#"{"sessionUpdate":"subagent_spawned","subagent_id":"sa","parent_session_id":"s","child_session_id":"ca","subagent_type":"general-purpose","description":"task"}"#,
+        );
         // Build the finish exactly as the stream reconcile emits it.
-        let finish = serde_json::to_string(&SessionNotification {
+        let finish_notification = SessionNotification {
             session_id: acp::SessionId::new("s"),
             update: SessionUpdate::SubagentFinished {
                 subagent_id: "sa".into(),
@@ -3707,109 +2890,26 @@ mod tests {
                 duration_ms: 0,
                 tokens_used: 0,
                 output: None,
-                will_wake: false,
             },
             meta: None,
-        })
+        };
+        let finish = serde_json::to_string(
+            &SessionUpdateEnvelope::from_update(&super::SessionUpdate::Grow(Box::new(
+                finish_notification,
+            )))
+            .unwrap(),
+        )
         .unwrap();
 
-        assert!(
-            collect_unfinished_subagents(&[spawn.as_str(), finish.as_str()]).is_empty(),
-            "the emitted finish must re-pair the spawn so a 2nd resume doesn't re-emit"
-        );
-    }
-
-    // ── collect_assistant_text / collect_tool_metadata tests ──────────────────
-
-    #[test]
-    fn collect_assistant_text_extracts_chunks() {
-        let lines = vec![
-            acp_envelope(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}"#,
-            ),
-            acp_envelope(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"}}"#,
-            ),
-        ];
-        let updates: Vec<_> = lines
-            .into_iter()
-            .map(|s| Ok(serde_json::from_str(&s).unwrap()))
-            .collect();
-        let result = collect_assistant_text(updates.into_iter());
-        assert_eq!(result, vec!["hello world"]);
+        let state = collect_subagent_projection_state(&[spawn.as_str(), finish.as_str()]);
+        assert!(state.spawned.contains("sa"));
+        assert!(state.finished.contains("sa"));
     }
 
     #[test]
-    fn collect_assistant_text_caps_at_100k() {
-        // Two 60k chunks with non-ASCII, separator, and truncation
-        let chunk1 = "x".repeat(60_000) + "café"; // 60k + 5 bytes (café is 5 UTF-8 bytes)
-        let chunk2 = "日本語".repeat(20_000); // 60k bytes (3 bytes per char)
-        let lines = vec![
-            acp_envelope(&format!(
-                r#"{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{chunk1}"}}}}"#
-            )),
-            acp_envelope(&format!(
-                r#"{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{chunk2}"}}}}"#
-            )),
-        ];
-        let updates: Vec<_> = lines
-            .into_iter()
-            .map(|s| Ok(serde_json::from_str(&s).unwrap()))
-            .collect();
-        let result = collect_assistant_text(updates.into_iter());
-        let total: usize = result.iter().map(|s| s.len()).sum();
-        assert!(total <= 100_000, "got {total} chars");
-        // Verify non-ASCII content is present (not corrupted by truncation)
-        assert!(
-            result.iter().any(|s| s.contains("café")),
-            "non-ASCII should be preserved"
-        );
-    }
-
-    #[test]
-    fn collect_tool_metadata_extracts_title_and_paths() {
-        let line = acp_envelope(
-            r#"{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read `/tmp/foo.rs`","kind":"read","locations":[{"path":"/tmp/foo.rs"}]}"#,
-        );
-        let updates: Vec<_> = vec![Ok(serde_json::from_str(&line).unwrap())];
-        let result = collect_tool_metadata(updates.into_iter());
-        assert!(result.contains(&"Read `/tmp/foo.rs`".to_string()));
-        assert!(result.contains(&"/tmp/foo.rs".to_string()));
-    }
-
-    #[test]
-    fn collect_tool_metadata_caps_at_200_calls() {
-        let mut lines = Vec::new();
-        for i in 0..250 {
-            lines.push(acp_envelope(&format!(
-                r#"{{"sessionUpdate":"tool_call","toolCallId":"tc{i}","title":"tool_{i}","kind":"exec","locations":[]}}"#,
-            )));
-        }
-        let updates: Vec<_> = lines
-            .into_iter()
-            .map(|s| Ok(serde_json::from_str(&s).unwrap()))
-            .collect();
-        let result = collect_tool_metadata(updates.into_iter());
-        // Should cap at 200 tool calls (title + paths, but paths empty so just titles)
-        let titles: Vec<_> = result.iter().filter(|s| s.starts_with("tool_")).collect();
-        assert_eq!(titles.len(), 200);
-    }
-
-    #[test]
-    fn from_str_unknown_grow_variant_deserializes_via_envelope() {
-        // Simulates an updates.jsonl line containing a removed variant (e.g. git_branch_update).
-        // SessionUpdateEnvelope::from_str must not error — the Unknown catch-all absorbs it.
+    fn from_str_unknown_grow_variant_is_rejected() {
         let line = grow_envelope(r#"{"sessionUpdate":"git_branch_update","branch":"main"}"#);
-        let update = SessionUpdateEnvelope::from_str(&line).unwrap();
-        match update {
-            SessionUpdate::Grow(notif) => {
-                assert_eq!(
-                    notif.update,
-                    crate::extensions::notification::SessionUpdate::Unknown
-                );
-            }
-            SessionUpdate::Acp(_) => panic!("expected Grow variant"),
-        }
+        assert!(SessionUpdateEnvelope::from_str(&line).is_err());
     }
 
     #[test]

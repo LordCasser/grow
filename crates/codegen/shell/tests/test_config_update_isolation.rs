@@ -5,7 +5,7 @@
 //! layers) to populate the `Config` struct, then `save_config` wrote that merged
 //! result back to the user's `config.toml`. If `requirements.toml` contained
 //! `auto_update = false`, any unrelated config write (theme change, model
-//! preference, yolo toggle) would permanently poison the user's config.
+//! preference, always-approve toggle) would permanently poison the user's config.
 
 use std::fs;
 use std::path::PathBuf;
@@ -114,7 +114,7 @@ async fn update_config_preserves_none_when_only_requirements_sets_value() {
 
     // Write an unrelated field
     shell::util::config::update_config(|cfg| {
-        cfg.ui.yolo = true;
+        cfg.ui.permission_mode = Some("always-approve".into());
     })
     .await
     .expect("update_config should succeed");

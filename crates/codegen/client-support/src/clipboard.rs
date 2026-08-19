@@ -924,7 +924,7 @@ mod platform {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         let stdout = match checked_command_stdout("osascript", cmd.output()) {
             Ok(stdout) => stdout,
             Err(error) => {
@@ -985,7 +985,7 @@ mod platform {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         let stdout = checked_command_stdout("pbpaste", cmd.output())?;
         if stdout.is_empty() {
             return Ok(None);
@@ -1007,7 +1007,7 @@ mod platform {
             cmd.stdin(Stdio::from(stdin))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            tools::util::detach_std_command(&mut cmd);
+            tty_utils::detach_std_command(&mut cmd);
             #[allow(clippy::disallowed_methods)] // short-lived clipboard helper, waited on below
             let mut child = cmd
                 .spawn()
@@ -1096,7 +1096,7 @@ mod platform {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         let stdout = match checked_command_stdout("osascript", cmd.output()) {
             Ok(stdout) => stdout,
             Err(error) => {
@@ -1175,7 +1175,7 @@ mod platform {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         let output = cmd
             .output()
             .map_err(|e| anyhow::anyhow!("failed to run osascript: {e}"))?;
@@ -1681,7 +1681,7 @@ mod platform {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         // Availability = the tool ran and exited in time (any exit status).
         #[allow(clippy::disallowed_methods)] // availability probe, waited on with a timeout
         let Ok(mut child) = cmd.spawn() else {
@@ -1803,7 +1803,7 @@ mod platform {
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         #[allow(clippy::disallowed_methods)] // short-lived clipboard helper, waited on below
         let mut child = cmd
             .spawn()
@@ -1828,7 +1828,7 @@ mod platform {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         #[allow(clippy::disallowed_methods)] // short-lived clipboard helper, waited on below
         let mut child = cmd
             .spawn()
@@ -2831,7 +2831,7 @@ mod tests {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         cmd.spawn().expect("spawn sleep")
     }
 

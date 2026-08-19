@@ -39,7 +39,7 @@ use std::collections::HashSet;
 pub struct AppRenderParams {
     /// App-level Esc ownership snapshot — single producer
     /// `AppView::esc_owned_before_agent` (focused dev tracing pane,
-    /// cloud / import-Claude modals, dashboard
+    /// cloud and application modals, dashboard
     /// attached-agent popup). Feeds the hint path so the bar never
     /// advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
@@ -1086,10 +1086,6 @@ impl AgentView {
             frame_stamp,
         );
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
-            self.active_pane = ActivePane::Scrollback;
-        }
-        self.catalog.sync_from_bundle(bundle_state);
-        if self.active_pane == ActivePane::Catalog && !self.catalog.is_visible() {
             self.active_pane = ActivePane::Scrollback;
         }
         self.catalog.sync_from_bundle(bundle_state);
@@ -2257,7 +2253,7 @@ impl AgentView {
                 bold: false,
             });
         }
-        if self.session.is_yolo() {
+        if self.session.is_always_approve() {
             mode_flags_vec.push(PromptFlag {
                 text: "always-approve",
                 color: None,
@@ -3896,15 +3892,6 @@ impl AgentView {
                 compact,
                 &theme,
             );
-            if let Some(ref mut detail) = self.persona_detail {
-                crate::views::persona_detail::render_persona_detail(
-                    buf,
-                    overlay_area,
-                    detail,
-                    &theme,
-                    compact,
-                );
-            }
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
@@ -4373,7 +4360,7 @@ mod behavior_status_tests {
     fn prompt_status_places_behavior_before_permission() {
         let mut agent = make_agent();
         agent.behavior_mode = tools::types::BehaviorId::Workflow;
-        agent.session.yolo_mode = true;
+        agent.session.permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
         let text = draw_text(&mut agent);
         let behavior = text.find("workflow").expect("workflow Behavior status");
         let permission = text

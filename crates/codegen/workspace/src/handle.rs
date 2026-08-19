@@ -2,13 +2,9 @@
 use fastrace::future::FutureExt as _;
 use fastrace::local::LocalSpan;
 use hunk_tracker::{HunkTrackerActor, HunkTrackerHandle, TrackingMode};
-use prometheus::{
-    Histogram, HistogramVec, IntCounter, IntCounterVec, register_histogram, register_histogram_vec,
-    register_int_counter, register_int_counter_vec,
-};
+use prometheus::{IntCounterVec, register_int_counter_vec};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tool_protocol::turn_hook::TurnHookOutcome;
 /// Tripwire, expected 0 in production. `path="swap"`: a toolset swap found
 /// the outgoing toolset's `Terminal` resource pointing at a backend other
 /// than the session-owned one — a resolve path bypassed the session-owned
@@ -41,150 +37,11 @@ use crate::workspace_ops::{
     GetFileEntry, GetFileResult, GetFilesRes, PutFileEntry, PutFileResult, PutFilesRes,
 };
 
-/// Per-domain checkpoint captures, by domain and turn outcome.
-pub(crate) static REWIND_CHECKPOINT_CAPTURE_TOTAL: std::sync::LazyLock<IntCounterVec> =
-    std::sync::LazyLock::new(|| {
-        register_int_counter_vec!(
-            "grow_workspace_rewind_checkpoint_capture_total",
-            "Total rewind-checkpoint domain captures",
-            &["domain", "outcome"]
-        )
-        .unwrap()
-    });
-/// Checkpoint finalizes, by turn outcome.
-pub(crate) static REWIND_CHECKPOINT_FINALIZE_TOTAL: std::sync::LazyLock<IntCounterVec> =
-    std::sync::LazyLock::new(|| {
-        register_int_counter_vec!(
-            "grow_workspace_rewind_checkpoint_finalize_total",
-            "Total rewind-checkpoint finalizes",
-            &["outcome"]
-        )
-        .unwrap()
-    });
-/// Per-domain restores (the user-initiated `rewind_to` path), by domain and result.
-pub(crate) static REWIND_RESTORE_TOTAL: std::sync::LazyLock<IntCounterVec> =
-    std::sync::LazyLock::new(|| {
-        register_int_counter_vec!(
-            "grow_workspace_rewind_restore_total",
-            "Total rewind-checkpoint domain restores",
-            &["domain", "result"]
-        )
-        .unwrap()
-    });
-/// Duration of per-domain capture operations.
-pub(crate) static REWIND_CHECKPOINT_DURATION: std::sync::LazyLock<HistogramVec> =
-    std::sync::LazyLock::new(|| {
-        register_histogram_vec!(
-            "grow_workspace_rewind_checkpoint_duration_seconds",
-            "Duration of rewind-checkpoint per-domain capture operations",
-            &["domain"],
-            vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
-        )
-        .unwrap()
-    });
-/// Correctness canary: non-`Completed` `after_turn` boundaries that produced
-/// a rewind finalize. Stays 0 unless `workspace_rewind_all_outcomes` is on.
-pub(crate) static REWIND_NON_COMPLETED_FINALIZE_TOTAL: std::sync::LazyLock<IntCounterVec> =
-    std::sync::LazyLock::new(|| {
-        register_int_counter_vec!(
-            "grow_workspace_rewind_non_completed_finalize_total",
-            "Non-Completed after_turn boundaries that produced a rewind finalize",
-            &["outcome"]
-        )
-        .unwrap()
-    });
-/// `domain` label for the rewind metrics. Typed so the closed fs/hunk/git
-/// vocabulary can't be mistyped at a call site.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RewindDomain {
-    Fs,
-    Hunk,
-    Git,
-}
-impl RewindDomain {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            RewindDomain::Fs => "fs",
-            RewindDomain::Hunk => "hunk",
-            RewindDomain::Git => "git",
-        }
-    }
-}
-/// Map a turn outcome to a stable, bounded `outcome` metric label. The catch-all
-/// keeps label cardinality bounded (`TurnHookOutcome` is `#[non_exhaustive]`).
-pub(crate) fn rewind_outcome_label(outcome: TurnHookOutcome) -> &'static str {
-    match outcome {
-        TurnHookOutcome::Completed => "completed",
-        TurnHookOutcome::Cancelled => "cancelled",
-        TurnHookOutcome::Error => "error",
-        _ => "other",
-    }
-}
-/// Map a restore result to its `result` metric label.
-pub(crate) fn rewind_result_label(success: bool) -> &'static str {
-    if success { "success" } else { "failure" }
-}
-/// Record a per-domain checkpoint capture, labeled by turn outcome.
-pub(crate) fn record_rewind_capture(domain: RewindDomain, outcome: TurnHookOutcome) {
-    REWIND_CHECKPOINT_CAPTURE_TOTAL
-        .with_label_values(&[domain.as_str(), rewind_outcome_label(outcome)])
-        .inc();
-}
-/// Observe how long a per-domain capture operation took (seconds).
-pub(crate) fn observe_rewind_capture_duration(domain: RewindDomain, seconds: f64) {
-    REWIND_CHECKPOINT_DURATION
-        .with_label_values(&[domain.as_str()])
-        .observe(seconds);
-}
-/// Record a per-domain restore, labeled by result (success/failure).
-pub(crate) fn record_rewind_restore(domain: RewindDomain, success: bool) {
-    REWIND_RESTORE_TOTAL
-        .with_label_values(&[domain.as_str(), rewind_result_label(success)])
-        .inc();
-}
-/// Record the metrics common to every finalize: FS-domain capture + finalize
-/// counter (both by `outcome`) + FS capture duration. Shared by the RPC finalize
-/// and the non-`Completed` cross-over so the two paths can't drift.
-pub(crate) fn record_fs_finalize(outcome: TurnHookOutcome, fs_capture_seconds: f64) {
-    observe_rewind_capture_duration(RewindDomain::Fs, fs_capture_seconds);
-    record_rewind_capture(RewindDomain::Fs, outcome);
-    REWIND_CHECKPOINT_FINALIZE_TOTAL
-        .with_label_values(&[rewind_outcome_label(outcome)])
-        .inc();
-}
-/// Record the correctness canary: a non-`Completed` `after_turn` boundary that
-/// produced a finalize.
-pub(crate) fn record_non_completed_finalize_canary(outcome: TurnHookOutcome) {
-    REWIND_NON_COMPLETED_FINALIZE_TOTAL
-        .with_label_values(&[rewind_outcome_label(outcome)])
-        .inc();
-}
 /// Zero-init this module's metric families. See [`crate::init_metrics`].
 pub(crate) fn init_metrics() {
     WORKSPACE_TERMINAL_BACKEND_ORPHANED_TOTAL
         .with_label_values(&["swap"])
         .inc_by(0);
-    for domain in [RewindDomain::Fs, RewindDomain::Hunk, RewindDomain::Git] {
-        for outcome in ["completed", "cancelled", "error", "other"] {
-            REWIND_CHECKPOINT_CAPTURE_TOTAL
-                .with_label_values(&[domain.as_str(), outcome])
-                .inc_by(0);
-        }
-        for result in ["success", "failure"] {
-            REWIND_RESTORE_TOTAL
-                .with_label_values(&[domain.as_str(), result])
-                .inc_by(0);
-        }
-        let _ = REWIND_CHECKPOINT_DURATION.with_label_values(&[domain.as_str()]);
-    }
-    for outcome in ["completed", "cancelled", "error", "other"] {
-        REWIND_CHECKPOINT_FINALIZE_TOTAL
-            .with_label_values(&[outcome])
-            .inc_by(0);
-        REWIND_NON_COMPLETED_FINALIZE_TOTAL
-            .with_label_values(&[outcome])
-            .inc_by(0);
-    }
 }
 /// What [`WorkspaceHandle::resolve_and_swap_session_toolset`] actually did —
 /// so no caller can mistake a deliberate skip for an installed swap (the
@@ -218,16 +75,11 @@ impl WorkspaceHandle {
     /// # Panics
     /// Requires a Tokio runtime to be entered (for broadcast channel).
     pub fn new(config: WorkspaceConfig) -> WorkspaceResult<Self> {
-        Self::build(
-            config,
-            ephemeral_workspace_home(),
-            rewind_all_outcomes_from_env(),
-        )
+        Self::build(config, ephemeral_workspace_home())
     }
     pub(crate) fn build(
         config: WorkspaceConfig,
         workspace_home: std::path::PathBuf,
-        workspace_rewind_all_outcomes: bool,
     ) -> WorkspaceResult<Self> {
         let sessions = std::collections::HashMap::new();
         let local_registry = tool_runtime::LocalRegistry::new();
@@ -241,7 +93,7 @@ impl WorkspaceHandle {
             use hooks::discovery::{HookSource, load_hooks_from_sources};
             fn to_hook_source(s: &HookSourceConfig) -> HookSource<'_> {
                 match s {
-                    HookSourceConfig::SettingsFile(p) => HookSource::SettingsFile(p.as_path()),
+                    HookSourceConfig::HookFile(p) => HookSource::HookFile(p.as_path()),
                     HookSourceConfig::Directory(p) => HookSource::Directory(p.as_path()),
                 }
             }
@@ -323,7 +175,6 @@ impl WorkspaceHandle {
             codebase_indexes: Arc::new(parking_lot::Mutex::new(
                 crate::file_system::CodebaseIndexManager::new(),
             )),
-            workspace_rewind_all_outcomes,
             workspace_home,
             #[cfg(test)]
             post_resolve_test_hook: parking_lot::Mutex::new(None),
@@ -743,12 +594,9 @@ impl WorkspaceHandle {
         session_id: &str,
         payload: &tool_protocol::turn_hook::BeforeTurnPayload,
     ) {
-        self.sync_session_yolo_mode(session_id, payload.yolo_mode);
-        self.on_turn_boundary(
-            session_id,
-            crate::session::checkpoint::TurnBoundary::turn_start(payload.turn_number),
-        )
-        .await;
+        self.shared
+            .activity_tracker
+            .turn_started(session_id, payload.turn_number);
         tracing::debug!(
             session = %session_id,
             turn = payload.turn_number,
@@ -756,9 +604,7 @@ impl WorkspaceHandle {
             "workspace: before_turn processed"
         );
     }
-    /// Fire-and-forget `after_turn` hook path (legacy shells / local mode):
-    /// turn-end work with detached enqueue handles, no ack. New shells use
-    /// the request/response path ([`Self::compute_turn_injections`]) instead.
+    /// Fire-and-forget `after_turn` hook path for in-process clients.
     pub async fn on_after_turn(
         &self,
         session_id: &str,
@@ -771,16 +617,11 @@ impl WorkspaceHandle {
         session_id: &str,
         payload: &tool_protocol::turn_hook::AfterTurnPayload,
     ) {
-        self.on_turn_boundary(
+        self.shared.activity_tracker.turn_completed(
             session_id,
-            crate::session::checkpoint::TurnBoundary::turn_end(
-                payload.turn_number,
-                payload.duration_ms,
-                payload.outcome,
-                payload.written_repo_paths.clone(),
-            ),
-        )
-        .await;
+            payload.turn_number,
+            payload.duration_ms,
+        );
         tracing::debug!(
             session = %session_id,
             turn = payload.turn_number,
@@ -793,7 +634,7 @@ impl WorkspaceHandle {
     /// Both phases run the same turn-boundary work as their fire-and-forget
     /// hook counterparts (the server-side sampler signals turns ONLY through
     /// this request channel): `Before` drives [`Self::on_before_turn`]
-    /// (including the YOLO-state sync) and answers with a no-op reply
+    /// and answers with a no-op reply
     /// (injections are not computed yet); `After` runs the turn-end work.
     ///
     /// Each phase must be signalled through exactly ONE channel per client —
@@ -814,23 +655,6 @@ impl WorkspaceHandle {
                 HookReply::default()
             }
             _ => HookReply::default(),
-        }
-    }
-    /// Sync a before-turn hook's YOLO state into the session. No-op for
-    /// unknown sessions; the shell owns durable Timeline observations.
-    fn sync_session_yolo_mode(&self, session_id: &str, yolo_mode: bool) {
-        let Some(session) = self.session(session_id) else {
-            return;
-        };
-        let was = session.yolo_mode();
-        if was != yolo_mode {
-            tracing::info!(
-                session = %session_id,
-                from = was,
-                to = yolo_mode,
-                "workspace: yolo_mode changed via before-turn hook"
-            );
-            session.set_yolo_mode(yolo_mode);
         }
     }
     /// Bookkeeping for a cancelled in-flight tool call: marks it as
@@ -1490,17 +1314,6 @@ impl WorkspaceHandle {
                             }
                         }
                     }
-                    Ok(workspace_types::WorkspaceEvent::GitHeadChanged { .. }) => {
-                        let idx_opt = shared.codebase_indexes.lock().get(&index_root);
-                        if let Some(idx) = idx_opt {
-                            crate::fs_notify::refresh_codebase_graph_after_head_change(
-                                &idx,
-                                &index_root,
-                                &shared.events,
-                            )
-                            .await;
-                        }
-                    }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(lagged = n, "codebase index event forwarder lagged");
@@ -1769,10 +1582,6 @@ fn after_turn_watchdog() -> std::time::Duration {
 fn ephemeral_workspace_home() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("grow-workspace-ephemeral-{}", std::process::id()))
 }
-/// Resolve `workspace_rewind_all_outcomes` from `GROW_WORKSPACE_REWIND_ALL_OUTCOMES` (default off).
-fn rewind_all_outcomes_from_env() -> bool {
-    config::env_bool("GROW_WORKSPACE_REWIND_ALL_OUTCOMES").unwrap_or(false)
-}
 impl WorkspaceHandle {
     /// Minimal local handle. Requires a Tokio runtime.
     ///
@@ -1783,10 +1592,7 @@ impl WorkspaceHandle {
         use crate::session::tool_config::WorkspaceSessionContextFactory;
         let config = WorkspaceConfig {
             root_cwd: cwd,
-            default_tool_config: tools::registry::types::ToolServerConfig {
-                tools: vec![],
-                behavior_preset: None,
-            },
+            default_tool_config: tools::registry::types::ToolServerConfig { tools: vec![] },
             respect_gitignore: false,
             memory_config: None,
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
@@ -1798,11 +1604,7 @@ impl WorkspaceHandle {
             status_config: Default::default(),
             project_lsp_trusted,
         };
-        Self::build(
-            config,
-            ephemeral_workspace_home(),
-            rewind_all_outcomes_from_env(),
-        )
+        Self::build(config, ephemeral_workspace_home())
     }
 }
 #[cfg(any(test, feature = "test-support"))]
@@ -1862,16 +1664,9 @@ pub(crate) mod tests {
     use workspace_types::WorkspaceEvent;
     /// Create a test workspace handle with a "main" session pre-created.
     pub(crate) fn make_handle() -> WorkspaceHandle {
-        make_handle_with_rewind_all_outcomes(false)
+        make_handle_inner(Default::default())
     }
-    /// [`make_handle`] with an explicit `workspace_rewind_all_outcomes` value.
-    pub(crate) fn make_handle_with_rewind_all_outcomes(enabled: bool) -> WorkspaceHandle {
-        make_handle_inner(enabled, Default::default())
-    }
-    fn make_handle_inner(
-        rewind_all_outcomes: bool,
-        status_config: crate::StatusConfig,
-    ) -> WorkspaceHandle {
+    fn make_handle_inner(status_config: crate::StatusConfig) -> WorkspaceHandle {
         let factory = Arc::new(TestSessionContextFactory::new());
         let cwd = factory.temp.path().to_path_buf();
         let config = WorkspaceConfig {
@@ -1888,33 +1683,12 @@ pub(crate) mod tests {
             status_config,
             project_lsp_trusted: true,
         };
-        let handle =
-            WorkspaceHandle::build(config, ephemeral_workspace_home(), rewind_all_outcomes)
-                .expect("handle construction should succeed");
+        let handle = WorkspaceHandle::build(config, ephemeral_workspace_home())
+            .expect("handle construction should succeed");
         handle
             .create_session("main")
             .expect("create main session should succeed");
         handle
-    }
-    #[test]
-    fn rewind_outcome_label_maps_each_variant() {
-        assert_eq!(
-            rewind_outcome_label(TurnHookOutcome::Completed),
-            "completed"
-        );
-        assert_eq!(
-            rewind_outcome_label(TurnHookOutcome::Cancelled),
-            "cancelled"
-        );
-        assert_eq!(rewind_outcome_label(TurnHookOutcome::Error), "error");
-    }
-    #[test]
-    fn rewind_domain_and_result_labels_are_stable() {
-        assert_eq!(RewindDomain::Fs.as_str(), "fs");
-        assert_eq!(RewindDomain::Hunk.as_str(), "hunk");
-        assert_eq!(RewindDomain::Git.as_str(), "git");
-        assert_eq!(rewind_result_label(true), "success");
-        assert_eq!(rewind_result_label(false), "failure");
     }
     /// Client names advertised by a session's current toolset.
     fn session_tool_names(session: &Arc<crate::session::WorkspaceSession>) -> Vec<String> {
@@ -2123,7 +1897,6 @@ pub(crate) mod tests {
         renamed.name_override = Some(name_override.to_owned());
         ToolServerConfig {
             tools: vec![renamed],
-            behavior_preset: None,
         }
     }
     /// Background-capable toolset (execute + task-output + kill), the shape
@@ -2136,7 +1909,6 @@ pub(crate) mod tests {
                 tc("Grow:get_task_output", Some(ToolKind::BackgroundTaskAction)),
                 tc("Grow:kill_task", Some(ToolKind::KillTaskAction)),
             ],
-            behavior_preset: None,
         }
     }
     /// A minimal bash-kind [`TerminalRunRequest`] for `command`, writing
@@ -2420,7 +2192,7 @@ pub(crate) mod tests {
             status_config: Default::default(),
             project_lsp_trusted: true,
         };
-        WorkspaceHandle::build(config, ephemeral_workspace_home(), false)
+        WorkspaceHandle::build(config, ephemeral_workspace_home())
             .expect("handle construction should succeed")
     }
     /// The persistent shell's state (a model-issued `cd`) survives a
@@ -2708,54 +2480,6 @@ pub(crate) mod tests {
         );
         session_a.terminal_backend().kill_task(&bg.task_id).await;
     }
-    /// The typed helpers feed the registry and the targeted counters advance.
-    /// Counters are monotonic, so `after > before` is robust despite the
-    /// process-global registry and parallel tests (capture, restore, canary).
-    #[test]
-    fn rewind_metric_helpers_record_observable_effects() {
-        let capture_labels = [
-            RewindDomain::Git.as_str(),
-            rewind_outcome_label(TurnHookOutcome::Cancelled),
-        ];
-        let restore_labels = [RewindDomain::Fs.as_str(), rewind_result_label(true)];
-        let canary_label = [rewind_outcome_label(TurnHookOutcome::Error)];
-        let capture_before = REWIND_CHECKPOINT_CAPTURE_TOTAL
-            .with_label_values(&capture_labels)
-            .get();
-        let restore_before = REWIND_RESTORE_TOTAL
-            .with_label_values(&restore_labels)
-            .get();
-        let canary_before = REWIND_NON_COMPLETED_FINALIZE_TOTAL
-            .with_label_values(&canary_label)
-            .get();
-        record_rewind_capture(RewindDomain::Git, TurnHookOutcome::Cancelled);
-        observe_rewind_capture_duration(RewindDomain::Hunk, 0.002);
-        record_rewind_restore(RewindDomain::Fs, true);
-        record_rewind_restore(RewindDomain::Git, false);
-        record_fs_finalize(TurnHookOutcome::Completed, 0.001);
-        record_non_completed_finalize_canary(TurnHookOutcome::Error);
-        assert!(
-            REWIND_CHECKPOINT_CAPTURE_TOTAL
-                .with_label_values(&capture_labels)
-                .get()
-                > capture_before,
-            "capture counter must advance"
-        );
-        assert!(
-            REWIND_RESTORE_TOTAL
-                .with_label_values(&restore_labels)
-                .get()
-                > restore_before,
-            "restore counter must advance"
-        );
-        assert!(
-            REWIND_NON_COMPLETED_FINALIZE_TOTAL
-                .with_label_values(&canary_label)
-                .get()
-                > canary_before,
-            "canary counter must advance"
-        );
-    }
     /// The client ext-notification sink is invoked with the emitted method +
     /// params, and is no-op until installed.
     #[tokio::test]
@@ -2827,57 +2551,6 @@ pub(crate) mod tests {
             "expected alpha_widget in matches, got: {last}"
         );
     }
-    /// Both before-turn hook delivery styles sync YOLO state into the session.
-    #[tokio::test]
-    async fn before_turn_hooks_sync_session_yolo_mode() {
-        use tool_protocol::turn_hook::{BeforeTurnPayload, TurnHookRequest};
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session");
-        assert!(!session.yolo_mode(), "fail-closed default");
-        handle
-            .on_before_turn(
-                "main",
-                &BeforeTurnPayload {
-                    turn_number: 1,
-                    model_id: "grow-4".to_owned(),
-                    yolo_mode: true,
-                    ..Default::default()
-                },
-            )
-            .await;
-        assert!(session.yolo_mode(), "on_before_turn must sync yolo on");
-        let reply = handle
-            .compute_turn_injections(
-                "main",
-                &TurnHookRequest::Before(BeforeTurnPayload {
-                    turn_number: 2,
-                    model_id: "grow-4".to_owned(),
-                    yolo_mode: false,
-                    ..Default::default()
-                }),
-            )
-            .await;
-        assert_eq!(
-            reply,
-            tool_protocol::turn_hook::HookReply::default(),
-            "reply stays a behavior-neutral no-op"
-        );
-        assert!(
-            !session.yolo_mode(),
-            "compute_turn_injections must sync yolo off"
-        );
-        handle
-            .compute_turn_injections(
-                "never-bound",
-                &TurnHookRequest::Before(BeforeTurnPayload {
-                    turn_number: 1,
-                    model_id: "grow-4".to_owned(),
-                    yolo_mode: true,
-                    ..Default::default()
-                }),
-            )
-            .await;
-    }
     pub(crate) fn fork_cfg_with(
         agent_id: &str,
         capability: CapabilityMode,
@@ -2931,7 +2604,6 @@ pub(crate) mod tests {
         assert_eq!(child_ids, parent_ids);
         let new_parent_baseline = ToolServerConfig {
             tools: vec![tc("Grow:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
         };
         let factory = handle.shared.session_factory.clone();
         let mcp_snapshot = handle.shared.mcp_tools_snapshot.load_full();
@@ -2969,7 +2641,6 @@ pub(crate) mod tests {
                 tc("Grow:read_file", Some(ToolKind::Read)),
                 tc("Grow:list_dir", Some(ToolKind::ListDir)),
             ],
-            behavior_preset: None,
         };
         let child = handle
             .fork_session(fork_cfg_with(
@@ -2994,7 +2665,6 @@ pub(crate) mod tests {
         let handle = make_handle();
         let marker_config = ToolServerConfig {
             tools: vec![tc("Grow:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
         };
         let main = handle.session("main").expect("main present");
         let factory = handle.shared.session_factory.clone();
@@ -3036,7 +2706,6 @@ pub(crate) mod tests {
         let handle = make_handle();
         let custom = ToolServerConfig {
             tools: vec![tc("Grow:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
         };
         handle
             .fork_session(fork_cfg_with(
@@ -3208,7 +2877,6 @@ pub(crate) mod tests {
         let handle = make_handle();
         let bad = ToolServerConfig {
             tools: vec![tc("DoesNotExist:nope", Some(ToolKind::Read))],
-            behavior_preset: None,
         };
         let cfg = fork_cfg_with("bogus", CapabilityMode::ReadOnly, Some(bad), Some("main"));
         let err = handle
@@ -3299,10 +2967,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn fork_session_empty_baseline_tools_succeeds() {
         let handle = make_handle();
-        let empty = ToolServerConfig {
-            tools: vec![],
-            behavior_preset: None,
-        };
+        let empty = ToolServerConfig { tools: vec![] };
         let child = handle
             .fork_session(fork_cfg_with(
                 "empty",
@@ -3379,13 +3044,13 @@ pub(crate) mod tests {
         );
     }
     #[tokio::test]
-    async fn hook_registry_loads_from_settings_file() {
+    async fn hook_registry_loads_from_hook_file() {
         let factory = Arc::new(TestSessionContextFactory::new());
         let cwd = factory.temp.path().to_path_buf();
         let settings_path = cwd.join("claude_settings.json");
         std::fs::write(
             &settings_path,
-            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo ok"}]}]}}"#,
+            r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"echo ok"}]}]}}"#,
         )
         .expect("write settings");
         let config = WorkspaceConfig {
@@ -3395,7 +3060,7 @@ pub(crate) mod tests {
             memory_config: None,
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             session_factory: factory,
-            hook_global_sources: vec![HookSourceConfig::SettingsFile(settings_path)],
+            hook_global_sources: vec![HookSourceConfig::HookFile(settings_path)],
             hook_project_sources: vec![],
             skills_config: Default::default(),
             plugin_discovery_config: Default::default(),
@@ -3404,7 +3069,7 @@ pub(crate) mod tests {
         };
         let handle = WorkspaceHandle::new(config).expect("ok");
         let registry = handle.hook_registry();
-        assert!(!registry.is_empty(), "settings file should yield hooks");
+        assert!(!registry.is_empty(), "hook file should yield hooks");
         assert!(handle.hook_load_errors().is_empty());
     }
     #[tokio::test]
@@ -3415,7 +3080,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&hooks_dir).expect("mkdir");
         std::fs::write(
             hooks_dir.join("my_hook.json"),
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
         )
         .expect("write hook file");
         let config = WorkspaceConfig {
@@ -3477,7 +3142,7 @@ pub(crate) mod tests {
             memory_config: None,
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             session_factory: factory,
-            hook_global_sources: vec![HookSourceConfig::SettingsFile(bad_path)],
+            hook_global_sources: vec![HookSourceConfig::HookFile(bad_path)],
             hook_project_sources: vec![],
             skills_config: Default::default(),
             plugin_discovery_config: Default::default(),
@@ -3497,13 +3162,13 @@ pub(crate) mod tests {
         let global_settings = cwd.join("global.json");
         std::fs::write(
                 &global_settings,
-                r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo global"}]}]}}"#,
+                r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"echo global"}]}]}}"#,
             )
             .expect("write");
         let project_settings = cwd.join("project.json");
         std::fs::write(
             &project_settings,
-            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo project"}]}]}}"#,
+            r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"echo project"}]}]}}"#,
         )
         .expect("write");
         let config = WorkspaceConfig {
@@ -3513,8 +3178,8 @@ pub(crate) mod tests {
             memory_config: None,
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             session_factory: factory,
-            hook_global_sources: vec![HookSourceConfig::SettingsFile(global_settings)],
-            hook_project_sources: vec![HookSourceConfig::SettingsFile(project_settings)],
+            hook_global_sources: vec![HookSourceConfig::HookFile(global_settings)],
+            hook_project_sources: vec![HookSourceConfig::HookFile(project_settings)],
             skills_config: Default::default(),
             plugin_discovery_config: Default::default(),
             status_config: Default::default(),
@@ -3536,7 +3201,7 @@ pub(crate) mod tests {
             memory_config: None,
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             session_factory: factory,
-            hook_global_sources: vec![HookSourceConfig::SettingsFile(missing)],
+            hook_global_sources: vec![HookSourceConfig::HookFile(missing)],
             hook_project_sources: vec![],
             skills_config: Default::default(),
             plugin_discovery_config: Default::default(),
@@ -3881,7 +3546,10 @@ pub(crate) mod tests {
                 "main",
                 &TurnHookRequest::Before(BeforeTurnPayload {
                     turn_number: 9,
-                    ..BeforeTurnPayload::default()
+                    model_id: "model".into(),
+                    conversation_message_count: 0,
+                    session_relationship: "primary".into(),
+                    schema_version: tool_protocol::turn_hook::DEFAULT_SCHEMA_VERSION.into(),
                 }),
             )
             .await;

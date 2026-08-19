@@ -12,7 +12,7 @@
 //! (`handle_recap`).
 
 use crate::sampling::ConversationItem;
-use crate::session::helpers::chat::floor_char_boundary;
+use crate::session::helpers::text::floor_char_boundary;
 use chat_state::{compaction_utils, estimate_conversation_tokens, estimate_item_tokens};
 
 /// Hard cap on the recap text length (characters). Generous headroom: the recap

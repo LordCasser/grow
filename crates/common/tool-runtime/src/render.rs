@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn extract_mcp_image_with_camel_case() {
-        let v = json!({"type": "image", "mimeType": "image/png", "data": "abc"});
+        let v = json!({"type": "image", "mime_type": "image/png", "data": "abc"});
         let blocks = extract_content_blocks(&v);
         assert_eq!(
             blocks,
@@ -595,7 +595,7 @@ mod tests {
         let v = json!({
             "content": [
                 {"type": "resource", "uri": "ui://tldraw/canvas",
-                 "mimeType": "text/html", "text": "<html>…</html>"},
+                 "mime_type": "text/html", "text": "<html>…</html>"},
             ],
             "structuredContent": {"drawing_id": "abc123", "title": "sketch"},
             "isError": false,

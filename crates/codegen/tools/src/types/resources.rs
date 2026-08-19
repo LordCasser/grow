@@ -502,41 +502,6 @@ pub fn display_cwd_or_cwd(cwd: &std::path::Path, display_cwd: Option<&std::path:
 /// through the outer `ToolBridge` (which would deadlock).
 #[derive(Clone)]
 pub struct InnerDispatch(pub std::sync::Arc<dyn tool_runtime::ToolDispatch>);
-#[derive(Debug, Clone)]
-pub struct ManagedGatewayToolSource {
-    pub connector_id: String,
-    pub connector_name: String,
-    pub tool_id: String,
-    pub tool_name: String,
-    pub call_id: String,
-}
-#[derive(Debug, Clone, Default)]
-pub struct ManagedGatewayToolCatalog(pub HashMap<String, ManagedGatewayToolSource>);
-impl ManagedGatewayToolCatalog {
-    pub fn get(&self, name: &str) -> Option<&ManagedGatewayToolSource> {
-        self.0.get(name)
-    }
-}
-#[derive(Debug, Clone)]
-pub struct ManagedGatewayToolCallResponse {
-    pub result: serde_json::Value,
-}
-#[async_trait::async_trait]
-pub trait ManagedGatewayToolCaller: Send + Sync {
-    async fn call_tool(
-        &self,
-        call_id: &str,
-        arguments: serde_json::Value,
-        caller: &str,
-    ) -> Result<ManagedGatewayToolCallResponse, tool_runtime::ToolError>;
-}
-#[derive(Clone)]
-pub struct ManagedGatewayToolClient(pub Arc<dyn ManagedGatewayToolCaller>);
-impl std::fmt::Debug for ManagedGatewayToolClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ManagedGatewayToolClient").finish()
-    }
-}
 /// Whether streaming output is enabled for this invocation.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamEnabled(pub bool);
@@ -609,19 +574,6 @@ impl Default for RespectGitignore {
 /// Default `false`. Hosts may enable this via remote config or local settings.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PathNotFoundHints(pub bool);
-/// Whether scheduled task fires execute in background loop subagents.
-///
-/// `false` forces every fire onto the legacy main-conversation path.
-/// Configured via `[scheduler] background_loops` in `config.toml`, the
-/// `GROW_SCHEDULER_BACKGROUND_LOOPS` env var, or the
-/// `scheduler_background_loops` remote setting.
-#[derive(Debug, Clone, Copy)]
-pub struct SchedulerBackgroundLoops(pub bool);
-impl Default for SchedulerBackgroundLoops {
-    fn default() -> Self {
-        Self(true)
-    }
-}
 /// Map of canonical tool names → model-facing tool names.
 #[derive(Debug, Clone, Default)]
 pub struct ToolNameMapping(pub HashMap<String, String>);

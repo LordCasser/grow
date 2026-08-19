@@ -5,13 +5,12 @@ use std::path::PathBuf;
 use workspace::file_system::{FileReference, render_embedded_resource, render_file_reference};
 /// Parsed prompt with context and query kept separate.
 ///
-/// Some templates put `<user_query>` last (context first); Grow puts it first.
-/// Keeping them separate lets the caller truncate context without
-/// searching for the query boundary in a flat string.
+/// Keeping them separate lets the caller truncate context without searching
+/// for the query boundary in a flat string.
 #[derive(Debug, Clone)]
 pub struct ParsedPrompt {
     /// Context blocks: `<attached_files>` payloads and resource-link sections.
-    /// Grow mode may include editor open/focus metadata; the compat mode does not.
+    /// May include editor open/focus metadata.
     /// Empty string when there is no context.
     pub context: String,
     /// The user's query, already wrapped in `<user_query>` tags
@@ -22,31 +21,13 @@ pub struct ParsedPrompt {
     pub skill_information: String,
     /// Extracted images from the prompt.
     pub images: Vec<ImageContent>,
-    /// Whether the prompt was parsed in query-last mode.
-    pub is_cursor: bool,
 }
 impl ParsedPrompt {
-    /// Assemble into the final message string with correct ordering.
+    /// Assemble into the canonical query-first message shape.
     pub fn assemble(&self) -> String {
-        Self::assemble_parts_with_skills(
-            &self.context,
-            &self.query,
-            &self.skill_information,
-            self.is_cursor,
-        )
-    }
-    /// Assemble context and query into the final message string.
-    ///
-    /// Legacy entry point — delegates to [`assemble_parts_with_skills`] with
-    /// no skill information.
-    pub fn assemble_parts(context: &str, query: &str, is_cursor: bool) -> String {
-        Self::assemble_parts_with_skills(context, query, "", is_cursor)
+        Self::assemble_parts_with_skills(&self.context, &self.query, &self.skill_information)
     }
     /// Assemble context, query, and skill information into the final message string.
-    ///
-    /// Layout:
-    /// - **Grow mode:** `<user_query>` + `<skill_information>` + context
-    /// - **Query-last mode:** context + `<user_query>` + `<skill_information>`
     ///
     /// The `<skill_information>` block always follows `<user_query>` immediately
     /// so the model sees the user's request and skill instructions together.
@@ -54,7 +35,6 @@ impl ParsedPrompt {
         context: &str,
         query: &str,
         skill_information: &str,
-        is_cursor: bool,
     ) -> String {
         let query_block = if skill_information.is_empty() {
             query.to_string()
@@ -64,47 +44,21 @@ impl ParsedPrompt {
         if context.is_empty() {
             return query_block;
         }
-        let _ = is_cursor;
         format!("{query_block}\n\n{context}")
     }
 }
 /// Parses ACP prompt content blocks into a [`ParsedPrompt`] with context
 /// and query kept separate.
 ///
-/// When `is_cursor` is true, produces query-last format output:
-/// - `<attached_files>` (bare), resource links, then `<user_query>` last
-/// - File references use `<code_selection>` tags
-///
-/// When `is_cursor` is false, produces original Grow-format output:
+/// Produces the canonical Grow-format output:
 /// - `<user_query>` first, then `<system-reminder>` wrapped `<attached_files>` and resource links
 /// - File references use `<file_contents>` tags
-pub async fn parse_prompt(
-    prompt: &[acp::ContentBlock],
-    working_directory: PathBuf,
-    _session_info: &crate::session::info::Info,
-    verbatim: bool,
-    is_cursor: bool,
-) -> Result<ParsedPrompt, acp::Error> {
-    parse_prompt_with_skills(
-        prompt,
-        working_directory,
-        _session_info,
-        verbatim,
-        is_cursor,
-        String::new(),
-    )
-    .await
-}
-/// Parse prompt with optional pre-built skill information block.
-///
-/// This is the full-featured entry point. `parse_prompt` delegates here with
-/// an empty `skill_information` string for backward compatibility.
+/// Parse a prompt with its pre-built skill information block.
 pub async fn parse_prompt_with_skills(
     prompt: &[acp::ContentBlock],
     working_directory: PathBuf,
     _session_info: &crate::session::info::Info,
     verbatim: bool,
-    is_cursor: bool,
     skill_information: String,
 ) -> Result<ParsedPrompt, acp::Error> {
     let mut message_parts: Vec<String> = Vec::new();
@@ -137,7 +91,7 @@ pub async fn parse_prompt_with_skills(
             continue;
         };
         file_ref.path = working_directory.join(&file_ref.path);
-        let rendered_file = render_file_reference(file_ref, is_cursor).await;
+        let rendered_file = render_file_reference(file_ref, false).await;
         let success = rendered_file.is_some();
         tracing::info_span!("at_mention", mention_type = "file", success).in_scope(|| {});
         if let Some(rendered_file) = rendered_file {
@@ -146,7 +100,7 @@ pub async fn parse_prompt_with_skills(
     }
     let mut embedded_contents = Vec::new();
     for resource in &embedded_resources {
-        if let Some(rendered) = render_embedded_resource(resource, is_cursor).await {
+        if let Some(rendered) = render_embedded_resource(resource, false).await {
             embedded_contents.push(rendered);
         }
     }
@@ -156,14 +110,12 @@ pub async fn parse_prompt_with_skills(
         file_ref_contents,
         &resource_links,
         verbatim,
-        is_cursor,
     );
     Ok(ParsedPrompt {
         context: parsed.0,
         query: parsed.1,
         skill_information,
         images: image_parts,
-        is_cursor,
     })
 }
 /// Returns `(context, query)` — the two halves of the prompt kept separate
@@ -174,7 +126,6 @@ fn render_message(
     file_ref_contents: Vec<String>,
     resource_links: &[acp::ResourceLink],
     verbatim: bool,
-    is_cursor: bool,
 ) -> (String, String) {
     let all_attached_contents: Vec<String> = embedded_contents
         .into_iter()
@@ -182,7 +133,6 @@ fn render_message(
         .collect();
     let wrap = |msg: String| -> String { if verbatim { msg } else { user_query(msg) } };
     let query = wrap(message);
-    let _ = is_cursor;
     let mut context = String::new();
     if !all_attached_contents.is_empty() {
         context.push_str(&format!(
@@ -352,16 +302,12 @@ fn render_open_files(paths: &[String]) -> String {
 mod tests {
     use super::*;
     /// Assemble a `render_message` result into a flat string for test assertions.
-    fn assemble(parts: (String, String), is_cursor: bool) -> String {
+    fn assemble(parts: (String, String)) -> String {
         let (context, query) = parts;
         if context.is_empty() {
             return query;
         }
-        if is_cursor {
-            format!("{context}\n\n{query}")
-        } else {
-            format!("{query}\n\n{context}")
-        }
+        format!("{query}\n\n{context}")
     }
     /// Shorthand: render + assemble for grow mode.
     fn render_grow(
@@ -371,10 +317,13 @@ mod tests {
         links: &[acp::ResourceLink],
         verbatim: bool,
     ) -> String {
-        assemble(
-            render_message(message.into(), embedded, file_refs, links, verbatim, false),
-            false,
-        )
+        assemble(render_message(
+            message.into(),
+            embedded,
+            file_refs,
+            links,
+            verbatim,
+        ))
     }
     #[test]
     fn test_collect_single_reference() {

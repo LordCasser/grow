@@ -18,21 +18,15 @@ Grow discovers skills from these directories, in priority order:
 
 | Location | Scope | Priority | Notes |
 |----------|-------|----------|-------|
-| `./.grow/skills/`, `./.grow/commands/` | Local (CWD) | Highest | Current directory skills / legacy command markdown |
+| `./.grow/skills/`, `./.grow/commands/` | Local (CWD) | Highest | Current directory skills and command Markdown |
 | `<repo_root>/.grow/skills/`, `…/commands/` | Repo | Medium | Shared across the repo |
 | `~/.grow/skills/`, `~/.grow/commands/` | User | Lowest | Personal skills for all projects |
-| `~/.claude/skills/`, `~/.claude/commands/` | User | Lowest | Claude Code compatibility (configurable) |
-| `./.claude/skills/`, `./.claude/commands/` | Local / Repo | High | Project Claude skills and legacy custom slash commands |
-| `~/.cursor/skills/` | User | Lowest | Cursor compatibility (configurable) |
-| `./.cursor/skills/` | Local / Repo | High | Project Cursor skills (when cursor compat skills are enabled) |
 
-Grow deduplicates skills by name -- a higher-priority location overrides a lower one. Grow also scans `.agents/skills/` (and `commands/`) at each tier (alongside `.grow/`) and walks every directory between your working directory and the repo root.
+Grow deduplicates skills by name -- a higher-priority location overrides a lower one. Project discovery walks every directory between your working directory and the repo root.
 
-Flat `*.md` files under a `commands/` directory become user-invocable slash commands (filename stem = command name), matching Claude Code's legacy custom-command layout.
+Flat `*.md` files under a `.grow/commands/` directory become user-invocable slash commands; the filename stem is the command name.
 
-Skill and command discovery does **not** use `.gitignore`. Paths under known skill roots (`.grow/`, `.agents/`, `.claude/`, `.cursor/`) always load when present on disk — teams often ignore `.claude/**` as local-only config while still expecting `/frontend`-style project commands to work. To hide a skill, use `[skills] ignore` in config (not repo ignore rules).
-
-Grow scans the Claude and Cursor skill directories by default. To stop scanning a vendor, set its `skills` cell to `false` under `[compat.cursor]` or `[compat.claude]` in `~/.grow/config.toml`, or set the `GROW_CURSOR_SKILLS_ENABLED` or `GROW_CLAUDE_SKILLS_ENABLED` environment variable to `false`. See [Configuration](05-configuration.md#harness-compatibility) for details. Grow always filters out known vendor-shipped default skills (such as Cursor's `shell`, `canvas`, and `statusline`), regardless of these settings.
+Skill and command discovery does **not** use `.gitignore`. To hide a skill, use `[skills] ignore` in config.
 
 ### Additional Skill Directories
 

@@ -6,7 +6,7 @@ use super::types::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
     BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed, LspServerReady,
     LspServerRetrying, LspServerStarting, MonitorEvent, ScheduledTaskCreated, ScheduledTaskFired,
-    ScheduledTaskRemoved, SubagentCompleted, ToolNotification, UserQuestionAsked,
+    ScheduledTaskRemoved, ToolNotification, UserQuestionAsked,
 };
 use crate::types::TaskSnapshot;
 
@@ -134,7 +134,6 @@ fn is_critical_notification(notification: &ToolNotification) -> bool {
             | ToolNotification::BashExecutionTimeout(_)
             | ToolNotification::BashExecutionFailed(_)
             | ToolNotification::TaskCompleted(_)
-            | ToolNotification::SubagentCompleted(_)
             | ToolNotification::UserQuestionAsked(_)
             | ToolNotification::LspServerCrashed(_)
             | ToolNotification::LspServerFailed(_)
@@ -355,7 +354,6 @@ impl ToolNotificationHandle {
         send_failed, BashExecutionFailed, BashExecutionFailed;
         send_file_written, FileWritten, FileWritten;
         send_task_complete, TaskSnapshot, TaskCompleted;
-        send_subagent_completed, SubagentCompleted, SubagentCompleted;
         send_user_question_asked, UserQuestionAsked, UserQuestionAsked;
         send_lsp_starting, LspServerStarting, LspServerStarting;
         send_lsp_ready, LspServerReady, LspServerReady;

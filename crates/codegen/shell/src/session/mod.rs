@@ -2,16 +2,18 @@ pub mod acp_types;
 pub mod announcement_state;
 pub mod commands;
 pub mod compaction_config;
+pub(crate) mod context_fetch;
 pub mod control;
 pub mod goal_board;
 pub mod handle;
+pub mod listing;
 pub mod memory_state;
-pub mod merge;
 pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;
+#[path = "acp_session_impl/sideband.rs"]
+pub(crate) mod sideband;
 pub(crate) mod subagent_capability;
-pub mod two_pass;
 pub use self::acp_session::*;
 pub use self::acp_types::*;
 pub use self::commands::*;
@@ -22,20 +24,6 @@ pub use self::persistence::{
 };
 pub use self::result::{Empty, ExtMethodResult};
 pub use fsnotify::{FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind};
-/// `false` twin: this template is not compiled into this build, so no
-/// template matches. Keeps ungated call sites compiling in both
-/// configurations.
-pub(crate) fn is_cursor_user_template(
-    _template: &agent::prompt::user_message::UserMessageTemplate,
-) -> bool {
-    false
-}
-/// `false` twin of [`is_cursor_system_template`]; see [`is_cursor_user_template`].
-pub(crate) fn is_cursor_system_template(
-    _template: &agent::prompt::context::TemplateOverride,
-) -> bool {
-    false
-}
 /// Pull the `ContentBlock::Image`s out of a block list — the single spelling
 /// of "only Image blocks ride structurally" (interject parse + queue-interject
 /// harvest).
@@ -107,6 +95,22 @@ pub enum TurnKind {
     Scheduled,
 }
 impl PromptOrigin {
+    pub fn turn_identity(&self, turn_kind: TurnKind) -> chat_state::TurnIdentity {
+        let (goal_id, stage_id) = match self {
+            Self::GoalContinuation { goal_id, stage_id }
+            | Self::GoalFinalization { goal_id, stage_id } => {
+                (Some(goal_id.clone()), Some(*stage_id))
+            }
+            _ => (None, None),
+        };
+        chat_state::TurnIdentity {
+            origin: self.wire_name().to_string(),
+            turn_kind: turn_kind.wire_name().to_string(),
+            goal_id,
+            stage_id,
+        }
+    }
+
     pub fn wire_name(&self) -> &'static str {
         match self {
             Self::User => "user",
@@ -235,7 +239,6 @@ pub mod acp_conversion;
 pub mod acp_mcp;
 pub(crate) mod acp_session;
 pub(crate) mod agent_rebuild;
-pub mod chat_persistence;
 pub(crate) mod event_tracker;
 pub(crate) mod event_types;
 pub(crate) mod events;
@@ -248,10 +251,10 @@ pub mod helpers;
 pub(crate) mod image_describe;
 pub(crate) mod image_normalize;
 pub mod inference_metrics;
+pub mod timeline_persistence;
 pub mod trajectory;
 pub use client_support::session::info;
-pub mod managed_mcp;
-pub(crate) mod mcp_descriptors;
+pub mod mcp_catalog;
 pub mod mcp_dispatcher;
 #[cfg(test)]
 mod mcp_dispatcher_e2e_tests;
@@ -263,7 +266,6 @@ pub mod persistence;
 pub use client_support::placeholder_images;
 pub mod behavior;
 pub(crate) mod diagnostics;
-pub mod prompt_history;
 pub mod prompt_parser;
 pub(crate) mod prompt_timing;
 pub(crate) mod replay_events;

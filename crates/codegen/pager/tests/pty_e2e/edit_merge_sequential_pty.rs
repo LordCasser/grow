@@ -48,20 +48,17 @@ fn edit_header_rows(screen: &str) -> usize {
         .count()
 }
 
-/// PTY: with `collapsed_edit_blocks` enabled, three sequential same-file
-/// edits coalesce into ONE Edit row whose header sums the diffstat (`+3/-3`);
+/// PTY: three sequential same-file edits coalesce into ONE Edit row whose
+/// header sums the diffstat (`+3/-3`);
 /// expanding it shows every hunk with `… N unchanged lines` gap markers
 /// between them. A fourth edit arriving after intervening agent text stays a
 /// separate second Edit row — counted after wheeling back above the second
 /// submit's page-flip, which pins the new prompt to the pane top and scrolls
-/// turn 1 out of view by design. (Flag off, coalescing is disabled entirely —
-/// pinned by the tracker unit test.)
+/// turn 1 out of view by design.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run with cargo test -p pager --test pty_e2e -- --ignored"]
 async fn edit_merge_sequential_pty() {
     let content = ContentController::start().await.expect("start content");
-    seed_ui_config(&content, "collapsed_edit_blocks = true");
-
     let target = content.home().join(FIXTURE);
     std::fs::write(&target, fixture_text()).expect("write fixture");
     let abs = dunce::canonicalize(&target).unwrap_or(target.clone());
@@ -100,7 +97,7 @@ async fn edit_merge_sequential_pty() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

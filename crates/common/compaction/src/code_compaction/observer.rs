@@ -1,26 +1,20 @@
-//! Observability seam for the full-replace (grow-build) pass.
+//! Observability seam for a range-summary sampling pass.
 //!
 //! The shared orchestrator reports per-attempt and terminal outcomes through
-//! this trait so each harness can emit its own diagnostics (grow-build:
-//! `CompactionAttempt` rows, `CompactionRetryDegraded` events, span records,
-//! request-artifact persistence) without the shared crate depending on a
-//! diagnostics backend. Mirrors
-//! [`IntraCompactionObserver`](crate::intra_compaction::IntraCompactionObserver)
-//! / [`InterCompactionObserver`](crate::inter_compaction::InterCompactionObserver).
+//! this trait so each harness can emit its own diagnostics and durable retry
+//! feedback without the shared crate depending on a diagnostics or persistence
+//! backend.
 //!
-//! Emission points are part of the behavior contract: the grow-build observer
-//! preserves the pre-migration `CompactionAttempt`/`CompactionRetryDegraded`
-//! semantics byte-for-byte.
+//! Emission points are part of the behavior contract.
 
 use std::time::Duration;
 
-/// Classified outcome of a single full-replace sample attempt.
+/// Classified outcome of a single range-summary sample attempt.
 ///
-/// The harness turns this into its per-attempt diagnostics row. `summary` is the
-/// raw model output (the harness bounds/captures it as needed); it is borrowed
-/// for the duration of the callback so no allocation happens on the hot path.
+/// `summary` is borrowed for the duration of the callback so harnesses can
+/// classify it or feed rejection detail into a retry without a hot-path clone.
 #[derive(Debug)]
-pub enum FullReplaceAttemptOutcome<'a> {
+pub enum SummaryAttemptOutcome<'a> {
     /// A usable, non-degenerate summary was produced; the pass will succeed.
     Success {
         /// Raw model summary text.
@@ -34,7 +28,7 @@ pub enum FullReplaceAttemptOutcome<'a> {
     /// The cleaned summary seed was too short to carry the conversation's task
     /// state; retried like a transient failure.
     Degenerate {
-        /// Raw model summary text (still captured for offline inspection).
+        /// Raw model summary text.
         summary: &'a str,
         /// Whether the orchestrator will retry after this attempt.
         will_retry: bool,
@@ -55,12 +49,12 @@ pub enum FullReplaceAttemptOutcome<'a> {
     },
 }
 
-/// Receives full-replace compaction outcomes. All methods default to no-ops so
+/// Receives range-summary outcomes. All methods default to no-ops so
 /// harnesses without diagnostics (and tests) can use `()`.
-pub trait FullReplaceObserver: Send + Sync {
+pub trait SummaryObserver: Send + Sync {
     /// One sample attempt finished with the given classified outcome.
     /// `attempt` is 1-based and cumulative across the pass.
-    fn on_attempt(&self, _attempt: u32, _outcome: &FullReplaceAttemptOutcome<'_>) {}
+    fn on_attempt(&self, _attempt: u32, _outcome: &SummaryAttemptOutcome<'_>) {}
 
     /// The pass succeeded after `attempts` total attempts.
     fn on_success(&self, _attempts: u32, _summary_chars: usize, _elapsed: Duration) {}
@@ -70,4 +64,4 @@ pub trait FullReplaceObserver: Send + Sync {
 }
 
 /// No-op observer for tests and harnesses without diagnostics.
-impl FullReplaceObserver for () {}
+impl SummaryObserver for () {}

@@ -13,40 +13,22 @@ use crate::matcher::HookMatcher;
 /// This is a point-in-time snapshot. Edits to hook files on disk are only
 /// picked up by new sessions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookRegistry {
     hooks: HashMap<HookEventName, Vec<HookSpec>>,
 }
 
 impl HookRegistry {
-    /// Hooks registered under the exact event key. Use
-    /// [`Self::hooks_for_canonical`] for dispatch.
+    /// Hooks registered for an event.
     pub fn hooks_for(&self, event: HookEventName) -> &[HookSpec] {
         self.hooks.get(&event).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Returns true when any enabled hook is registered for `event` or its
-    /// alias spelling. Allocation-free guard for hot paths.
-    pub fn has_enabled_hooks_for_canonical(&self, event: HookEventName) -> bool {
-        let enabled = |specs: &[HookSpec]| {
-            specs
-                .iter()
-                .any(|s| s.enabled && !crate::trust::is_hook_disabled(&s.name))
-        };
-        let canonical = event.canonical();
-        enabled(self.hooks_for(canonical))
-            || (canonical == HookEventName::SubagentStop
-                && enabled(self.hooks_for(HookEventName::SubagentEnd)))
-    }
-
-    /// Hooks for `event` plus any registered under an alias spelling
-    /// (`SubagentEnd` ≡ `SubagentStop`), so dispatch treats both identically.
-    pub fn hooks_for_canonical(&self, event: HookEventName) -> Vec<&HookSpec> {
-        let canonical = event.canonical();
-        let mut out: Vec<&HookSpec> = self.hooks_for(canonical).iter().collect();
-        if canonical == HookEventName::SubagentStop {
-            out.extend(self.hooks_for(HookEventName::SubagentEnd));
-        }
-        out
+    /// Returns true when any enabled hook is registered for `event`.
+    pub fn has_enabled_hooks(&self, event: HookEventName) -> bool {
+        self.hooks_for(event)
+            .iter()
+            .any(|s| s.enabled && !crate::trust::is_hook_disabled(&s.name))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -76,7 +58,6 @@ impl HookRegistry {
         // Defensive: `ALL` covers every variant, but keep leftovers in a stable order.
         if !hooks.is_empty() {
             let mut leftover: Vec<(HookEventName, Vec<HookSpec>)> = hooks.into_iter().collect();
-            // Typed order, not `Display` (which collapses SubagentStop/SubagentEnd).
             leftover.sort_by_key(|(event, _)| *event);
             for (_, specs) in leftover {
                 out.extend(specs);
@@ -128,8 +109,8 @@ impl HookRegistry {
 
 #[derive(Debug, Clone)]
 pub enum HookSource<'a> {
-    /// A JSON settings file; only its `hooks` key is used.
-    SettingsFile(&'a Path),
+    /// One canonical JSON hook file containing exactly the `hooks` key.
+    HookFile(&'a Path),
     /// A directory of `*.json` hook files (e.g. `~/.grow/hooks/`).
     Directory(&'a Path),
 }
@@ -154,8 +135,7 @@ pub fn load_hooks_from_sources(
         notification = registry.hooks_for(HookEventName::Notification).len(),
         user_prompt_submit = registry.hooks_for(HookEventName::UserPromptSubmit).len(),
         subagent_start = registry.hooks_for(HookEventName::SubagentStart).len(),
-        subagent_stop = registry.hooks_for(HookEventName::SubagentStop).len()
-            + registry.hooks_for(HookEventName::SubagentEnd).len(),
+        subagent_stop = registry.hooks_for(HookEventName::SubagentStop).len(),
         "hooks: discovery complete"
     );
 
@@ -211,7 +191,7 @@ pub fn collect_specs_from_sources(
     (all_specs, all_errors)
 }
 
-/// Build a registry from specs, deduping on (canonical event, command_raw,
+/// Build a registry from specs, deduping on (event, command_raw,
 /// url_raw, configured_matcher) so a hook from several origins runs once; earlier
 /// specs win, so callers place higher-authority first. `timeout_ms`/`extra_env`
 /// are intentionally excluded from the key.
@@ -221,7 +201,7 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
         std::collections::HashSet::new();
     for spec in specs {
         let key = (
-            spec.event.canonical(),
+            spec.event,
             spec.command_raw.clone().unwrap_or_default(),
             spec.url_raw.clone().unwrap_or_default(),
             spec.configured_matcher.clone().unwrap_or_default(),
@@ -253,14 +233,14 @@ pub fn load_hooks(
 
 fn load_from_source(source: &HookSource<'_>) -> (Vec<HookSpec>, Vec<HookError>) {
     match source {
-        HookSource::SettingsFile(path) => load_hooks_from_settings_file(path),
+        HookSource::HookFile(path) => load_hooks_from_file(path),
         HookSource::Directory(dir) => load_hooks_from_directory(dir),
     }
 }
 
-/// Load hooks from a single JSON settings file. A missing file or absent
-/// `hooks` key returns empty results, not an error.
-fn load_hooks_from_settings_file(path: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
+/// Load hooks from one canonical JSON hook file. A missing optional source is
+/// empty; any present file must satisfy the strict hook-file schema.
+fn load_hooks_from_file(path: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
@@ -279,7 +259,7 @@ fn load_hooks_from_settings_file(path: &Path) -> (Vec<HookSpec>, Vec<HookError>)
 
     let (specs, errors) = config::parse_hook_file(&content, path);
     for err in &errors {
-        tracing::warn!("hook loading from settings file: {err}");
+        tracing::warn!("hook file loading failed: {err}");
     }
     (specs, errors)
 }
@@ -386,11 +366,9 @@ mod tests {
     #[test]
     fn gate_events_are_the_known_set() {
         use crate::event::GateKind;
-        // Canonicalize first to dedup alias spellings into one set entry
-        // (`traits()` itself already canonicalizes, so it's safe on aliases).
         let gates: std::collections::HashSet<_> = HookEventName::ALL
             .iter()
-            .map(|e| e.canonical())
+            .copied()
             .filter(|e| e.traits().gate != GateKind::Observe)
             .collect();
         let expected: std::collections::HashSet<_> = [
@@ -422,7 +400,7 @@ mod tests {
     #[test]
     fn load_single_hook() {
         let dir = tempfile::tempdir().unwrap();
-        write_json(dir.path(), "safety.json", &simple_hook("PreToolUse"));
+        write_json(dir.path(), "safety.json", &simple_hook("pre_tool_use"));
 
         let (registry, errors) = load_hooks(Some(dir.path()), None);
         assert!(errors.is_empty(), "errors: {errors:?}");
@@ -437,17 +415,17 @@ mod tests {
         write_json(
             dir.path(),
             "02-second.json",
-            &simple_hook_with_id("PreToolUse", "second"),
+            &simple_hook_with_id("pre_tool_use", "second"),
         );
         write_json(
             dir.path(),
             "01-first.json",
-            &simple_hook_with_id("PreToolUse", "first"),
+            &simple_hook_with_id("pre_tool_use", "first"),
         );
         write_json(
             dir.path(),
             "03-third.json",
-            &simple_hook_with_id("PreToolUse", "third"),
+            &simple_hook_with_id("pre_tool_use", "third"),
         );
 
         let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -468,12 +446,12 @@ mod tests {
         write_json(
             global.path(),
             "global.json",
-            &simple_hook_with_id("PreToolUse", "global"),
+            &simple_hook_with_id("pre_tool_use", "global"),
         );
         write_json(
             project.path(),
             "project.json",
-            &simple_hook_with_id("PreToolUse", "project"),
+            &simple_hook_with_id("pre_tool_use", "project"),
         );
 
         let (registry, errors) = load_hooks(Some(global.path()), Some(project.path()));
@@ -485,8 +463,8 @@ mod tests {
     #[test]
     fn skip_hidden_and_non_json_files() {
         let dir = tempfile::tempdir().unwrap();
-        write_json(dir.path(), "valid.json", &simple_hook("SessionStart"));
-        write_json(dir.path(), ".hidden.json", &simple_hook("SessionStart"));
+        write_json(dir.path(), "valid.json", &simple_hook("session_start"));
+        write_json(dir.path(), ".hidden.json", &simple_hook("session_start"));
         write_json(dir.path(), "backup.json~", "{}");
         write_json(dir.path(), "not-json.txt", "{}");
         write_json(dir.path(), "not-json.toml", "version = 1");
@@ -501,7 +479,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let content = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "matcher": "Bash",
                         "hooks": [
@@ -523,9 +501,9 @@ mod tests {
     #[test]
     fn invalid_file_skipped_others_loaded() {
         let dir = tempfile::tempdir().unwrap();
-        write_json(dir.path(), "01-good.json", &simple_hook("SessionStart"));
+        write_json(dir.path(), "01-good.json", &simple_hook("session_start"));
         write_json(dir.path(), "02-bad.json", "not valid json {{{");
-        write_json(dir.path(), "03-also-good.json", &simple_hook("SessionEnd"));
+        write_json(dir.path(), "03-also-good.json", &simple_hook("session_end"));
 
         let (registry, errors) = load_hooks(Some(dir.path()), None);
         assert_eq!(errors.len(), 1);
@@ -538,30 +516,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let content = r#"{
             "hooks": {
-                "SessionStart": [{"hooks": [{"type": "command", "command": "a.sh"}]}],
-                "PreToolUse": [{"hooks": [{"type": "command", "command": "b.sh"}]}],
-                "PostToolUse": [{"hooks": [{"type": "command", "command": "c.sh"}]}],
-                "SessionEnd": [{"hooks": [{"type": "command", "command": "d.sh"}]}],
-                "Stop": [{"hooks": [{"type": "command", "command": "e.sh"}]}],
-                "Notification": [{"hooks": [{"type": "command", "command": "f.sh"}]}],
-                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "g.sh"}]}],
-                "SubagentStart": [{"hooks": [{"type": "command", "command": "h.sh"}]}],
-                "SubagentStop": [{"hooks": [{"type": "command", "command": "i.sh"}]}],
-                "SubagentEnd": [{"hooks": [{"type": "command", "command": "j.sh"}]}]
+                "session_start": [{"hooks": [{"type": "command", "command": "a.sh"}]}],
+                "pre_tool_use": [{"hooks": [{"type": "command", "command": "b.sh"}]}],
+                "post_tool_use": [{"hooks": [{"type": "command", "command": "c.sh"}]}],
+                "session_end": [{"hooks": [{"type": "command", "command": "d.sh"}]}],
+                "stop": [{"hooks": [{"type": "command", "command": "e.sh"}]}],
+                "notification": [{"hooks": [{"type": "command", "command": "f.sh"}]}],
+                "user_prompt_submit": [{"hooks": [{"type": "command", "command": "g.sh"}]}],
+                "subagent_start": [{"hooks": [{"type": "command", "command": "h.sh"}]}],
+                "subagent_stop": [{"hooks": [{"type": "command", "command": "i.sh"}]}]
             }
         }"#;
         write_json(dir.path(), "all-events.json", content);
 
         let (registry, errors) = load_hooks(Some(dir.path()), None);
         assert!(errors.is_empty(), "errors: {errors:?}");
-        assert_eq!(registry.len(), 10);
+        assert_eq!(registry.len(), 9);
 
         let all = registry.all_hooks();
         let events: std::collections::HashSet<_> = all.iter().map(|h| h.event).collect();
         assert_eq!(
             events.len(),
-            10,
-            "all_hooks() must cover 10 distinct event types"
+            9,
+            "all_hooks() must cover 9 distinct event types"
         );
     }
 
@@ -591,25 +568,24 @@ mod tests {
     }
 
     #[test]
-    fn load_from_settings_file() {
+    fn load_from_hook_file() {
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         std::fs::write(
             &settings,
-            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"check.sh"}]}]}}"#,
+            r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"check.sh"}]}]}}"#,
         )
         .unwrap();
 
-        let (registry, errors) =
-            load_hooks_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
+        let (registry, errors) = load_hooks_from_sources(&[HookSource::HookFile(&settings)], &[]);
         assert!(errors.is_empty(), "errors: {errors:?}");
         assert_eq!(registry.len(), 1);
     }
 
     #[test]
-    fn load_from_missing_settings_file() {
+    fn load_from_missing_hook_file() {
         let (registry, errors) = load_hooks_from_sources(
-            &[HookSource::SettingsFile(Path::new(
+            &[HookSource::HookFile(Path::new(
                 "/nonexistent/settings.json",
             ))],
             &[],
@@ -619,14 +595,13 @@ mod tests {
     }
 
     #[test]
-    fn load_from_settings_file_no_hooks_key() {
+    fn hook_file_without_hooks_key_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         std::fs::write(&settings, r#"{"theme": "dark", "model": "grow-3"}"#).unwrap();
 
-        let (registry, errors) =
-            load_hooks_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
-        assert!(errors.is_empty());
+        let (registry, errors) = load_hooks_from_sources(&[HookSource::HookFile(&settings)], &[]);
+        assert_eq!(errors.len(), 1);
         assert!(registry.is_empty());
     }
 
@@ -637,17 +612,17 @@ mod tests {
         let settings = dir.path().join("settings.json");
         std::fs::write(
             &settings,
-            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"from-settings.sh"}]}]}}"#,
+            r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"from-settings.sh"}]}]}}"#,
         )
         .unwrap();
 
         let hooks_dir = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
-        write_json(&hooks_dir, "extra.json", &simple_hook("SessionStart"));
+        write_json(&hooks_dir, "extra.json", &simple_hook("session_start"));
 
         let (registry, errors) = load_hooks_from_sources(
             &[
-                HookSource::SettingsFile(&settings),
+                HookSource::HookFile(&settings),
                 HookSource::Directory(&hooks_dir),
             ],
             &[],
@@ -665,20 +640,20 @@ mod tests {
         let global_settings = dir.path().join("global.json");
         std::fs::write(
             &global_settings,
-            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"global.sh"}]}]}}"#,
+            r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"global.sh"}]}]}}"#,
         )
         .unwrap();
 
         let project_settings = dir.path().join("project.json");
         std::fs::write(
             &project_settings,
-            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"project.sh"}]}]}}"#,
+            r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"project.sh"}]}]}}"#,
         )
         .unwrap();
 
         let (registry, errors) = load_hooks_from_sources(
-            &[HookSource::SettingsFile(&global_settings)],
-            &[HookSource::SettingsFile(&project_settings)],
+            &[HookSource::HookFile(&global_settings)],
+            &[HookSource::HookFile(&project_settings)],
         );
         assert!(errors.is_empty());
         let hooks = registry.hooks_for(HookEventName::PreToolUse);
@@ -694,29 +669,29 @@ mod tests {
         let global_settings = dir.path().join("global.json");
         std::fs::write(
             &global_settings,
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"safety.sh"}]}]}}"#,
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"safety.sh"}]}]}}"#,
         )
         .unwrap();
 
         let claude_settings = dir.path().join("claude.json");
         std::fs::write(
             &claude_settings,
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"safety.sh"}]}]}}"#,
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"safety.sh"}]}]}}"#,
         )
         .unwrap();
 
         let cursor_settings = dir.path().join("cursor.json");
         std::fs::write(
             &cursor_settings,
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"safety.sh"}]}]}}"#,
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"safety.sh"}]}]}}"#,
         )
         .unwrap();
 
         let (registry, errors) = load_hooks_from_sources(
             &[
-                HookSource::SettingsFile(&global_settings),
-                HookSource::SettingsFile(&claude_settings),
-                HookSource::SettingsFile(&cursor_settings),
+                HookSource::HookFile(&global_settings),
+                HookSource::HookFile(&claude_settings),
+                HookSource::HookFile(&cursor_settings),
             ],
             &[],
         );
@@ -735,33 +710,6 @@ mod tests {
         );
     }
 
-    /// A hook registered under both `SubagentStop` and `SubagentEnd` dedups on
-    /// the canonical event, so it runs once.
-    #[test]
-    fn deduplicates_hooks_across_alias_spellings() {
-        let dir = tempfile::tempdir().unwrap();
-        let settings = dir.path().join("settings.json");
-        std::fs::write(
-            &settings,
-            r#"{"hooks":{
-                "SubagentStop":[{"hooks":[{"type":"command","command":"notify.sh"}]}],
-                "SubagentEnd":[{"hooks":[{"type":"command","command":"notify.sh"}]}]
-            }}"#,
-        )
-        .unwrap();
-
-        let (registry, errors) =
-            load_hooks_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
-        assert!(errors.is_empty());
-        assert_eq!(
-            registry
-                .hooks_for_canonical(HookEventName::SubagentStop)
-                .len(),
-            1,
-            "alias spelling must not double-register the same hook"
-        );
-    }
-
     #[test]
     fn different_commands_not_deduplicated() {
         let dir = tempfile::tempdir().unwrap();
@@ -769,21 +717,21 @@ mod tests {
         let global_settings = dir.path().join("global.json");
         std::fs::write(
             &global_settings,
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"first.sh"}]}]}}"#,
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"first.sh"}]}]}}"#,
         )
         .unwrap();
 
         let claude_settings = dir.path().join("claude.json");
         std::fs::write(
             &claude_settings,
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"second.sh"}]}]}}"#,
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"second.sh"}]}]}}"#,
         )
         .unwrap();
 
         let (registry, errors) = load_hooks_from_sources(
             &[
-                HookSource::SettingsFile(&global_settings),
-                HookSource::SettingsFile(&claude_settings),
+                HookSource::HookFile(&global_settings),
+                HookSource::HookFile(&claude_settings),
             ],
             &[],
         );
@@ -806,15 +754,14 @@ mod tests {
             &settings,
             r#"{
                 "hooks": {
-                    "SessionStart": [{"hooks": [{"type": "command", "command": "hook.sh"}]}],
-                    "SessionEnd": [{"hooks": [{"type": "command", "command": "hook.sh"}]}]
+                    "session_start": [{"hooks": [{"type": "command", "command": "hook.sh"}]}],
+                    "session_end": [{"hooks": [{"type": "command", "command": "hook.sh"}]}]
                 }
             }"#,
         )
         .unwrap();
 
-        let (registry, errors) =
-            load_hooks_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
+        let (registry, errors) = load_hooks_from_sources(&[HookSource::HookFile(&settings)], &[]);
         assert!(errors.is_empty());
         assert_eq!(registry.hooks_for(HookEventName::SessionStart).len(), 1);
         assert_eq!(registry.hooks_for(HookEventName::SessionEnd).len(), 1);
@@ -829,12 +776,12 @@ mod tests {
         write_json(
             dir.path(),
             "01-first.json",
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"same.sh"}]}]}}"#,
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"same.sh"}]}]}}"#,
         );
         write_json(
             dir.path(),
             "02-second.json",
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"same.sh"}]}]}}"#,
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"same.sh"}]}]}}"#,
         );
 
         let (registry, errors) = load_hooks(Some(dir.path()), None);
@@ -849,17 +796,17 @@ mod tests {
     }
 
     #[test]
-    fn realistic_claude_settings_discovery() {
+    fn hook_file_rejects_foreign_top_level_fields() {
         let dir = tempfile::tempdir().unwrap();
 
-        let claude_settings = dir.path().join("settings.json");
+        let settings = dir.path().join("settings.json");
         std::fs::write(
-            &claude_settings,
+            &settings,
             r#"{
-                "model": "claude-sonnet-4-20250514",
+                "unrelated": "ignored",
                 "permissions": {"allow": ["Bash(npm test)"]},
                 "hooks": {
-                    "PreToolUse": [
+                    "pre_tool_use": [
                         {"matcher": "Bash", "hooks": [{"type": "command", "command": "check.sh"}]}
                     ]
                 },
@@ -868,10 +815,9 @@ mod tests {
         )
         .unwrap();
 
-        let (registry, errors) =
-            load_hooks_from_sources(&[HookSource::SettingsFile(&claude_settings)], &[]);
-        assert!(errors.is_empty(), "errors: {errors:?}");
-        assert_eq!(registry.len(), 1);
+        let (registry, errors) = load_hooks_from_sources(&[HookSource::HookFile(&settings)], &[]);
+        assert!(registry.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     /// Wire/serde-shaped spec: compiled matcher cleared, pattern still set.
@@ -916,7 +862,7 @@ mod tests {
     fn recompile_matchers_isolates_invalid_sibling() {
         let mut registry = HookRegistry::default();
         registry.append_specs(vec![
-            recompile_test_spec("ok", Some("Bash")),
+            recompile_test_spec("ok", Some("run_terminal_cmd")),
             recompile_test_spec("broken", Some("[invalid")),
         ]);
         registry.recompile_matchers();
@@ -930,14 +876,14 @@ mod tests {
             .matcher
             .as_ref()
             .expect("valid sibling must recompile");
-        assert!(ok.is_match("run_terminal_command"));
+        assert!(ok.is_match("run_terminal_cmd"));
         assert!(!ok.is_match("read_file"));
 
         let broken = by_name["broken"]
             .matcher
             .as_ref()
             .expect("invalid sibling must become never-match");
-        assert!(!broken.is_match("run_terminal_command"));
+        assert!(!broken.is_match("run_terminal_cmd"));
         assert!(!broken.is_match("Bash"));
         assert!(!broken.is_match("read_file"));
     }

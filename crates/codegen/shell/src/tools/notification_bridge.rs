@@ -360,14 +360,12 @@ async fn handle_notification(
                 "FileWritten notification forwarded to hunk tracker"
             );
         }
-        ToolNotification::SubagentCompleted(_) => {}
         ToolNotification::TaskCompleted(task_snapshot) => {
             let is_monitor = task_snapshot.kind == tools::computer::types::TaskKind::Monitor;
             let task_id = task_snapshot.task_id.clone();
             let goal_loop_active = config
                 .goal_loop_active
                 .load(std::sync::atomic::Ordering::Relaxed);
-            let mut will_wake = false;
             if goal_loop_active {
                 // Goal suppresses unrelated background noise, but a task
                 // whose blocking wait was displaced by steering has an
@@ -472,7 +470,6 @@ async fn handle_notification(
                         }),
                         respond_to,
                         persist_ack: None,
-                        parsed_prompt_tx: None,
                     })
                     .is_ok();
                 if !enqueued {
@@ -487,7 +484,6 @@ async fn handle_notification(
                 } else {
                     false
                 };
-                will_wake = admitted;
                 ::diagnostics::unified_log::info(
                     "shell.task_wake.bridge_admission",
                     Some(config.session_id.0.as_ref()),
@@ -499,7 +495,7 @@ async fn handle_notification(
                         "gate": config.task_wake_suppressed.get(),
                     })),
                 );
-                if will_wake && is_monitor {
+                if admitted && is_monitor {
                     let _ = config
                         .session_cmd_tx
                         .send(SessionCommand::DropMonitorNotifications {
@@ -549,7 +545,6 @@ async fn handle_notification(
                 session_id: config.session_id.clone(),
                 update: crate::extensions::notification::SessionUpdate::TaskCompleted {
                     task_snapshot,
-                    will_wake,
                 },
                 meta: None,
             };
@@ -609,26 +604,9 @@ async fn handle_notification(
             tracing::info!(
                 task_id = %fired.task_id,
                 schedule = %fired.human_schedule,
-                subagent_id = fired.subagent_id.as_deref().unwrap_or(""),
+                subagent_id = %fired.subagent_id,
                 "Scheduled task fired"
             );
-            if fired.subagent_id.is_none() {
-                let inject_payload = serde_json::json!({
-                    "sessionId": config.session_id,
-                    "taskId": &fired.task_id,
-                    "prompt": &fired.prompt,
-                    "humanSchedule": &fired.human_schedule,
-                    "nextFireAt": &fired.next_fire_at,
-                });
-                if let Ok(params) = serde_json::value::to_raw_value(&inject_payload) {
-                    config
-                        .gateway
-                        .forward_fire_and_forget(acp::ExtNotification::new(
-                            "grow/scheduled_task_inject_prompt",
-                            params.into(),
-                        ));
-                }
-            }
             let mut meta = None;
             stamp_scheduler_meta(config, &mut meta, &fired.generation, fired.revision);
             let fired_notif = crate::extensions::notification::SessionNotification {
@@ -655,15 +633,13 @@ async fn handle_notification(
         }
         ToolNotification::MonitorEvent(event) => {
             let my_session = config.session_id.0.as_ref();
-            if let Some(owner) = event.owner_session_id.as_deref()
-                && owner != my_session
-            {
+            if event.owner_session_id.as_deref() != Some(my_session) {
                 tracing::warn!(
                     task_id = %event.task_id,
                     description = %event.description,
-                    monitor_owner = %owner,
+                    monitor_owner = ?event.owner_session_id,
                     bridge_session = %my_session,
-                    "Dropped cross-session monitor event: owner does not match this bridge's session"
+                    "Dropped monitor event without this bridge's exact session owner"
                 );
                 return;
             }
@@ -999,24 +975,21 @@ mod tests {
             vec!["bg-normal".to_string()],
         );
     }
-    fn task_completed_will_wake(
+    fn take_task_completed_notification(
         gateway_rx: &mut mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
-    ) -> Option<bool> {
+    ) -> Option<serde_json::Value> {
         while let Ok(msg) = gateway_rx.try_recv() {
             if let acp_transport::AcpClientMessage::ExtNotification(args) = msg
                 && args.request.method.as_ref() == "grow/task_completed"
             {
                 let v: serde_json::Value = serde_json::from_str(args.request.params.get()).ok()?;
-                return v["update"]["will_wake"].as_bool();
+                return Some(v);
             }
         }
         None
     }
-    /// The completion notification carries the wake verdict — the pager keys
-    /// its between-turns status line on it (skip when a wake response
-    /// follows, emit when nothing else will mark the moment).
     #[tokio::test]
-    async fn task_completed_notification_stamps_will_wake() {
+    async fn task_completed_notification_is_independent_of_wake_admission() {
         let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
         config
             .task_output_tool_name
@@ -1035,11 +1008,9 @@ mod tests {
             cmd_rx.recv().await,
             Some(SessionCommand::QueuePrompt { .. })
         ));
-        assert_eq!(
-            task_completed_will_wake(&mut gateway_rx),
-            Some(true),
-            "an auto-woken completion must stamp will_wake: true"
-        );
+        let notification = take_task_completed_notification(&mut gateway_rx)
+            .expect("completion notification must be emitted");
+        assert!(notification["update"].get("will_wake").is_none());
         let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
         let mut offsets = HashMap::new();
         handle_notification_with_admission(
@@ -1050,11 +1021,9 @@ mod tests {
             false,
         )
         .await;
-        assert_eq!(
-            task_completed_will_wake(&mut gateway_rx),
-            Some(false),
-            "an actor-declined completion must stamp will_wake: false"
-        );
+        let notification = take_task_completed_notification(&mut gateway_rx)
+            .expect("declined admission must still emit a completion notification");
+        assert!(notification["update"].get("will_wake").is_none());
         assert!(
             config.task_completion_reservations.contains("bg-declined"),
             "the actor owns reservation release after queuing the deferred fallback"
@@ -1106,7 +1075,7 @@ mod tests {
             .await;
         tokio::task::yield_now().await;
         notification.await;
-        assert_eq!(task_completed_will_wake(&mut gateway_rx), Some(false));
+        assert!(take_task_completed_notification(&mut gateway_rx).is_some());
         assert!(
             config.task_completion_reservations.contains("bg-stalled"),
             "a timed-out admission may still be handled and deferred by the actor"
@@ -1173,14 +1142,14 @@ mod tests {
             Ok(SessionCommand::DispatchNotificationHook { .. })
         ));
         assert!(cmd_rx.try_recv().is_err());
-        assert_eq!(task_completed_will_wake(&mut gateway_rx), Some(false));
+        assert!(take_task_completed_notification(&mut gateway_rx).is_some());
         assert!(
             config.task_completion_reservations.contains("mon-timeout"),
             "the late actor fallback retains the reservation until user delivery"
         );
     }
     #[tokio::test]
-    async fn task_completed_stamps_will_wake_false_when_session_channel_closed() {
+    async fn task_completed_still_emits_when_session_channel_is_closed() {
         let (config, mut gateway_rx, _persistence_rx, cmd_rx) = make_test_config_full_raw();
         config
             .task_output_tool_name
@@ -1197,11 +1166,7 @@ mod tests {
             &mut offsets,
         )
         .await;
-        assert_eq!(
-            task_completed_will_wake(&mut gateway_rx),
-            Some(false),
-            "a completion whose wake prompt could not be enqueued must stamp will_wake: false"
-        );
+        assert!(take_task_completed_notification(&mut gateway_rx).is_some());
         assert!(config.task_completion_reservations.contains("bg-dead"));
         config.task_completion_reservations.release("bg-dead");
         assert!(!config.task_completion_reservations.contains("bg-dead"));
@@ -1706,7 +1671,7 @@ mod tests {
                 prompt: "check deploy".into(),
                 human_schedule: "every 5 minutes".into(),
                 next_fire_at: Some("2026-01-01T00:00:00Z".into()),
-                subagent_id: Some("subagent-1".into()),
+                subagent_id: "subagent-1".into(),
                 generation: "generation-a".into(),
                 revision: 3,
             });
@@ -1775,23 +1740,12 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn legacy_monitor_event_without_owner_is_injected() {
+    async fn monitor_event_without_owner_is_dropped() {
         let (config, mut cmd_rx) = make_test_config();
         let notification = make_monitor_event_notification("mon-legacy", None);
         let mut offsets = HashMap::new();
         handle_notification(&config, notification, &mut offsets).await;
-        assert!(
-            matches!(
-                cmd_rx
-                    .try_recv()
-                    .expect("legacy (no-owner) monitor event must be injected"),
-                SessionCommand::InjectNotification {
-                    source: NotificationSource::MonitorEvent { .. },
-                    ..
-                }
-            ),
-            "legacy monitor event should be injected as a MonitorEvent notification"
-        );
+        assert!(cmd_rx.try_recv().is_err());
     }
     #[tokio::test]
     async fn block_waited_task_skips_auto_wake_prompt() {

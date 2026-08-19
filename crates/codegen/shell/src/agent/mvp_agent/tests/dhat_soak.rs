@@ -22,9 +22,8 @@ fn populate_and_evict(agent: &MvpAgent, i: usize) {
     {
         let ops = agent.workspace_ops.borrow();
         let ops = ops.as_ref().expect("test installs workspace ops");
-        let toolset = std::sync::Arc::new(
-            tools::registry::types::FinalizedToolset::empty_for_test(),
-        );
+        let toolset =
+            std::sync::Arc::new(tools::registry::types::FinalizedToolset::empty_for_test());
         ops.bind_local_session(
             sid.0.as_ref(),
             std::env::temp_dir(),

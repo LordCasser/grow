@@ -12,7 +12,7 @@
 //!                                            ← top vpad (configurable)
 //!  ❯ type here, text wraps                   ← prefix + TextArea
 //!    continuation of long input...            ← TextArea continuation
-//!  grow · grow-3 · yolo                      ← info line (agent · model · flags)
+//!  grow · grow-3 · always-approve                      ← info line (agent · model · flags)
 //! ```
 //!
 //! The accent line (┃) and selection box are rendered by the caller.
@@ -752,12 +752,7 @@ impl PromptWidget {
     /// insert.
     pub fn apply_completion_splice(&mut self, splice: CompletionSplice) -> bool {
         match splice {
-            CompletionSplice::WholeLine(line) => {
-                self.set_text(&line);
-                self.set_cursor(line.len());
-                true
-            }
-            CompletionSplice::Token(range, replacement) => {
+            CompletionSplice::Edit(range, replacement) => {
                 if self.completion_range_clips_element(&range) {
                     return false;
                 }
@@ -797,7 +792,7 @@ impl PromptWidget {
             .suggestions
             .peek_completion_splice(self.textarea.text())
         {
-            Some(CompletionSplice::Token(range, _)) => self.completion_range_clips_element(&range),
+            Some(CompletionSplice::Edit(range, _)) => self.completion_range_clips_element(&range),
             _ => false,
         }
     }

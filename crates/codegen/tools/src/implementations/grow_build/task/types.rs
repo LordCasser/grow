@@ -23,7 +23,7 @@ use std::sync::Arc;
 use educe::Educe;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tool_types::{SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
+use tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
 
 use crate::register_resource;
 
@@ -116,8 +116,8 @@ pub struct SubagentRequest {
     /// without affecting background subagents from earlier turns.
     pub parent_prompt_id: Option<String>,
     /// Resume from a previously completed subagent's conversation.
-    /// Inherits raw transcript, tool state, and model. System prompt is
-    /// freshly rendered.
+    /// Inherits the canonical raw transcript and model. System prompt, live
+    /// grants, and tool runtime are freshly constructed.
     pub resume_from: Option<String>,
     /// Explicit working directory for the child session.
     /// Validated at spawn time by the injected child runner.
@@ -201,7 +201,7 @@ impl SubagentSpawnRequest {
 /// precedence over role defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ModelOverrideProvenance {
-    /// Internal harness, role, persona, or config resolution.
+    /// Internal harness, role, or config resolution.
     #[default]
     Harness,
     /// A model-facing `Task.model` argument.
@@ -216,12 +216,10 @@ pub struct SubagentRuntimeOverrides {
     pub model_override_provenance: ModelOverrideProvenance,
     /// Override reasoning effort (e.g. "low", "medium", "high").
     pub reasoning_effort: Option<String>,
-    /// Named persona/SOUL template to apply.
-    pub persona: Option<String>,
     /// Capability mode controlling tool access.
     pub capability_mode: Option<SubagentCapabilityMode>,
     /// Isolation mode for child execution environment.
-    /// `None` means "use role/persona default" (which itself defaults to `None`/shared workspace).
+    /// `None` means use the agent-definition default.
     pub isolation: Option<SubagentIsolationMode>,
     pub completion_output_cap: Option<usize>,
     pub spawn_depth: Option<u32>,
@@ -332,9 +330,9 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::Plan,
                 ToolKind::MemorySearch,
                 ToolKind::MemoryGet,
+                ToolKind::ContextFetch,
                 ToolKind::WebFetch,
                 ToolKind::BackgroundTaskAction,
-                ToolKind::WaitTasksAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
                 ToolKind::PlanControl,
@@ -359,9 +357,9 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::Plan,
                 ToolKind::MemorySearch,
                 ToolKind::MemoryGet,
+                ToolKind::ContextFetch,
                 ToolKind::WebFetch,
                 ToolKind::BackgroundTaskAction,
-                ToolKind::WaitTasksAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
                 ToolKind::PlanControl,
@@ -384,9 +382,9 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::Plan,
                 ToolKind::MemorySearch,
                 ToolKind::MemoryGet,
+                ToolKind::ContextFetch,
                 ToolKind::WebFetch,
                 ToolKind::BackgroundTaskAction,
-                ToolKind::WaitTasksAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
                 ToolKind::PlanControl,
@@ -413,9 +411,9 @@ impl SubagentCapabilityModeExt for SubagentCapabilityMode {
                 ToolKind::Plan,
                 ToolKind::MemorySearch,
                 ToolKind::MemoryGet,
+                ToolKind::ContextFetch,
                 ToolKind::WebFetch,
                 ToolKind::BackgroundTaskAction,
-                ToolKind::WaitTasksAction,
                 ToolKind::KillTaskAction,
                 ToolKind::Task,
                 ToolKind::PlanControl,
@@ -538,8 +536,6 @@ pub struct SubagentSnapshot {
     pub started_at_epoch_ms: u64,
     /// Elapsed wall-clock time in milliseconds.
     pub duration_ms: u64,
-    /// Persona used by this subagent, if any.
-    pub persona: Option<String>,
 }
 
 /// Lifecycle metadata returned to shell presentation and extension callers.
@@ -663,17 +659,6 @@ pub struct SubagentCompletionSummary {
     pub output: Arc<str>,
 }
 
-/// Multi-wait request: block until one or all of the listed subagents finish.
-#[derive(Educe)]
-#[educe(Debug)]
-pub struct SubagentMultiWaitRequest {
-    pub subagent_ids: Vec<String>,
-    pub mode: WaitMode,
-    pub timeout_ms: Option<u64>,
-    #[educe(Debug(ignore))]
-    pub respond_to: oneshot::Sender<Vec<Option<SubagentSnapshot>>>,
-}
-
 /// Request to drain buffered completion summaries.
 #[derive(Educe)]
 #[educe(Debug)]
@@ -768,7 +753,6 @@ pub struct SpawnedSubagentRef {
     pub child_session_id: String,
     pub subagent_type: String,
     pub description: String,
-    pub persona: Option<String>,
     pub resumed_from: Option<String>,
 }
 
@@ -780,27 +764,6 @@ pub struct SubagentSpawnedRefsRequest {
     pub prompt_id: String,
     #[educe(Debug(ignore))]
     pub respond_to: oneshot::Sender<Vec<SpawnedSubagentRef>>,
-}
-
-/// In-memory source data used by a runtime adapter to resume a child.
-#[derive(Debug, Clone)]
-pub struct SubagentResumeSource {
-    pub subagent_id: String,
-    pub child_session_id: String,
-    pub child_cwd: String,
-    pub worktree_path: Option<String>,
-    pub snapshot_ref: Option<String>,
-    pub subagent_type: String,
-    pub persona: Option<String>,
-    pub model_id: Option<String>,
-}
-
-/// Result of a resume-source lookup.
-#[derive(Debug, Clone)]
-pub enum SubagentResumeLookup {
-    Active,
-    Completed(SubagentResumeSource),
-    Missing,
 }
 
 // Validate-type protocol
@@ -1110,7 +1073,6 @@ mod tests {
                 tc("Grow:kill_task", ToolKind::KillTaskAction),
                 tc("Grow:get_task_output", ToolKind::BackgroundTaskAction),
             ],
-            behavior_preset: None,
         };
 
         SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
@@ -1131,7 +1093,6 @@ mod tests {
                 tc("Grow:get_task_output", ToolKind::BackgroundTaskAction),
                 tc("Grow:task", ToolKind::Task),
             ],
-            behavior_preset: None,
         };
 
         SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
@@ -1176,10 +1137,7 @@ mod tests {
                 .unwrap()
                 .clone(),
         );
-        let mut config = ToolServerConfig {
-            tools: vec![bash],
-            behavior_preset: None,
-        };
+        let mut config = ToolServerConfig { tools: vec![bash] };
 
         SubagentCapabilityMode::ReadWrite.filter_tool_config(&mut config);
 
@@ -1213,7 +1171,6 @@ mod tests {
                     goal_replan.clone(),
                     goal_lifecycle.clone(),
                 ],
-                behavior_preset: None,
             };
             mode.filter_tool_config(&mut config);
             let kinds: Vec<_> = config.tools.iter().filter_map(|tool| tool.kind).collect();
@@ -1233,7 +1190,6 @@ mod tests {
                 goal_replan,
                 goal_lifecycle,
             ],
-            behavior_preset: None,
         };
         SubagentCapabilityMode::All.filter_tool_config(&mut all);
         assert!(all.tools.iter().all(|tool| tool.kind.is_some()));
@@ -1418,40 +1374,6 @@ mod tests {
     }
 
     #[test]
-    fn wait_mode_serializes_to_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&super::WaitMode::WaitAny).unwrap(),
-            "\"wait_any\""
-        );
-        assert_eq!(
-            serde_json::to_string(&super::WaitMode::WaitAll).unwrap(),
-            "\"wait_all\""
-        );
-    }
-
-    #[test]
-    fn wait_mode_deserializes_from_snake_case() {
-        let any: super::WaitMode = serde_json::from_str("\"wait_any\"").unwrap();
-        assert!(matches!(any, super::WaitMode::WaitAny));
-        let all: super::WaitMode = serde_json::from_str("\"wait_all\"").unwrap();
-        assert!(matches!(all, super::WaitMode::WaitAll));
-    }
-
-    #[test]
-    fn wait_mode_rejects_unknown_variant() {
-        let result = serde_json::from_str::<super::WaitMode>("\"wait_first\"");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn wait_mode_json_schema_has_two_variants() {
-        let schema = schemars::schema_for!(super::WaitMode);
-        let json = serde_json::to_string(&schema).unwrap();
-        assert!(json.contains("wait_any"));
-        assert!(json.contains("wait_all"));
-    }
-
-    #[test]
     fn completions_request_round_trips_through_channel() {
         use tokio::sync::{mpsc, oneshot};
 
@@ -1488,53 +1410,6 @@ mod tests {
         assert_eq!(result[0].duration_ms, 1500);
         assert_eq!(result[0].tool_calls, 7);
         assert_eq!(result[0].turns, 3);
-    }
-
-    #[test]
-    fn multi_wait_request_round_trips_through_channel() {
-        use tokio::sync::{mpsc, oneshot};
-
-        let (tx, mut rx) = mpsc::unbounded_channel::<super::SubagentMultiWaitRequest>();
-        let (respond_to, mut response_rx) = oneshot::channel();
-
-        tx.send(super::SubagentMultiWaitRequest {
-            subagent_ids: vec!["a".into(), "b".into()],
-            mode: super::WaitMode::WaitAll,
-            timeout_ms: Some(5000),
-            respond_to,
-        })
-        .unwrap();
-
-        let req = rx.try_recv().unwrap();
-        assert_eq!(req.subagent_ids, vec!["a", "b"]);
-        assert!(matches!(req.mode, super::WaitMode::WaitAll));
-        assert_eq!(req.timeout_ms, Some(5000));
-
-        // Simulate coordinator response: one found, one not
-        let snapshots = vec![
-            Some(super::SubagentSnapshot {
-                subagent_id: "a".into(),
-                description: "task a".into(),
-                subagent_type: "general-purpose".into(),
-                status: super::SubagentSnapshotStatus::Completed {
-                    output: "done".into(),
-                    tool_calls: 3,
-                    turns: 1,
-                    worktree_path: None,
-                },
-                started_at_epoch_ms: 1000,
-                duration_ms: 500,
-                persona: None,
-            }),
-            None,
-        ];
-        req.respond_to.send(snapshots).unwrap();
-
-        let result = response_rx.try_recv().unwrap();
-        assert_eq!(result.len(), 2);
-        assert!(result[0].is_some());
-        assert!(result[0].as_ref().unwrap().status.is_terminal());
-        assert!(result[1].is_none());
     }
 
     #[test]

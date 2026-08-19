@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use super::envelope::{FacetMap, FacetValue, SessionKind};
 use super::row::UnifiedRow;
-use crate::session::merge::MergedSession;
+use crate::session::listing::SessionListing;
 
 pub const KIND_FACET_KEY: &str = "kind";
 pub const CWD_FACET_KEY: &str = "cwd";
@@ -26,7 +26,7 @@ pub struct NormalizedItem {
 }
 
 impl NormalizedItem {
-    pub fn from_merged(session: &MergedSession) -> Self {
+    pub fn from_listing(session: &SessionListing) -> Self {
         Self {
             kind: SessionKind::Build,
             cwd: session.cwd.clone(),

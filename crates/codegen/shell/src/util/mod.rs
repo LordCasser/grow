@@ -12,18 +12,12 @@ pub use shell_base::util::*;
 pub(crate) fn is_user_instruction_path(
     path: &std::path::Path,
     grow_home: &std::path::Path,
-    vendor_homes: &[(std::path::PathBuf, bool)],
     workspace_root: Option<&std::path::Path>,
 ) -> bool {
     let parent = path.parent();
     let grow_rules = grow_home.join("rules");
-    let is_exact_home_surface = parent
-        .is_some_and(|parent| parent == grow_home || parent == grow_rules)
-        || vendor_homes.iter().any(|(vendor_home, named_enabled)| {
-            parent.is_some_and(|parent| {
-                (*named_enabled && parent == vendor_home) || parent == vendor_home.join("rules")
-            })
-        });
+    let is_exact_home_surface =
+        parent.is_some_and(|parent| parent == grow_home || parent == grow_rules);
     if is_exact_home_surface {
         return true;
     }
@@ -31,9 +25,6 @@ pub(crate) fn is_user_instruction_path(
         return false;
     }
     path.starts_with(grow_home)
-        || vendor_homes
-            .iter()
-            .any(|(vendor_home, _)| path.starts_with(vendor_home))
 }
 
 /// Aborts the wrapped tokio task when dropped.
@@ -117,13 +108,11 @@ mod is_user_instruction_path_tests {
         assert!(is_user_instruction_path(
             Path::new("/repo/config/AGENTS.md"),
             Path::new("/repo/config"),
-            &[],
             Some(Path::new("/repo")),
         ));
         assert!(!is_user_instruction_path(
             Path::new("/repo/config/src/AGENTS.md"),
             Path::new("/repo/config"),
-            &[],
             Some(Path::new("/repo")),
         ));
     }
@@ -133,7 +122,6 @@ mod is_user_instruction_path_tests {
         assert!(!is_user_instruction_path(
             Path::new("/custom/grow/worktrees/repo/src/AGENTS.md"),
             Path::new("/custom/grow"),
-            &[],
             Some(Path::new("/custom/grow/worktrees/repo")),
         ));
     }

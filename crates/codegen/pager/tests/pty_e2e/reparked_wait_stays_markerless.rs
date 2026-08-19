@@ -65,7 +65,7 @@ async fn reparked_wait_stays_markerless() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

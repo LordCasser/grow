@@ -4,17 +4,15 @@ use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use shell::sampling::types::{
     ReasoningEffort, ReasoningEffortOption, parse_reasoning_effort_meta,
-    parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
+    parse_reasoning_efforts_meta,
 };
-
-use crate::slash::commands::effort_levels::legacy_effort_options;
 
 /// Why an effort token could not be applied to a model. Shared by every effort
 /// surface (`/effort`, the CLI deferred switch, and headless) so they classify
 /// the same input identically and differ only in how they surface the error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EffortTokenError {
-    /// The target model does not advertise `supportsReasoningEffort`.
+    /// The target model does not publish a reasoning-effort menu.
     Unsupported,
     /// The token is neither a menu id nor a canonical value offered by this
     /// model's menu. `offered` is the model-specific list of option ids the
@@ -177,9 +175,8 @@ impl ModelState {
         });
     }
 
-    /// The reasoning-effort menu for the current model. Gate-first: an unset or
-    /// unsupported model yields no menu; a supported model uses the server list
-    /// when present, else the built-in fallback.
+    /// The reasoning-effort menu for the current model. The published list is
+    /// both the capability gate and the complete selectable contract.
     pub fn reasoning_effort_options(&self) -> Vec<ReasoningEffortOption> {
         match self.current.as_ref() {
             Some(id) => self.reasoning_effort_options_for(id),
@@ -200,9 +197,8 @@ impl ModelState {
     }
 
     /// Menu for a specific catalog model id (used by `/model`'s effort phase).
-    /// `parse_reasoning_efforts_meta` returns `None` for absent, non-array, or
-    /// present-but-unusable lists, so all of those fall back to the built-in menu
-    /// exactly as the shell's session picker does.
+    /// An absent or invalid menu means the model does not support selectable
+    /// reasoning effort. No client-side menu is synthesized.
     pub(crate) fn reasoning_effort_options_for(
         &self,
         id: &acp::ModelId,
@@ -210,10 +206,7 @@ impl ModelState {
         let Some(info) = self.available.get(id) else {
             return Vec::new();
         };
-        if !supports_reasoning_effort_meta(info.meta.as_ref()) {
-            return Vec::new();
-        }
-        parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_else(legacy_effort_options)
+        parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_default()
     }
 
     /// Map a typed/selected effort token to its canonical value for the current
@@ -250,8 +243,8 @@ impl ModelState {
             .map(|o| o.value)
     }
 
-    /// Canonical effort-token policy: gate on the model's support flag first,
-    /// then resolve the token (menu id or canonical level). This is the single
+    /// Canonical effort-token policy: require a published menu, then resolve the
+    /// token (menu id or canonical level). This is the single
     /// decision shared by `/effort`, the CLI deferred switch, and headless —
     /// each caller only maps the [`EffortTokenError`] to its own surface.
     pub(crate) fn resolve_effort_for_model(
@@ -262,8 +255,8 @@ impl ModelState {
         let supports = self
             .available
             .get(id)
-            .map(|info| supports_reasoning_effort_meta(info.meta.as_ref()))
-            .unwrap_or(false);
+            .and_then(|info| parse_reasoning_efforts_meta(info.meta.as_ref()))
+            .is_some();
         if !supports {
             return Err(EffortTokenError::Unsupported);
         }
@@ -390,8 +383,12 @@ mod tests {
     fn model_with_effort(id: &str, name: &str, effort: &str) -> acp::ModelInfo {
         acp::ModelInfo::new(acp::ModelId::new(Arc::from(id)), name.to_string()).meta(
             serde_json::json!({
-                "supportsReasoningEffort": true,
                 "reasoningEffort": effort,
+                "reasoningEfforts": [
+                    { "value": "low", "label": "Low" },
+                    { "value": "high", "label": "High" },
+                    { "value": "xhigh", "label": "Xhigh" },
+                ],
             })
             .as_object()
             .cloned(),
@@ -467,7 +464,6 @@ mod tests {
     #[test]
     fn reasoning_effort_options_renders_server_list() {
         let state = state_with_meta(Some(serde_json::json!({
-            "supportsReasoningEffort": true,
             "reasoningEfforts": [
                 { "id": "balanced", "value": "medium", "label": "Balanced" },
                 { "id": "deep", "value": "xhigh", "label": "Deep", "description": "Max" },
@@ -484,7 +480,6 @@ mod tests {
     #[test]
     fn next_reasoning_effort_follows_declared_order_and_wraps() {
         let mut state = state_with_meta(Some(serde_json::json!({
-            "supportsReasoningEffort": true,
             "reasoningEfforts": [
                 { "value": "high", "label": "High" },
                 { "value": "max", "label": "Max" },
@@ -506,55 +501,44 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_options_gate_first_empty_when_unsupported() {
+    fn reasoning_effort_options_are_derived_from_the_menu() {
         // No current model → empty.
         assert!(ModelState::default().reasoning_effort_options().is_empty());
-        // Current model that does not support effort → empty (even with a list).
+        // A menu is sufficient; there is no separate support gate.
         let state = state_with_meta(Some(serde_json::json!({
             "reasoningEfforts": [{ "value": "high" }],
+        })));
+        assert_eq!(state.reasoning_effort_options().len(), 1);
+    }
+
+    #[test]
+    fn removed_support_flag_does_not_create_a_menu() {
+        let state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": true,
         })));
         assert!(state.reasoning_effort_options().is_empty());
     }
 
     #[test]
-    fn reasoning_effort_options_falls_back_to_builtin_menu() {
-        // Supported but no server list → today's four-row built-in menu.
-        let state = state_with_meta(Some(serde_json::json!({
-            "supportsReasoningEffort": true,
-        })));
-        let ids: Vec<_> = state
-            .reasoning_effort_options()
-            .into_iter()
-            .map(|o| o.id)
-            .collect();
-        assert_eq!(ids, ["xhigh", "high", "medium", "low"]);
-    }
-
-    #[test]
-    fn reasoning_effort_options_falls_back_when_list_present_but_unusable() {
-        // Matches the shell picker: an explicit empty list, and a list where every
-        // entry skip-invalidated under version skew, both fall back to the built-in
-        // menu rather than silently vanishing.
+    fn reasoning_effort_options_rejects_empty_or_invalid_menus() {
         for meta in [
-            serde_json::json!({ "supportsReasoningEffort": true, "reasoningEfforts": [] }),
+            serde_json::json!({ "reasoningEfforts": [] }),
             serde_json::json!({
-                "supportsReasoningEffort": true,
                 "reasoningEfforts": [{ "value": "quantum" }],
             }),
         ] {
-            let ids: Vec<_> = state_with_meta(Some(meta.clone()))
-                .reasoning_effort_options()
-                .into_iter()
-                .map(|o| o.id)
-                .collect();
-            assert_eq!(ids, ["xhigh", "high", "medium", "low"], "for meta {meta}");
+            assert!(
+                state_with_meta(Some(meta.clone()))
+                    .reasoning_effort_options()
+                    .is_empty(),
+                "for meta {meta}"
+            );
         }
     }
 
     #[test]
     fn resolve_effort_token_maps_remap_id_to_canonical_value() {
         let state = state_with_meta(Some(serde_json::json!({
-            "supportsReasoningEffort": true,
             "reasoningEfforts": [
                 { "id": "deep", "value": "xhigh", "label": "Deep" },
                 { "id": "high", "value": "high", "label": "High" },
@@ -584,7 +568,6 @@ mod tests {
     #[test]
     fn resolve_effort_token_accepts_none_only_when_menu_offers_it() {
         let with_none = state_with_meta(Some(serde_json::json!({
-            "supportsReasoningEffort": true,
             "reasoningEfforts": [
                 { "value": "none", "label": "None", "default": true },
                 { "value": "high", "label": "High" },
@@ -596,7 +579,6 @@ mod tests {
         );
 
         let without_none = state_with_meta(Some(serde_json::json!({
-            "supportsReasoningEffort": true,
             "reasoningEfforts": [
                 { "value": "high", "label": "High", "default": true },
                 { "value": "low", "label": "Low" },
@@ -633,20 +615,6 @@ mod tests {
         assert!(
             !msg.contains("unset"),
             "unset is log-only, not a user token: {msg}"
-        );
-    }
-
-    #[test]
-    fn resolve_effort_token_legacy_menu_rejects_none() {
-        // supportsReasoningEffort without a server list → built-in low..xhigh.
-        let state = state_with_meta(Some(serde_json::json!({
-            "supportsReasoningEffort": true,
-        })));
-        assert!(state.resolve_effort_token("none").is_none());
-        assert!(state.resolve_effort_token("minimal").is_none());
-        assert_eq!(
-            state.resolve_effort_token("low"),
-            Some(ReasoningEffort::Low)
         );
     }
 

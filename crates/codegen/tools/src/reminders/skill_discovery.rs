@@ -1,18 +1,16 @@
 //! Skill discovery reminder — discovers new skills near accessed paths.
 //!
 //! Contains `SkillDiscoveryReminder`, a cross-cutting `Reminder` that fires
-//! after every tool call to check for SKILL.md files in `.grow/skills/`,
-//! `.agents/skills/`, or `.claude/skills/` directories near the accessed path.
+//! after every tool call to check for SKILL.md files in `.grow/skills/`
+//! directories near the accessed path.
 //!
 //! The actual tracking logic lives in
 //! `types::skill_discovery_tracker::SkillDiscoveryTracker`.
 
 use std::path::{Path, PathBuf};
 
-/// Directories that contain skill definitions (`.grow/skills/`, `.agents/skills/`,
-/// `.claude/skills/`, `.cursor/skills/`). Shared between startup skill discovery
-/// and runtime `SkillDiscoveryReminder`.
-pub const SKILL_CONFIG_DIRS: &[&str] = &[".grow", ".agents", ".claude", ".cursor"];
+/// Canonical directory containing Grow skill definitions.
+pub const SKILL_CONFIG_DIR: &str = ".grow";
 
 use crate::implementations::skills::discovery;
 use crate::implementations::skills::types::SkillScope;
@@ -70,14 +68,14 @@ impl SkillDiscoveryReminder {
     }
 
     /// Check whether a SKILL.md path is inside a supported skills directory
-    /// (`.grow/skills/`, `.agents/skills/`, or `.claude/skills/`).
+    /// (`.grow/skills/`).
     fn is_in_supported_skills_dir(path: &Path) -> bool {
         for ancestor in path.ancestors().skip(1) {
             if ancestor.file_name().is_some_and(|n| n == "skills") {
                 return ancestor
                     .parent()
                     .and_then(|p| p.file_name())
-                    .is_some_and(|n| SKILL_CONFIG_DIRS.iter().any(|d| *d == n));
+                    .is_some_and(|n| n == SKILL_CONFIG_DIR);
             }
         }
         false
@@ -147,7 +145,7 @@ impl Reminder for SkillDiscoveryReminder {
         }
 
         // 2. Snapshot context under lock, then RELEASE the lock before I/O.
-        let (cwd, git_root, mut checked_dirs_snapshot, compat) = {
+        let (cwd, git_root, mut checked_dirs_snapshot) = {
             let res = resources.lock().await;
             let Some(tracker) = res.get::<SkillManager>() else {
                 return vec![];
@@ -156,12 +154,7 @@ impl Reminder for SkillDiscoveryReminder {
                 Some(c) => c,
                 None => return vec![],
             };
-            (
-                cwd,
-                tracker.git_root.clone(),
-                tracker.checked_dirs.clone(),
-                tracker.compat,
-            )
+            (cwd, tracker.git_root.clone(), tracker.checked_dirs.clone())
         };
         // Lock is released here.
 
@@ -172,7 +165,6 @@ impl Reminder for SkillDiscoveryReminder {
             &cwd,
             git_root.as_deref(),
             &mut checked_dirs_snapshot,
-            compat,
         );
 
         if discovered.is_empty() {

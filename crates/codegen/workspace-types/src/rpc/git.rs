@@ -5,33 +5,6 @@ use serde_json::Value;
 
 use super::WorkspaceRpc;
 
-/// `workspace.git_status`. The response value is a JSON string (branch,
-/// ahead/behind, staged files), capped server-side at ~1 KB.
-///
-/// **DEPRECATED**: This method is deprecated and will be removed in a future
-/// release. Use [`GitStatusExtReq`] with `format: GitStatusFormat::Prompt`
-/// instead, which provides the same compact JSON string output.
-///
-/// Migration:
-/// ```ignore
-/// // Old (deprecated):
-/// let status: serde_json::Value = client.git_status().await?;
-///
-/// // New (recommended):
-/// let response = client.git_status_ext(&GitStatusExtReq {
-///     format: GitStatusFormat::Prompt,
-///     ..Default::default()
-/// }).await?;
-/// let status = response.prompt.expect("prompt format should have prompt");
-/// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GitStatusReq {}
-
-impl WorkspaceRpc for GitStatusReq {
-    const METHOD: &'static str = "workspace.git_status";
-    type Response = Value;
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitStatusExtReq {
     #[serde(default)]
@@ -548,93 +521,30 @@ pub struct GitStatusData {
     pub unstaged: Vec<GitFileChange>,
 }
 
-/// Response wrapper for `git_status_ext` that always has the same shape regardless of format.
-///
-/// This avoids the deserialization ambiguity of an untagged enum by using
-/// a tagged struct with optional fields. Callers check `format` to know
-/// which field to use.
-///
-/// `Deserialize` is implemented manually (see below) so that a legacy flat
-/// `GitStatusData` payload — returned by an older workspace server during a
-/// version skew — is recognized and wrapped as `format: Structured` rather than
-/// silently parsed as empty.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct GitStatusExtResponse {
-    /// The format of this response (echoed from request for convenience).
-    pub format: GitStatusFormat,
-
-    /// Structured status data (present when format = "structured").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<GitStatusData>,
-
-    /// Prompt-formatted string (present when format = "prompt").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for GitStatusExtResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // Deserialize into a generic value first so we can distinguish the new
-        // envelope from a legacy flat `GitStatusData` payload (version skew with
-        // an older workspace server that still returns flat status for
-        // `git_status_ext`).
-        let value = Value::deserialize(deserializer)?;
-
-        // The new envelope is identified by any of its own keys; `format` is
-        // always serialized, and `data`/`prompt` cover any hand-written payload.
-        // A legacy flat `GitStatusData` (root/branch/staged/...) has none of them.
-        let is_new_envelope = value.as_object().is_some_and(|obj| {
-            obj.contains_key("format") || obj.contains_key("data") || obj.contains_key("prompt")
-        });
-
-        if is_new_envelope {
-            #[derive(Deserialize)]
-            struct Envelope {
-                #[serde(default)]
-                format: GitStatusFormat,
-                #[serde(default)]
-                data: Option<GitStatusData>,
-                #[serde(default)]
-                prompt: Option<String>,
-            }
-            let env: Envelope = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-            Ok(GitStatusExtResponse {
-                format: env.format,
-                data: env.data,
-                prompt: env.prompt,
-            })
-        } else {
-            // Legacy flat payload: parse as `GitStatusData` and wrap it.
-            let data: GitStatusData =
-                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-            Ok(GitStatusExtResponse {
-                format: GitStatusFormat::Structured,
-                data: Some(data),
-                prompt: None,
-            })
-        }
-    }
+/// Strict response for `git_status_ext`. The discriminator and payload are
+/// coupled in the type so malformed mixed or empty envelopes cannot exist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "format", rename_all = "lowercase", deny_unknown_fields)]
+pub enum GitStatusExtResponse {
+    Structured { data: GitStatusData },
+    Prompt { prompt: String },
 }
 
 impl GitStatusExtResponse {
     /// Create a structured response.
     pub fn structured(data: GitStatusData) -> Self {
-        Self {
-            format: GitStatusFormat::Structured,
-            data: Some(data),
-            prompt: None,
-        }
+        Self::Structured { data }
     }
 
     /// Create a prompt-formatted response.
     pub fn prompt(text: String) -> Self {
-        Self {
-            format: GitStatusFormat::Prompt,
-            data: None,
-            prompt: Some(text),
+        Self::Prompt { prompt: text }
+    }
+
+    pub fn into_structured(self) -> Option<GitStatusData> {
+        match self {
+            Self::Structured { data } => Some(data),
+            Self::Prompt { .. } => None,
         }
     }
 }
@@ -984,7 +894,6 @@ mod tests {
 
     #[test]
     fn method_constant() {
-        assert_eq!(GitStatusReq::METHOD, "workspace.git_status");
         assert_eq!(GitStatusExtReq::METHOD, "workspace.git_status_ext");
         assert_eq!(GitBranchInfoReq::METHOD, "workspace.git_branch_info");
         assert_eq!(GitMetadataReq::METHOD, "workspace.git_metadata");
@@ -1051,10 +960,7 @@ mod tests {
     fn git_status_ext_response_structured_constructor() {
         let data = GitStatusData::default();
         let response = GitStatusExtResponse::structured(data.clone());
-
-        assert_eq!(response.format, GitStatusFormat::Structured);
-        assert!(response.data.is_some());
-        assert!(response.prompt.is_none());
+        assert!(matches!(response, GitStatusExtResponse::Structured { .. }));
 
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["format"], "structured");
@@ -1068,10 +974,7 @@ mod tests {
     #[test]
     fn git_status_ext_response_prompt_constructor() {
         let response = GitStatusExtResponse::prompt("On branch main".to_string());
-
-        assert_eq!(response.format, GitStatusFormat::Prompt);
-        assert!(response.data.is_none());
-        assert_eq!(response.prompt, Some("On branch main".to_string()));
+        assert!(matches!(response, GitStatusExtResponse::Prompt { .. }));
 
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["format"], "prompt");
@@ -1094,9 +997,9 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: GitStatusExtResponse = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.format, GitStatusFormat::Structured);
-        assert!(deserialized.data.is_some());
-        let data = deserialized.data.unwrap();
+        let GitStatusExtResponse::Structured { data } = deserialized else {
+            panic!("expected structured response");
+        };
         assert_eq!(data.branch, Some("main".to_string()));
         assert_eq!(data.ahead, Some(1));
         assert_eq!(data.behind, Some(0));
@@ -1108,20 +1011,10 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: GitStatusExtResponse = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.format, GitStatusFormat::Prompt);
-        assert!(deserialized.data.is_none());
-        assert_eq!(
-            deserialized.prompt,
-            Some("Changes not staged for commit".to_string())
-        );
-    }
-
-    #[test]
-    fn git_status_ext_response_default() {
-        let response = GitStatusExtResponse::default();
-        assert_eq!(response.format, GitStatusFormat::Structured);
-        assert!(response.data.is_none());
-        assert!(response.prompt.is_none());
+        let GitStatusExtResponse::Prompt { prompt } = deserialized else {
+            panic!("expected prompt response");
+        };
+        assert_eq!(prompt, "Changes not staged for commit");
     }
 
     #[test]
@@ -1131,9 +1024,10 @@ mod tests {
             "data": { "branch": "main", "staged": [], "unstaged": [] },
         });
         let resp: GitStatusExtResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.format, GitStatusFormat::Structured);
-        assert_eq!(resp.data.unwrap().branch, Some("main".to_string()));
-        assert!(resp.prompt.is_none());
+        let GitStatusExtResponse::Structured { data } = resp else {
+            panic!("expected structured response");
+        };
+        assert_eq!(data.branch, Some("main".to_string()));
     }
 
     #[test]
@@ -1143,17 +1037,15 @@ mod tests {
             "prompt": "On branch main",
         });
         let resp: GitStatusExtResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.format, GitStatusFormat::Prompt);
-        assert!(resp.data.is_none());
-        assert_eq!(resp.prompt, Some("On branch main".to_string()));
+        let GitStatusExtResponse::Prompt { prompt } = resp else {
+            panic!("expected prompt response");
+        };
+        assert_eq!(prompt, "On branch main");
     }
 
     #[test]
-    fn git_status_ext_response_deserializes_legacy_flat_status() {
-        // A legacy workspace server returns flat `GitStatusData` JSON for
-        // `git_status_ext`; it must be wrapped as a structured envelope rather
-        // than parsed as an empty response.
-        let legacy = serde_json::to_value(GitStatusData {
+    fn git_status_ext_response_rejects_flat_status() {
+        let flat = serde_json::to_value(GitStatusData {
             branch: Some("main".to_string()),
             ahead: Some(2),
             behind: Some(1),
@@ -1162,19 +1054,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        // Sanity: the legacy payload has none of the envelope's own keys.
-        assert!(legacy.get("format").is_none());
-        assert!(legacy.get("data").is_none());
-        assert!(legacy.get("prompt").is_none());
-
-        let resp: GitStatusExtResponse = serde_json::from_value(legacy).unwrap();
-        assert_eq!(resp.format, GitStatusFormat::Structured);
-        assert!(resp.prompt.is_none());
-        let data = resp
-            .data
-            .expect("legacy flat status should be wrapped into data");
-        assert_eq!(data.branch, Some("main".to_string()));
-        assert_eq!(data.ahead, Some(2));
-        assert_eq!(data.behind, Some(1));
+        assert!(serde_json::from_value::<GitStatusExtResponse>(flat).is_err());
     }
 }

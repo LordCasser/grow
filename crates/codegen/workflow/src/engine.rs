@@ -940,6 +940,34 @@ mod tests {
     }
 
     #[test]
+    fn unknown_agent_option_is_rejected_before_host_call() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let outcome = run_workflow(params(
+            r#"
+            let meta = #{ name: "t", description: "d" };
+            agent("do it", #{ max_output_tokens: 900 });
+            complete(true);
+            "#,
+            Journal::new(None),
+            tx,
+        ));
+
+        match outcome {
+            WorkflowOutcome::Failed { error } => {
+                assert!(
+                    error.contains("unknown field `max_output_tokens`"),
+                    "{error}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid agent options must not cross the host boundary"
+        );
+    }
+
+    #[test]
     fn catchable_host_failure_journals_and_replays() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");

@@ -1,39 +1,5 @@
 use std::path::{Path, PathBuf};
 
-// Project-hook trust is no longer stored here: the shell's folder-trust store
-// (`~/.grow/trusted_folders.toml`) is the single authority for whether a repo's
-// project hooks run (the same gate as repo-local MCP/LSP). The helpers below
-// exist only to migrate prior grants out of the legacy file.
-
-/// Path to the legacy project-hook trust file
-/// (`<user_grow_home>/trusted-hook-projects`), or `None` when no user grow home
-/// resolves. Retained only for the one-time migration into folder-trust.
-pub fn legacy_trust_file_path() -> Option<PathBuf> {
-    Some(config::user_grow_home()?.join("trusted-hook-projects"))
-}
-
-/// Parse the legacy trusted-projects file into a list of project paths.
-///
-/// The legacy format is one canonical absolute path per line; blank and
-/// `#`-comment lines are skipped. A missing file yields `Ok(empty)` (nothing to
-/// migrate); any OTHER read error is returned as `Err` so the caller does not
-/// mistake an unreadable file for an empty one and consume it. Consumed by the
-/// one-time migration that seeds folder-trust from prior grants.
-pub fn list_trusted_projects_with_file(trust_file: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let content = match std::fs::read_to_string(trust_file) {
-        Ok(c) => c,
-        // A missing file is "nothing to migrate", not an error.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    Ok(content
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(PathBuf::from)
-        .collect())
-}
-
 // ── Hook enable/disable ─────────────────────────────────────────────────
 
 /// Check whether a hook is disabled by name.
@@ -126,46 +92,4 @@ fn enable_hook_with_file(hook_name: &str, file: &Path) -> Result<bool, String> {
 /// home resolves.
 fn disabled_hooks_file_path() -> Option<PathBuf> {
     Some(config::user_grow_home()?.join("disabled-hooks"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Each test creates its own legacy file in its own temp dir -- no shared state.
-    fn trust_file_in(dir: &Path) -> PathBuf {
-        let grow_dir = dir.join(".grow");
-        std::fs::create_dir_all(&grow_dir).unwrap();
-        grow_dir.join("trusted-hook-projects")
-    }
-
-    #[test]
-    fn list_trusted_projects_parses_paths_skipping_comments_and_blanks() {
-        let home = tempfile::tempdir().unwrap();
-        let trust_file = trust_file_in(home.path());
-        std::fs::write(
-            &trust_file,
-            "# comment\n\n/abs/project/one\n  /abs/project/two  \n# trailing\n",
-        )
-        .unwrap();
-
-        let projects = list_trusted_projects_with_file(&trust_file).unwrap();
-        assert_eq!(
-            projects,
-            vec![
-                PathBuf::from("/abs/project/one"),
-                PathBuf::from("/abs/project/two"),
-            ]
-        );
-    }
-
-    #[test]
-    fn list_trusted_projects_missing_file_is_empty() {
-        // A missing file is Ok(empty), NOT an error — so the migration treats it
-        // as "nothing to migrate" rather than as an unreadable file.
-        let projects =
-            list_trusted_projects_with_file(Path::new("/nonexistent/trusted-hook-projects"))
-                .expect("missing file resolves to Ok(empty)");
-        assert!(projects.is_empty());
-    }
 }

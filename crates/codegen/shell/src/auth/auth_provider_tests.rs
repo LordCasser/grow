@@ -543,7 +543,7 @@ async fn dropping_helper_future_kills_its_process_group() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    tools::util::detach_command(&mut cmd);
+    tty_utils::detach_command(&mut cmd);
 
     let mut future = Box::pin(run_capped(&mut cmd, std::time::Duration::from_secs(300)));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {

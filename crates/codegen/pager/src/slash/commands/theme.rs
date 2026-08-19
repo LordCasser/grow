@@ -341,7 +341,7 @@ mod tests {
                 screen_mode: crate::app::ScreenMode::Inline,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
-                    yolo_mode: false,
+                    permission_mode: shell::util::config::PermissionMode::Ask,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
             };
@@ -382,7 +382,7 @@ mod tests {
                 screen_mode: crate::app::ScreenMode::Inline,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
-                    yolo_mode: false,
+                    permission_mode: shell::util::config::PermissionMode::Ask,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
             };
@@ -412,7 +412,7 @@ mod tests {
                 screen_mode: crate::app::ScreenMode::Inline,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
-                    yolo_mode: false,
+                    permission_mode: shell::util::config::PermissionMode::Ask,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
             };
@@ -440,7 +440,7 @@ mod tests {
                 screen_mode: crate::app::ScreenMode::Inline,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
-                    yolo_mode: false,
+                    permission_mode: shell::util::config::PermissionMode::Ask,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
             };
@@ -546,7 +546,7 @@ mod tests {
                 screen_mode: crate::app::ScreenMode::Inline,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
-                    yolo_mode: false,
+                    permission_mode: shell::util::config::PermissionMode::Ask,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
             };
@@ -573,7 +573,7 @@ mod tests {
                 screen_mode: crate::app::ScreenMode::Inline,
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: false,
-                    yolo_mode: false,
+                    permission_mode: shell::util::config::PermissionMode::Ask,
                     ..crate::settings::PagerLocalSnapshot::default()
                 },
             };

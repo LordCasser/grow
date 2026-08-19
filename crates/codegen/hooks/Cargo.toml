@@ -16,9 +16,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["process", "rt", "macros", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+tty-utils = { workspace = true }
 url = { workspace = true }
 config = { workspace = true }
-tools = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

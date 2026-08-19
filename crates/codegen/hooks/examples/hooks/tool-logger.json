@@ -1,13 +1,13 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "pre_tool_use": [
       {
         "hooks": [
           { "type": "command", "command": "bin/tool-logger.sh", "timeout": 5 }
         ]
       }
     ],
-    "PostToolUse": [
+    "post_tool_use": [
       {
         "hooks": [
           { "type": "command", "command": "bin/tool-logger.sh", "timeout": 5 }

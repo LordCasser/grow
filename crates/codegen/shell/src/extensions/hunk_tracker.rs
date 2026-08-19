@@ -92,22 +92,12 @@ pub struct GetSummaryRequest {
 #[serde(rename_all = "camelCase")]
 pub struct GetHunksResponse {
     pub hunks: Vec<Arc<Hunk>>,
-
-    // === Explicit content status (new fields) ===
     /// Baseline content with explicit status - only present when requesting a specific path
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<FileContentView>,
     /// Current content with explicit status - only present when requesting a specific path
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<FileContentView>,
-
-    // === Legacy fields for backward compatibility ===
-    /// Baseline content (git HEAD) - legacy, use `baseline.content` instead
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_content: Option<String>,
-    /// Current content (on disk) - legacy, use `current.content` instead
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,9 +166,6 @@ fn file_content_status_from_wire(w: FileContentStatusWire) -> FileContentStatus 
         FileContentStatusWire::LfsPointer => FileContentStatus::LfsPointer,
         FileContentStatusWire::Symlink => FileContentStatus::Symlink,
         FileContentStatusWire::Full => FileContentStatus::Full,
-        // A status from a newer peer this build does not know: degrade to
-        // Missing (content unavailable) rather than failing.
-        FileContentStatusWire::Unknown => FileContentStatus::Missing,
     }
 }
 
@@ -314,19 +301,12 @@ pub async fn handle(
             let ctx = get_hunk_tracker(agent, req.session_id.as_ref())?;
 
             // If path is specified, use get_file_hunk_data to get hunks + content together
-            let (hunks, baseline, current, baseline_content, current_content) =
-                if let Some(path) = req.path {
-                    let data = ctx.handle.get_file_hunk_data(PathBuf::from(path)).await;
-                    (
-                        data.hunks,
-                        Some(data.baseline),
-                        Some(data.current),
-                        data.baseline_content,
-                        data.current_content,
-                    )
-                } else {
-                    (ctx.handle.get_all_hunks().await, None, None, None, None)
-                };
+            let (hunks, baseline, current) = if let Some(path) = req.path {
+                let data = ctx.handle.get_file_hunk_data(PathBuf::from(path)).await;
+                (data.hunks, Some(data.baseline), Some(data.current))
+            } else {
+                (ctx.handle.get_all_hunks().await, None, None)
+            };
 
             // Filter by source if specified
             let hunks = match req.source.as_deref() {
@@ -348,8 +328,6 @@ pub async fn handle(
                 hunks,
                 baseline,
                 current,
-                baseline_content,
-                current_content,
             }))
         }
 
@@ -708,8 +686,7 @@ mod tests {
     // =========================================================================
     // GetHunksResponse Serialization Tests
     // =========================================================================
-    // These tests verify that the ACP get-hunks response correctly serializes
-    // the new explicit status fields (baseline, current) alongside legacy fields.
+    // These tests verify the canonical explicit content-status fields.
 
     /// GetHunksResponse serializes Full status with all fields
     #[test]
@@ -721,8 +698,6 @@ mod tests {
             hunks: vec![],
             baseline: Some(FileContentView::full(baseline_text.to_string())),
             current: Some(FileContentView::full(current_text.to_string())),
-            baseline_content: Some(baseline_text.to_string()),
-            current_content: Some(current_text.to_string()),
         };
 
         let json = serde_json::to_value(&response).unwrap();
@@ -747,15 +722,8 @@ mod tests {
             current_text
         );
 
-        // Verify legacy fields
-        assert_eq!(
-            json.get("baselineContent").unwrap().as_str().unwrap(),
-            baseline_text
-        );
-        assert_eq!(
-            json.get("currentContent").unwrap().as_str().unwrap(),
-            current_text
-        );
+        assert!(json.get("baselineContent").is_none());
+        assert!(json.get("currentContent").is_none());
     }
 
     /// GetHunksResponse serializes Missing status
@@ -765,8 +733,6 @@ mod tests {
             hunks: vec![],
             baseline: Some(FileContentView::missing()),
             current: Some(FileContentView::full("new file\n".to_string())),
-            baseline_content: None,
-            current_content: Some("new file\n".to_string()),
         };
 
         let json = serde_json::to_value(&response).unwrap();
@@ -777,7 +743,6 @@ mod tests {
         assert!(baseline.get("content").is_none());
         assert!(baseline.get("byteLen").is_none());
 
-        // Legacy baseline_content should be absent (skipped when None)
         assert!(json.get("baselineContent").is_none());
     }
 
@@ -788,8 +753,6 @@ mod tests {
             hunks: vec![],
             baseline: Some(FileContentView::binary(Some(1024))),
             current: Some(FileContentView::binary(Some(2048))),
-            baseline_content: None,
-            current_content: None,
         };
 
         let json = serde_json::to_value(&response).unwrap();
@@ -813,8 +776,6 @@ mod tests {
             hunks: vec![],
             baseline: Some(FileContentView::too_large(5_000_000)),
             current: Some(FileContentView::too_large(10_000_000)),
-            baseline_content: None,
-            current_content: None,
         };
 
         let json = serde_json::to_value(&response).unwrap();
@@ -853,13 +814,11 @@ mod tests {
             )],
             baseline: None,
             current: None,
-            baseline_content: None,
-            current_content: None,
         };
 
         let json = serde_json::to_value(&response).unwrap();
 
-        // baseline, current, baselineContent, currentContent should all be absent
+        // Optional content views are absent in the get-all response.
         assert!(json.get("baseline").is_none());
         assert!(json.get("current").is_none());
         assert!(json.get("baselineContent").is_none());

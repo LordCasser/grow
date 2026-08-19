@@ -4,9 +4,7 @@
 //! `tools/src/implementations/skills/types.rs` (the type the
 //! server serializes); the fixture tests below pin the contract.
 //!
-//! Not to be confused with the event/chunk `SkillInfo` in
-//! `crate::types::skills` (`source`-keyed), which is **not** this RPC's
-//! wire shape.
+//! This module owns the workspace skill-discovery wire schema.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,6 +12,7 @@ use serde_json::Value;
 use super::WorkspaceRpc;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiscoverSkillsReq {}
 
 impl WorkspaceRpc for DiscoverSkillsReq {
@@ -21,24 +20,11 @@ impl WorkspaceRpc for DiscoverSkillsReq {
     type Response = Vec<SkillInfo>;
 }
 
-/// `workspace.discover_plugins` — plugins discovered at the workspace
-/// root. Each element is the raw serialized plugin object.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DiscoverPluginsReq {}
-
-impl WorkspaceRpc for DiscoverPluginsReq {
-    const METHOD: &'static str = "workspace.discover_plugins";
-    type Response = Vec<Value>;
-}
-
 /// Scope/priority of a skill based on where it was discovered.
 /// Lower values have higher priority.
 ///
-/// Serde is manual so that [`Unknown`](Self::Unknown) is lossless: a
-/// scope string from a newer server deserializes into
-/// `Unknown(original)` and re-serializes back to the original string,
-/// so round-tripping never rewrites a novel scope value.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SkillScope {
     /// cwd/.grow/skills
     Local,
@@ -52,43 +38,6 @@ pub enum SkillScope {
     Bundled,
     /// plugin-provided skills
     Plugin,
-    /// A scope value this client does not know, preserved verbatim.
-    Unknown(String),
-}
-
-impl SkillScope {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Local => "local",
-            Self::Repo => "repo",
-            Self::User => "user",
-            Self::Server => "server",
-            Self::Bundled => "bundled",
-            Self::Plugin => "plugin",
-            Self::Unknown(s) => s,
-        }
-    }
-}
-
-impl Serialize for SkillScope {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for SkillScope {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
-            "local" => Self::Local,
-            "repo" => Self::Repo,
-            "user" => Self::User,
-            "server" => Self::Server,
-            "bundled" => Self::Bundled,
-            "plugin" => Self::Plugin,
-            _ => Self::Unknown(s),
-        })
-    }
 }
 
 const fn default_true() -> bool {
@@ -98,6 +47,7 @@ const fn default_true() -> bool {
 /// A discovered skill as serialized by `workspace.discover_skills`.
 /// See the module SYNC note for the source of truth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkillInfo {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,13 +187,8 @@ mod tests {
     }
 
     #[test]
-    fn skill_scope_unknown_value_round_trips_losslessly() {
-        let v: SkillScope = serde_json::from_value(serde_json::json!("galactic")).unwrap();
-        assert_eq!(v, SkillScope::Unknown("galactic".into()));
-        assert_eq!(
-            serde_json::to_value(&v).unwrap(),
-            serde_json::json!("galactic")
-        );
+    fn skill_scope_rejects_unknown_value() {
+        assert!(serde_json::from_value::<SkillScope>(serde_json::json!("galactic")).is_err());
     }
 
     #[test]
@@ -255,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_info_ignores_unknown_fields() {
+    fn skill_info_rejects_unknown_fields() {
         let raw = serde_json::json!({
             "name": "n",
             "description": "d",
@@ -263,13 +208,11 @@ mod tests {
             "scope": "repo",
             "brand_new_field": {"nested": true},
         });
-        let info: SkillInfo = serde_json::from_value(raw).unwrap();
-        assert_eq!(info.scope, SkillScope::Repo);
+        assert!(serde_json::from_value::<SkillInfo>(raw).is_err());
     }
 
     #[test]
     fn method_constant() {
         assert_eq!(DiscoverSkillsReq::METHOD, "workspace.discover_skills");
-        assert_eq!(DiscoverPluginsReq::METHOD, "workspace.discover_plugins");
     }
 }

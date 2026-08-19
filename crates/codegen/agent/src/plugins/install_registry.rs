@@ -15,8 +15,9 @@ const DEFAULT_INSTALL_DIR_NAME: &str = "installed-plugins";
 
 /// Registry of installed repos and their plugins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstallRegistry {
-    /// Schema version for forward compatibility.
+    /// Exact on-disk schema version.
     pub version: u32,
     /// Installed repos, keyed by repo key (`<basename>-<hash8>`).
     pub repos: HashMap<String, InstalledRepo>,
@@ -27,7 +28,7 @@ pub struct InstallRegistry {
 
 /// How a repo was installed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum InstallKind {
     /// Cloned from a remote git repo.
     Git {
@@ -35,7 +36,7 @@ pub enum InstallKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         git_ref: Option<String>,
         commit: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         subdir: Option<String>,
     },
     /// Copied from a local directory (full tree snapshot under installed-plugins).
@@ -44,13 +45,14 @@ pub enum InstallKind {
         /// Optional plugin subdirectory selector used at install time (e.g.
         /// multi-package `path#plugins/foo`). Preserved so refresh rediscovers
         /// the same scope.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         subdir: Option<String>,
     },
 }
 
 /// A single installed repo, which may contain one or more plugins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstalledRepo {
     pub kind: InstallKind,
     pub installed_at: String,
@@ -60,13 +62,14 @@ pub struct InstalledRepo {
     /// Plugins discovered within this repo.
     pub plugins: HashMap<String, RepoPlugin>,
     /// Marketplace provenance (None for non-marketplace installs).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub marketplace: Option<MarketplaceProvenance>,
 }
 
 /// Marketplace provenance — tracks which marketplace a plugin was installed from.
 /// Lives here (not in plugin-marketplace) to keep dependency direction sane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarketplaceProvenance {
     /// Canonical source identity (git URL or local path).
     pub source_url_or_path: String,
@@ -78,6 +81,7 @@ pub struct MarketplaceProvenance {
 
 /// A plugin discovered within an installed repo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepoPlugin {
     /// Subdirectory within the repo (None if plugin is at repo root).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +137,14 @@ impl InstallRegistry {
                     serde_json::from_str(&content).map_err(|e| InstallError::Json {
                         detail: e.to_string(),
                     })?;
+                if reg.version != 1 {
+                    return Err(InstallError::Json {
+                        detail: format!(
+                            "unsupported plugin registry version {}; expected 1",
+                            reg.version
+                        ),
+                    });
+                }
                 reg.install_dir = install_dir;
                 Ok(reg)
             }

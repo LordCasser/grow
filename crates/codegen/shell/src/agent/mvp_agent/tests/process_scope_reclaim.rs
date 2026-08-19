@@ -33,7 +33,7 @@ fn insert_session_with_scope(
     sid: &acp::SessionId,
     scope: tty_utils::ProcessScope,
 ) {
-    let mut handle = make_test_handle("test", false, None);
+    let mut handle = make_test_handle("test", None);
     handle.info.id = sid.clone();
     handle.tool_context.process_scope = Some(scope);
     agent.sessions.borrow_mut().insert(sid.clone(), handle);

@@ -433,7 +433,9 @@ mod install_pipeline {
         header.set_size(body.len() as u64);
         header.set_mode(0o755);
         header.set_cksum();
-        archive.append_data(&mut header, "grow", body.as_bytes()).unwrap();
+        archive
+            .append_data(&mut header, "grow", body.as_bytes())
+            .unwrap();
         let encoder = archive.into_inner().unwrap();
         encoder.finish().unwrap().into_inner()
     }
@@ -611,7 +613,11 @@ mod install_pipeline {
             Some("0.1.181")
         );
         // The versioned binary landed in downloads.
-        assert!(downloads.join(format!("grow-0.1.181-{}", test_platform())).exists());
+        assert!(
+            downloads
+                .join(format!("grow-0.1.181-{}", test_platform()))
+                .exists()
+        );
     }
 
     // 2c: an external symlink (outside grow_home) is swapped to the new
@@ -822,7 +828,9 @@ mod install_pipeline {
         .unwrap();
         assert_eq!(landed, target);
         assert!(
-            std::fs::read_to_string(&target).unwrap().contains("0.1.181"),
+            std::fs::read_to_string(&target)
+                .unwrap()
+                .contains("0.1.181"),
             "target must be replaced"
         );
         // The still-running process survived the rename-over.

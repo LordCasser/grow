@@ -1,12 +1,14 @@
 //! Read-only Trajectory projection built exclusively from Timeline events.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CompactionEvent, MessageEvent, ObservationEvent, RecoveryEvent, RequestEvent, StepEvent,
-    SurfaceId, SurfaceOp, Timeline, TimelineEvent, TimelineEventKind, ToolEvent, TurnEvent,
+    CompactionEvent, ControlEvent, MessageEvent, ObservationEvent, RecoveryEvent, RequestEvent,
+    SessionTitleEvent, SessionTitleSource, SidebandSpawnEvent, StepEvent, SubagentEvent,
+    SubagentResultEvent, SubagentSeedEvent, SurfaceId, SurfaceOp, Timeline, TimelineEvent,
+    TimelineEventKind, ToolEvent, TurnEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,10 +21,16 @@ pub enum SurfaceVisibility {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrajectoryRow {
+    pub entry_id: String,
     pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_seq: Option<u64>,
     pub at_ms: i64,
-    pub category: String,
-    pub name: String,
+    pub layer: String,
+    pub actor: String,
+    pub class: String,
+    pub producer: String,
+    pub kind: String,
     pub state: String,
     pub visibility: SurfaceVisibility,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,76 +61,131 @@ pub struct TrajectorySnapshot {
 
 impl Timeline {
     pub fn trajectory(&self) -> TrajectorySnapshot {
-        let current_surface = self.current_surface_ids().iter().copied().collect();
-        let mut request_scopes = BTreeMap::<String, (String, u32)>::new();
-        let mut tool_scopes = BTreeMap::<String, (String, u32)>::new();
-        let rows = self
-            .events()
-            .iter()
-            .map(|event| {
-                match &event.kind {
-                    TimelineEventKind::Request(RequestEvent::Started {
-                        id, turn, step, ..
-                    }) => {
-                        request_scopes.insert(id.clone(), (turn.0.to_string(), step.index));
+        let mut projector = TrajectoryProjector::default();
+        for event in self.events() {
+            projector.accept(event);
+        }
+        projector.snapshot(self)
+    }
+}
+
+/// Incremental read model for long-running Timeline ledgers.
+///
+/// Surface replacements update the visibility of earlier message rows through
+/// their stable `SurfaceId`s, so appending one event never requires replaying
+/// the full ledger.
+#[derive(Debug, Clone, Default)]
+pub struct TrajectoryProjector {
+    rows: Vec<TrajectoryRow>,
+    request_scopes: BTreeMap<String, (String, u32)>,
+    tool_scopes: BTreeMap<String, (String, u32)>,
+    surface_rows: BTreeMap<SurfaceId, usize>,
+    current_items_per_row: Vec<usize>,
+}
+
+impl TrajectoryProjector {
+    pub fn accept(&mut self, event: &TimelineEvent) {
+        match &event.kind {
+            TimelineEventKind::Request(RequestEvent::Started { id, turn, step, .. }) => {
+                self.request_scopes
+                    .insert(id.clone(), (turn.0.to_string(), step.index));
+            }
+            TimelineEventKind::Tool(ToolEvent::Started {
+                call_id,
+                turn,
+                step,
+                ..
+            }) => {
+                self.tool_scopes
+                    .insert(call_id.clone(), (turn.0.to_string(), step.index));
+            }
+            _ => {}
+        }
+
+        if let TimelineEventKind::Messages(MessageEvent {
+            surface: SurfaceOp::Replace { shadowed, .. },
+            ..
+        }) = &event.kind
+        {
+            for id in shadowed {
+                if let Some(&row_index) = self.surface_rows.get(id) {
+                    let remaining = &mut self.current_items_per_row[row_index];
+                    *remaining = remaining.saturating_sub(1);
+                    if *remaining == 0 {
+                        self.rows[row_index].visibility = SurfaceVisibility::Shadowed;
                     }
-                    TimelineEventKind::Tool(ToolEvent::Started {
-                        call_id,
-                        turn,
-                        step,
-                        ..
-                    }) => {
-                        tool_scopes.insert(call_id.clone(), (turn.0.to_string(), step.index));
-                    }
-                    _ => {}
                 }
-                row(event, &current_surface, &request_scopes, &tool_scopes)
-            })
-            .collect();
+            }
+        }
+
+        let row_index = self.rows.len();
+        let current_items = match &event.kind {
+            TimelineEventKind::Messages(messages) => {
+                for item in 0..messages.items.len() {
+                    if let Ok(item) = u32::try_from(item) {
+                        self.surface_rows.insert(
+                            SurfaceId {
+                                event: event.seq,
+                                item,
+                            },
+                            row_index,
+                        );
+                    }
+                }
+                messages.items.len()
+            }
+            _ => 0,
+        };
+        self.current_items_per_row.push(current_items);
+        self.rows.push(row(
+            event,
+            if current_items == 0 {
+                SurfaceVisibility::LogOnly
+            } else {
+                SurfaceVisibility::Current
+            },
+            &self.request_scopes,
+            &self.tool_scopes,
+        ));
+    }
+
+    pub fn rows(&self) -> &[TrajectoryRow] {
+        &self.rows
+    }
+
+    pub fn snapshot(&self, timeline: &Timeline) -> TrajectorySnapshot {
         TrajectorySnapshot {
             schema_version: crate::TIMELINE_SCHEMA_VERSION,
-            event_count: self.events().len(),
-            current_surface_items: self.surface_len(),
-            active_turn: self.active_turn().map(|id| id.0.to_string()),
-            active_step: self.active_step().map(|id| id.index),
-            open_requests: self.open_request_ids().map(str::to_owned).collect(),
-            open_tools: self.open_tool_call_ids().map(str::to_owned).collect(),
-            rows,
+            event_count: timeline.events().len(),
+            current_surface_items: timeline.surface_len(),
+            active_turn: timeline.active_turn().map(|id| id.0.to_string()),
+            active_step: timeline.active_step().map(|id| id.index),
+            open_requests: timeline.open_request_ids().map(str::to_owned).collect(),
+            open_tools: timeline.open_tool_call_ids().map(str::to_owned).collect(),
+            rows: self.rows.clone(),
         }
     }
 }
 
 fn row(
     event: &TimelineEvent,
-    current_surface: &BTreeSet<SurfaceId>,
+    visibility: SurfaceVisibility,
     request_scopes: &BTreeMap<String, (String, u32)>,
     tool_scopes: &BTreeMap<String, (String, u32)>,
 ) -> TrajectoryRow {
-    let (category, name, state, turn_id, step_index, correlation_id, duration_ms, summary) =
+    let (_, _, state, turn_id, step_index, correlation_id, duration_ms, summary) =
         describe(&event.kind, request_scopes, tool_scopes);
-    let visibility = match &event.kind {
-        TimelineEventKind::Messages(messages) => {
-            let has_current = (0..messages.items.len()).any(|item| {
-                u32::try_from(item).is_ok_and(|item| {
-                    current_surface.contains(&SurfaceId {
-                        event: event.seq,
-                        item,
-                    })
-                })
-            });
-            if has_current {
-                SurfaceVisibility::Current
-            } else {
-                SurfaceVisibility::Shadowed
-            }
-        }
-        _ => SurfaceVisibility::LogOnly,
-    };
+    let (layer, class, producer, kind) = dimensions(&event.kind, &state);
     TrajectoryRow {
+        entry_id: format!("t:local/{}", event.seq.get()),
         seq: event.seq.get(),
+        parent_seq: None,
         at_ms: event.at_ms,
-        category,
-        name,
+        layer,
+        actor: "main".into(),
+        class,
+        producer,
+        kind,
         state,
         visibility,
         turn_id,
@@ -132,6 +195,147 @@ fn row(
         summary,
         details: serde_json::to_value(&event.kind).unwrap_or(serde_json::Value::Null),
     }
+}
+
+fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String, String) {
+    match event {
+        TimelineEventKind::Messages(message) => message_dimensions(message),
+        TimelineEventKind::Turn(_) => coordinates("meta", "lifecycle", "core", "turn", state),
+        TimelineEventKind::Step(_) => coordinates("meta", "lifecycle", "core", "step", state),
+        TimelineEventKind::Request(_) => {
+            coordinates("meta", "lifecycle", "model", "request", state)
+        }
+        TimelineEventKind::Tool(tool) => {
+            let producer = match tool {
+                ToolEvent::Started { name, .. } | ToolEvent::Completed { name, .. } => {
+                    format!("tool:{name}")
+                }
+            };
+            let kind = match tool {
+                ToolEvent::Started { .. } => "tool.call",
+                ToolEvent::Completed { .. } => "tool.result",
+            };
+            (kind.into(), "message".into(), producer, kind.into())
+        }
+        TimelineEventKind::Compaction(_) => {
+            coordinates("meta", "governance", "core", "compaction", state)
+        }
+        TimelineEventKind::Recovery(_) => {
+            coordinates("meta", "governance", "core", "context.recovery", state)
+        }
+        TimelineEventKind::Observation(observation) => {
+            let producer = producer_from_scope(&observation.scope);
+            (
+                "meta".into(),
+                "audit".into(),
+                producer,
+                format!("{}.{}", observation.scope, observation.name),
+            )
+        }
+        TimelineEventKind::Control(_) => {
+            coordinates("system.behavior", "lifecycle", "core", "control", state)
+        }
+        TimelineEventKind::SessionTitle(title) => coordinates(
+            "meta",
+            "lifecycle",
+            match &title.source {
+                SessionTitleSource::User => "user",
+                SessionTitleSource::Generated { .. } | SessionTitleSource::Fallback { .. } => {
+                    "sideband"
+                }
+            },
+            "session.title",
+            state,
+        ),
+        TimelineEventKind::Sideband(_) => {
+            coordinates("meta", "auxiliary", "core", "sideband", "spawn")
+        }
+        TimelineEventKind::Subagent(_) => {
+            coordinates("meta", "lifecycle", "core", "subagent", state)
+        }
+        TimelineEventKind::SubagentSeed(_) => {
+            coordinates("meta", "lifecycle", "core", "subagent.seed", "linked")
+        }
+        TimelineEventKind::SubagentResult(_) => {
+            coordinates("meta", "lifecycle", "core", "subagent.result", state)
+        }
+    }
+}
+
+fn coordinates(
+    layer: &str,
+    class: &str,
+    producer: &str,
+    kind: &str,
+    state: &str,
+) -> (String, String, String, String) {
+    (
+        layer.into(),
+        class.into(),
+        producer.into(),
+        format!("{kind}.{state}"),
+    )
+}
+
+fn message_dimensions(message: &MessageEvent) -> (String, String, String, String) {
+    let governance = matches!(
+        message.cause,
+        crate::MessageCause::IntegrityRepair
+            | crate::MessageCause::Compaction
+            | crate::MessageCause::ToolResultPrune
+            | crate::MessageCause::ImageRewrite
+            | crate::MessageCause::ContextRebuild
+            | crate::MessageCause::Rewind
+    );
+    if governance {
+        let kind = match message.cause {
+            crate::MessageCause::Compaction => "replacement.summary",
+            crate::MessageCause::Rewind => "context.branch",
+            crate::MessageCause::ToolResultPrune => "replacement.range_ref",
+            crate::MessageCause::IntegrityRepair => "context.repair",
+            crate::MessageCause::ImageRewrite => "context.image_rewrite",
+            crate::MessageCause::ContextRebuild => "context.rebuild",
+            _ => unreachable!(),
+        };
+        return (
+            "meta".into(),
+            "governance".into(),
+            "core".into(),
+            kind.into(),
+        );
+    }
+
+    let first = message.items.first();
+    let (layer, producer, kind) = match first {
+        Some(sampling_types::ConversationItem::System(_)) => {
+            ("system.core", "core", "system.message")
+        }
+        Some(sampling_types::ConversationItem::User(user)) if user.synthetic_reason.is_some() => {
+            ("user.synthetic", "core", "user.message")
+        }
+        Some(sampling_types::ConversationItem::User(_)) => ("user.direct", "user", "user.message"),
+        Some(sampling_types::ConversationItem::Assistant(_))
+        | Some(sampling_types::ConversationItem::Reasoning(_)) => {
+            ("assistant", "model", "assistant.message")
+        }
+        Some(sampling_types::ConversationItem::ToolResult(_)) => {
+            ("tool.result", "tool", "tool.result")
+        }
+        Some(sampling_types::ConversationItem::BackendToolCall(_)) => {
+            ("tool.call", "model", "tool.call")
+        }
+        None => ("meta", "core", "message.empty"),
+    };
+    (layer.into(), "message".into(), producer.into(), kind.into())
+}
+
+fn producer_from_scope(scope: &str) -> String {
+    for prefix in ["hook", "plugin", "skill", "mcp", "tool"] {
+        if scope == prefix || scope.starts_with(&format!("{prefix}:")) {
+            return scope.to_owned();
+        }
+    }
+    "core".into()
 }
 
 #[allow(clippy::type_complexity)]
@@ -154,7 +358,7 @@ fn describe(
         TimelineEventKind::Turn(event) => match event {
             TurnEvent::Started {
                 id,
-                origin,
+                identity,
                 model_id,
                 ..
             } => tuple(
@@ -165,7 +369,7 @@ fn describe(
                 None,
                 Some(id.0.to_string()),
                 None,
-                format!("{origin} · {model_id}"),
+                format!("{} · {model_id}", identity.origin),
             ),
             TurnEvent::Ended {
                 id,
@@ -175,7 +379,7 @@ fn describe(
             } => tuple(
                 "turn",
                 "turn",
-                "ended",
+                outcome,
                 Some(id.0.to_string()),
                 None,
                 Some(id.0.to_string()),
@@ -242,6 +446,109 @@ fn describe(
             None,
             None,
             scope.clone(),
+        ),
+        TimelineEventKind::Control(ControlEvent { revision, .. }) => tuple(
+            "governance",
+            "control",
+            "committed",
+            None,
+            None,
+            Some(revision.to_string()),
+            None,
+            format!("control revision {revision}"),
+        ),
+        TimelineEventKind::SessionTitle(SessionTitleEvent { title, source }) => tuple(
+            "session",
+            "title",
+            match source {
+                SessionTitleSource::User => "user",
+                SessionTitleSource::Generated { .. } => "generated",
+                SessionTitleSource::Fallback { .. } => "fallback",
+            },
+            None,
+            None,
+            match source {
+                SessionTitleSource::User => None,
+                SessionTitleSource::Generated { sideband_id, .. }
+                | SessionTitleSource::Fallback { sideband_id, .. } => Some(sideband_id.clone()),
+            },
+            None,
+            title.clone(),
+        ),
+        TimelineEventKind::Sideband(SidebandSpawnEvent {
+            sideband_id,
+            purpose,
+            ..
+        }) => tuple(
+            "sideband",
+            purpose.as_str(),
+            "spawn",
+            None,
+            None,
+            Some(sideband_id.clone()),
+            None,
+            purpose.as_str().into(),
+        ),
+        TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn)) => tuple(
+            "subagent",
+            "spawn",
+            "running",
+            None,
+            None,
+            Some(spawn.subagent_id.clone()),
+            None,
+            format!("{} · {}", spawn.subagent_type, spawn.description),
+        ),
+        TimelineEventKind::Subagent(SubagentEvent::Ended(end)) => tuple(
+            "subagent",
+            "end",
+            match end.outcome {
+                crate::SubagentOutcome::Completed => "completed",
+                crate::SubagentOutcome::Failed => "failed",
+                crate::SubagentOutcome::Cancelled => "cancelled",
+            },
+            None,
+            None,
+            Some(end.subagent_id.clone()),
+            Some(end.duration_ms),
+            end.error
+                .clone()
+                .unwrap_or_else(|| "subagent completed".into()),
+        ),
+        TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+            parent_timeline_id,
+            parent_spawn_seq,
+            subagent_id,
+            ..
+        }) => tuple(
+            "subagent",
+            "seed-source",
+            "linked",
+            None,
+            None,
+            Some(subagent_id.clone()),
+            None,
+            format!("t:{parent_timeline_id}/{parent_spawn_seq}"),
+        ),
+        TimelineEventKind::SubagentResult(SubagentResultEvent {
+            subagent_id,
+            outcome,
+            duration_ms,
+            error,
+            ..
+        }) => tuple(
+            "subagent",
+            "result",
+            match outcome {
+                crate::SubagentOutcome::Completed => "completed",
+                crate::SubagentOutcome::Failed => "failed",
+                crate::SubagentOutcome::Cancelled => "cancelled",
+            },
+            None,
+            None,
+            Some(subagent_id.clone()),
+            Some(*duration_ms),
+            error.clone().unwrap_or_else(|| "subagent completed".into()),
         ),
     }
 }
@@ -446,6 +753,30 @@ fn describe_compaction(event: &CompactionEvent) -> ReturnTuple {
             None,
             format!("prompt {prompt_index} · {source_items} source items"),
         ),
+        CompactionEvent::Summary {
+            id,
+            source_tokens,
+            summary_chars,
+            result_ref,
+            target,
+            ..
+        } => tuple(
+            "compaction",
+            "compaction",
+            "summary",
+            None,
+            None,
+            Some(id.clone()),
+            None,
+            format!(
+                "{} shadowed items [{}..{}] · {source_tokens} source tokens → {summary_chars} chars · {}:{}",
+                target.shadowed.len(),
+                surface_id_label(target.start),
+                surface_id_label(target.end),
+                result_ref.timeline_id,
+                result_ref.first_seq
+            ),
+        ),
         CompactionEvent::Completed {
             id,
             source_items,
@@ -476,6 +807,10 @@ fn describe_compaction(event: &CompactionEvent) -> ReturnTuple {
             truncate(error, 180),
         ),
     }
+}
+
+fn surface_id_label(id: SurfaceId) -> String {
+    format!("e{}:i{}", id.event.get(), id.item)
 }
 
 type ReturnTuple = (
@@ -544,6 +879,26 @@ mod tests {
     }
 
     #[test]
+    fn projection_exposes_control_commits_as_governance_rows() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 3,
+                snapshot: serde_json::json!({ "behavior": "plan" }),
+            }))
+            .unwrap();
+
+        let mut snapshot = timeline.trajectory();
+        let row = snapshot.rows.pop().unwrap();
+        assert_eq!(row.layer, "system.behavior");
+        assert_eq!(row.class, "lifecycle");
+        assert_eq!(row.producer, "core");
+        assert_eq!(row.kind, "control.committed");
+        assert_eq!(row.state, "committed");
+        assert_eq!(row.correlation_id.as_deref(), Some("3"));
+    }
+
+    #[test]
     fn projection_carries_request_scope_to_terminal_rows() {
         let mut timeline = Timeline::default();
         let turn = crate::TurnId(9);
@@ -551,11 +906,17 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
-                origin: "user".into(),
+                identity: crate::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    stage_id: None,
+                },
                 model_id: "model".into(),
                 input_message_count: 0,
-                prompt_index: Some(0),
-                prompt_text: Some("prompt".into()),
+                prompt_index: 0,
+                prompt_text: "prompt".into(),
+                input_kind: crate::TurnInputKind::Prompt,
                 redirect_kind: None,
             }))
             .unwrap();
@@ -585,5 +946,23 @@ mod tests {
         let terminal = timeline.trajectory().rows.pop().unwrap();
         assert_eq!(terminal.turn_id.as_deref(), Some("9"));
         assert_eq!(terminal.step_index, Some(2));
+    }
+
+    #[test]
+    fn projection_exposes_session_title_as_lifecycle_fact() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::SessionTitle(SessionTitleEvent {
+                title: "Canonical title".into(),
+                source: SessionTitleSource::User,
+            }))
+            .unwrap();
+
+        let row = timeline.trajectory().rows.pop().unwrap();
+        assert_eq!(row.layer, "meta");
+        assert_eq!(row.class, "lifecycle");
+        assert_eq!(row.producer, "user");
+        assert_eq!(row.state, "user");
+        assert_eq!(row.summary, "Canonical title");
     }
 }

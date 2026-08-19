@@ -66,7 +66,7 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: PagerLocalSnapshot {
                 multiline_mode,
-                yolo_mode: false,
+                permission_mode: shell::util::config::PermissionMode::Ask,
                 ..PagerLocalSnapshot::default()
             },
         }

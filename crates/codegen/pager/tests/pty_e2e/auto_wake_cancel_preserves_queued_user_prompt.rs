@@ -62,13 +62,13 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
     content.set_response("TURN1_SETTLED");
 
     let binary = pager_binary().expect("resolve pager binary");
-    // --yolo skips the bash permission prompt; --trust skips the folder-trust gate.
+    // --permission-mode always-approve skips the bash permission prompt; --trust skips the folder-trust gate.
     let mut harness = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");
@@ -199,7 +199,7 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--continue", "--yolo", "--trust"],
+        &["--continue", "--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn resumed pager");
@@ -291,7 +291,7 @@ async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

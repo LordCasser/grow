@@ -105,7 +105,7 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
 /// register zero turns and never summarize, blowing up token usage.
 ///
 /// NOTE: this is one of two reasoning-aware turn-boundary scanners that must move
-/// together — the other is `fork_filter_chat` in
+/// together — the other is `fork_filter_surface` in
 /// `shell/src/session/storage/jsonl.rs` (it truncates to the last
 /// complete turn before this counts them). Keep their notions of a "complete
 /// turn" in sync if the turn item model changes.

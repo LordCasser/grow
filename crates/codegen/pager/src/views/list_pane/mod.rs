@@ -17,9 +17,7 @@ mod state;
 pub use crate::search::QueryKind;
 pub use layout::{ListLayoutCache, WrapMode};
 pub use render::ListPane;
-pub use state::{
-    FilterMatcher, InputBarMode, ListFilter, ListMatcher, ListPaneConfig, ListPaneState, MatchMode,
-};
+pub use state::{InputBarMode, ListMatcher, ListPaneConfig, ListPaneState, MatchMode};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

@@ -89,17 +89,6 @@ pub enum Action {
     },
     /// Open the "New Worktree" popup dialog on the welcome screen.
     OpenNewWorktreeDialog,
-    /// Open the interactive import-claude modal on the welcome screen.
-    ImportClaudeSettings,
-    /// User confirmed the import modal — apply selected items.
-    ImportClaudeConfirm,
-    /// User cancelled the import modal — close without applying.
-    ImportClaudeCancel,
-    /// Hide the import-claude menu row by recording the current `.claude/`
-    /// content hash as "seen". Doesn't import anything, doesn't change
-    /// runtime fallback behavior. The menu reappears only if `.claude/`
-    /// content changes.
-    DismissClaudeImport,
     /// Load (resume) an existing session by ID (strict — never create).
     /// The optional `PathBuf` overrides the CWD for sessions stored under a
     /// different directory (e.g., a worktree).
@@ -455,10 +444,6 @@ pub enum Action {
     /// process-wide cache mirror and persists to `[ui].group_tool_verbs`
     /// via `Effect::PersistSetting`.
     SetGroupToolVerbs(bool),
-    /// Set whether Edit blocks default to the collapsed one-line diffstat
-    /// summary. SHELL-owned: updates the process-wide cache mirror and
-    /// persists to `[ui].collapsed_edit_blocks` via `Effect::PersistSetting`.
-    SetCollapsedEditBlocks(bool),
     /// Set whether the predicted-next-prompt ghost text (tab autocomplete)
     /// is offered after each turn. SHELL-owned: updates the process-wide
     /// cache mirror and persists to `[ui].prompt_suggestions` via
@@ -915,7 +900,7 @@ pub enum Action {
 /// Persist-and-notify semantics for [`Effect::PersistPermissionMode`].
 ///
 /// Both variants write to `~/.grow/config.toml` and route ACP
-/// `grow/yolo_mode_changed` notifications. The ACP notification is
+/// `grow/permission_mode_changed` notifications. The ACP notification is
 /// gated on disk-write success when `WithRollback` is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionModePersist {
@@ -932,19 +917,14 @@ pub enum PermissionModePersist {
 }
 /// Canonical permission-mode state for the `permission_mode` setting.
 ///
-/// `Default` and `Ask` both project onto `yolo_mode = false` at runtime
-/// but are distinct on disk — `Default` expresses "use the agent's
-/// default" while `Ask` is the explicit "prompt me every time".
 /// `Auto` uses the LLM classifier (not full always-approve).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionModeKind {
-    /// Agent's default behavior (prompt). `yolo_mode = false`.
-    Default,
-    /// Explicit prompt-every-time. `yolo_mode = false`.
+    /// Explicit prompt-every-time.
     Ask,
-    /// LLM classifier for non-fast-path tools. `yolo_mode = false`, `auto_mode = true`.
+    /// LLM classifier for non-fast-path tools.
     Auto,
-    /// Auto-approve all tool actions. `yolo_mode = true`.
+    /// Auto-approve all tool actions.
     AlwaysApprove,
 }
 impl PermissionModeKind {
@@ -953,18 +933,25 @@ impl PermissionModeKind {
     /// `settings/defs.rs::PERMISSION_MODE_CHOICES`.
     pub fn as_canonical(self) -> &'static str {
         match self {
-            Self::Default => "default",
             Self::Ask => "ask",
             Self::Auto => "auto",
             Self::AlwaysApprove => "always-approve",
         }
     }
-    /// Bool projection onto the YOLO runtime flag — `AlwaysApprove
-    /// → true`, everything else → `false`. Used by `set_yolo_mode_inner`
-    /// to perform the actual state mutation (`agent.session.yolo_mode`,
-    /// `app.default_yolo`, permission_queue drain) without caring
-    /// about the canonical distinction. The canonical is restored
-    /// afterwards by `set_permission_mode`.
+    pub fn as_runtime(self) -> shell::util::config::PermissionMode {
+        match self {
+            Self::Ask => shell::util::config::PermissionMode::Ask,
+            Self::Auto => shell::util::config::PermissionMode::Auto,
+            Self::AlwaysApprove => shell::util::config::PermissionMode::AlwaysApprove,
+        }
+    }
+    pub fn from_runtime(mode: shell::util::config::PermissionMode) -> Self {
+        match mode {
+            shell::util::config::PermissionMode::Ask => Self::Ask,
+            shell::util::config::PermissionMode::Auto => Self::Auto,
+            shell::util::config::PermissionMode::AlwaysApprove => Self::AlwaysApprove,
+        }
+    }
     pub fn is_always_approve(self) -> bool {
         matches!(self, Self::AlwaysApprove)
     }
@@ -974,7 +961,6 @@ impl PermissionModeKind {
     }
     pub fn display_name(self) -> &'static str {
         match self {
-            Self::Default => "Default",
             Self::Ask => "Ask",
             Self::Auto => "Auto",
             Self::AlwaysApprove => "Always Approve",
@@ -986,7 +972,6 @@ impl PermissionModeKind {
     /// rollback payload.
     pub fn from_canonical(s: &str) -> Option<Self> {
         match s {
-            "default" => Some(Self::Default),
             "ask" => Some(Self::Ask),
             "auto" => Some(Self::Auto),
             "always-approve" => Some(Self::AlwaysApprove),
@@ -1014,7 +999,7 @@ mod permission_mode_kind_tests {
     }
     #[test]
     fn permission_mode_choices_include_auto_in_catalog() {
-        for c in ["default", "ask", "auto", "always-approve"] {
+        for c in ["ask", "auto", "always-approve"] {
             assert!(
                 PermissionModeKind::from_canonical(c).is_some(),
                 "catalog canonical {c} must parse"
@@ -1336,7 +1321,7 @@ pub enum Effect {
     /// FleetView roster. Issued while the dashboard is open and NOT in leader
     /// mode so the dashboard shows idle sessions instead of being empty.
     FetchDashboardSessions,
-    /// Load card detail for a specific session (lazy, reads chat history from disk).
+    /// Load card detail for a specific session (lazy, folds Timeline from disk).
     LoadCardDetail {
         session_id: String,
         cwd: String,
@@ -1563,9 +1548,8 @@ pub enum Effect {
         skill_token_ranges: Vec<std::ops::Range<usize>>,
     },
     /// Fetch prompt history for the current session from the ACP agent.
-    /// `session_id` scopes the per-CWD history file to this session (the agent's
-    /// `filter_session_id` param), so up-arrow recall and the `/history`
-    /// panel show only the current session's prompts.
+    /// `session_id` scopes the canonical Timeline projection, so up-arrow
+    /// recall and the `/history` panel show only the current session's prompts.
     FetchPromptHistory {
         agent_id: AgentId,
         cwd: std::path::PathBuf,
@@ -1990,12 +1974,6 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         models: Option<acp::SessionModelState>,
-        /// Whether this session's scheduled fires run detached, as the shell
-        /// resolved it at spawn (response
-        /// `_meta["grow/schedulerBackgroundLoops"]`). `None` from a shell that
-        /// predates the key. See
-        /// [`crate::app::effects::parse_session_scheduler_background_loops`].
-        scheduler_background_loops: Option<bool>,
     },
     /// Session creation failed.
     SessionFailed {
@@ -2016,8 +1994,6 @@ pub enum TaskResult {
         /// Effective cwd inside the worktree (preserves subdirectory offset).
         session_cwd: std::path::PathBuf,
         models: Option<acp::SessionModelState>,
-        /// See [`TaskResult::SessionCreated::scheduler_background_loops`].
-        scheduler_background_loops: Option<bool>,
     },
     /// Worktree created and session forked, but not yet loaded.
     /// The dispatch handler sets session_id eagerly, then emits LoadSession.
@@ -2047,10 +2023,6 @@ pub enum TaskResult {
         /// loader adopts its opaque id without reconstructing lifecycle
         /// semantics from the id spelling.
         foreground: Option<prompt_queue::ForegroundSnapshot>,
-        /// See [`TaskResult::SessionCreated::scheduler_background_loops`]. A
-        /// resumed session re-spawns its actor, so the load response carries
-        /// the value that spawn just pinned.
-        scheduler_background_loops: Option<bool>,
     },
     /// Session load (resume) failed.
     SessionLoadFailed {
@@ -2062,7 +2034,7 @@ pub enum TaskResult {
     SessionTitleFromDisk {
         agent_id: AgentId,
         /// The display title paired with whether it came from a manual
-        /// `/rename` (`summary.title_is_manual`, restores the prompt-border
+        /// `/rename` (a user-authored `session/title` fact, restores the prompt-border
         /// title) — manual-ness cannot exist without a title.
         title: Option<(String, bool)>,
     },
@@ -2395,12 +2367,8 @@ pub enum TaskResult {
     BundleStatusReady {
         has_cache: bool,
         version: Option<String>,
-        personas: Vec<String>,
-        roles: Vec<String>,
         agents: Vec<String>,
         skills: Vec<String>,
-        persona_details: Vec<super::bundle::PersonaDetail>,
-        role_details: Vec<super::bundle::RoleDetail>,
     },
     /// Bundle status fetch failed.
     BundleStatusFailed {

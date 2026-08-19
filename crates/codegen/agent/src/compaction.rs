@@ -24,13 +24,6 @@ pub struct CompactionPolicy {
     /// Per-compaction wall-clock budget (seconds); a generation exceeding it is
     /// cut and retried — the backstop for reasoning runaways token limits miss.
     pub wall_clock_budget_secs: u64,
-
-    /// Prefire two-pass compaction: when usage approaches the threshold,
-    /// speculatively summarize the history prefix in the background (pass 1);
-    /// at compaction, summarize NOTE₁ + the recent tail (pass 2). Resolved from
-    /// config (`two_pass_compaction` flag) at session build; `false` keeps the
-    /// legacy single-pass path. Default `false` (real sessions set it from config).
-    pub two_pass_enabled: bool,
 }
 
 impl Default for CompactionPolicy {
@@ -40,7 +33,6 @@ impl Default for CompactionPolicy {
             compact_model: None,
             memory_flush_enabled: false,
             wall_clock_budget_secs: 300,
-            two_pass_enabled: false,
         }
     }
 }

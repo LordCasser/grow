@@ -15,7 +15,7 @@ pub use facets::{
     SOURCE_WORKSPACE_FACET_KEY, SourceWorkspaceFacet, WORKTREE_FACET_KEY, WorktreeFacet,
     build_facet_registry,
 };
-pub use row::{ExtSupersetRow, RowMeta, SessionInfo, UnifiedRow, merged_session_to_row};
+pub use row::{RowMeta, SessionInfo, SessionListRow, UnifiedRow, session_listing_to_row};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_LIMIT: usize = 30;
@@ -31,7 +31,7 @@ pub fn parse_list_req(raw: &str) -> Result<ListReq, serde_json::Error> {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListReq {
     #[serde(default)]
     pub cwd: Option<String>,
@@ -131,15 +131,15 @@ pub async fn build_unified_list(req: ListReq) -> UnifiedListResult {
     let limit = req.limit.or(meta_limit).unwrap_or(DEFAULT_LIMIT);
     let query = req.query.clone().or(meta_query);
     let cursor = Cursor::decode(req.cursor.as_deref());
-    let over_fetch = crate::session::merge::over_fetch(limit);
+    let over_fetch = crate::session::listing::over_fetch(limit);
 
     let mut rows = if excludes_build(&facet_filters) {
         Vec::new()
     } else {
-        crate::session::merge::fetch_merged(req.cwd.as_deref(), query.as_deref(), over_fetch)
+        crate::session::listing::fetch_sessions(req.cwd.as_deref(), query.as_deref(), over_fetch)
             .await
             .into_iter()
-            .map(|session| merged_session_to_row(session, registry))
+            .map(|session| session_listing_to_row(session, registry))
             .collect()
     };
     let mut scope = ListScope::Cwd;
@@ -155,11 +155,12 @@ pub async fn build_unified_list(req: ListReq) -> UnifiedListResult {
         let all_local = crate::session::persistence::list_summaries(None)
             .await
             .unwrap_or_default();
-        let scoped = crate::session::merge::filter_summaries_by_repo(all_local, &repo_urls);
-        let relaxed: Vec<_> = crate::session::merge::merge(scoped, None, over_fetch)
-            .into_iter()
-            .map(|session| merged_session_to_row(session, registry))
-            .collect();
+        let scoped = crate::session::listing::filter_summaries_by_repo(all_local, &repo_urls);
+        let relaxed: Vec<_> =
+            crate::session::listing::list_from_summaries(scoped, None, over_fetch)
+                .into_iter()
+                .map(|session| session_listing_to_row(session, registry))
+                .collect();
         if !lane_has_no_messages(&relaxed) {
             rows = relaxed;
             scope = if repo_urls.is_empty() {
@@ -190,7 +191,7 @@ fn relax_eligible(
 }
 
 fn lane_has_no_messages(rows: &[UnifiedRow]) -> bool {
-    rows.iter().all(|row| row.legacy.num_messages == 0)
+    rows.iter().all(|row| row.session.num_messages == 0)
 }
 
 fn excludes_build(filters: &BTreeMap<String, Vec<serde_json::Value>>) -> bool {
@@ -204,7 +205,7 @@ fn excludes_build(filters: &BTreeMap<String, Vec<serde_json::Value>>) -> bool {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtListResponse {
-    pub sessions: Vec<ExtSupersetRow>,
+    pub sessions: Vec<SessionListRow>,
     #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     #[serde(rename = "_meta")]
@@ -224,7 +225,7 @@ pub fn ext_list_response(result: UnifiedListResult) -> ExtListResponse {
         sessions: result
             .rows
             .into_iter()
-            .map(UnifiedRow::into_ext_superset)
+            .map(UnifiedRow::into_session_list_row)
             .collect(),
         next_cursor: result.next_cursor,
         meta: ExtListResponseMeta {

@@ -15,7 +15,12 @@ async fn folder_trust_cwd_is_home_git_repo_no_prompt() {
     // $HOME is a git repo with a home-level repo-local marker, and cwd IS $HOME —
     // so there is genuinely "something to gate", yet the key is unrecordable.
     git2::Repository::init(content.home()).expect("git init $HOME");
-    std::fs::write(content.home().join(".mcp.json"), "{}").expect("write $HOME/.mcp.json");
+    std::fs::create_dir_all(content.home().join(".grow")).expect("create $HOME/.grow");
+    std::fs::write(
+        content.home().join(".grow/config.toml"),
+        "[mcp_servers.fixture]\ncommand = \"/usr/bin/true\"\n",
+    )
+    .expect("write $HOME/.grow/config.toml");
 
     let env_refs = trust_env(true);
     let cwd = content.home().to_str().expect("utf8 home path");

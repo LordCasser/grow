@@ -25,17 +25,15 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RewindSessionRequest {
-    #[serde(alias = "sessionId")]
     session_id: String,
-    #[serde(default, alias = "targetPromptIndex")]
+    #[serde(default)]
     target_prompt_index: Option<usize>,
-    #[serde(default, alias = "targetResponseId")]
+    #[serde(default)]
     target_response_id: Option<String>,
-    #[serde(default)]
     force: bool,
-    #[serde(default)]
-    mode: Option<RewindMode>,
+    mode: RewindMode,
 }
 impl RewindSessionRequest {
     fn prompt_index_for_local(&self) -> Result<usize, acp::Error> {
@@ -54,8 +52,8 @@ impl RewindSessionRequest {
     }
 }
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RewindPointsRequest {
-    #[serde(alias = "sessionId")]
     session_id: String,
 }
 /// Look up a `SessionHandle` by id string, or return a `resource_not_found`
@@ -79,7 +77,7 @@ async fn handle_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             request: RewindRequest {
                 target_prompt_index,
                 force: request.force,
-                mode: request.mode.unwrap_or(RewindMode::All),
+                mode: request.mode,
             },
             respond_to: tx,
         })

@@ -193,12 +193,12 @@ pub(super) fn dispatch_set_behavior_mode(
 }
 
 /// The single gate for client paths that ENABLE always-approve: `Some(reason)`
-/// iff `enabling` and the pin (`app.yolo_policy_block`) is set. Every enabling
-/// path routes through here (or [`refuse_if_yolo_locked`]) so new paths stay
+/// iff `enabling` and the pin (`app.always_approve_policy_block`) is set. Every enabling
+/// path routes through here (or [`refuse_if_always_approve_locked`]) so new paths stay
 /// gated by default; callers must NOT persist on a refusal.
-pub(super) fn yolo_enable_blocked(app: &AppView, enabling: bool) -> Option<&'static str> {
+pub(super) fn always_approve_enable_blocked(app: &AppView, enabling: bool) -> Option<&'static str> {
     if enabling {
-        app.yolo_policy_block
+        app.always_approve_policy_block
     } else {
         None
     }
@@ -206,22 +206,14 @@ pub(super) fn yolo_enable_blocked(app: &AppView, enabling: bool) -> Option<&'sta
 
 /// `Vec<Effect>` wrapper for the persisting setters: on a refusal, toast and
 /// return `Some(vec![])` (no persist); `None` means proceed.
-fn refuse_if_yolo_locked(app: &mut AppView, enabling: bool) -> Option<Vec<Effect>> {
-    let warning = yolo_enable_blocked(app, enabling)?;
+fn refuse_if_always_approve_locked(app: &mut AppView, enabling: bool) -> Option<Vec<Effect>> {
+    let warning = always_approve_enable_blocked(app, enabling)?;
     app.show_toast(warning);
     Some(vec![])
 }
 
-/// Canonical "auto wins only when yolo is off" precedence — the single source
-/// of truth for the yolo-over-auto rule applied at every reconnect / seed / meta
-/// site. Callers pass the already-resolved auto signal (a per-session flag or a
-/// `permission_mode == Some("auto")` test).
-pub(crate) fn effective_auto(yolo: bool, auto: bool) -> bool {
-    !yolo && auto
-}
-
 /// When the auto gate is off, force the displayed permission mode off Auto and
-/// clear every agent's per-session auto flag, so the UI, selectors, settings
+/// clamp every agent's per-session mode, so the UI, selectors, settings
 /// snapshot, and each tab's badge never show Auto while the feature is
 /// disabled. Shared by the startup reconcile and the mid-session kill-switch.
 /// Clearing every agent (not just when the global mirror still reads "auto")
@@ -231,41 +223,37 @@ pub(crate) fn downgrade_displayed_auto_if_gated(app: &mut AppView) {
         return;
     }
     for agent in app.agents.values_mut() {
-        agent.session.auto_mode = false;
-        sync_follow_subagent_permission_modes(agent);
+        if agent.session.is_auto() {
+            agent.session.permission_mode = shell::util::config::PermissionMode::Ask;
+            sync_follow_subagent_permission_modes(agent);
+        }
     }
     if app.current_ui.permission_mode.as_deref() == Some("auto") {
         app.current_ui.permission_mode = Some("ask".into());
     }
 }
 
-/// Whether a newly created session should start with the Auto display flag set:
-/// the gate is on, the current UI mode is Auto, and yolo is not winning. Mirrors
-/// the canonical `auto && !yolo` precedence used on the wire (`ClientCapabilities`
-/// / `SessionFlags`). The `auto_mode_gate` check is defense-in-depth so a stale
-/// `current_ui == "auto"` can never seed a new session into Auto when gated off.
-pub(super) fn inherit_auto_mode(app: &AppView) -> bool {
-    app.auto_mode_gate
-        && effective_auto(
-            app.default_yolo,
-            app.current_ui.permission_mode.as_deref() == Some("auto"),
-        )
+/// Canonical mode inherited by a newly created session. Runtime policy gates
+/// clamp stale settings projections at this boundary.
+pub(crate) fn inherit_permission_mode(app: &AppView) -> shell::util::config::PermissionMode {
+    match app.default_permission_mode {
+        shell::util::config::PermissionMode::Auto if !app.auto_mode_gate => {
+            shell::util::config::PermissionMode::Ask
+        }
+        shell::util::config::PermissionMode::AlwaysApprove
+            if app.always_approve_policy_block.is_some() =>
+        {
+            shell::util::config::PermissionMode::Ask
+        }
+        mode => mode,
+    }
 }
 
-fn set_yolo_mode_inner_scoped(app: &mut AppView, new: bool, update_default: bool) {
-    if yolo_enable_blocked(app, new).is_some() {
+fn set_permission_mode_inner_scoped(app: &mut AppView, mode: shell::util::config::PermissionMode) {
+    if always_approve_enable_blocked(app, mode.is_always_approve()).is_some() {
         tracing::warn!("always-approve enable blocked by managed policy");
         return;
     }
-    // Global mirrors update unconditionally (even if the user navigated
-    // away from the agent mid-rollback). Per-agent state is gated below.
-    if update_default {
-        app.default_yolo = new;
-        app.permission_mode_from_soft_default = false;
-        app.current_ui.permission_mode =
-            Some(if new { "always-approve" } else { "ask" }.to_string());
-    }
-
     let ActiveView::Agent(id) = app.active_view else {
         return;
     };
@@ -273,16 +261,16 @@ fn set_yolo_mode_inner_scoped(app: &mut AppView, new: bool, update_default: bool
         return;
     };
 
-    let previous_state = agent.session.is_yolo();
+    let previous_mode = agent.session.permission_mode();
 
     // Drain ordering invariant: flag flip BEFORE the drain (see fn
     // doc-comment). Do NOT reorder these without re-reading the
     // contract.
-    agent.session.yolo_mode = new;
+    agent.session.permission_mode = mode;
     sync_follow_subagent_permission_modes(agent);
 
-    if new {
-        // YOLO ON: auto-approve only permissions owned by this root session.
+    if mode.is_always_approve() {
+        // always-approve ON: auto-approve only permissions owned by this root session.
         // Child asks share the visual queue but follow an independent mode and
         // must survive a later parent mode switch. The root drain runs even on
         // idempotent re-dispatch, prefers `AllowOnce`, and never selects
@@ -332,42 +320,26 @@ fn set_yolo_mode_inner_scoped(app: &mut AppView, new: bool, update_default: bool
     }
 
     // Diagnostic + tracing guarded on real state change only.
-    if previous_state != new {
-        diagnostics::session_ctx::log_event(diagnostics::events::YoloToggled {
-            enabled: new,
-            previous_state,
-            trigger: diagnostics::events::YoloTrigger::Pager,
+    if previous_mode != mode {
+        diagnostics::session_ctx::log_event(diagnostics::events::PermissionModeChanged {
+            mode,
+            previous_mode,
+            trigger: diagnostics::events::PermissionModeTrigger::Pager,
         });
-        tracing::info!(target: "settings", key = "permission_mode", value = new, "setting changed");
+        tracing::info!(target: "settings", key = "permission_mode", value = ?mode, "setting changed");
     }
 }
 
-/// Set YOLO (`permission_mode`). SHELL-owned, emits
+/// Set `permission_mode`. SHELL-owned, emits
 /// `Effect::PersistPermissionMode` with rollback. The drain runs
-/// unconditionally on YOLO=ON (even duplicate dispatches) because
+/// unconditionally on always-approve (even duplicate dispatches) because
 /// a permission could arrive between dispatches.
-fn capture_prev_permission_canonical(app: &AppView, prev_yolo: bool) -> &'static str {
-    if prev_yolo {
-        "always-approve"
-    } else {
-        match app.current_ui.permission_mode.as_deref() {
-            Some("default") => "default",
-            Some("auto") => "auto",
-            _ => "ask",
-        }
-    }
-}
-
 /// Set the active session's permission mode without changing the persisted
 /// default used by future sessions.
 pub(super) fn set_permission_mode(
     app: &mut AppView,
     kind: crate::app::actions::PermissionModeKind,
 ) -> Vec<Effect> {
-    if matches!(kind, crate::app::actions::PermissionModeKind::Default) {
-        app.show_toast("Default permission is only available in Settings.");
-        return vec![];
-    }
     // Feature gate: a commit to Auto is inert when the auto permission-mode
     // feature is disabled. Reading `app.auto_mode_gate` here keeps the settings
     // default and session selector in lockstep — both degrade Auto → Ask when
@@ -379,7 +351,7 @@ pub(super) fn set_permission_mode(
             kind
         };
     // Managed policy pins always-approve off — keep the modal on live state.
-    if let Some(blocked) = refuse_if_yolo_locked(app, kind.is_always_approve()) {
+    if let Some(blocked) = refuse_if_always_approve_locked(app, kind.is_always_approve()) {
         refresh_open_settings_modals(app);
         return blocked;
     }
@@ -401,18 +373,13 @@ pub(super) fn set_permission_mode(
         return vec![];
     };
 
-    // State mutation via shared inner. We overwrite the canonical
-    // below for the Default case. Inner clears the soft-default latch.
-    set_yolo_mode_inner_scoped(app, kind.is_always_approve(), false);
-    if let Some(agent) = app.agents.get_mut(&id) {
-        agent.session.auto_mode = matches!(kind, crate::app::actions::PermissionModeKind::Auto);
-        sync_follow_subagent_permission_modes(agent);
-    }
+    // State mutation via shared inner. Inner clears the soft-default latch.
+    set_permission_mode_inner_scoped(app, kind.as_runtime());
 
     // Toast on every save (plan-aware for AlwaysApprove, mirroring
-    // `set_yolo_mode` — the plan edit gate stays binding under yolo).
+    // `set_always_approve_mode` — the plan edit gate stays binding under always-approve).
     if kind.is_always_approve() && effective_plan {
-        app.show_toast(YOLO_ON_UNDER_PLAN_TOAST);
+        app.show_toast(ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST);
     } else {
         app.show_toast(&permission_mode_toast(kind));
     }
@@ -424,8 +391,7 @@ pub(super) fn set_permission_mode(
 }
 
 pub(crate) fn sync_follow_subagent_permission_modes(agent: &mut AgentView) {
-    let parent_yolo = agent.session.yolo_mode;
-    let parent_auto = agent.session.is_auto();
+    let parent_mode = agent.session.permission_mode();
     let follow_children = agent
         .subagent_sessions
         .iter()
@@ -435,8 +401,7 @@ pub(crate) fn sync_follow_subagent_permission_modes(agent: &mut AgentView) {
         .collect::<Vec<_>>();
     for session_id in follow_children {
         if let Some(child) = agent.subagent_views.get_mut(&session_id) {
-            child.session.yolo_mode = parent_yolo;
-            child.session.auto_mode = parent_auto;
+            child.session.permission_mode = parent_mode;
         }
     }
 }
@@ -451,14 +416,14 @@ pub(super) fn set_default_permission_mode(
         app.show_toast("Auto permission mode is unavailable");
         return vec![];
     }
-    if let Some(blocked) = refuse_if_yolo_locked(app, kind.is_always_approve()) {
+    if let Some(blocked) = refuse_if_always_approve_locked(app, kind.is_always_approve()) {
         return blocked;
     }
-    let previous = capture_prev_permission_canonical(app, app.default_yolo);
+    let previous = shell::util::config::permission_mode_canonical_str(app.default_permission_mode);
     if previous == kind.as_canonical() {
         return vec![];
     }
-    app.default_yolo = kind.is_always_approve();
+    app.default_permission_mode = kind.as_runtime();
     app.current_ui.permission_mode = Some(kind.as_canonical().to_string());
     refresh_open_settings_modals(app);
     app.show_toast(&format!(
@@ -473,25 +438,24 @@ pub(super) fn set_default_permission_mode(
 }
 
 /// Build the toast for a `permission_mode` commit. `AlwaysApprove`
-/// reuses `yolo_toast(true)` (destructive). `Ask` and `Default` get
-/// dedicated "Permission mode: ..." toasts matching the picker brand.
+/// reuses `always_approve_toast(true)` (destructive). `Ask` gets a dedicated
+/// "Permission mode: ..." toast matching the picker brand.
 pub(super) fn permission_mode_toast(kind: crate::app::actions::PermissionModeKind) -> String {
     use crate::app::actions::PermissionModeKind;
     match kind {
-        PermissionModeKind::AlwaysApprove => yolo_toast(true),
+        PermissionModeKind::AlwaysApprove => always_approve_toast(true),
         PermissionModeKind::Auto => "\u{2713} Permission mode: Auto (classifier)".to_string(),
         PermissionModeKind::Ask => "\u{2713} Permission mode: Ask".to_string(),
-        PermissionModeKind::Default => "\u{2713} Permission mode: Default".to_string(),
     }
 }
 
-/// YOLO-ON toast when plan mode is active: always-approve arms the permission
+/// always-approve-ON toast when plan mode is active: always-approve arms the permission
 /// fast path, but it does not bypass Plan phases or the approved contract.
-pub(super) const YOLO_ON_UNDER_PLAN_TOAST: &str =
+pub(super) const ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST: &str =
     "\u{26A0} Always-approve ON: Plan approval phases and contract remain enforced";
 
-/// Build the YOLO toast — ⚠ on ON (destructive), ✓ on OFF (safe default).
-fn yolo_toast(new: bool) -> String {
+/// Build the always-approve toast — ⚠ on ON (destructive), ✓ on OFF (safe default).
+fn always_approve_toast(new: bool) -> String {
     if new {
         // Warning glyph + consequence — only post-commit feedback.
         "\u{26A0} Always-approve ON: all tool actions auto-run".to_string()

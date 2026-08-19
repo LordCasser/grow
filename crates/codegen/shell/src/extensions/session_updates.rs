@@ -270,10 +270,10 @@ fn extract_last_event_id<T: AsRef<str>>(lines: &[T]) -> Option<String> {
         let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) else {
             continue;
         };
-        let Some(raw_params) = env.params.map(|p| p.get()) else {
+        if !matches!(env.method, "session/update" | "_grow/session/update") {
             continue;
-        };
-        let Ok(pp) = serde_json::from_str::<RawParamsPeek<'_>>(raw_params) else {
+        }
+        let Ok(pp) = serde_json::from_str::<RawParamsPeek<'_>>(env.params.get()) else {
             continue;
         };
         let Some(meta_raw) = pp.meta else { continue };

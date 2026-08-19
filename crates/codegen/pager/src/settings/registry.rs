@@ -232,12 +232,8 @@ pub enum SettingValue {
 pub struct PagerLocalSnapshot {
     /// Whether multiline input mode is active.
     pub multiline_mode: bool,
-    /// Whether YOLO mode (always-approve) is active on the active agent.
-    pub yolo_mode: bool,
-    /// Whether Auto (LLM classifier) mode is active on the active agent.
-    /// Mutually exclusive with `yolo_mode` in practice (yolo wins); read by
-    /// `/auto` so it can toggle off when already on.
-    pub auto_mode: bool,
+    /// Canonical permission mode on the active agent.
+    pub permission_mode: shell::util::config::PermissionMode,
     /// Currently-selected model's canonical id, or `None` if no model has
     /// been selected yet.
     pub current_model_id: Option<String>,
@@ -272,19 +268,13 @@ pub struct PagerLocalSnapshot {
     /// `[toolset.ask_user_question].timeout_enabled` mirror (effective TOML
     /// merge, like `show_tips`). `None` = unset in TOML → default `true`.
     pub ask_user_question_timeout_enabled: Option<bool>,
-    /// Mirrors `AgentView::scheduler_background_loops` — the value the shell
-    /// pinned for THIS session — falling back to
-    /// `AppView::scheduler_background_loops_seed` before the session response
-    /// lands. `/loop` reads it to describe where a scheduled fire runs.
-    pub scheduler_background_loops: bool,
 }
 
 impl Default for PagerLocalSnapshot {
     fn default() -> Self {
         Self {
             multiline_mode: false,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             current_model_id: None,
             available_models: Vec::new(),
             behavior_mode: tools::types::BehaviorId::Normal,
@@ -301,32 +291,25 @@ impl Default for PagerLocalSnapshot {
             respect_manual_folds: crate::appearance::ScrollConfig::default().respect_manual_folds,
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
-            // Matches `resolve_scheduler_background_loops`'s default.
-            scheduler_background_loops: true,
         }
     }
 }
 
-/// Canonicalize a raw hunk-tracker mode to a registry choice. Case-insensitive
-/// and trimmed; `disabled` aliases `off`; unknown/blank/`None` → `agent_only`.
+/// Resolve a persisted hunk-tracker mode to a registry choice.
+/// Unknown/blank/`None` values use the `agent_only` default.
 pub fn canonical_hunk_tracker_mode(value: Option<&str>) -> &'static str {
-    let raw = value.unwrap_or_default().trim();
-    if raw.eq_ignore_ascii_case("all_dirty") {
-        "all_dirty"
-    } else if raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("disabled") {
-        "off"
-    } else {
-        "agent_only"
+    match value {
+        Some("all_dirty") => "all_dirty",
+        Some("off") => "off",
+        _ => "agent_only",
     }
 }
 
-/// `minimal` stays; everything else (including unset / legacy `default`) → `fullscreen`.
+/// Resolve a persisted screen mode to a registry choice.
 pub fn canonical_screen_mode(value: Option<&str>) -> &'static str {
-    let raw = value.unwrap_or_default().trim();
-    if raw.eq_ignore_ascii_case("minimal") {
-        "minimal"
-    } else {
-        "fullscreen"
+    match value {
+        Some("minimal") => "minimal",
+        _ => "fullscreen",
     }
 }
 
@@ -527,10 +510,6 @@ pub fn current_value_for(
         // Live cache (like `show_thinking_blocks`).
         "group_tool_verbs" => Some(SettingValue::Bool(
             crate::appearance::cache::load_group_tool_verbs(),
-        )),
-        // Live cache (like `group_tool_verbs`).
-        "collapsed_edit_blocks" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_collapsed_edit_blocks(),
         )),
         // Live cache; `GROW_PROMPT_SUGGESTIONS` env overrides at the gate.
         "prompt_suggestions" => Some(SettingValue::Bool(
@@ -920,16 +899,6 @@ mod tests {
                         "group_tool_verbs default drifts from UiConfig::default()"
                     );
                 }
-                // collapsed_edit_blocks: Option<bool>; None → false (rollout
-                // flag ships OFF; the cache const is pinned in cache.rs).
-                ("collapsed_edit_blocks", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.collapsed_edit_blocks.unwrap_or(false),
-                        "collapsed_edit_blocks default drifts from UiConfig::default()"
-                    );
-                    assert!(!*default, "collapsed_edit_blocks must default OFF");
-                }
                 // prompt_suggestions: Option<bool>; None → true (client default).
                 ("prompt_suggestions", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -1153,31 +1122,29 @@ mod tests {
     }
 
     #[test]
-    fn canonical_hunk_tracker_mode_maps_aliases_and_unknowns() {
+    fn canonical_hunk_tracker_mode_accepts_only_canonical_values() {
         assert_eq!(
             canonical_hunk_tracker_mode(Some("agent_only")),
             "agent_only"
         );
         assert_eq!(canonical_hunk_tracker_mode(Some("all_dirty")), "all_dirty");
         assert_eq!(canonical_hunk_tracker_mode(Some("off")), "off");
-        // `disabled` is an accepted alias for `off`.
-        assert_eq!(canonical_hunk_tracker_mode(Some("disabled")), "off");
-        // Case-insensitive + whitespace-tolerant.
-        assert_eq!(canonical_hunk_tracker_mode(Some("  OFF  ")), "off");
-        assert_eq!(canonical_hunk_tracker_mode(Some("Disabled")), "off");
-        assert_eq!(canonical_hunk_tracker_mode(Some("All_Dirty")), "all_dirty");
-        // Unknown / blank / absent → the `agent_only` default.
+        // Alternate spellings and unknown values use the default.
+        assert_eq!(canonical_hunk_tracker_mode(Some("disabled")), "agent_only");
+        assert_eq!(canonical_hunk_tracker_mode(Some("OFF")), "agent_only");
+        assert_eq!(canonical_hunk_tracker_mode(Some(" off ")), "agent_only");
         assert_eq!(canonical_hunk_tracker_mode(Some("bogus")), "agent_only");
         assert_eq!(canonical_hunk_tracker_mode(Some("")), "agent_only");
         assert_eq!(canonical_hunk_tracker_mode(None), "agent_only");
     }
 
     #[test]
-    fn canonical_screen_mode_maps_aliases_and_unknowns() {
+    fn canonical_screen_mode_accepts_only_canonical_values() {
         assert_eq!(canonical_screen_mode(Some("minimal")), "minimal");
         assert_eq!(canonical_screen_mode(Some("fullscreen")), "fullscreen");
         assert_eq!(canonical_screen_mode(Some("full")), "fullscreen");
-        assert_eq!(canonical_screen_mode(Some("  MINIMAL ")), "minimal");
+        assert_eq!(canonical_screen_mode(Some("MINIMAL")), "fullscreen");
+        assert_eq!(canonical_screen_mode(Some(" minimal ")), "fullscreen");
         assert_eq!(canonical_screen_mode(Some("default")), "fullscreen");
         assert_eq!(canonical_screen_mode(Some("auto")), "fullscreen");
         assert_eq!(canonical_screen_mode(Some("bogus")), "fullscreen");

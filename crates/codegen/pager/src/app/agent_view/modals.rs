@@ -1,4 +1,4 @@
-//! Modal input handlers: agents/persona modals and the extensions modal
+//! Modal input handlers: agent and extension modals
 //! (hooks, plugins, marketplace, skills, MCP servers) with its actions.
 
 use super::AgentView;
@@ -46,28 +46,6 @@ impl AgentView {
                 }
                 InputOutcome::Changed
             }
-            crate::views::agents_modal::AgentsModalOutcome::OpenPersonaDetail {
-                name,
-                source_path,
-                editable,
-                scope_label,
-            } => {
-                use crate::views::persona_detail::PersonaDetailState;
-                let detail = if let Some(ref path) = source_path {
-                    PersonaDetailState::from_toml_file(path, editable, &scope_label)
-                } else {
-                    Some(PersonaDetailState::from_name_only(&name))
-                };
-                if detail.is_none()
-                    && let Some(ref mut modal) = self.agents_modal
-                {
-                    modal.message = Some(crate::views::agents_modal::AgentsModalMessage::error(
-                        format!("Failed to load persona '{name}'"),
-                    ));
-                }
-                self.persona_detail = detail;
-                InputOutcome::Changed
-            }
             crate::views::agents_modal::AgentsModalOutcome::EditInEditor { path, tab } => {
                 InputOutcome::Action(Action::SuspendForEditor {
                     path,
@@ -102,77 +80,12 @@ impl AgentView {
                 InputOutcome::Changed
             }
             crate::views::agents_modal::AgentsModalOutcome::ViewAgent { .. }
-            | crate::views::agents_modal::AgentsModalOutcome::OpenPersonaDetail { .. }
             | crate::views::agents_modal::AgentsModalOutcome::EditInEditor { .. } => {
                 // Mouse interactions don't trigger view/edit — ignore.
                 InputOutcome::Unchanged
             }
             crate::views::agents_modal::AgentsModalOutcome::Changed => InputOutcome::Changed,
             crate::views::agents_modal::AgentsModalOutcome::Unchanged => InputOutcome::Unchanged,
-        }
-    }
-
-    // -- Persona detail modal input handling --
-
-    pub(super) fn handle_persona_detail_key(
-        &mut self,
-        key: &crossterm::event::KeyEvent,
-    ) -> InputOutcome {
-        let Some(ref mut detail) = self.persona_detail else {
-            return InputOutcome::Unchanged;
-        };
-        use crate::views::persona_detail::{PersonaDetailOutcome, handle_persona_detail_key};
-        match handle_persona_detail_key(detail, key) {
-            PersonaDetailOutcome::Close => {
-                self.persona_detail = None;
-                // Refresh the personas list in case edits were made.
-                if let Some(ref mut modal) = self.agents_modal {
-                    modal.refresh_personas();
-                }
-                InputOutcome::Changed
-            }
-            PersonaDetailOutcome::EditInEditor { path } => {
-                self.persona_detail = None;
-                InputOutcome::Action(Action::SuspendForEditor {
-                    path,
-                    refresh_agents_modal: Some(crate::views::agents_modal::AgentsTab::Personas),
-                })
-            }
-            PersonaDetailOutcome::Changed => InputOutcome::Changed,
-            PersonaDetailOutcome::Unchanged => InputOutcome::Unchanged,
-        }
-    }
-
-    pub(super) fn handle_persona_detail_paste(&mut self, text: &str) -> InputOutcome {
-        let Some(ref mut detail) = self.persona_detail else {
-            return InputOutcome::Unchanged;
-        };
-        match crate::views::persona_detail::handle_persona_detail_paste(detail, text) {
-            crate::views::persona_detail::PersonaDetailOutcome::Changed => InputOutcome::Changed,
-            _ => InputOutcome::Unchanged,
-        }
-    }
-
-    pub(super) fn handle_persona_detail_mouse(
-        &mut self,
-        mouse: &crossterm::event::MouseEvent,
-    ) -> InputOutcome {
-        let Some(ref mut detail) = self.persona_detail else {
-            return InputOutcome::Unchanged;
-        };
-        use crate::views::persona_detail::{PersonaDetailOutcome, handle_persona_detail_mouse};
-        match handle_persona_detail_mouse(detail, mouse) {
-            PersonaDetailOutcome::Close => {
-                self.persona_detail = None;
-                if let Some(ref mut modal) = self.agents_modal {
-                    modal.refresh_personas();
-                }
-                InputOutcome::Changed
-            }
-            PersonaDetailOutcome::Changed => InputOutcome::Changed,
-            PersonaDetailOutcome::EditInEditor { .. } | PersonaDetailOutcome::Unchanged => {
-                InputOutcome::Unchanged
-            }
         }
     }
 
@@ -1954,10 +1867,6 @@ mod marketplace_modal_action_tests {
             domains: Vec::new(),
             homepage: None,
             relative_path: relative_path.into(),
-            skill_count: 0,
-            has_hooks: false,
-            has_agents: false,
-            has_mcp: false,
             install_status: "update_available".into(),
             installed_version: Some("1.0.0".into()),
             components: None,
@@ -2067,7 +1976,6 @@ mod extensions_action_target_tests {
             id: format!("user/abcd1234/{name}"),
             root: "/tmp/p".into(),
             scope: extension_types::PluginScope::User,
-            trusted: true,
             enabled,
             version: None,
             description: None,
@@ -2079,8 +1987,7 @@ mod extensions_action_target_tests {
             hook_count: 0,
             mcp_server_count: 0,
             mcp_status: extension_types::McpStatus::None,
-            marketplace_source: None,
-            origin: None,
+            origin: extension_types::PluginOrigin::UserGrow,
             conflict: None,
         }
     }
@@ -2097,9 +2004,7 @@ mod extensions_action_target_tests {
             tools: Vec::new(),
             enabled,
             source: "local".into(),
-            wire_source: crate::views::mcps_modal::McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }
     }
 
@@ -2582,44 +2487,19 @@ mod extensions_modal_search_key_tests {
 
 #[cfg(test)]
 mod editor_paste_routing_tests {
-    use std::collections::HashMap;
-
     use super::test_fixtures::make_agent;
     use crate::actions::ActionRegistry;
-    use crate::app::bundle::BundleState;
-    use crate::views::agents_modal::{AgentsModalState, AgentsTab};
     use crate::views::extensions_modal::{
         ExtensionsModalState, ExtensionsTab, FieldSpec, ModalInput,
     };
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::Event;
 
     #[test]
-    fn persona_and_extensions_paste_only_into_active_forms() {
+    fn extensions_paste_only_into_active_form() {
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
         agent.prompt.set_text("hidden prompt");
 
-        let cwd = tempfile::tempdir().expect("temp cwd");
-        let mut agents =
-            AgentsModalState::new(cwd.path(), &HashMap::new(), &BundleState::default(), None);
-        agents.active_tab = AgentsTab::Personas;
-        agent.agents_modal = Some(agents);
-        let _ = agent.handle_input(
-            &Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
-            &registry,
-        );
-        let _ = agent.handle_input(&Event::Paste("na\r\nme".to_owned()), &registry);
-        assert_eq!(
-            agent
-                .agents_modal
-                .as_ref()
-                .and_then(|state| state.persona_input.as_ref())
-                .map(|input| input.name()),
-            Some("name")
-        );
-        assert_eq!(agent.prompt.text(), "hidden prompt");
-
-        agent.agents_modal = None;
         let mut extensions = ExtensionsModalState::new(ExtensionsTab::McpServers);
         extensions.input = Some(ModalInput::from_specs(
             "mcp add".to_owned(),
@@ -2667,7 +2547,6 @@ mod extensions_modal_confirmation_tests {
             id: format!("user/abcd1234/{name}"),
             root: "/tmp/p".into(),
             scope: extension_types::PluginScope::User,
-            trusted: true,
             enabled: true,
             version: None,
             description: None,
@@ -2679,16 +2558,12 @@ mod extensions_modal_confirmation_tests {
             hook_count: 0,
             mcp_server_count: 0,
             mcp_status: extension_types::McpStatus::None,
-            marketplace_source: None,
-            origin: None,
+            origin: extension_types::PluginOrigin::UserGrow,
             conflict: None,
         }
     }
 
-    fn server_info(
-        name: &str,
-        wire_source: crate::views::mcps_modal::McpWireSource,
-    ) -> crate::views::mcps_modal::McpServerInfo {
+    fn server_info(name: &str) -> crate::views::mcps_modal::McpServerInfo {
         crate::views::mcps_modal::McpServerInfo {
             name: name.into(),
             display_name: None,
@@ -2700,9 +2575,7 @@ mod extensions_modal_confirmation_tests {
             tools: Vec::new(),
             enabled: true,
             source: "local".into(),
-            wire_source,
             plugin_name: None,
-            is_managed_gateway: false,
         }
     }
 
@@ -2784,10 +2657,7 @@ mod extensions_modal_confirmation_tests {
 
     fn all_prompt_cases() -> Vec<PromptCase> {
         let mut mcp = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        mcp.mcps_data = TabDataState::Loaded(vec![
-            server_info("alpha", crate::views::mcps_modal::McpWireSource::Local),
-            server_info("beta", crate::views::mcps_modal::McpWireSource::Local),
-        ]);
+        mcp.mcps_data = TabDataState::Loaded(vec![server_info("alpha"), server_info("beta")]);
         mcp.entry_data_indices = vec![Some(0), Some(1)];
         mcp.entry_group_keys = vec![None, None];
         mcp.picker_state.selected = 0;
@@ -2902,10 +2772,7 @@ mod extensions_modal_confirmation_tests {
     fn y_dispatches_captured_target_after_selection_moves() {
         let mut agent = super::test_fixtures::make_agent();
         let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        modal.mcps_data = TabDataState::Loaded(vec![
-            server_info("alpha", crate::views::mcps_modal::McpWireSource::Local),
-            server_info("beta", crate::views::mcps_modal::McpWireSource::Local),
-        ]);
+        modal.mcps_data = TabDataState::Loaded(vec![server_info("alpha"), server_info("beta")]);
         modal.entry_data_indices = vec![Some(0), Some(1)];
         modal.entry_group_keys = vec![None, None];
         modal.picker_state.selected = 0;
@@ -2999,35 +2866,10 @@ mod extensions_modal_confirmation_tests {
     }
 
     #[test]
-    fn managed_mcp_errors_without_prompt() {
-        let mut agent = super::test_fixtures::make_agent();
-        let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        modal.mcps_data = TabDataState::Loaded(vec![server_info(
-            "managed-one",
-            crate::views::mcps_modal::McpWireSource::Managed,
-        )]);
-        modal.entry_data_indices = vec![Some(0)];
-        modal.entry_group_keys = vec![None];
-        modal.picker_state.selected = 0;
-        agent.extensions_modal = Some(modal);
-
-        assert_no_action(agent.execute_modal_button_action(ButtonAction::RemoveSelectedMcpServer));
-        match &agent.extensions_modal.as_ref().unwrap().modal_message {
-            Some(ModalMessage::Error(msg)) => {
-                assert!(msg.contains("Cannot remove managed server 'managed-one'"));
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn cancel_keys_dismiss_without_dispatch() {
         let mut agent = super::test_fixtures::make_agent();
         let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        modal.mcps_data = TabDataState::Loaded(vec![server_info(
-            "alpha",
-            crate::views::mcps_modal::McpWireSource::Local,
-        )]);
+        modal.mcps_data = TabDataState::Loaded(vec![server_info("alpha")]);
         modal.entry_data_indices = vec![Some(0)];
         modal.entry_group_keys = vec![None];
         modal.picker_state.selected = 0;

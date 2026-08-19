@@ -12,13 +12,12 @@
 //! - `ToolCallId` — notification correlation (optional, defaults empty)
 //! - `TemplateRenderer` — resolve client-facing tool/param names in error messages (optional)
 pub(crate) mod helpers;
-mod versions;
 use crate::notification::types::FileWritten;
 use crate::types::output::{
     SearchReplaceEditContextInformation, SearchReplaceEditDetail, SearchReplaceEditsApplied,
     SearchReplaceOutput,
 };
-use crate::types::requirements::{Expr, ToolParamsRequirement, ToolRequirement};
+use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
 use crate::types::resources::{
     Cwd, DisplayCwd, FileSystem, GitignoreFilter, NotificationHandle, Params, PathNotFoundHints,
@@ -33,23 +32,6 @@ use helpers::{
     replace_normalized_matches, replace_using_positions,
 };
 pub(crate) const CONTEXT_LINES: usize = 3;
-/// Internal version discriminant for search_replace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SearchReplaceVersion {
-    Current,
-    Legacy0_4_10,
-}
-impl SearchReplaceVersion {
-    pub(crate) fn from_contract(v: Option<&str>) -> Self {
-        match v {
-            Some("legacy-0.4.10") => Self::Legacy0_4_10,
-            _ => Self::Current,
-        }
-    }
-    pub(crate) fn is_legacy(self) -> bool {
-        self == Self::Legacy0_4_10
-    }
-}
 /// Full description (for the non-concise toolset).
 ///
 /// Uses MiniJinja template placeholders with ToolKind-based keys:
@@ -63,14 +45,9 @@ ${% if tools.by_kind.read -%}
 ${% endif -%}
 - `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier).
 - To create a new file, set `${{ params.edit.old_string }}` to an empty string. An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file."#;
-/// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. Only accurate while
-/// `empty_old_string_does_not_override` is enabled (opt-in; the default is the
-/// legacy overwrite behavior); `versioned_definition` strips it unless a
-/// config enables the guard.
-pub(crate) const EMPTY_OLD_STRING_GUARD_SENTENCE: &str =
-    " An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file.";
 /// Input for the search_replace tool.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchReplaceInput {
     #[schemars(
         description = "The path to the file to modify. You can use either a relative path in the workspace or an absolute path."
@@ -82,10 +59,7 @@ pub struct SearchReplaceInput {
         description = "The text to replace it with (must be different from ${{ params.edit.old_string }})"
     )]
     pub new_string: String,
-    #[serde(
-        default,
-        deserialize_with = "crate::types::schema::deserialize_lenient_bool"
-    )]
+    #[serde(default)]
     #[schemars(
         description = "Replace all occurrences of ${{ params.edit.old_string }} (default false)"
     )]
@@ -100,18 +74,6 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchReplaceParams {
-    /// Deprecated runtime no-op, kept so configs still sending it deserialize under
-    /// `deny_unknown_fields`. Still gates the config-time Read-tool requirement (`requires_expr`).
-    #[serde(default)]
-    pub skip_read_before_edit: bool,
-    /// When true (opt-in), an empty `old_string` may only create a new file
-    /// or fill an empty one — it never silently overwrites an existing
-    /// non-empty file. Defaults to false (the legacy behavior): an empty
-    /// `old_string` replaces the file's entire contents. The served
-    /// description includes the guard sentence only when this is enabled
-    /// (see `versioned_definition`).
-    #[serde(default)]
-    pub empty_old_string_does_not_override: bool,
     /// When true, enable normalized-fallback matching for Unicode confusable
     /// characters (smart quotes, em-dashes, etc.).  When exact byte matching
     /// fails, the tool will retry with confusable-normalized comparison and
@@ -131,8 +93,6 @@ pub struct SearchReplaceParams {
 impl Default for SearchReplaceParams {
     fn default() -> Self {
         Self {
-            skip_read_before_edit: false,
-            empty_old_string_does_not_override: false,
             unicode_normalized_fallback: false,
             include_user_edit_hint: true,
         }
@@ -156,10 +116,6 @@ pub(crate) async fn run_search_replace(
         .extensions
         .get::<tool_runtime::Cwd>()
         .map(|c| c.0.clone());
-    let contract_version = ctx
-        .extensions
-        .get::<tool_runtime::BehaviorVersion>()
-        .map(|v| v.0.clone());
     let tool_call_id = ctx.call_id.as_str().to_owned();
     let (cwd, display_cwd, fs, notification_handle, hints_enabled);
     {
@@ -192,32 +148,27 @@ pub(crate) async fn run_search_replace(
             "File path is a directory".to_owned(),
         ));
     }
-    let is_legacy = SearchReplaceVersion::from_contract(contract_version.as_deref()).is_legacy();
-    if !is_legacy {
-        let res = resources.lock().await;
-        let respect_gitignore = res.get::<RespectGitignore>().is_none_or(|r| r.0);
-        if respect_gitignore
-            && let Some(filter) = res.get::<GitignoreFilter>()
-            && filter.is_ignored(&path)
-        {
-            return Ok(SearchReplaceOutput::InvalidInput(format!(
-                "Error: {} is ignored by .gitignore and cannot be edited.",
-                input.file_path
-            )));
-        }
+    let res = resources.lock().await;
+    let respect_gitignore = res.get::<RespectGitignore>().is_none_or(|r| r.0);
+    if respect_gitignore
+        && let Some(filter) = res.get::<GitignoreFilter>()
+        && filter.is_ignored(&path)
+    {
+        return Ok(SearchReplaceOutput::InvalidInput(format!(
+            "Error: {} is ignored by .gitignore and cannot be edited.",
+            input.file_path
+        )));
     }
+    drop(res);
     if input.old_string == input.new_string {
         return Ok(SearchReplaceOutput::InvalidInput(
             "Old string and new string are the same".to_owned(),
         ));
     }
-    let (empty_old_string_does_not_override, include_user_edit_hint);
+    let include_user_edit_hint;
     {
         let res = resources.lock().await;
         let sr_params = res.get::<Params<SearchReplaceParams>>();
-        empty_old_string_does_not_override = sr_params
-            .map(|p| p.0.empty_old_string_does_not_override)
-            .unwrap_or(false);
         include_user_edit_hint = sr_params
             .map(|p| p.0.include_user_edit_hint)
             .unwrap_or(true);
@@ -233,7 +184,6 @@ pub(crate) async fn run_search_replace(
             &cwd,
             display_cwd.as_deref(),
             hints_enabled,
-            empty_old_string_does_not_override,
         )
         .await?
     } else {
@@ -247,7 +197,6 @@ pub(crate) async fn run_search_replace(
             &cwd,
             display_cwd.as_deref(),
             hints_enabled,
-            is_legacy,
             include_user_edit_hint,
         )
         .await?
@@ -302,17 +251,13 @@ async fn handle_new_file_creation(
     cwd: &std::path::Path,
     display_cwd: Option<&std::path::Path>,
     hints_enabled: bool,
-    empty_old_string_does_not_override: bool,
 ) -> Result<SearchReplaceOutput, tool_runtime::ToolError> {
-    let file_exists = match fs.read_file(path).await {
-        Ok(bytes) => !bytes.is_empty(),
-        Err(_) => false,
-    };
     let old_text = match fs.read_file(path).await {
         Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
         Err(_) => None,
     };
-    if file_exists && empty_old_string_does_not_override {
+    let file_exists = old_text.is_some();
+    if old_text.as_deref().is_some_and(|text| !text.is_empty()) {
         let old_string_name;
         {
             let res = resources.lock().await;
@@ -357,31 +302,20 @@ async fn handle_new_file_creation(
             )),
         });
     }
-    if let Some(old_text) = old_text
-        && file_exists
-        && !empty_old_string_does_not_override
-    {
-        notification_handle.send_file_written(FileWritten {
-            tool_call_id: tool_call_id.to_string(),
-            absolute_path: path.to_path_buf(),
-            content: input.new_string.clone(),
-            previous_content: Some(old_text.clone()),
-            is_new_file: false,
-        });
-    } else {
-        notification_handle.send_file_written(FileWritten {
-            tool_call_id: tool_call_id.to_string(),
-            absolute_path: path.to_path_buf(),
-            content: input.new_string.clone(),
-            previous_content: None,
-            is_new_file: true,
-        });
-    }
+    notification_handle.send_file_written(FileWritten {
+        tool_call_id: tool_call_id.to_string(),
+        absolute_path: path.to_path_buf(),
+        content: input.new_string.clone(),
+        previous_content: old_text.clone(),
+        is_new_file: !file_exists,
+    });
+    let action = if file_exists { "updated" } else { "created" };
     let tool_output_for_prompt = format!(
-        "The file {} has been created successfully.",
+        "The file {} has been {action} successfully.",
         &input.file_path
     );
-    let tool_output_for_prompt_concise = format!("The file {} has been created.", &input.file_path);
+    let tool_output_for_prompt_concise =
+        format!("The file {} has been {action}.", &input.file_path);
     let edits = vec![SearchReplaceEditDetail {
         old_string: input.old_string.clone(),
         old_line: 1,
@@ -530,7 +464,6 @@ async fn handle_replacement(
     cwd: &std::path::Path,
     display_cwd: Option<&std::path::Path>,
     hints_enabled: bool,
-    is_legacy: bool,
     include_user_edit_hint: bool,
 ) -> Result<SearchReplaceOutput, tool_runtime::ToolError> {
     let bytes = match fs.read_file(path).await {
@@ -640,24 +573,16 @@ async fn handle_replacement(
                 .map_err(|e| tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
             (read_name, old_string_param, execute_name)
         };
-        let hint = if is_legacy {
-            String::new()
-        } else {
-            build_nearest_match_hint(&match_text, &input.old_string)
-        };
-        let confusable_hint = if is_legacy {
-            String::new()
-        } else {
-            build_confusable_hint(
-                &match_text,
-                &input.old_string,
-                crate::util::query_tools::QueryTools::detect(),
-                &read_name,
-                &old_string_param,
-                &execute_name,
-            )
-            .unwrap_or_default()
-        };
+        let hint = build_nearest_match_hint(&match_text, &input.old_string);
+        let confusable_hint = build_confusable_hint(
+            &match_text,
+            &input.old_string,
+            crate::util::query_tools::QueryTools::detect(),
+            &read_name,
+            &old_string_param,
+            &execute_name,
+        )
+        .unwrap_or_default();
         let user_edit_hint = if include_user_edit_hint {
             " The user may have changed the file since you last read it."
         } else {
@@ -784,59 +709,12 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
     fn description_template(&self) -> &str {
         DESCRIPTION_FULL
     }
-    /// Params-aware description: the "cannot overwrite" sentence in
-    /// [`DESCRIPTION_FULL`] only holds while `empty_old_string_does_not_override`
-    /// is enabled, so it is served only for configs that opt into the guard and
-    /// stripped by default (legacy overwrite behavior).
-    fn versioned_definition(
-        &self,
-        _contract_version: Option<&str>,
-        client_name: &str,
-        description_override: Option<&str>,
-        renderer: &TemplateRenderer,
-        param_map: &std::collections::HashMap<String, String>,
-        input_schema: &serde_json::Value,
-        effective_params: &serde_json::Value,
-    ) -> crate::types::definition::ToolDefinition {
-        let params: SearchReplaceParams =
-            serde_json::from_value(effective_params.clone()).unwrap_or_default();
-        let raw_desc = match description_override {
-            Some(d) => d.to_string(),
-            None if params.empty_old_string_does_not_override => {
-                self.description_template().to_string()
-            }
-            None => self
-                .description_template()
-                .replace(EMPTY_OLD_STRING_GUARD_SENTENCE, ""),
-        };
-        let description = renderer.render(&raw_desc).unwrap_or_else(|e| {
-            crate::types::template_renderer::strip_markers_on_render_failure(&raw_desc, &e)
-        });
-        let remapped_schema = if param_map.is_empty() {
-            input_schema.clone()
-        } else {
-            crate::util::remap::remap_schema_properties(input_schema, param_map)
-        };
-        crate::types::definition::ToolDefinition::function(
-            client_name,
-            Some(&description),
-            remapped_schema,
-        )
-    }
     fn emitted_notifications(&self) -> &'static [&'static str] {
         &["FileWritten"]
     }
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         Expr::And(vec![
-            // Unless `skip_read_before_edit` is set, require a Read tool in the toolset
-            // (read-before-edit is encouraged via description and RL grading, not runtime-enforced).
-            Expr::Value(ToolRequirement::if_params(
-                Expr::Not(Box::new(Expr::Value(ToolParamsRequirement::new(
-                    "skip_read_before_edit",
-                    true,
-                )))),
-                ToolRequirement::tool_kind(ToolKind::Read),
-            )),
+            Expr::Value(ToolRequirement::tool_kind(ToolKind::Read)),
             // Description template references these input params via
             // ${{ params.edit.old_string }}, ${{ params.edit.new_string }},
             // ${{ params.edit.replace_all }}. They must remain visible.
@@ -879,16 +757,7 @@ impl tool_runtime::Tool for SearchReplaceTool {
     ) -> Result<SearchReplaceOutput, tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
-        let bv = crate::types::tool_metadata::behavior_version(&ctx);
-        let is_legacy = SearchReplaceVersion::from_contract(bv.as_deref()).is_legacy();
-        let file_path = input.file_path.clone();
-        let result = run_search_replace(input, &ctx, resources.clone()).await?;
-        if is_legacy {
-            versions::legacy_0_4_10::downgrade_structured_errors(result, &resources, &file_path)
-                .await
-        } else {
-            Ok(result)
-        }
+        run_search_replace(input, &ctx, resources).await
     }
 }
 #[cfg(test)]
@@ -937,21 +806,14 @@ mod tests {
             std::collections::HashMap::from([(ToolKind::Edit, edit_params)]),
         )
     }
-    /// The strip in `versioned_definition` matches the template verbatim, so
-    /// the sentence must stay in sync with `DESCRIPTION_FULL`.
     #[test]
-    fn overwrite_guard_sentence_stays_in_sync_with_template() {
-        assert!(DESCRIPTION_FULL.contains(EMPTY_OLD_STRING_GUARD_SENTENCE));
-    }
-    #[test]
-    fn overwrite_guard_sentence_is_conditional_on_param() {
+    fn overwrite_guard_sentence_is_always_advertised() {
         use crate::types::tool_metadata::ToolMetadata;
         let renderer = description_renderer();
         let schema = serde_json::json!({"type": "object", "properties": {}});
         let param_map = std::collections::HashMap::new();
-        let default_def = ToolMetadata::versioned_definition(
+        let default_def = ToolMetadata::finalized_definition(
             &SearchReplaceTool,
-            None,
             "search_replace",
             None,
             &renderer,
@@ -961,27 +823,12 @@ mod tests {
         );
         let default_desc = default_def.function.description.unwrap();
         assert!(
-            !default_desc.contains("cannot overwrite"),
-            "guard sentence must be absent by default (legacy overwrite behavior):\n{default_desc}"
+            default_desc.contains("cannot overwrite an existing non-empty file"),
+            "canonical overwrite guard must be advertised:\n{default_desc}"
         );
         assert!(
             default_desc.contains("To create a new file"),
             "create-file guidance must remain:\n{default_desc}"
-        );
-        let opt_in_def = ToolMetadata::versioned_definition(
-            &SearchReplaceTool,
-            None,
-            "search_replace",
-            None,
-            &renderer,
-            &param_map,
-            &schema,
-            &serde_json::json!({"empty_old_string_does_not_override": true}),
-        );
-        let opt_in_desc = opt_in_def.function.description.unwrap();
-        assert!(
-            opt_in_desc.contains("cannot overwrite an existing non-empty file"),
-            "guard sentence must appear when the guard is enabled:\n{opt_in_desc}"
         );
     }
     #[test]
@@ -1053,15 +900,20 @@ mod tests {
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
     }
-    /// Harness configs still send this field; it must keep validating under `deny_unknown_fields`.
     #[test]
-    fn harness_skip_read_before_edit_param_still_validates() {
-        let json = serde_json::json!({ "skip_read_before_edit": true });
-        crate::types::params_validation::validate_params_json::<SearchReplaceParams>(&json).expect(
-            "harness skip_read_before_edit config must validate against SearchReplaceParams",
-        );
+    fn removed_search_replace_params_are_rejected() {
+        for json in [
+            serde_json::json!({ "skip_read_before_edit": true }),
+            serde_json::json!({ "empty_old_string_does_not_override": false }),
+        ] {
+            assert!(
+                crate::types::params_validation::validate_params_json::<SearchReplaceParams>(&json)
+                    .is_err(),
+                "removed parameter must be rejected: {json}"
+            );
+        }
     }
-    /// Consecutive edits to the same file succeed without any prior read.
+    /// Consecutive exact edits share the same canonical implementation.
     #[tokio::test]
     async fn consecutive_edits_succeed_without_prior_read() {
         let tmp = TempDir::new().unwrap();
@@ -1097,36 +949,11 @@ mod tests {
         assert_eq!(content, "hi earth\n");
     }
     #[tokio::test]
-    async fn skip_read_before_edit_param() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("test.txt"), "hello\n").unwrap();
-        let tool = SearchReplaceTool;
-        let mut resources = test_resources(tmp.path());
-        resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
-            ..Default::default()
-        }));
-        let input = make_input("test.txt", "hello", "goodbye");
-        let result = tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        match result {
-            SearchReplaceOutput::EditsApplied(_) => {
-                let content = std::fs::read_to_string(tmp.path().join("test.txt")).unwrap();
-                assert_eq!(content, "goodbye\n");
-            }
-            other => panic!("Expected EditsApplied, got {:?}", other),
-        }
-    }
-    #[tokio::test]
     async fn file_not_found() {
         let tmp = TempDir::new().unwrap();
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("nonexistent.txt", "hello", "goodbye");
@@ -1138,31 +965,6 @@ mod tests {
                 assert!(msg.contains("does not exist"), "got: {msg}");
             }
             other => panic!("Expected FileNotFound, got {:?}", other),
-        }
-    }
-    #[tokio::test]
-    async fn legacy_file_not_found_returns_exact_historical_invalid_input() {
-        let tmp = TempDir::new().unwrap();
-        let tool = SearchReplaceTool;
-        let mut resources = test_resources(tmp.path());
-        resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
-            ..Default::default()
-        }));
-        let input = make_input("nonexistent.txt", "hello", "goodbye");
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let result = tool_runtime::Tool::run(&tool, ctx, input).await.unwrap();
-        match result {
-            SearchReplaceOutput::InvalidInput(msg) => {
-                assert_eq!(
-                    msg,
-                    "File not found: nonexistent.txt. Please check the path and try again."
-                );
-            }
-            other => panic!("Expected InvalidInput, got {:?}", other),
         }
     }
     #[tokio::test]
@@ -1189,8 +991,6 @@ mod tests {
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("exception/Foo.java", "", "public class Foo {}");
@@ -1210,8 +1010,6 @@ mod tests {
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("nonexistent.txt", "hello", "goodbye");
@@ -1248,8 +1046,6 @@ mod tests {
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = SearchReplaceInput {
@@ -1281,8 +1077,6 @@ mod tests {
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("test.txt", "aaa", "ccc");
@@ -1301,40 +1095,12 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn legacy_multiple_matches_returns_exact_historical_invalid_input() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("test.txt"), "aaa bbb aaa\n").unwrap();
-        let tool = SearchReplaceTool;
-        let mut resources = test_resources(tmp.path());
-        resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
-            ..Default::default()
-        }));
-        let input = make_input("test.txt", "aaa", "ccc");
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let result = tool_runtime::Tool::run(&tool, ctx, input).await.unwrap();
-        match result {
-            SearchReplaceOutput::InvalidInput(msg) => {
-                assert_eq!(
-                    msg,
-                    "The string to replace was found multiple times in the file. Use replace_all to replace all occurrences, or include more context to only edit one occurrence."
-                );
-            }
-            other => panic!("Expected InvalidInput, got {:?}", other),
-        }
-    }
-    #[tokio::test]
     async fn no_match_found() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), "hello world\n").unwrap();
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("test.txt", "xyz", "abc");
@@ -1354,40 +1120,12 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn legacy_no_match_returns_exact_historical_invalid_input() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("test.txt"), "hello world\n").unwrap();
-        let tool = SearchReplaceTool;
-        let mut resources = test_resources(tmp.path());
-        resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
-            ..Default::default()
-        }));
-        let input = make_input("test.txt", "xyz", "abc");
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let result = tool_runtime::Tool::run(&tool, ctx, input).await.unwrap();
-        match result {
-            SearchReplaceOutput::InvalidInput(msg) => {
-                assert_eq!(
-                    msg,
-                    "The string to replace was not found in the file, use the read_file tool to see the correct string."
-                );
-            }
-            other => panic!("Expected InvalidInput, got {:?}", other),
-        }
-    }
-    #[tokio::test]
     async fn file_already_exists_nonempty() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: false,
-            empty_old_string_does_not_override: true,
             ..Default::default()
         }));
         let input = make_input("existing.txt", "", "new content");
@@ -1406,56 +1144,12 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn empty_old_string_overwrites_existing_file_by_default() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
-        let tool = SearchReplaceTool;
-        let resources = test_resources(tmp.path());
-        let input = make_input("existing.txt", "", "completely new content\n");
-        let result = tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        match result {
-            SearchReplaceOutput::EditsApplied(applied) => {
-                assert!(applied.tool_output_for_prompt.contains("has been created"));
-                let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
-                assert_eq!(content, "completely new content\n");
-            }
-            other => panic!("Expected EditsApplied, got {:?}", other),
-        }
-    }
-    #[tokio::test]
-    async fn empty_old_string_overrides_with_explicit_false() {
+    async fn empty_old_string_cannot_overwrite_existing_file() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            empty_old_string_does_not_override: false,
-            ..Default::default()
-        }));
-        let input = make_input("existing.txt", "", "completely new content\n");
-        let result = tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        match result {
-            SearchReplaceOutput::EditsApplied(applied) => {
-                assert!(applied.tool_output_for_prompt.contains("has been created"));
-                let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
-                assert_eq!(content, "completely new content\n");
-            }
-            other => panic!("Expected EditsApplied, got {:?}", other),
-        }
-    }
-    #[tokio::test]
-    async fn empty_old_string_blocked_when_param_set() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
-        let tool = SearchReplaceTool;
-        let mut resources = test_resources(tmp.path());
-        resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: false,
-            empty_old_string_does_not_override: true,
             ..Default::default()
         }));
         let input = make_input("existing.txt", "", "replacement content\n");
@@ -1476,13 +1170,11 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn empty_old_string_creates_new_file_even_with_override_guard() {
+    async fn empty_old_string_creates_new_file() {
         let tmp = TempDir::new().unwrap();
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: false,
-            empty_old_string_does_not_override: true,
             ..Default::default()
         }));
         let input = make_input("brand_new.txt", "", "fresh content\n");
@@ -1499,14 +1191,12 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn empty_old_string_overwrites_empty_file_even_with_guard() {
+    async fn empty_old_string_fills_empty_file() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("empty.txt"), "").unwrap();
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: false,
-            empty_old_string_does_not_override: true,
             ..Default::default()
         }));
         let input = make_input("empty.txt", "", "new content\n");
@@ -1515,7 +1205,7 @@ mod tests {
             .unwrap();
         match result {
             SearchReplaceOutput::EditsApplied(applied) => {
-                assert!(applied.tool_output_for_prompt.contains("has been created"));
+                assert!(applied.tool_output_for_prompt.contains("has been updated"));
                 let content = std::fs::read_to_string(tmp.path().join("empty.txt")).unwrap();
                 assert_eq!(content, "new content\n");
             }
@@ -1529,8 +1219,6 @@ mod tests {
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let mut param_map = std::collections::HashMap::new();
@@ -1563,7 +1251,6 @@ mod tests {
         resources.insert(FileSystem(Arc::new(LocalFs)));
         resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
             ..Default::default()
         }));
         resources.insert(TemplateRenderer::new(
@@ -1607,8 +1294,6 @@ mod tests {
         resources.insert(FileSystem(Arc::new(LocalFs)));
         resources.insert(NotificationHandle(handle));
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("test.txt", "hello", "goodbye");
@@ -1682,8 +1367,6 @@ mod tests {
         let tool = SearchReplaceTool;
         let mut resources = test_resources_with_gitignore(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("build/output.js", "var x = 1;", "var x = 2;");
@@ -1699,39 +1382,6 @@ mod tests {
                 );
             }
             other => panic!("Expected InvalidInput for gitignored file, got {:?}", other),
-        }
-    }
-    #[tokio::test]
-    async fn legacy_edit_allowed_for_gitignored_file() {
-        let tmp = TempDir::new().unwrap();
-        let canonical_root = dunce::canonicalize(tmp.path()).unwrap();
-        let build_dir = canonical_root.join("build");
-        std::fs::create_dir(&build_dir).unwrap();
-        let file_path = build_dir.join("output.js");
-        std::fs::write(&file_path, "var x = 1;\n").unwrap();
-        let tool = SearchReplaceTool;
-        let mut resources = test_resources_with_gitignore(tmp.path());
-        resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
-            ..Default::default()
-        }));
-        let input = make_input("build/output.js", "var x = 1;", "var x = 2;");
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let result = tool_runtime::Tool::run(&tool, ctx, input).await.unwrap();
-        match result {
-            SearchReplaceOutput::EditsApplied(_) => {
-                let content = std::fs::read_to_string(&file_path).unwrap();
-                assert!(content.contains("var x = 2;"));
-            }
-            other => {
-                panic!(
-                    "Expected EditsApplied for legacy gitignored file, got {:?}",
-                    other
-                )
-            }
         }
     }
     #[tokio::test]
@@ -1768,8 +1418,6 @@ mod tests {
         let tool = SearchReplaceTool;
         let mut resources = test_resources_with_gitignore(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input(
@@ -1797,8 +1445,6 @@ mod tests {
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("build/output.js", "var x = 1;", "var x = 2;");
@@ -2174,8 +1820,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("doc.md", "\"stream through\"", "replacement");
@@ -2206,8 +1850,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("test.txt", "xyz", "abc");
@@ -2235,8 +1877,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("doc.md", "totally_unrelated_string", "replacement");
@@ -2256,8 +1896,6 @@ neutTest_set);
     }
     fn fallback_params() -> SearchReplaceParams {
         SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             unicode_normalized_fallback: true,
             include_user_edit_hint: false,
         }
@@ -2435,8 +2073,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             unicode_normalized_fallback: false,
             include_user_edit_hint: false,
         }));
@@ -2522,8 +2158,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("test.txt", "hello\nworld\n", "goodbye\nearth\n");
@@ -2546,8 +2180,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("test.txt", "bbb", "BBB");
@@ -2570,8 +2202,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("test.txt", "hello", "goodbye");
@@ -2594,8 +2224,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = SearchReplaceInput {
@@ -2627,8 +2255,6 @@ neutTest_set);
         let tool = SearchReplaceTool;
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
-            skip_read_before_edit: true,
-            empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("test.txt", "line2\nline3", "REPLACED");

@@ -700,7 +700,6 @@ pub(super) fn render_rows(
                     render_area,
                     meta,
                     value,
-                    max_label_w,
                     is_selected,
                     theme,
                     is_expanded,
@@ -2301,7 +2300,6 @@ pub(super) fn render_setting_row(
     area: Rect,
     meta: &SettingMeta,
     value: &SettingValue,
-    max_label_w: u16,
     is_selected: bool,
     theme: &Theme,
     is_expanded: bool,
@@ -2379,8 +2377,6 @@ pub(super) fn render_setting_row(
     } else {
         layout_decision
     };
-    let _ = max_label_w;
-
     // ── Compute right-side x positions (shared across layouts). ──
     // Layout (right-to-left): [restart pill][space][chevron][space][value]
     // The 1-cell right pad is baked into `restart_x`.

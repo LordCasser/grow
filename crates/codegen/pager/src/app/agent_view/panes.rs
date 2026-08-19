@@ -731,11 +731,10 @@ mod scroll_granularity_tests {
         CompletionItemParsed {
             display: label.into(),
             description: String::new(),
-            insert_text: label.into(),
+            replacement: label.into(),
             source: SuggestionSource::History,
             priority: 0,
-            replace_range: None,
-            token_text: None,
+            replace_range: 0..0,
             truncated: false,
         }
     }

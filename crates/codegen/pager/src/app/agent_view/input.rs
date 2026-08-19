@@ -86,7 +86,6 @@ impl AgentView {
             || self.active_modal.is_some()
             || self.extensions_modal.is_some()
             || self.agents_modal.is_some()
-            || self.persona_detail.is_some()
             || self.scrollback_search.is_some()
             || self.line_viewer.is_some()
             || self.image_viewer.is_some()
@@ -222,14 +221,14 @@ impl AgentView {
     /// to advertise `Esc` instead of `Ctrl+C` for CancelTurn. Composed from
     /// the same predicates input routing uses, so the hint cannot claim Esc
     /// while a higher-priority consumer (dropdown, search, viewer/modal,
-    /// agents/persona modal, needs-input overlay, queued-prompt or inline
+    /// agent modal, needs-input overlay, queued-prompt or inline
     /// edit, subagent-view close, selection/link/goal/rewind/btw/jump,
     /// latent composer mode) would steal the press. Conservative on purpose:
     /// when false, the registry `Ctrl+C` is shown, which always cancels.
     /// `esc_owned_before_agent` is the app-level ownership snapshot
     /// (`AppView::esc_owned_before_agent`: app-level modals or
     /// pending cold-start, a focused dev tracing pane, the top-level cloud /
-    /// import-Claude modals, and the dashboard's attached-agent popup — all
+    /// application modals and the dashboard's attached-agent popup — all
     /// consume Esc before any agent routing), passed down by the draw path.
     pub(crate) fn esc_would_cancel_turn(&self, esc_owned_before_agent: bool) -> bool {
         if esc_owned_before_agent
@@ -254,7 +253,6 @@ impl AgentView {
             && self.inline_edit.is_none()
             && !self.is_subagent_view
             && self.agents_modal.is_none()
-            && self.persona_detail.is_none()
             && self.no_esc_consumer_pending()
             && self.no_input_overlay_pending()
     }
@@ -371,7 +369,7 @@ impl AgentView {
     ///
     /// Routes key events through three levels:
     /// 1. Pane-specific (prompt widget or scrollback navigation)
-    /// 2. Agent-level (cancel, yolo -- checked if pane didn't consume)
+    /// 2. Agent-level (cancel, always-approve -- checked if pane didn't consume)
     /// 3. Return Unchanged (bubbles to app_view for global actions)
     pub fn handle_input(&mut self, ev: &Event, registry: &ActionRegistry) -> InputOutcome {
         self.handle_input_inner(ev, registry, false)
@@ -801,19 +799,6 @@ impl AgentView {
                 }
                 Event::Mouse(mouse) => self.handle_extensions_modal_mouse(mouse),
                 Event::Paste(text) => self.handle_extensions_modal_paste(text),
-                _ => InputOutcome::Changed,
-            };
-        }
-        if self.persona_detail.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if registry.lookup(key, When::Always).is_some() {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_persona_detail_key(key)
-                }
-                Event::Mouse(mouse) => self.handle_persona_detail_mouse(mouse),
-                Event::Paste(text) => self.handle_persona_detail_paste(text),
                 _ => InputOutcome::Changed,
             };
         }
@@ -1397,7 +1382,7 @@ impl AgentView {
             .registry()
             .get("auto")
             .is_some();
-        let permission = if self.session.is_yolo() {
+        let permission = if self.session.is_always_approve() {
             "always-approve"
         } else if self.session.is_auto() {
             "auto"
@@ -2511,7 +2496,7 @@ mod esc_would_cancel_turn_tests {
         );
     }
     #[test]
-    fn agents_and_persona_modals_steal_esc() {
+    fn agents_modal_steals_esc() {
         let mut agent = running_agent(false);
         agent.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new(
             std::path::Path::new("/nonexistent"),
@@ -2522,13 +2507,6 @@ mod esc_would_cancel_turn_tests {
         assert!(
             !agent.esc_would_cancel_turn(false),
             "an open agents modal owns Esc (close), not cancel"
-        );
-        let mut agent = running_agent(false);
-        agent.persona_detail =
-            Some(crate::views::persona_detail::PersonaDetailState::from_name_only("researcher"));
-        assert!(
-            !agent.esc_would_cancel_turn(false),
-            "an open persona detail owns Esc (back/close), not cancel"
         );
     }
     #[test]

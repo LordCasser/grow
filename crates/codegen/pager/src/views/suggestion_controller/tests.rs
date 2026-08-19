@@ -466,21 +466,19 @@ fn suggestions_loaded_populates_dropdown() {
             CompletionItemParsed {
                 display: "git commit".into(),
                 description: "commit changes".into(),
-                insert_text: "git commit".into(),
+                replacement: "git commit".into(),
                 source: SuggestionSource::History,
                 priority: 10,
-                replace_range: None,
-                token_text: None,
+                replace_range: 0..3,
                 truncated: false,
             },
             CompletionItemParsed {
                 display: "git checkout".into(),
                 description: "switch branches".into(),
-                insert_text: "git checkout".into(),
+                replacement: "git checkout".into(),
                 source: SuggestionSource::History,
                 priority: 5,
-                replace_range: None,
-                token_text: None,
+                replace_range: 0..3,
                 truncated: false,
             },
         ],
@@ -492,7 +490,7 @@ fn suggestions_loaded_populates_dropdown() {
     assert_eq!(sc.dropdown.generation, current_gen);
     assert_eq!(sc.dropdown.selected, 0);
     assert_eq!(sc.dropdown.items[0].display, "git commit");
-    assert_eq!(sc.dropdown.items[1].insert_text, "git checkout");
+    assert_eq!(sc.dropdown.items[1].replacement, "git checkout");
     assert_eq!(sc.ghost_text(), Some(" commit"));
 }
 
@@ -508,11 +506,10 @@ fn suggestions_loaded_stale_does_not_populate_dropdown() {
         completions: vec![CompletionItemParsed {
             display: "stale".into(),
             description: "".into(),
-            insert_text: "stale".into(),
+            replacement: "stale".into(),
             source: SuggestionSource::None,
             priority: 0,
-            replace_range: None,
-            token_text: None,
+            replace_range: 0..3,
             truncated: false,
         }],
         generation: stale,
@@ -535,11 +532,10 @@ fn accept_ghost_closes_dropdown() {
         completions: vec![CompletionItemParsed {
             display: "git commit".into(),
             description: "".into(),
-            insert_text: "git commit".into(),
+            replacement: "git commit".into(),
             source: SuggestionSource::History,
             priority: 0,
-            replace_range: None,
-            token_text: None,
+            replace_range: 0..3,
             truncated: false,
         }],
         generation: current_gen,
@@ -561,7 +557,6 @@ fn parse_response_with_ghost_and_completions() {
         "result": {
             "generation": 42,
             "ghost": {
-                "fullText": "git commit",
                 "suffix": " commit",
                 "source": "history"
             },
@@ -569,9 +564,11 @@ fn parse_response_with_ghost_and_completions() {
                 {
                     "display": "git commit",
                     "description": "commit changes",
-                    "insertText": "git commit",
+                    "replacement": "git commit",
                     "source": "history",
-                    "priority": 10
+                    "priority": 10,
+                    "replaceRange": [0, 3],
+                    "truncated": false
                 }
             ]
         }
@@ -607,7 +604,6 @@ fn parse_response_empty_suffix_treated_as_no_ghost() {
         "result": {
             "generation": 1,
             "ghost": {
-                "fullText": "ls",
                 "suffix": "",
                 "source": "history"
             },
@@ -640,88 +636,33 @@ fn parse_response_unwrapped_format() {
     assert_eq!(parsed.generation, 5);
 }
 
-fn parse_single_completion(item: serde_json::Value) -> CompletionItemParsed {
+fn parse_single_completion(item: serde_json::Value) -> Option<CompletionItemParsed> {
     let json = serde_json::json!({
         "result": { "generation": 1, "ghost": null, "completions": [item] }
     });
-    SuggestResponseParsed::from_json(&json)
-        .unwrap()
-        .completions
-        .remove(0)
+    SuggestResponseParsed::from_json(&json).and_then(|mut response| response.completions.pop())
 }
 
 #[test]
-fn parse_completion_replace_range_array() {
+fn parse_completion_requires_one_atomic_edit() {
     let item = parse_single_completion(serde_json::json!({
         "display": "grep",
-        "insertText": "ls | grep",
+        "description": "",
+        "replacement": "grep",
         "source": "path",
         "priority": 0,
         "replaceRange": [5, 7],
-        "tokenText": "grep"
-    }));
-    assert_eq!(item.replace_range, Some(5..7));
+        "truncated": false
+    }))
+    .unwrap();
+    assert_eq!(item.replace_range, 5..7);
+    assert_eq!(item.replacement, "grep");
 }
 
 #[test]
-fn parse_completion_replace_range_absent_is_none() {
-    let item = parse_single_completion(serde_json::json!({
-        "display": "grep",
-        "insertText": "grep",
-        "source": "path",
-        "priority": 0
-    }));
-    assert_eq!(item.replace_range, None);
-    assert_eq!(item.token_text, None);
-}
-
-/// `tokenText` and `replaceRange` parse as ONE atomic pair; half pairs
-/// degrade to the rangeless whole-line accept (a range without its token
-/// would splice the whole-line `insertText` into a token span — `cat no`
-/// becoming `cat cat notes.md`).
-#[test]
-fn parse_completion_token_text() {
-    let item = parse_single_completion(serde_json::json!({
-        "display": "grep",
-        "insertText": "ls | grep",
-        "source": "path",
-        "priority": 0,
-        "replaceRange": [5, 7],
-        "tokenText": "grep"
-    }));
-    assert_eq!(item.token_text.as_deref(), Some("grep"));
-    assert_eq!(item.span_replacement(), "grep");
-
-    // Range without a token (history/AI whole-line rows): the range drops
-    // and the whole-line accept — the identical outcome — takes over.
-    let whole_line = parse_single_completion(serde_json::json!({
-        "display": "git status",
-        "insertText": "git status",
-        "source": "history",
-        "priority": 0,
-        "replaceRange": [0, 6]
-    }));
-    assert_eq!(whole_line.replace_range, None);
-    assert_eq!(whole_line.span_replacement(), "git status");
-
-    // Token without a range has nowhere to splice: both drop.
-    let token_only = parse_single_completion(serde_json::json!({
-        "display": "notes.md",
-        "insertText": "cat notes.md",
-        "source": "file",
-        "priority": 0,
-        "tokenText": "notes.md"
-    }));
-    assert_eq!(token_only.replace_range, None);
-    assert_eq!(token_only.token_text, None);
-}
-
-/// Malformed wire shapes degrade to `None` (legacy whole-line accept)
-/// instead of dropping the item or erroring — and take the now-unmoored
-/// `tokenText` down with them.
-#[test]
-fn parse_completion_replace_range_malformed_is_none() {
+fn parse_completion_rejects_old_or_malformed_shapes() {
     for bad in [
+        serde_json::json!(null),
         serde_json::json!([5]),
         serde_json::json!([5, 7, 9]),
         serde_json::json!([7, 5]),
@@ -730,48 +671,43 @@ fn parse_completion_replace_range_malformed_is_none() {
         serde_json::json!("5..7"),
         serde_json::json!(null),
     ] {
-        let item = parse_single_completion(serde_json::json!({
-            "display": "grep",
-            "insertText": "grep",
-            "source": "path",
-            "priority": 0,
-            "replaceRange": bad,
-            "tokenText": "grep"
-        }));
-        assert_eq!(item.replace_range, None, "shape: {bad:?}");
-        assert_eq!(item.token_text, None, "shape: {bad:?}");
+        assert!(
+            parse_single_completion(serde_json::json!({
+                "display": "grep",
+                "description": "",
+                "replacement": "grep",
+                "source": "path",
+                "priority": 0,
+                "replaceRange": bad,
+                "truncated": false
+            }))
+            .is_none(),
+            "shape: {bad:?}"
+        );
     }
-}
 
-/// `truncated` parses leniently: absent or non-bool means `false` (older
-/// shells never send it), `true` survives.
-#[test]
-fn parse_completion_truncated_flag() {
-    let absent = parse_single_completion(serde_json::json!({
-        "display": "notes.md",
-        "insertText": "cat notes.md",
-        "source": "file",
-        "priority": 0
-    }));
-    assert!(!absent.truncated);
-
-    let set = parse_single_completion(serde_json::json!({
-        "display": "notes.md",
-        "insertText": "cat notes.md",
-        "source": "file",
-        "priority": 0,
-        "truncated": true
-    }));
-    assert!(set.truncated);
-
-    let malformed = parse_single_completion(serde_json::json!({
-        "display": "notes.md",
-        "insertText": "cat notes.md",
-        "source": "file",
-        "priority": 0,
-        "truncated": "yes"
-    }));
-    assert!(!malformed.truncated);
+    for old in [
+        serde_json::json!({
+            "display": "grep", "description": "", "insertText": "ls | grep",
+            "source": "path", "priority": 0, "replaceRange": [5, 7],
+            "tokenText": "grep", "truncated": false
+        }),
+        serde_json::json!({
+            "display": "grep", "description": "", "replacement": "grep",
+            "source": "path", "priority": 0, "truncated": false
+        }),
+        serde_json::json!({
+            "display": "grep", "description": "", "replacement": "grep",
+            "source": "path", "priority": 0, "replaceRange": [5, 7]
+        }),
+        serde_json::json!({
+            "display": "grep", "description": "", "replacement": "grep",
+            "source": "unknown", "priority": 0, "replaceRange": [5, 7],
+            "truncated": false
+        }),
+    ] {
+        assert!(parse_single_completion(old).is_none());
+    }
 }
 
 // -- validated_replace_range -----------------------------------------------
@@ -880,11 +816,10 @@ fn span_item(
     CompletionItemParsed {
         display: token.to_owned(),
         description: String::new(),
-        insert_text: format!("line:{token}"),
+        replacement: token.to_owned(),
         source,
         priority: 0,
-        replace_range: Some(range),
-        token_text: Some(token.to_owned()),
+        replace_range: range,
         truncated: false,
     }
 }
@@ -1092,38 +1027,6 @@ fn tab_decision_open_when_no_extending_lcp() {
     assert_eq!(sc.tab_decision("ls | gr", "ls | gr".len()), TabAction::Open);
 }
 
-/// THE legacy-shell data-loss case: a rangeless `path` row (old shells send
-/// `insertText: "grep"` with no range) must never insta-accept — its
-/// whole-line fallback would replace `ls | gr` with `grep`. Any rangeless
-/// or token-less row in the set forces plain-open.
-#[test]
-fn tab_decision_rangeless_rows_never_get_token_semantics() {
-    // The `item` fixture is rangeless/token-less — the old-shell row shape.
-    let rangeless = item("grep", SuggestionSource::PathExecutable);
-    let mut sc = decision_controller("ls | gr");
-    sc.dropdown.items = vec![rangeless.clone()];
-    assert_eq!(
-        sc.tab_decision("ls | gr", "ls | gr".len()),
-        TabAction::Open,
-        "sole rangeless row must open, not insta-accept"
-    );
-
-    // Mixed rangeless PATH row + ranged file row: still open-only.
-    let mut sc = decision_controller("ls | gr");
-    sc.dropdown.items = vec![
-        rangeless,
-        span_item("growfile", 5..7, SuggestionSource::FilePath),
-    ];
-    assert_eq!(sc.tab_decision("ls | gr", "ls | gr".len()), TabAction::Open);
-
-    // A range without its token (struct-level half pair) is equally unsafe.
-    let mut half = item("cat notes.md", SuggestionSource::FilePath);
-    half.replace_range = Some(4..6);
-    let mut sc = decision_controller("cat no");
-    sc.dropdown.items = vec![half];
-    assert_eq!(sc.tab_decision("cat no", "cat no".len()), TabAction::Open);
-}
-
 /// A truncated (capped-scan) set must not conclude: the unscanned tail
 /// could hold the row that disproves a sole match or extends past an LCP.
 #[test]
@@ -1184,7 +1087,7 @@ fn peek_completion_splice_is_non_consuming() {
     let generation = sc.generation();
     assert_eq!(
         sc.peek_completion_splice("ls | gr"),
-        Some(CompletionSplice::Token(5..7, "grep".into()))
+        Some(CompletionSplice::Edit(5..7, "grep".into()))
     );
     assert_eq!(sc.dropdown.items.len(), 1, "peek must not consume");
     assert_eq!(sc.generation(), generation);
@@ -1200,37 +1103,28 @@ fn accept_completion_resolves_token_splice() {
     );
     assert_eq!(
         sc.accept_completion("ls | gr"),
-        Some(CompletionSplice::Token(5..7, "grep".into()))
+        Some(CompletionSplice::Edit(5..7, "grep".into()))
     );
     assert!(sc.dropdown.items.is_empty(), "item moved out + closed");
 }
 
-/// A ranged item without a distinct `token_text` (history/AI whole-line
-/// completions) splices its `insert_text` over the span.
+/// History/AI use the same atomic edit shape, with a whole-line range.
 #[test]
-fn accept_completion_range_without_token_uses_insert_text() {
-    let mut item = item("git status --porcelain", SuggestionSource::History);
-    item.replace_range = Some(0..6);
-    let mut sc = accept_controller("git st", vec![item]);
+fn accept_completion_whole_line_edit() {
+    let mut sc = accept_controller(
+        "git st",
+        vec![span_item(
+            "git status --porcelain",
+            0..6,
+            SuggestionSource::History,
+        )],
+    );
     assert_eq!(
         sc.accept_completion("git st"),
-        Some(CompletionSplice::Token(
+        Some(CompletionSplice::Edit(
             0..6,
             "git status --porcelain".into()
         ))
-    );
-}
-
-/// Rangeless items (older shells) resolve to the legacy whole-line replace.
-#[test]
-fn accept_completion_rangeless_resolves_whole_line() {
-    let mut sc = accept_controller(
-        "git st",
-        vec![item("git status --porcelain", SuggestionSource::History)],
-    );
-    assert_eq!(
-        sc.accept_completion("git st"),
-        Some(CompletionSplice::WholeLine("git status --porcelain".into()))
     );
 }
 
@@ -1255,11 +1149,10 @@ fn item(text: &str, source: SuggestionSource) -> CompletionItemParsed {
     CompletionItemParsed {
         display: text.to_owned(),
         description: String::new(),
-        insert_text: text.to_owned(),
+        replacement: text.to_owned(),
         source,
         priority: 0,
-        replace_range: None,
-        token_text: None,
+        replace_range: 0..0,
         truncated: false,
     }
 }
@@ -1274,7 +1167,7 @@ fn loaded_controller(text: &str, ghost_suffix: Option<&str>, insert: &str) -> Su
                 suffix: s.to_owned(),
                 source: SuggestionSource::History,
             }),
-            completions: vec![item(insert, SuggestionSource::History)],
+            completions: vec![span_item(insert, 0..text.len(), SuggestionSource::History)],
             generation,
         },
         text,
@@ -1496,26 +1389,26 @@ fn disabled_controller_ignores_response_ghost() {
 fn source_parse_known_values() {
     assert_eq!(
         SuggestionSource::parse_source("history"),
-        SuggestionSource::History
+        Some(SuggestionSource::History)
     );
     assert_eq!(
         SuggestionSource::parse_source("path"),
-        SuggestionSource::PathExecutable
+        Some(SuggestionSource::PathExecutable)
     );
     assert_eq!(
         SuggestionSource::parse_source("file"),
-        SuggestionSource::FilePath
+        Some(SuggestionSource::FilePath)
     );
-    assert_eq!(SuggestionSource::parse_source("ai"), SuggestionSource::AI);
+    assert_eq!(
+        SuggestionSource::parse_source("ai"),
+        Some(SuggestionSource::AI)
+    );
 }
 
 #[test]
 fn source_parse_unknown_returns_none() {
-    assert_eq!(SuggestionSource::parse_source(""), SuggestionSource::None);
-    assert_eq!(
-        SuggestionSource::parse_source("bogus"),
-        SuggestionSource::None
-    );
+    assert_eq!(SuggestionSource::parse_source(""), None);
+    assert_eq!(SuggestionSource::parse_source("bogus"), None);
 }
 
 // -- end-to-end pipeline: text_changed → debounce → loaded ----------------

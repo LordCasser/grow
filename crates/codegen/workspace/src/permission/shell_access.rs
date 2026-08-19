@@ -540,8 +540,6 @@ pub enum ProtectedEditReason {
     Etc,
     GrowConfig,
     GrowSandbox,
-    ClaudeSettings,
-    CursorHooks,
     /// Fail-closed / unclassified sensitive path; no user copy yet.
     Sensitive,
 }
@@ -556,8 +554,6 @@ impl ProtectedEditReason {
             Self::Etc => "etc",
             Self::GrowConfig => "grow_config",
             Self::GrowSandbox => "grow_sandbox",
-            Self::ClaudeSettings => "claude_settings",
-            Self::CursorHooks => "cursor_hooks",
             Self::Sensitive => "sensitive",
         }
     }
@@ -584,12 +580,6 @@ impl ProtectedEditReason {
             ),
             Self::GrowSandbox => Some(
                 "Note: This edit contains changes to the Grow sandbox config, which can loosen filesystem and network restrictions on commands.",
-            ),
-            Self::ClaudeSettings => Some(
-                "Note: This edit contains changes to Claude-compatible settings, which can install hooks or change permission mode without a separate execution approval.",
-            ),
-            Self::CursorHooks => Some(
-                "Note: This edit contains changes to Cursor hooks, which can run automatically in later sessions without a separate execution approval.",
             ),
             Self::Sensitive => None,
         }
@@ -669,14 +659,6 @@ fn protected_edit_reason(path: &Path) -> Option<ProtectedEditReason> {
 
     if protected_grow_hook_root(path, &string_components) {
         return Some(ProtectedEditReason::HookRoot);
-    }
-    if string_components.ends_with(&[".claude", "settings.json"])
-        || string_components.ends_with(&[".claude", "settings.local.json"])
-    {
-        return Some(ProtectedEditReason::ClaudeSettings);
-    }
-    if string_components.ends_with(&[".cursor", "hooks.json"]) {
-        return Some(ProtectedEditReason::CursorHooks);
     }
     if protected_git_hooks_path(&string_components) {
         return Some(ProtectedEditReason::GitHooks);
@@ -1703,14 +1685,6 @@ mod tests {
                 "/home/user/.grow/requirements.toml",
                 ProtectedEditReason::GrowConfig,
             ),
-            (
-                "/home/user/.claude/settings.json",
-                ProtectedEditReason::ClaudeSettings,
-            ),
-            (
-                "/home/user/.cursor/hooks.json",
-                ProtectedEditReason::CursorHooks,
-            ),
         ];
         for (path, reason) in cases {
             assert_eq!(
@@ -1733,9 +1707,6 @@ mod tests {
             "/home/user/.grow/hooks/evil.json",
             "/home/user/.grow/hooks/nested/deep.json",
             "/home/user/.grow/hooks-paths",
-            "/home/user/.claude/settings.json",
-            "/home/user/.claude/settings.local.json",
-            "/home/user/.cursor/hooks.json",
             "/work/project/.grow/hooks/local.json",
             "/work/project/.grow/hooks-paths",
         ] {
@@ -1748,8 +1719,7 @@ mod tests {
             "/home/user/.grow/hooks-disabled/note.json",
             "/home/user/.grow/hooks-evil/note.json",
             "/home/user/project/src/hooks.json",
-            "/home/user/.claude/other.json",
-            "/home/user/.cursor/settings.json",
+            "/home/user/.other-tool/settings.json",
         ] {
             assert!(
                 edit_target_protection(Path::new(path)).is_none(),

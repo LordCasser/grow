@@ -8,20 +8,17 @@ const DONE_SENTINEL: &str = "EDIT_COLLAPSED_DONE";
 /// renders, so it separates the collapsed one-liner from the expanded view.
 const BODY_MARKER: &str = "EXPANDED_BODY_MARKER";
 
-/// PTY: with the `collapsed_edit_blocks` flag enabled (config tier here;
-/// remote settings/managed in production), an Edit tool call lands as a collapsed
-/// one-liner — header with the colored `+N/-M` diffstat, no diff body — and a
+/// PTY: an Edit tool call lands in the canonical collapsed presentation —
+/// header with the colored `+N/-M` diffstat, no diff body — and a
 /// double-click on the header expands it to the full diff. (The keyboard fold
 /// keys operate on the scrollback selection, which this test does not
-/// exercise.) The flag-off/legacy default is covered end-to-end by
-/// `edit_hl_inplace_refresh_pty`, which relies on expanded-on-arrival diffs.
+/// exercise.) The explicit expanded appearance is covered end-to-end by
+/// `edit_hl_inplace_refresh_pty`.
 /// Doubles as the demo-cast generator via `GROW_PTY_CAST_DIR`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn edit_collapsed_oneliner_pty() {
     let content = ContentController::start().await.expect("start content");
-    seed_ui_config(&content, "collapsed_edit_blocks = true");
-
     // Fixture under the isolated HOME so the scripted search_replace succeeds.
     let target = content.home().join("greet_fix.py");
     std::fs::write(
@@ -51,7 +48,7 @@ async fn edit_collapsed_oneliner_pty() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

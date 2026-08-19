@@ -354,7 +354,7 @@
         let mut scrollback = ScrollbackState::new();
         session.set_compaction_activity(Some(TurnActivity::AutoCompacting));
         let update = GrowSessionUpdate::AutoCompactCompleted {
-            tokens_before: Some(858_000),
+            tokens_before: 858_000,
             tokens_after: 66_000,
             elapsed_ms: Some(500),
             summary_preview: None,
@@ -376,7 +376,7 @@
                 tokens_after,
                 ..
             }) => {
-                assert_eq!(tokens_before, Some(858_000));
+                assert_eq!(tokens_before, 858_000);
                 assert_eq!(
                     tokens_after, 43_000,
                     "must flush the model-confirmed count, not the 66k estimate"
@@ -391,7 +391,7 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         let update = GrowSessionUpdate::AutoCompactCompleted {
-            tokens_before: Some(90_000),
+            tokens_before: 90_000,
             tokens_after: 20_000,
             elapsed_ms: Some(500),
             summary_preview: None,
@@ -416,7 +416,7 @@
         session.loading_replay = true;
         let mut scrollback = ScrollbackState::new();
         let update = GrowSessionUpdate::AutoCompactCompleted {
-            tokens_before: Some(90_000),
+            tokens_before: 90_000,
             tokens_after: 20_000,
             elapsed_ms: Some(500),
             summary_preview: None,
@@ -441,7 +441,7 @@
             .set_compaction_activity(Some(TurnActivity::AutoCompacting));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
-            tokens_before: Some(858_000),
+            tokens_before: 858_000,
             tokens_after: 66_000,
             elapsed_ms: Some(500),
             summary_preview: None,
@@ -462,7 +462,7 @@
                 tokens_after,
                 ..
             }) => {
-                assert_eq!(tokens_before, Some(858_000));
+                assert_eq!(tokens_before, 858_000);
                 assert_eq!(
                     tokens_after, 43_000,
                     "deferred line must flush the confirmed 43k, not the 66k \
@@ -496,7 +496,7 @@
             .insert(child_sid.into(), Box::new(child_view));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
-            tokens_before: Some(90000),
+            tokens_before: 90000,
             tokens_after: 25000,
             elapsed_ms: Some(300),
             summary_preview: None,
@@ -574,7 +574,7 @@
             .insert(child_sid.into(), make_subagent_info(child_sid));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
-            tokens_before: Some(90000),
+            tokens_before: 90000,
             tokens_after: 25000,
             elapsed_ms: Some(300),
             summary_preview: None,

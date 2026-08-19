@@ -353,7 +353,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             // The agent's tool bridge must know `todo_write` for it to parse + dispatch.
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
-            begin_test_causal_turn(&actor);
+            begin_test_causal_turn(&actor).await;
 
             let mut client_hooks = crate::extensions::hooks::ClientHooks::new();
             for event in [
@@ -450,7 +450,7 @@ async fn pre_tool_use_deny_feeds_reason_back_and_continues_turn() {
             // The tool bridge must know `todo_write` so the call reaches the gate
             // rather than short-circuiting as an unknown tool.
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
-            begin_test_causal_turn(&actor);
+            begin_test_causal_turn(&actor).await;
 
             install_client_hook(&actor, ::hooks::event::HookEventName::PreToolUse, &["cb_0"]);
             spawn_deny_responder(gateway_rx, "use read_file instead");
@@ -909,38 +909,6 @@ async fn subagent_session_gates_on_subagent_stop() {
                     panic!("a SubagentStop block must keep the subagent working, got {other:?}")
                 }
             }
-        })
-        .await;
-}
-
-/// Alias fire sites serialize the canonical event name: a `SubagentEnd` envelope reads
-/// `"subagent_stop"` on the wire, matching `GROW_HOOK_EVENT`.
-#[tokio::test(flavor = "current_thread")]
-async fn alias_envelope_serializes_canonical_event_name() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (gateway_tx, _gateway_rx) =
-                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-
-            let envelope = actor.make_hook_envelope(
-                ::hooks::event::HookEventName::SubagentEnd,
-                None,
-                ::hooks::event::HookPayload::SubagentStop {
-                    phase: ::hooks::event::SubagentStopPhase::Observe,
-                    subagent_id: "sub-1".into(),
-                    subagent_type: "explore".into(),
-                    stop_hook_active: None,
-                    last_assistant_message: None,
-                },
-            );
-            let value = serde_json::to_value(&envelope).expect("envelope serializes");
-            assert_eq!(value["hookEventName"], "subagent_stop");
-            // The test actor runs yolo, so permissionMode pins that state.
-            assert_eq!(value["permissionMode"], "bypassPermissions");
         })
         .await;
 }

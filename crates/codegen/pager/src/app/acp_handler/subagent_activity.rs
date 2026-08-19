@@ -91,7 +91,6 @@ pub(crate) fn finalize_killed_subagent(
             duration_ms: 0,
             tokens_used: 0,
             output: None,
-            will_wake: false,
         },
         meta: None,
     };

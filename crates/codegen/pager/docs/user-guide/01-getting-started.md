@@ -67,7 +67,7 @@ By default, Grow asks for permission before executing shell commands or editing 
 
 - Press `Ctrl+X`, then `P`, to open the Permission picker
 - Use `/permission`, `/ask`, `/auto`, or `/always-approve`
-- Use the `--yolo` flag at launch: `grow --yolo`
+- Use the `--permission-mode always-approve` flag at launch: `grow --permission-mode always-approve`
 
 ---
 
@@ -148,7 +148,7 @@ grow --cwd ~/projects/my-app
 grow --rules "Always use TypeScript. Prefer functional components."
 
 # Auto-approve all tool executions
-grow --yolo
+grow --permission-mode always-approve
 
 # Use a configured provider/model
 grow -m deepseek/deepseek-chat
@@ -191,7 +191,7 @@ Output formats:
 Example CI/CD usage:
 
 ```bash
-grow -p "Review changes for bugs" --output-format json --yolo | jq -r '.text'
+grow -p "Review changes for bugs" --output-format json --permission-mode always-approve | jq -r '.text'
 ```
 
 ---
@@ -206,7 +206,7 @@ Add per-project instructions by creating an `AGENTS.md` file in your repository.
 <cwd>/AGENTS.md             # Directory-level rules (highest priority)
 ```
 
-Deeper files take precedence. Grow also reads `CLAUDE.md` files for compatibility.
+Deeper files take precedence. `.grow/rules/*.md` provides the canonical multi-file rules surface.
 
 ---
 

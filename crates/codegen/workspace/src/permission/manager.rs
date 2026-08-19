@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
 use agent_client_protocol as acp;
@@ -76,7 +76,7 @@ impl PendingPermissionMutation {
 
 /// Canonical `decision_reason` values for the local permission event.
 pub(crate) mod reasons {
-    pub const YOLO: &str = "yolo";
+    pub const ALWAYS_APPROVE: &str = "always_approve";
     pub const POLICY_ALLOW: &str = "policy_allow";
     pub const POLICY_DENY: &str = "policy_deny";
     pub const POLICY_ASK: &str = "policy_ask";
@@ -179,6 +179,22 @@ fn permission_mode_artifact_str(mode: diagnostics::enums::PermissionMode) -> &'s
     }
 }
 
+fn encode_permission_mode(mode: diagnostics::enums::PermissionMode) -> u8 {
+    match mode {
+        diagnostics::enums::PermissionMode::Ask => 0,
+        diagnostics::enums::PermissionMode::Auto => 1,
+        diagnostics::enums::PermissionMode::AlwaysApprove => 2,
+    }
+}
+
+fn decode_permission_mode(value: u8) -> diagnostics::enums::PermissionMode {
+    match value {
+        1 => diagnostics::enums::PermissionMode::Auto,
+        2 => diagnostics::enums::PermissionMode::AlwaysApprove,
+        _ => diagnostics::enums::PermissionMode::Ask,
+    }
+}
+
 /// Increments the in-flight permission-request counter on construction and
 /// decrements it on drop, so every `request()` return path stays balanced.
 struct InFlightGuard(Arc<AtomicUsize>);
@@ -233,15 +249,13 @@ impl PermissionAuditProgress {
 pub enum PermissionHandle {
     Actor {
         cmd_tx: mpsc::UnboundedSender<PermissionCommand>,
-        yolo_state: Arc<AtomicBool>,
-        /// Auto mode (LLM classifier) — mutually exclusive with yolo at runtime.
-        auto_state: Arc<AtomicBool>,
+        mode_state: Arc<AtomicU8>,
         /// True when the installed auto classifier has a live `ClassifyTextFn`
         /// (session sampling side-query). False for heuristic-only fallbacks.
         side_query_wired: Arc<AtomicBool>,
         /// Managed-policy pin cached at spawn. When `Some`, the agent re-clamps
-        /// every client-supplied yolo to non-yolo; `None` = no pin.
-        yolo_pin: Option<&'static str>,
+        /// every client-supplied always-approve to non-always-approve; `None` = no pin.
+        always_approve_pin: Option<&'static str>,
         /// Grep Read-deny globs, carried so subagents inherit the parent's excludes.
         deny_read_globs: Arc<Vec<String>>,
         /// Concurrent in-flight permission requests. Shared across handle clones
@@ -826,46 +840,19 @@ impl PermissionHandle {
         PermissionHandle::AllowAll
     }
 
-    /// Set the YOLO mode for the permission manager
-    pub fn set_yolo_mode(&self, enabled: bool) {
+    /// Atomically select the permission manager's canonical mode.
+    pub fn set_mode(&self, mode: diagnostics::enums::PermissionMode) {
         if let PermissionHandle::Actor {
             cmd_tx,
-            yolo_state,
-            auto_state,
-            yolo_pin,
+            mode_state,
+            always_approve_pin,
             ..
         } = self
         {
-            // Clamp the Arc synchronously so `is_yolo_mode()` is correct
-            // immediately (no optimistic-true window); the raw request is still
-            // forwarded so the actor logs the refusal once and re-clamps.
-            let clamped = clamp_yolo(enabled, *yolo_pin);
-            yolo_state.store(clamped, Ordering::Relaxed);
-            if clamped {
-                auto_state.store(false, Ordering::Relaxed);
-            }
-            if let Err(e) = cmd_tx.send(PermissionCommand::SetYoloMode(enabled)) {
-                tracing::error!(?e, "failed to send yolo mode command");
-            }
-        }
-    }
-
-    /// Enable or disable auto mode (LLM classifier). Enabling auto clears yolo
-    /// and installs the default conversation-aware classifier when none is set.
-    pub fn set_auto_mode(&self, enabled: bool) {
-        if let PermissionHandle::Actor {
-            cmd_tx,
-            yolo_state,
-            auto_state,
-            ..
-        } = self
-        {
-            auto_state.store(enabled, Ordering::Relaxed);
-            if enabled {
-                yolo_state.store(false, Ordering::Relaxed);
-            }
-            if let Err(e) = cmd_tx.send(PermissionCommand::SetAutoMode(enabled)) {
-                tracing::error!(?e, "failed to send auto mode command");
+            let effective = clamp_permission_mode(mode, *always_approve_pin);
+            mode_state.store(encode_permission_mode(effective), Ordering::Relaxed);
+            if let Err(e) = cmd_tx.send(PermissionCommand::SetMode(mode)) {
+                tracing::error!(?e, "failed to send permission mode command");
             }
         }
     }
@@ -921,18 +908,6 @@ impl PermissionHandle {
         }
     }
 
-    /// Update recent transcript turns used by the auto-mode classifier.
-    pub fn set_classifier_transcript(
-        &self,
-        turns: Vec<crate::permission::auto_mode::ClassifierTurn>,
-    ) {
-        if let PermissionHandle::Actor { cmd_tx, .. } = self
-            && let Err(e) = cmd_tx.send(PermissionCommand::SetClassifierTranscript(turns))
-        {
-            tracing::error!(?e, "failed to send classifier transcript command");
-        }
-    }
-
     /// Update the project AGENTS.md instructions used by the auto-mode classifier.
     pub fn set_project_instructions(&self, instructions: Option<String>) {
         if let PermissionHandle::Actor { cmd_tx, .. } = self
@@ -951,17 +926,12 @@ impl PermissionHandle {
         }
     }
 
-    pub fn is_yolo_mode(&self) -> bool {
+    pub fn mode(&self) -> diagnostics::enums::PermissionMode {
         match self {
-            PermissionHandle::AllowAll => true,
-            PermissionHandle::Actor { yolo_state, .. } => yolo_state.load(Ordering::Relaxed),
-        }
-    }
-
-    pub fn is_auto_mode(&self) -> bool {
-        match self {
-            PermissionHandle::AllowAll => false,
-            PermissionHandle::Actor { auto_state, .. } => auto_state.load(Ordering::Relaxed),
+            PermissionHandle::AllowAll => diagnostics::enums::PermissionMode::AlwaysApprove,
+            PermissionHandle::Actor { mode_state, .. } => {
+                decode_permission_mode(mode_state.load(Ordering::Relaxed))
+            }
         }
     }
 
@@ -974,23 +944,20 @@ impl PermissionHandle {
         match self {
             PermissionHandle::AllowAll => EffectivePermissionMode::AlwaysApprove,
             PermissionHandle::Actor {
-                yolo_state,
-                auto_state,
-                yolo_pin,
+                mode_state,
+                always_approve_pin,
                 ..
             } => {
-                let (yolo, auto) = resolve_request_modes(
+                match resolve_request_mode(
                     request_mode,
-                    yolo_state.load(Ordering::Relaxed),
-                    auto_state.load(Ordering::Relaxed),
-                    *yolo_pin,
-                );
-                if yolo {
-                    EffectivePermissionMode::AlwaysApprove
-                } else if auto {
-                    EffectivePermissionMode::Auto
-                } else {
-                    EffectivePermissionMode::Ask
+                    decode_permission_mode(mode_state.load(Ordering::Relaxed)),
+                    *always_approve_pin,
+                ) {
+                    diagnostics::enums::PermissionMode::AlwaysApprove => {
+                        EffectivePermissionMode::AlwaysApprove
+                    }
+                    diagnostics::enums::PermissionMode::Auto => EffectivePermissionMode::Auto,
+                    diagnostics::enums::PermissionMode::Ask => EffectivePermissionMode::Ask,
                 }
             }
         }
@@ -1201,24 +1168,31 @@ impl PermissionHandle {
     }
 }
 
-/// Clamp requested yolo against the pin: the pin wins, so a client can never
-/// enable always-approve while it is set.
-fn clamp_yolo(requested: bool, yolo_pin: Option<&'static str>) -> bool {
-    requested && yolo_pin.is_none()
+fn clamp_permission_mode(
+    requested: diagnostics::enums::PermissionMode,
+    always_approve_pin: Option<&'static str>,
+) -> diagnostics::enums::PermissionMode {
+    if requested.is_always_approve() && always_approve_pin.is_some() {
+        diagnostics::enums::PermissionMode::Ask
+    } else {
+        requested
+    }
 }
 
-fn resolve_request_modes(
+fn resolve_request_mode(
     request_mode: Option<crate::permission::types::RequestPermissionMode>,
-    primary_yolo: bool,
-    primary_auto: bool,
-    yolo_pin: Option<&'static str>,
-) -> (bool, bool) {
+    primary_mode: diagnostics::enums::PermissionMode,
+    always_approve_pin: Option<&'static str>,
+) -> diagnostics::enums::PermissionMode {
     use crate::permission::types::RequestPermissionMode;
     match request_mode {
-        Some(RequestPermissionMode::AlwaysApprove) => (clamp_yolo(true, yolo_pin), false),
-        Some(RequestPermissionMode::Auto) => (false, true),
-        Some(RequestPermissionMode::Ask) => (false, false),
-        Some(RequestPermissionMode::Follow) | None => (primary_yolo, primary_auto),
+        Some(RequestPermissionMode::AlwaysApprove) => clamp_permission_mode(
+            diagnostics::enums::PermissionMode::AlwaysApprove,
+            always_approve_pin,
+        ),
+        Some(RequestPermissionMode::Auto) => diagnostics::enums::PermissionMode::Auto,
+        Some(RequestPermissionMode::Ask) => diagnostics::enums::PermissionMode::Ask,
+        Some(RequestPermissionMode::Follow) | None => primary_mode,
     }
 }
 
@@ -1264,13 +1238,14 @@ fn auto_prompt_blocks_allow(access: &AccessKind) -> bool {
 
 /// Whether persisted state auto-approves bash `cmd`. The user-writable
 /// `allow_bash_execute` is clamped under the pin so it can't substitute for
-/// `--yolo`; explicit `allowed_bash_commands` grants still apply.
+/// `--permission-mode always-approve`; explicit `allowed_bash_commands` grants still apply.
 fn persisted_bash_auto_allows(
     state: &PermissionState,
     cmd: &str,
-    yolo_pin: Option<&'static str>,
+    always_approve_pin: Option<&'static str>,
 ) -> bool {
-    (state.allow_bash_execute && yolo_pin.is_none()) || state.allowed_bash_commands.contains(cmd)
+    (state.allow_bash_execute && always_approve_pin.is_none())
+        || state.allowed_bash_commands.contains(cmd)
 }
 
 fn bash_write_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
@@ -1346,7 +1321,7 @@ fn bash_grant_pre_decision(
     cmd: &str,
     evaluation: &BashEvaluation,
     state: &PermissionState,
-    yolo_pin: Option<&'static str>,
+    always_approve_pin: Option<&'static str>,
     opts: BashGrantOpts,
 ) -> Option<(Decision, &'static str)> {
     if let SegmentEvaluation::Reject(reason) = &evaluation.segments {
@@ -1372,7 +1347,7 @@ fn bash_grant_pre_decision(
             if !opts.allow_blanket || (*any_dangerous && opts.conservative_blanket) {
                 None
             } else {
-                persisted_bash_auto_allows(state, cmd, yolo_pin)
+                persisted_bash_auto_allows(state, cmd, always_approve_pin)
                     .then_some((Decision::Allow, reasons::SESSION_GRANT))
             }
         }
@@ -1383,7 +1358,7 @@ fn bash_grant_pre_decision(
                 let allowed = if opts.conservative_blanket {
                     evaluation.exact_grant
                 } else {
-                    persisted_bash_auto_allows(state, cmd, yolo_pin)
+                    persisted_bash_auto_allows(state, cmd, always_approve_pin)
                 };
                 allowed.then_some((Decision::Allow, reasons::SESSION_GRANT))
             }
@@ -1405,7 +1380,7 @@ fn session_grant_pre_decision(
     allow_edits_for_session: bool,
     static_domain_matcher: &DomainMatcher,
     honor_static_web_allowlist: bool,
-    yolo_pin: Option<&'static str>,
+    always_approve_pin: Option<&'static str>,
 ) -> Option<(Decision, &'static str)> {
     match access {
         AccessKind::MCPTool { name, .. } => {
@@ -1430,7 +1405,7 @@ fn session_grant_pre_decision(
             cmd,
             bash_evaluation?,
             state,
-            yolo_pin,
+            always_approve_pin,
             BashGrantOpts::PRE_CLASSIFIER,
         ),
         AccessKind::Read(_)
@@ -1452,7 +1427,7 @@ pub fn spawn_permission_manager(
     permission_config: Option<crate::permission::types::PermissionConfig>,
     deny_read_globs: Vec<String>,
     web_fetch_allowed_domains: Vec<String>,
-    initial_yolo: bool,
+    initial_mode: diagnostics::enums::PermissionMode,
     client_identifier: Option<String>,
     remember_tool_approvals: bool,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
@@ -1465,13 +1440,13 @@ pub fn spawn_permission_manager(
         permission_config,
         deny_read_globs,
         web_fetch_allowed_domains,
-        initial_yolo,
+        initial_mode,
         client_identifier,
         remember_tool_approvals,
-        crate::permission::resolution::yolo_disabled_by_policy(),
+        crate::permission::resolution::always_approve_disabled_by_policy(),
     )
 }
-/// `yolo_pin` threaded for testability; production passes the live pin.
+/// `always_approve_pin` threaded for testability; production passes the live pin.
 #[allow(clippy::too_many_arguments)]
 fn spawn_permission_manager_with_pin(
     session_id: acp::SessionId,
@@ -1482,25 +1457,17 @@ fn spawn_permission_manager_with_pin(
     permission_config: Option<crate::permission::types::PermissionConfig>,
     deny_read_globs: Vec<String>,
     web_fetch_allowed_domains: Vec<String>,
-    initial_yolo: bool,
+    initial_mode: diagnostics::enums::PermissionMode,
     client_identifier: Option<String>,
     remember_tool_approvals: bool,
-    yolo_pin: Option<&'static str>,
+    always_approve_pin: Option<&'static str>,
 ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<PermissionCommand>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<PermissionEvent>();
-    // Pin clamps the initial yolo however the client set it.
-    let initial_yolo = clamp_yolo(initial_yolo, yolo_pin);
-    let yolo_state = Arc::new(AtomicBool::new(initial_yolo));
-    let yolo_state_actor = yolo_state.clone();
-    // Seed auto from compat `permissions.defaultMode: "auto"` when not yolo.
-    // Always-approve wins if both are requested (same relative order as upstream
-    // dangerouslySkipPermissions vs defaultMode unless bypass is pinned off).
-    let seed_auto = !initial_yolo
-        && permission_config
-            .as_ref()
-            .is_some_and(|c| matches!(c.prompt_policy, PromptPolicy::Auto));
-    if initial_yolo
+    let initial_mode = clamp_permission_mode(initial_mode, always_approve_pin);
+    let mode_state = Arc::new(AtomicU8::new(encode_permission_mode(initial_mode)));
+    let mode_state_actor = mode_state.clone();
+    if initial_mode.is_always_approve()
         && permission_config
             .as_ref()
             .is_some_and(|c| matches!(c.prompt_policy, PromptPolicy::Deny))
@@ -1512,8 +1479,6 @@ fn spawn_permission_manager_with_pin(
              ([ui] disable_bypass_permissions_mode = true) to enforce managed dontAsk."
         );
     }
-    let auto_state = Arc::new(AtomicBool::new(seed_auto));
-    let auto_state_actor = auto_state.clone();
     let side_query_wired = Arc::new(AtomicBool::new(false));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_actor = in_flight.clone();
@@ -1526,32 +1491,6 @@ fn spawn_permission_manager_with_pin(
         let client_id_ref = client_identifier.as_deref();
         let mut state = load_state_from_disk(&cwd, client_id_ref).await;
 
-        // One-time migration for users who previously selected
-        // "Yes, allow all edits during this session".
-        //
-        // Prior to this change, that choice would set edit_policy=Allow and
-        // persist it to ~/.grow/sessions/<cwd>/permission.toml. This caused
-        // the allow to survive full restarts (new grow process, new agent
-        // session in the same directory), which did not match the label or
-        // user expectation (and did not match upstream session-scoped
-        // behavior).
-        //
-        // We now keep "session" allows purely in-memory (see
-        // allow_edits_for_session flag + AllowEditsForSession outcome).
-        //
-        // On load, if we see a persisted Allow, we treat it as a legacy
-        // "session" grant and downgrade it back to Ask. This gives affected
-        // users a clean slate automatically on their next restart, without
-        // requiring them to manually locate and delete the state file.
-        if state.edit_policy == EditPolicy::Allow {
-            tracing::info!(
-                "Migrating legacy persisted edit_policy=Allow → Ask \
-                 (previously set by the 'allow edits for this session' option)"
-            );
-            state.edit_policy = EditPolicy::Ask;
-            persist_state(&cwd, &state, client_id_ref).await;
-        }
-
         let prompter = AcpPrompter::new(
             session_id.clone(),
             gateway.clone(),
@@ -1559,11 +1498,7 @@ fn spawn_permission_manager_with_pin(
             prompt_timeout,
         )
         .with_remember_tool_approvals(remember_tool_approvals);
-        let mut yolo_mode = initial_yolo;
-        let mut auto_mode = seed_auto;
-        if seed_auto {
-            tracing::info!("auto permission mode seeded from Claude defaultMode / prompt_policy");
-        }
+        let mut primary_mode = initial_mode;
         // Conversation-aware classifier (LLM side-query when wired; heuristic
         // fallback always uses the actor's transcript turns).
         let mut auto_classifier: Option<crate::permission::auto_mode::SharedClassifier> =
@@ -1574,7 +1509,7 @@ fn spawn_permission_manager_with_pin(
         let mut root_auto_runtime = AutoRuntimeState::default();
         let mut child_auto_runtimes: HashMap<String, AutoRuntimeState> = HashMap::new();
         let mut project_instructions: Option<String> = None;
-        // Log a refused yolo-enable once per session, not per SetYoloMode.
+        // Log a refused always-approve selection once per session.
         let mut pin_refusal_logged = false;
         let mut allow_edits_for_session = false;
         // Child remembered grants are intentionally actor-local. They are keyed by the
@@ -1600,29 +1535,22 @@ fn spawn_permission_manager_with_pin(
             .eq(DEFAULT_ALLOWED_DOMAINS.iter().copied());
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PermissionCommand::SetYoloMode(enabled) => {
-                    // Authoritative re-clamp: no client can enable yolo under
+                PermissionCommand::SetMode(mode) => {
+                    // Authoritative re-clamp: no client can enable
+                    // always-approve under
                     // the pin, whatever ingestion path set it.
-                    let clamped = clamp_yolo(enabled, yolo_pin);
-                    if enabled && !clamped && !pin_refusal_logged {
+                    let effective = clamp_permission_mode(mode, always_approve_pin);
+                    if mode.is_always_approve()
+                        && !effective.is_always_approve()
+                        && !pin_refusal_logged
+                    {
                         tracing::warn!("always-approve enable refused: disabled by managed policy");
                         pin_refusal_logged = true;
                     }
-                    tracing::info!("always-approve set to: {}", clamped);
-                    yolo_mode = clamped;
-                    yolo_state_actor.store(clamped, Ordering::Relaxed);
-                    if clamped {
-                        auto_mode = false;
-                        auto_state_actor.store(false, Ordering::Relaxed);
-                    }
-                }
-                PermissionCommand::SetAutoMode(enabled) => {
-                    tracing::info!("auto permission mode set to: {}", enabled);
-                    auto_mode = enabled;
-                    auto_state_actor.store(enabled, Ordering::Relaxed);
-                    if enabled {
-                        yolo_mode = false;
-                        yolo_state_actor.store(false, Ordering::Relaxed);
+                    tracing::info!(?mode, "permission mode selected");
+                    primary_mode = effective;
+                    mode_state_actor.store(encode_permission_mode(effective), Ordering::Relaxed);
+                    if effective.is_auto() {
                         // Ensure a conversation-aware classifier is installed
                         // (tests may have cleared it; production always has one).
                         if auto_classifier.is_none() {
@@ -1633,11 +1561,6 @@ fn spawn_permission_manager_with_pin(
                 }
                 PermissionCommand::SetClassifier(classifier) => {
                     auto_classifier = classifier;
-                }
-                PermissionCommand::SetClassifierTranscript(turns) => {
-                    // Legacy primary-session path. Child requests carry their
-                    // transcript atomically in PermissionRequestContext.
-                    root_auto_runtime.classifier_turns = turns;
                 }
                 PermissionCommand::SetProjectInstructions(instructions) => {
                     project_instructions = instructions;
@@ -1668,7 +1591,7 @@ fn spawn_permission_manager_with_pin(
                 } => {
                     // wait_ms timer; starts at dequeue so it excludes time queued behind others.
                     let request_received = tokio::time::Instant::now();
-                    // Effective mode (yolo wins); stable for the arm (single-threaded actor).
+                    // Effective mode is stable for this arm (single-threaded actor).
                     let request_mode = context.request_mode;
                     let request_session_id = context.source.session_id().map(str::to_owned);
                     let request_subagent_type = context.source.subagent_type().map(str::to_owned);
@@ -1679,15 +1602,10 @@ fn spawn_permission_manager_with_pin(
                         && child_permission_key.is_some()
                         && !matches!(access, AccessKind::CapabilityGrant { .. });
                     let request_cwd = context.execution_cwd.as_deref().unwrap_or(cwd.as_path());
-                    let (effective_yolo_mode, effective_auto_mode) =
-                        resolve_request_modes(request_mode, yolo_mode, auto_mode, yolo_pin);
-                    let permission_mode = if effective_yolo_mode {
-                        diagnostics::enums::PermissionMode::AlwaysApprove
-                    } else if effective_auto_mode {
-                        diagnostics::enums::PermissionMode::Auto
-                    } else {
-                        diagnostics::enums::PermissionMode::Ask
-                    };
+                    let permission_mode =
+                        resolve_request_mode(request_mode, primary_mode, always_approve_pin);
+                    let effective_always_approve = permission_mode.is_always_approve();
+                    let effective_auto_mode = permission_mode.is_auto();
                     // Extract tool info for diagnostics
                     let tool_id = tool_call_update.tool_call_id.to_string();
                     let request_state = permission_state_for_request(
@@ -1798,7 +1716,6 @@ fn spawn_permission_manager_with_pin(
                                 tool_name: tool_name.clone(),
                                 access_kind: access_kind_str.clone(),
                                 access_detail: access_detail.clone(),
-                                yolo_mode: effective_yolo_mode,
                                 auto_approved,
                                 user_prompted,
                                 decision: decision_str,
@@ -1986,7 +1903,7 @@ fn spawn_permission_manager_with_pin(
                     };
 
                     // Evaluate managed policy (direct access + per-segment Bash command
-                    // rules + Bash shell-file args) up front so the YOLO/sandbox fast
+                    // rules + Bash shell-file args) up front so the always-approve/sandbox fast
                     // paths below honor a deny or forced prompt. The preflight also
                     // resolves the auto-mode disposition of a fail-closed gate Ask:
                     // defer to the classifier or stay prompt-binding on a rule match.
@@ -1998,7 +1915,7 @@ fn spawn_permission_manager_with_pin(
                     );
                     let policy_decision = preflight.policy_decision();
                     let policy_forced_prompt = preflight.policy_forced_prompt();
-                    // An `Ask` from either bash gate must block the YOLO/auto fast paths.
+                    // An `Ask` from either bash gate must block the always-approve/auto fast paths.
                     let shell_forced_prompt = preflight.shell_forced_prompt();
                     // Set when auto mode decides to prompt (needs-user fast path or
                     // classifier block). Prevents the sandbox bash auto-approve and the
@@ -2012,7 +1929,7 @@ fn spawn_permission_manager_with_pin(
                         tracing::info!(
                             tool = ?tool_name,
                             source = "policy",
-                            "permission policy: deny rule matched (enforced before YOLO)"
+                            "permission policy: deny rule matched (enforced before always-approve)"
                         );
                         let decision = Decision::PolicyDeny(reason);
                         emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
@@ -2048,12 +1965,12 @@ fn spawn_permission_manager_with_pin(
 
                     let child_mode_can_override_shell_heuristic =
                         child_permission_key.is_some() && !managed_prompt_required;
-                    if effective_yolo_mode
+                    if effective_always_approve
                         && (!shell_forced_prompt || child_mode_can_override_shell_heuristic)
                     {
-                        tracing::debug!("YOLO mode: auto-approving permission request");
+                        tracing::debug!("always-approve mode: auto-approving permission request");
                         let decision = Decision::Allow;
-                        emit_event(&decision, true, false, None, Some(reasons::YOLO));
+                        emit_event(&decision, true, false, None, Some(reasons::ALWAYS_APPROVE));
                         let _ = respond_to.send(decision);
                         continue;
                     }
@@ -2070,7 +1987,7 @@ fn spawn_permission_manager_with_pin(
                             *request_allow_edits_for_session,
                             &static_domain_matcher,
                             !(effective_auto_mode && web_fetch_allowlist_is_default),
-                            yolo_pin,
+                            always_approve_pin,
                         )
                     {
                         tracing::debug!(
@@ -2581,11 +2498,7 @@ fn spawn_permission_manager_with_pin(
                                         Decision::Reject("edits prohibited".to_owned()),
                                         reasons::SESSION_DENY,
                                     )),
-                                    // `Allow` is a legacy on-disk value that the startup
-                                    // migration downgrades to `Ask`, so it is never observed
-                                    // here. Session-scoped edit allows now live in the
-                                    // in-memory `allow_edits_for_session` flag above.
-                                    EditPolicy::Ask | EditPolicy::Allow => None,
+                                    EditPolicy::Ask => None,
                                 }
                             }
                         }
@@ -2606,7 +2519,7 @@ fn spawn_permission_manager_with_pin(
                                             .as_ref()
                                             .expect("Bash access has evaluation"),
                                         request_state,
-                                        yolo_pin,
+                                        always_approve_pin,
                                         BashGrantOpts::ASK_FLOOR_REMEMBER,
                                     )
                                 } else {
@@ -2619,7 +2532,7 @@ fn spawn_permission_manager_with_pin(
                                         .as_ref()
                                         .expect("Bash access has evaluation"),
                                     request_state,
-                                    yolo_pin,
+                                    always_approve_pin,
                                     BashGrantOpts::post_classify(auto_forced_prompt),
                                 )
                             }
@@ -2810,24 +2723,7 @@ fn spawn_permission_manager_with_pin(
                                         Some(PendingPermissionMutation::AllowEditsForSession),
                                     ),
                                     PromptOutcome::AllowAlways => {
-                                        // Fallback clients (Generic / GrowWeb /
-                                        // Extension) submit the legacy `"always-allow"` option
-                                        // id, which the prompter maps to plain `AllowAlways`.
-                                        // They have no scope toggle, so default to tool-scope
-                                        // (smallest blast radius). Edits no longer produce
-                                        // `AllowAlways` (the edit "allow for this session"
-                                        // option maps to `AllowEditsForSession` above).
-                                        if let AccessKind::MCPTool { name, .. } = &access {
-                                            (
-                                                Decision::Allow,
-                                                "allow_always",
-                                                Some(PendingPermissionMutation::AllowMcpTool(
-                                                    name.clone(),
-                                                )),
-                                            )
-                                        } else {
-                                            (Decision::Allow, "allow_always", None)
-                                        }
+                                        (Decision::Allow, "allow_always", None)
                                     }
                                     PromptOutcome::AllowAlwaysBashCommand(_) => {
                                         // Not reachable for non-bash access; defensive.
@@ -3047,10 +2943,9 @@ fn spawn_permission_manager_with_pin(
     (
         PermissionHandle::Actor {
             cmd_tx: tx,
-            yolo_state,
-            auto_state,
+            mode_state,
             side_query_wired,
-            yolo_pin,
+            always_approve_pin,
             deny_read_globs: Arc::new(deny_read_globs),
             in_flight,
             shutdown,
@@ -3064,42 +2959,54 @@ fn spawn_permission_manager_with_pin(
 mod tests {
     use super::*;
     use crate::permission::bash_command_splitting::primary_command_from_script;
+    use diagnostics::enums::PermissionMode;
 
-    // ── Managed-policy pin: yolo clamp + persisted bash clamp ──
+    // ── Managed-policy pin: permission-mode + persisted bash clamp ──
 
-    const PIN: &str = crate::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
+    const PIN: &str = crate::permission::resolution::ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS;
     const UNSAFE_GIT_STATUS: &str = concat!(
         "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor ",
         "GIT_CONFIG_VALUE_0=/tmp/pwn git status"
     );
 
     #[test]
-    fn clamp_yolo_respects_pin() {
-        // Pin set: any requested yolo is forced off. No pin: passthrough.
-        assert!(!clamp_yolo(true, Some(PIN)));
-        assert!(!clamp_yolo(false, Some(PIN)));
-        assert!(clamp_yolo(true, None));
-        assert!(!clamp_yolo(false, None));
+    fn clamp_permission_mode_respects_pin() {
+        assert_eq!(
+            clamp_permission_mode(PermissionMode::AlwaysApprove, Some(PIN)),
+            PermissionMode::Ask
+        );
+        assert_eq!(
+            clamp_permission_mode(PermissionMode::Auto, Some(PIN)),
+            PermissionMode::Auto
+        );
+        assert_eq!(
+            clamp_permission_mode(PermissionMode::AlwaysApprove, None),
+            PermissionMode::AlwaysApprove
+        );
     }
 
     #[test]
-    fn request_modes_are_independent_and_follow_is_live() {
+    fn request_mode_override_and_follow_are_explicit() {
         use crate::permission::types::RequestPermissionMode;
         assert_eq!(
-            resolve_request_modes(Some(RequestPermissionMode::Auto), true, false, None),
-            (false, true)
+            resolve_request_mode(
+                Some(RequestPermissionMode::Auto),
+                PermissionMode::AlwaysApprove,
+                None,
+            ),
+            PermissionMode::Auto
         );
         assert_eq!(
-            resolve_request_modes(Some(RequestPermissionMode::Ask), false, true, None),
-            (false, false)
+            resolve_request_mode(Some(RequestPermissionMode::Ask), PermissionMode::Auto, None,),
+            PermissionMode::Ask
         );
         assert_eq!(
-            resolve_request_modes(Some(RequestPermissionMode::Follow), false, true, None),
-            (false, true)
-        );
-        assert_eq!(
-            resolve_request_modes(Some(RequestPermissionMode::Follow), true, false, None),
-            (true, false)
+            resolve_request_mode(
+                Some(RequestPermissionMode::Follow),
+                PermissionMode::Auto,
+                None,
+            ),
+            PermissionMode::Auto
         );
     }
 
@@ -3107,13 +3014,12 @@ mod tests {
     fn child_always_approve_is_clamped_by_managed_policy() {
         use crate::permission::types::RequestPermissionMode;
         assert_eq!(
-            resolve_request_modes(
+            resolve_request_mode(
                 Some(RequestPermissionMode::AlwaysApprove),
-                false,
-                false,
+                PermissionMode::Auto,
                 Some(PIN),
             ),
-            (false, false)
+            PermissionMode::Ask
         );
     }
 
@@ -3159,8 +3065,8 @@ mod tests {
 
     fn test_manager(
         cwd: &AbsPathBuf,
-        initial_yolo: bool,
-        yolo_pin: Option<&'static str>,
+        initial_mode: PermissionMode,
+        always_approve_pin: Option<&'static str>,
     ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
         let (tx, _rx) = mpsc::unbounded_channel();
         spawn_permission_manager_with_pin(
@@ -3172,17 +3078,17 @@ mod tests {
             None,
             vec![], // deny_read_globs
             vec![],
-            initial_yolo,
+            initial_mode,
             None,
             true,
-            yolo_pin,
+            always_approve_pin,
         )
     }
 
     fn test_manager_with_config(
         cwd: &AbsPathBuf,
         config: crate::permission::types::PermissionConfig,
-        initial_yolo: bool,
+        initial_mode: PermissionMode,
     ) -> (PermissionHandle, mpsc::UnboundedReceiver<PermissionEvent>) {
         let (tx, _rx) = mpsc::unbounded_channel();
         spawn_permission_manager_with_pin(
@@ -3194,7 +3100,7 @@ mod tests {
             Some(config),
             vec![], // deny_read_globs
             vec![],
-            initial_yolo,
+            initial_mode,
             None,
             true,
             None,
@@ -3202,7 +3108,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_auto_from_prompt_policy_auto() {
+    async fn prompt_policy_does_not_select_session_permission_mode() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -3210,17 +3116,14 @@ mod tests {
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut config = crate::permission::types::PermissionConfig::new(vec![]);
                 config.prompt_policy = PromptPolicy::Auto;
-                let (handle, _ev) = test_manager_with_config(&cwd, config, false);
-                assert!(
-                    handle.is_auto_mode(),
-                    "prompt_policy Auto must seed auto mode"
-                );
+                let (handle, _ev) = test_manager_with_config(&cwd, config, PermissionMode::Ask);
+                assert_eq!(handle.mode(), PermissionMode::Ask);
             })
             .await;
     }
 
     #[tokio::test]
-    async fn seed_auto_suppressed_when_initial_yolo() {
+    async fn explicit_always_approve_is_not_overridden_by_prompt_policy() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -3228,39 +3131,31 @@ mod tests {
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut config = crate::permission::types::PermissionConfig::new(vec![]);
                 config.prompt_policy = PromptPolicy::Auto;
-                let (handle, _ev) = test_manager_with_config(&cwd, config, true);
-                assert!(
-                    !handle.is_auto_mode(),
-                    "initial yolo must not seed auto mode"
-                );
-                assert!(handle.is_yolo_mode());
+                let (handle, _ev) =
+                    test_manager_with_config(&cwd, config, PermissionMode::AlwaysApprove);
+                assert_eq!(handle.mode(), PermissionMode::AlwaysApprove);
             })
             .await;
     }
 
     #[tokio::test]
-    async fn enabling_yolo_clears_seeded_auto() {
+    async fn mode_update_replaces_previous_mode() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let mut config = crate::permission::types::PermissionConfig::new(vec![]);
-                config.prompt_policy = PromptPolicy::Auto;
-                let (handle, _ev) = test_manager_with_config(&cwd, config, false);
-                assert!(handle.is_auto_mode());
-                handle.set_yolo_mode(true);
+                let config = crate::permission::types::PermissionConfig::new(vec![]);
+                let (handle, _ev) = test_manager_with_config(&cwd, config, PermissionMode::Auto);
+                assert_eq!(handle.mode(), PermissionMode::Auto);
+                handle.set_mode(PermissionMode::AlwaysApprove);
                 for _ in 0..20 {
-                    if !handle.is_auto_mode() && handle.is_yolo_mode() {
+                    if handle.mode() == PermissionMode::AlwaysApprove {
                         break;
                     }
                     tokio::task::yield_now().await;
                 }
-                assert!(handle.is_yolo_mode());
-                assert!(
-                    !handle.is_auto_mode(),
-                    "enabling yolo must clear seeded auto"
-                );
+                assert_eq!(handle.mode(), PermissionMode::AlwaysApprove);
             })
             .await;
     }
@@ -3287,7 +3182,7 @@ mod tests {
                         acp::ToolCallUpdateFields::default(),
                     )
                 };
-                let (mgr, _e) = test_manager_with_config(&cwd, config, false);
+                let (mgr, _e) = test_manager_with_config(&cwd, config, PermissionMode::Ask);
                 let d = mgr
                     .request(
                         AccessKind::Read(Some("secrets/value.txt".into())),
@@ -3318,10 +3213,10 @@ mod tests {
             .await;
     }
 
-    /// A managed file deny beats auto-allow, YOLO, and persisted bash grants; an
+    /// A managed file deny beats auto-allow, always-approve, and persisted bash grants; an
     /// `Ask` rule reaches the prompt; a non-denied reader still auto-allows.
     #[tokio::test]
-    async fn managed_file_deny_beats_shell_auto_allow_yolo_and_persisted() {
+    async fn managed_file_deny_beats_all_fast_paths_and_persisted() {
         use crate::permission::types::{
             PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
         };
@@ -3350,7 +3245,7 @@ mod tests {
                     )
                 };
 
-                let (mgr, _e) = test_manager_with_config(&cwd, config(), false);
+                let (mgr, _e) = test_manager_with_config(&cwd, config(), PermissionMode::Ask);
                 let d = mgr
                     .request(AccessKind::Bash("cat .env".into()), tc(), None, None, None)
                     .await;
@@ -3443,22 +3338,26 @@ mod tests {
                     "grep tool on .env must be denied, got {d:?}"
                 );
 
-                let (yolo_mgr, _e2) = test_manager_with_config(&cwd, config(), true);
-                assert!(yolo_mgr.is_yolo_mode(), "precondition: yolo on");
-                let d = yolo_mgr
+                let (always_approve_mgr, _e2) =
+                    test_manager_with_config(&cwd, config(), PermissionMode::AlwaysApprove);
+                assert!(
+                    always_approve_mgr.mode().is_always_approve(),
+                    "precondition: always-approve on"
+                );
+                let d = always_approve_mgr
                     .request(AccessKind::Bash("cat .env".into()), tc(), None, None, None)
                     .await;
                 assert!(
                     matches!(d, Decision::PolicyDeny(_)),
-                    "YOLO must not bypass the direct managed deny, got {d:?}"
+                    "always-approve must not bypass the direct managed deny, got {d:?}"
                 );
                 let inline_read = "bash -c 'cat .env'";
-                let d = yolo_mgr
+                let d = always_approve_mgr
                     .request(AccessKind::Bash(inline_read.into()), tc(), None, None, None)
                     .await;
                 assert!(
                     matches!(d, Decision::PolicyDeny(_)),
-                    "YOLO must not bypass the inline Read deny, got {d:?}"
+                    "always-approve must not bypass the inline Read deny, got {d:?}"
                 );
 
                 let inline_write = "bash -c 'echo x > .env'";
@@ -3471,7 +3370,8 @@ mod tests {
                     ..Default::default()
                 };
                 persist_state(&cwd, &state, None).await;
-                let (persisted_mgr, _e3) = test_manager_with_config(&cwd, config(), false);
+                let (persisted_mgr, _e3) =
+                    test_manager_with_config(&cwd, config(), PermissionMode::Ask);
                 let d = persisted_mgr
                     .request(AccessKind::Bash("cat .env".into()), tc(), None, None, None)
                     .await;
@@ -3496,10 +3396,10 @@ mod tests {
             .await;
     }
 
-    /// High-confidence `env -S` packed denials stay `PolicyDeny` under YOLO;
+    /// High-confidence `env -S` packed denials stay `PolicyDeny` under always-approve;
     /// uncertain split-string shapes force a prompt (never silent allow).
     #[tokio::test]
-    async fn managed_bash_deny_env_split_string_yolo() {
+    async fn managed_bash_deny_env_split_string_always_approve() {
         use crate::permission::types::{
             PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
         };
@@ -3523,8 +3423,8 @@ mod tests {
                     client,
                     ClientType::Generic,
                 );
-                mgr.set_yolo_mode(true);
-                // High-confidence packed deny → PolicyDeny even under YOLO.
+                mgr.set_mode(diagnostics::enums::PermissionMode::AlwaysApprove);
+                // High-confidence packed deny → PolicyDeny even under always-approve.
                 for cmd in [
                     "env -S 'rm -rf /tmp/victim'",
                     "timeout 5 env -S 'rm -rf /tmp/victim'",
@@ -3535,14 +3435,14 @@ mod tests {
                         .await;
                     assert!(
                         matches!(d, Decision::PolicyDeny(_)),
-                        "high-confidence env -S must PolicyDeny under YOLO: {cmd}, got {d:?}"
+                        "high-confidence env -S must PolicyDeny under always-approve: {cmd}, got {d:?}"
                     );
                 }
                 assert!(
                     prompts.borrow().is_empty(),
                     "hard PolicyDeny must not prompt the user"
                 );
-                // Uncertain/malformed env -S: Ask floor blocks YOLO and reaches the
+                // Uncertain/malformed env -S: Ask floor blocks always-approve and reaches the
                 // user prompt (not silent Allow, not hard PolicyDeny).
                 let uncertain = [
                     "env -S",
@@ -3557,15 +3457,15 @@ mod tests {
                         .await;
                     assert!(
                         matches!(d, Decision::Reject(_)),
-                        "uncertain env -S must prompt under YOLO (reject answer), not Allow/PolicyDeny: {cmd}, got {d:?}"
+                        "uncertain env -S must prompt under always-approve (reject answer), not Allow/PolicyDeny: {cmd}, got {d:?}"
                     );
                 }
                 assert_eq!(
                     prompts.borrow().len(),
                     uncertain.len(),
-                    "each uncertain env -S shape must hit the user prompt once under YOLO"
+                    "each uncertain env -S shape must hit the user prompt once under always-approve"
                 );
-                // Ordinary env assignment still denies the peeled command under YOLO.
+                // Ordinary env assignment still denies the peeled command under always-approve.
                 let d = mgr
                     .request(
                         AccessKind::Bash("env FOO=1 rm -rf /tmp/victim".into()),
@@ -3590,8 +3490,8 @@ mod tests {
 
     /// A managed Bash deny must catch a denied command in any chained / piped
     /// segment, not just the leading one, the resulting
-    /// `PolicyDeny` must hold under YOLO, and an undecomposable script must
-    /// fail closed past the YOLO auto-approve. Both rule shapes are covered: a
+    /// `PolicyDeny` must hold under always-approve, and an undecomposable script must
+    /// fail closed past the always-approve auto-approve. Both rule shapes are covered: a
     /// `Bash(sed*)` glob and the bare-prefix `sed` that an unprefixed pattern
     /// parses to (`ToolFilter::Any`). Without matching rules the per-segment
     /// gate must stay inert and never escalate a script to a prompt.
@@ -3619,9 +3519,9 @@ mod tests {
                 };
 
                 for (tool, pattern) in [(ToolFilter::Bash, "sed*"), (ToolFilter::Any, "sed")] {
-                    for yolo in [false, true] {
+                    for mode in [PermissionMode::Ask, PermissionMode::AlwaysApprove] {
                         let config = PermissionConfig::new(vec![deny(tool.clone(), pattern)]);
-                        let (mgr, _e) = test_manager_with_config(&cwd, config, yolo);
+                        let (mgr, _e) = test_manager_with_config(&cwd, config, mode);
                         for cmd in [
                             "git show HEAD:f | sed -n '1,5p'",
                             "cd /tmp && grep -n x f; sed -n '1,5p' f",
@@ -3631,11 +3531,11 @@ mod tests {
                                 .await;
                             assert!(
                                 matches!(d, Decision::PolicyDeny(_)),
-                                "must deny non-leading segment (yolo={yolo}): {cmd}, got {d:?}"
+                                "must deny non-leading segment (mode={mode:?}): {cmd}, got {d:?}"
                             );
                         }
                         // A chain with no denied segment must fall through
-                        // unescalated: YOLO auto-allows it, and without YOLO it
+                        // unescalated: always-approve auto-allows it, and without always-approve it
                         // may prompt but never policy-deny.
                         let d = mgr
                             .request(
@@ -3646,10 +3546,10 @@ mod tests {
                                 None,
                             )
                             .await;
-                        if yolo {
+                        if mode.is_always_approve() {
                             assert!(
                                 matches!(d, Decision::Allow),
-                                "clean chain must stay yolo-approved, got {d:?}"
+                                "clean chain must stay always-approve-approved, got {d:?}"
                             );
                         } else {
                             assert!(
@@ -3658,8 +3558,8 @@ mod tests {
                             );
                         }
                         // Undecomposable script: the command gate fails closed
-                        // to Ask, which must block the YOLO auto-approve — a
-                        // YOLO gate wired to the file-only flag would allow it.
+                        // to Ask, which must block the always-approve auto-approve — a
+                        // always-approve gate wired to the file-only flag would allow it.
                         let d = mgr
                             .request(
                                 AccessKind::Bash("OUT=$(sed -n 1p f); echo $OUT".into()),
@@ -3671,16 +3571,17 @@ mod tests {
                             .await;
                         assert!(
                             !matches!(d, Decision::Allow),
-                            "fail-closed Ask must block auto-approval (yolo={yolo}), got {d:?}"
+                            "fail-closed Ask must block auto-approval (mode={mode:?}), got {d:?}"
                         );
                     }
                 }
 
-                // No Bash deny/ask rules: the gate must be inert, so under YOLO
+                // No Bash deny/ask rules: the gate must be inert, so under always-approve
                 // even the piped `sed` script auto-allows — and an undecomposable
                 // script must not fail closed to a prompt.
                 let inert = PermissionConfig::new(vec![]);
-                let (mgr, _e) = test_manager_with_config(&cwd, inert, true);
+                let (mgr, _e) =
+                    test_manager_with_config(&cwd, inert, PermissionMode::AlwaysApprove);
                 for cmd in [
                     "git show HEAD:f | sed -n '1,5p'",
                     "cd /tmp && grep -n x f; sed -n '1,5p' f",
@@ -3699,22 +3600,28 @@ mod tests {
             .await;
     }
 
-    /// Construction clamps a requested initial yolo off under the pin (passes
+    /// Construction clamps a requested initial always-approve off under the pin (passes
     /// through without it); the Arc is set before the actor runs.
     #[tokio::test]
-    async fn yolo_pin_clamps_initial_yolo_at_construction() {
+    async fn always_approve_pin_clamps_initial_mode_at_construction() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 assert!(
-                    !test_manager(&cwd, true, Some(PIN)).0.is_yolo_mode(),
-                    "pin must clamp a requested initial yolo"
+                    !test_manager(&cwd, PermissionMode::AlwaysApprove, Some(PIN))
+                        .0
+                        .mode()
+                        .is_always_approve(),
+                    "pin must clamp a requested initial always-approve"
                 );
                 assert!(
-                    test_manager(&cwd, true, None).0.is_yolo_mode(),
-                    "no pin: requested initial yolo passes through"
+                    test_manager(&cwd, PermissionMode::AlwaysApprove, None)
+                        .0
+                        .mode()
+                        .is_always_approve(),
+                    "no pin: requested initial always-approve passes through"
                 );
             })
             .await;
@@ -3740,7 +3647,7 @@ mod tests {
                     None,
                     globs.clone(),
                     vec![],
-                    false,
+                    PermissionMode::Ask,
                     None,
                     true,
                     None,
@@ -3758,28 +3665,31 @@ mod tests {
             .await;
     }
 
-    /// SetYoloMode is refused under the pin; `set_yolo_mode` clamps the Arc
-    /// synchronously, so `is_yolo_mode()` needs no actor round-trip.
+    /// AlwaysApprove is refused under the pin; `set_mode` clamps the Arc
+    /// synchronously, so `is_always_approve_mode()` needs no actor round-trip.
     #[tokio::test]
-    async fn yolo_pin_clamps_set_yolo_mode() {
+    async fn always_approve_pin_clamps_runtime_mode() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
 
-                let (pinned, _e1) = test_manager(&cwd, false, Some(PIN));
-                pinned.set_yolo_mode(true);
+                let (pinned, _e1) = test_manager(&cwd, PermissionMode::Ask, Some(PIN));
+                pinned.set_mode(diagnostics::enums::PermissionMode::AlwaysApprove);
                 assert!(
-                    !pinned.is_yolo_mode(),
-                    "pin must refuse a runtime enable of yolo"
+                    !pinned.mode().is_always_approve(),
+                    "pin must refuse a runtime enable of always-approve"
                 );
 
-                let (unpinned, _e2) = test_manager(&cwd, false, None);
-                unpinned.set_yolo_mode(true);
-                assert!(unpinned.is_yolo_mode(), "no pin: runtime enable works");
-                unpinned.set_yolo_mode(false);
-                assert!(!unpinned.is_yolo_mode());
+                let (unpinned, _e2) = test_manager(&cwd, PermissionMode::Ask, None);
+                unpinned.set_mode(diagnostics::enums::PermissionMode::AlwaysApprove);
+                assert!(
+                    unpinned.mode().is_always_approve(),
+                    "no pin: runtime enable works"
+                );
+                unpinned.set_mode(diagnostics::enums::PermissionMode::Ask);
+                assert!(!unpinned.mode().is_always_approve());
             })
             .await;
     }
@@ -3787,7 +3697,7 @@ mod tests {
     /// Persisted `allow_bash_execute = true` auto-approves non-dangerous bash
     /// without the pin but is neutralized under it.
     #[tokio::test]
-    async fn yolo_pin_neutralizes_persisted_allow_bash_execute() {
+    async fn always_approve_pin_neutralizes_persisted_allow_bash_execute() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -3809,7 +3719,7 @@ mod tests {
                     )
                 };
 
-                let (unpinned, _e1) = test_manager(&cwd, false, None);
+                let (unpinned, _e1) = test_manager(&cwd, PermissionMode::Ask, None);
                 let allow = unpinned
                     .request(AccessKind::Bash(benign.into()), bash(), None, None, None)
                     .await;
@@ -3819,7 +3729,7 @@ mod tests {
                     "no pin: persisted allow_bash_execute auto-approves benign unknown cmds"
                 );
 
-                let (pinned, _e2) = test_manager(&cwd, false, Some(PIN));
+                let (pinned, _e2) = test_manager(&cwd, PermissionMode::Ask, Some(PIN));
                 let neutralized = pinned
                     .request(AccessKind::Bash(benign.into()), bash(), None, None, None)
                     .await;
@@ -3910,7 +3820,7 @@ mod tests {
             config,
             vec![], // deny_read_globs
             vec![],
-            false,
+            PermissionMode::Ask,
             None,
             remember_tool_approvals,
             None,
@@ -3922,6 +3832,18 @@ mod tests {
             acp::ToolCallId::new(Arc::from("tc")),
             acp::ToolCallUpdateFields::default(),
         )
+    }
+
+    fn classifier_context(
+        turns: Vec<crate::permission::auto_mode::ClassifierTurn>,
+    ) -> PermissionRequestContext {
+        PermissionRequestContext {
+            source: PermissionRequestSource::Primary { session_id: None },
+            request_mode: None,
+            within_capability_fence: false,
+            execution_cwd: None,
+            classifier_turns: Some(turns),
+        }
     }
 
     struct ApprovingClient;
@@ -4041,7 +3963,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, _events) = test_manager(&cwd, false, None);
+                let (manager, _events) = test_manager(&cwd, PermissionMode::Ask, None);
                 let (classifier, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 manager.set_classifier(Some(classifier));
 
@@ -4098,7 +4020,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, _events) = test_manager(&cwd, false, None);
+                let (manager, _events) = test_manager(&cwd, PermissionMode::Ask, None);
                 let (classifier, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 manager.set_classifier(Some(classifier));
                 let accesses = [
@@ -4157,7 +4079,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, mut events) = test_manager(&cwd, false, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
                 let (classifier, seen) =
                     capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Block);
                 manager.set_classifier(Some(classifier));
@@ -4246,7 +4168,8 @@ mod tests {
                 // Always-approve handles the secondary shell risk exactly as
                 // the same mode does on a primary session: no classifier and
                 // no user prompt.
-                let (always, _events) = test_manager_with_config(&cwd, config.clone(), false);
+                let (always, _events) =
+                    test_manager_with_config(&cwd, config.clone(), PermissionMode::Ask);
                 let (always_classifier, always_seen) =
                     capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Block);
                 always.set_classifier(Some(always_classifier));
@@ -4263,7 +4186,8 @@ mod tests {
 
                 // Auto consumes one primary-context LLM judgment and never
                 // falls through to the 60-second human prompt.
-                let (auto, mut auto_events) = test_manager_with_config(&cwd, config.clone(), false);
+                let (auto, mut auto_events) =
+                    test_manager_with_config(&cwd, config.clone(), PermissionMode::Ask);
                 let (auto_classifier, auto_seen) =
                     capturing_classifier(crate::permission::auto_mode::ClassifierVerdict::Allow);
                 auto.set_classifier(Some(auto_classifier));
@@ -4287,7 +4211,8 @@ mod tests {
                     crate::permission::auto_mode::ClassifierVerdict::Block,
                     crate::permission::auto_mode::ClassifierVerdict::Unavailable,
                 ] {
-                    let (auto, mut events) = test_manager_with_config(&cwd, config.clone(), false);
+                    let (auto, mut events) =
+                        test_manager_with_config(&cwd, config.clone(), PermissionMode::Ask);
                     let (classifier, seen) = capturing_classifier(verdict);
                     auto.set_classifier(Some(classifier));
                     let decision = auto
@@ -4347,7 +4272,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, mut events) = test_manager(&cwd, false, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
                 manager.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"outside the assigned task"}"#,
                 )));
@@ -4402,7 +4327,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, mut events) = test_manager(&cwd, false, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
                 manager.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     "not valid judgment json",
                 )));
@@ -4447,7 +4372,7 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (manager, mut events) = test_manager(&cwd, false, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
                 manager.set_classifier(Some(Arc::new(LlmPermissionClassifier {
                     classify_text: Some(Arc::new(|_messages: Vec<ClassifierMessage>| {
                         Box::pin(async { Err(ClassifierFailure::Timeout) })
@@ -4592,17 +4517,15 @@ mod tests {
                     .await;
                 assert_eq!(d, Decision::Allow, "prompted allow-once must allow");
 
-                mgr.set_auto_mode(true);
-                mgr.set_classifier_transcript(vec![ClassifierTurn::UserText("build it".into())]);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr.set_classifier(Some(clf));
                 let d = mgr
-                    .request(
+                    .request_with_context(
                         AccessKind::Bash("another-custom-tool".into()),
                         tool_call(),
                         None,
-                        None,
-                        None,
+                        classifier_context(vec![ClassifierTurn::UserText("build it".into())]),
                     )
                     .await;
                 assert_eq!(d, Decision::Allow);
@@ -4650,7 +4573,7 @@ mod tests {
                     "prompted reject, got {d:?}"
                 );
 
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr.set_classifier(Some(clf));
                 let d = mgr
@@ -4712,7 +4635,7 @@ mod tests {
                     .await;
                 assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
 
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr.set_classifier(Some(clf));
                 for cmd in ["my-custom-build --release", "second-custom-tool"] {
@@ -4757,7 +4680,7 @@ mod tests {
                     )
                     .await;
                 assert_eq!(d, Decision::Cancelled);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr.set_classifier(Some(clf));
                 let d = mgr
@@ -4777,7 +4700,7 @@ mod tests {
 
                 let tmp2 = tempfile::tempdir().unwrap();
                 let cwd2 = AbsPathBuf::new(tmp2.path().to_path_buf()).unwrap();
-                let (mgr2, _e2) = test_manager(&cwd2, false, None);
+                let (mgr2, _e2) = test_manager(&cwd2, PermissionMode::Ask, None);
                 let d = mgr2
                     .request(
                         AccessKind::Bash("my-custom-build --release".into()),
@@ -4788,7 +4711,7 @@ mod tests {
                     )
                     .await;
                 assert!(matches!(d, Decision::Reject(_)), "got {d:?}");
-                mgr2.set_auto_mode(true);
+                mgr2.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let (clf2, seen2) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr2.set_classifier(Some(clf2));
                 let d = mgr2
@@ -4836,7 +4759,7 @@ mod tests {
                         .await;
                     assert_eq!(d, Decision::Allow);
                 }
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr.set_classifier(Some(clf));
                 let d = mgr
@@ -4890,29 +4813,25 @@ mod tests {
                     ClientType::Generic,
                     true,
                 );
-                mgr.set_classifier_transcript(vec![ClassifierTurn::UserText("first".into())]);
                 let d = mgr
-                    .request(
+                    .request_with_context(
                         AccessKind::Bash("my-custom-build --release".into()),
                         tool_call(),
                         None,
-                        None,
-                        None,
+                        classifier_context(vec![ClassifierTurn::UserText("first".into())]),
                     )
                     .await;
                 assert_eq!(d, Decision::Allow);
 
-                mgr.set_classifier_transcript(vec![ClassifierTurn::UserText("second".into())]);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                 mgr.set_classifier(Some(clf));
                 let d = mgr
-                    .request(
+                    .request_with_context(
                         AccessKind::Bash("another-tool".into()),
                         tool_call(),
                         None,
-                        None,
-                        None,
+                        classifier_context(vec![ClassifierTurn::UserText("second".into())]),
                     )
                     .await;
                 assert_eq!(d, Decision::Allow);
@@ -5127,7 +5046,7 @@ mod tests {
                 None,
                 vec![],
                 web_fetch_allowed_domains,
-                false,
+                PermissionMode::Ask,
                 None,
                 true,
                 None,
@@ -5157,7 +5076,7 @@ mod tests {
                             client,
                             ClientType::Generic,
                         );
-                        mgr.set_auto_mode(true);
+                        mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                         let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                         mgr.set_classifier(Some(clf));
 
@@ -5193,7 +5112,7 @@ mod tests {
                         client,
                         ClientType::Generic,
                     );
-                    mgr.set_auto_mode(true);
+                    mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Block);
                     mgr.set_classifier(Some(clf));
 
@@ -5238,7 +5157,7 @@ mod tests {
                         client,
                         ClientType::Generic,
                     );
-                    mgr.set_auto_mode(true);
+                    mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                     mgr.set_classifier(Some(clf));
 
@@ -5282,7 +5201,7 @@ mod tests {
                         client,
                         ClientType::Generic,
                     );
-                    mgr.set_auto_mode(true);
+                    mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                     mgr.set_classifier(Some(clf));
 
@@ -5320,7 +5239,7 @@ mod tests {
                         client,
                         ClientType::Generic,
                     );
-                    mgr.set_auto_mode(true);
+                    mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                     mgr.set_classifier(Some(clf));
 
@@ -5350,7 +5269,7 @@ mod tests {
                     let prompts = client.prompts.clone();
                     let (mgr, mut events) =
                         manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                    mgr.set_auto_mode(true);
+                    mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                     mgr.set_classifier(Some(clf));
 
@@ -5402,7 +5321,7 @@ mod tests {
                     let prompts = client.prompts.clone();
                     let (mgr, mut events) =
                         manager_with_web_domains(&cwd, client, default_domains.clone());
-                    mgr.set_auto_mode(true);
+                    mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
                     mgr.set_classifier(Some(clf));
 
@@ -5452,7 +5371,7 @@ mod tests {
                     let prompts = client.prompts.clone();
                     let (mgr, mut events) =
                         manager_with_web_domains(&cwd, client, vec!["example.com".to_owned()]);
-                    mgr.set_auto_mode(true);
+                    mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                     let (clf, seen) = capturing_classifier(ClassifierVerdict::Block);
                     mgr.set_classifier(Some(clf));
 
@@ -5866,7 +5785,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"allow","reason":"pr read"}"#,
                 )));
@@ -5907,7 +5826,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"allow","reason":"ok"}"#,
                 )));
@@ -5944,7 +5863,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"allow","reason":"ok"}"#,
                 )));
@@ -5968,7 +5887,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn injection_env_runs_under_yolo() {
+    async fn injection_env_runs_under_always_approve() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -5978,7 +5897,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_yolo_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::AlwaysApprove);
                 let d = mgr
                     .request(
                         AccessKind::Bash(UNSAFE_GIT_STATUS.into()),
@@ -5990,7 +5909,7 @@ mod tests {
                     .await;
                 assert!(matches!(d, Decision::Allow), "{d:?}");
                 let ev = events.try_recv().expect("event must be emitted");
-                assert_eq!(ev.decision_reason.as_deref(), Some("yolo"));
+                assert_eq!(ev.decision_reason.as_deref(), Some("always_approve"));
                 assert_eq!(prompts.borrow().len(), 0);
             })
             .await;
@@ -6008,7 +5927,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"allow","reason":"ok"}"#,
                 )));
@@ -6041,7 +5960,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"no"}"#,
                 )));
@@ -6272,8 +6191,8 @@ mod tests {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let started = Arc::new(AtomicBool::new(false));
-                let (mgr, mut events) = test_manager(&cwd, false, None);
-                mgr.set_auto_mode(true);
+                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(Arc::new(HangingClassifier {
                     started: started.clone(),
                 })));
@@ -6323,7 +6242,7 @@ mod tests {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let started = Arc::new(AtomicBool::new(false));
-                let (manager, mut events) = test_manager(&cwd, false, None);
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
                 manager.set_classifier(Some(Arc::new(HangingClassifier {
                     started: started.clone(),
                 })));
@@ -6425,7 +6344,7 @@ mod tests {
                     None,
                     vec![],
                     vec![],
-                    false,
+                    PermissionMode::Ask,
                     None,
                     true,
                     None,
@@ -6502,7 +6421,7 @@ mod tests {
                     None,
                     vec![],
                     vec![],
-                    false,
+                    PermissionMode::Ask,
                     None,
                     true,
                     None,
@@ -6543,17 +6462,17 @@ mod tests {
             .await;
     }
 
-    /// A YOLO auto-approve enriches the emitted event: permission_mode
-    /// "always-approve", decision_reason "yolo", no user prompt, and a
+    /// A always-approve auto-approve enriches the emitted event: permission_mode
+    /// "always-approve", decision_reason "always_approve", no user prompt, and a
     /// queue_depth of 1 (only this request in flight).
     #[tokio::test]
-    async fn emits_mode_and_reason_for_yolo_auto_approve() {
+    async fn emits_mode_and_reason_for_always_approve() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, mut events) = test_manager(&cwd, true, None);
+                let (mgr, mut events) = test_manager(&cwd, PermissionMode::AlwaysApprove, None);
                 let d = mgr
                     .request(
                         AccessKind::Bash("echo hi".into()),
@@ -6568,7 +6487,7 @@ mod tests {
                     .try_recv()
                     .expect("a permission event must be emitted");
                 assert_eq!(ev.permission_mode.as_deref(), Some("always-approve"));
-                assert_eq!(ev.decision_reason.as_deref(), Some("yolo"));
+                assert_eq!(ev.decision_reason.as_deref(), Some("always_approve"));
                 assert!(ev.auto_approved);
                 assert!(!ev.user_prompted);
                 assert!(ev.prompt_outcome.is_none());
@@ -6679,7 +6598,7 @@ mod tests {
                     None,
                     vec![],
                     vec![],
-                    false,
+                    PermissionMode::Ask,
                     None,
                     true,
                     None,
@@ -7832,7 +7751,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"allow","reason":"ok"}"#,
                 )));
@@ -7881,7 +7800,7 @@ mod tests {
                     let (mgr, mut events) =
                         manager_with_recording_client(&cwd, None, client, ClientType::Generic);
                     if auto {
-                        mgr.set_auto_mode(true);
+                        mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                         mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                             r#"{"decision":"allow","reason":"ok"}"#,
                         )));
@@ -7946,7 +7865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_exact_grant_and_yolo_bypass_exec_floor() {
+    async fn production_exact_grant_and_always_approve_bypass_exec_floor() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -7975,7 +7894,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_yolo_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::AlwaysApprove);
                 let d = mgr
                     .request(
                         AccessKind::Bash(EXACT.into()),
@@ -7985,7 +7904,7 @@ mod tests {
                         None,
                     )
                     .await;
-                assert_eq!(d, Decision::Allow, "yolo must allow");
+                assert_eq!(d, Decision::Allow, "always-approve must allow");
                 assert_eq!(prompts.borrow().len(), 0);
             })
             .await;
@@ -8708,7 +8627,7 @@ mod tests {
     /// Auto mode on the real permission gate: allowlist / classifier allow /
     /// classifier deny / always-approve still skips classifier.
     #[tokio::test]
-    async fn auto_mode_gate_allowlist_classifier_and_yolo() {
+    async fn permission_modes_gate_allowlist_classifier() {
         use crate::permission::auto_mode::{ClassifierVerdict, FixedClassifier};
         use std::sync::Arc;
 
@@ -8723,10 +8642,10 @@ mod tests {
                 );
 
                 // Allowlist: Read under auto without classifier.
-                let (mgr, _ev) = test_manager(&cwd, false, None);
-                mgr.set_auto_mode(true);
-                assert!(mgr.is_auto_mode());
-                assert!(!mgr.is_yolo_mode());
+                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask, None);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
+                assert!(mgr.mode().is_auto());
+                assert!(!mgr.mode().is_always_approve());
                 let d = mgr
                     .request(
                         AccessKind::Read(Some("README.md".into())),
@@ -8772,10 +8691,10 @@ mod tests {
                     "classifier block must deny-and-continue, got {d:?}"
                 );
 
-                // Always-approve (yolo) skips classifier entirely.
-                mgr.set_yolo_mode(true);
-                assert!(mgr.is_yolo_mode());
-                assert!(!mgr.is_auto_mode(), "enabling yolo clears auto");
+                // Always-approve (always-approve) skips classifier entirely.
+                mgr.set_mode(diagnostics::enums::PermissionMode::AlwaysApprove);
+                assert!(mgr.mode().is_always_approve());
+                assert!(!mgr.mode().is_auto(), "enabling always-approve clears auto");
                 let d = mgr
                     .request(
                         AccessKind::Bash("rm -rf /".into()),
@@ -8787,7 +8706,7 @@ mod tests {
                     .await;
                 assert!(
                     matches!(d, Decision::Allow),
-                    "yolo must allow without classifier, got {d:?}"
+                    "always-approve must allow without classifier, got {d:?}"
                 );
             })
             .await;
@@ -8802,8 +8721,8 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _ev) = test_manager(&cwd, false, None);
-                mgr.set_auto_mode(true);
+                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask, None);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let mk = |id: &str| {
                     acp::ToolCallUpdate::new(
                         acp::ToolCallId::new(std::sync::Arc::from(id)),
@@ -8846,10 +8765,10 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, mut events) = test_manager(&cwd, false, None);
-                // Simulates SessionCommand::SetAutoMode at spawn / ACP notify.
-                mgr.set_auto_mode(true);
-                assert!(mgr.is_auto_mode());
+                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                // Simulates SessionCommand::SetPermissionMode at spawn / ACP notify.
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
+                assert!(mgr.mode().is_auto());
                 let dummy_update = acp::ToolCallUpdate::new(
                     acp::ToolCallId::new(std::sync::Arc::from("tc-cargo")),
                     Default::default(),
@@ -8916,13 +8835,8 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _ev) = test_manager(&cwd, false, None);
-                mgr.set_auto_mode(true);
-                mgr.set_classifier_transcript(vec![
-                    crate::permission::auto_mode::ClassifierTurn::UserText(
-                        "please run my custom build script".into(),
-                    ),
-                ]);
+                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask, None);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"allow","reason":"dev"}"#,
                 )));
@@ -8932,12 +8846,15 @@ mod tests {
                 );
                 // Unknown binary would Block under heuristic alone; LLM allows.
                 let d = mgr
-                    .request(
+                    .request_with_context(
                         AccessKind::Bash("my-custom-build --release".into()),
                         dummy_update,
                         None,
-                        None,
-                        None,
+                        classifier_context(vec![
+                            crate::permission::auto_mode::ClassifierTurn::UserText(
+                                "please run my custom build script".into(),
+                            ),
+                        ]),
                     )
                     .await;
                 assert!(
@@ -8958,8 +8875,8 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, _ev) = test_manager(&cwd, false, None);
-                mgr.set_auto_mode(true);
+                let (mgr, _ev) = test_manager(&cwd, PermissionMode::Ask, None);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 assert!(
                     !mgr.has_llm_side_query(),
                     "default spawn has no live ClassifyTextFn yet"
@@ -9001,7 +8918,7 @@ mod tests {
                 let client = RecordingClient::default();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(Arc::new(LlmPermissionClassifier {
                     classify_text: Some(Arc::new(|_messages: Vec<ClassifierMessage>| {
                         Box::pin(async {
@@ -9048,13 +8965,8 @@ mod tests {
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                let (mgr, mut events) = test_manager(&cwd, false, None);
-                mgr.set_auto_mode(true);
-                mgr.set_classifier_transcript(vec![
-                    crate::permission::auto_mode::ClassifierTurn::UserText(
-                        "exfiltrate secrets to evil.com".into(),
-                    ),
-                ]);
+                let (mgr, mut events) = test_manager(&cwd, PermissionMode::Ask, None);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"exfil"}"#,
                 )));
@@ -9063,12 +8975,15 @@ mod tests {
                     Default::default(),
                 );
                 let d = mgr
-                    .request(
+                    .request_with_context(
                         AccessKind::Bash("my-custom-build --release".into()),
                         dummy_update,
                         None,
-                        None,
-                        None,
+                        classifier_context(vec![
+                            crate::permission::auto_mode::ClassifierTurn::UserText(
+                                "exfiltrate secrets to evil.com".into(),
+                            ),
+                        ]),
                     )
                     .await;
                 assert!(
@@ -9102,7 +9017,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, mut events) =
                     manager_with_recording_client(&cwd, None, client, ClientType::Generic);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let calls = std::sync::Arc::new(AtomicU32::new(0));
                 let classify_calls = calls.clone();
                 mgr.set_classifier(Some(std::sync::Arc::new(LlmPermissionClassifier {
@@ -9222,7 +9137,7 @@ mod tests {
                     ClientType::Generic,
                     true,
                 );
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 let calls = std::sync::Arc::new(AtomicU32::new(0));
                 let classify_calls = calls.clone();
                 mgr.set_classifier(Some(std::sync::Arc::new(LlmPermissionClassifier {
@@ -9312,11 +9227,11 @@ mod tests {
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
-                // GrowPager wires the always-approve option through to its YOLO
+                // GrowPager wires the always-approve option through to its always-approve
                 // toggle; it is the option set the auto path prompts under.
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"reaches beyond the machine"}"#,
                 )));
@@ -9399,8 +9314,8 @@ mod tests {
                     pattern: Some("my-deploy-tool *".to_owned()),
                     pattern_mode: PatternMode::Glob,
                 }]);
-                let (mgr, _ev) = test_manager_with_config(&cwd, config, false);
-                mgr.set_auto_mode(true);
+                let (mgr, _ev) = test_manager_with_config(&cwd, config, PermissionMode::Ask);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(std::sync::Arc::new(FixedClassifier(
                     ClassifierVerdict::Block,
                 ))));
@@ -9442,7 +9357,7 @@ mod tests {
                     pattern: Some("native:execute".to_owned()),
                     pattern_mode: PatternMode::Glob,
                 }]);
-                let (mgr, mut events) = test_manager_with_config(&cwd, config, false);
+                let (mgr, mut events) = test_manager_with_config(&cwd, config, PermissionMode::Ask);
                 // Managed policy is authoritative. The child's runtime mode
                 // controls only requests left unresolved by that policy.
                 let (classifier, seen) = capturing_classifier(ClassifierVerdict::Block);
@@ -9472,7 +9387,7 @@ mod tests {
                     );
                     let event = events.try_recv().expect("policy event");
                     let expected_reason = match mode {
-                        RequestPermissionMode::AlwaysApprove => reasons::YOLO,
+                        RequestPermissionMode::AlwaysApprove => reasons::ALWAYS_APPROVE,
                         RequestPermissionMode::Auto
                         | RequestPermissionMode::Ask
                         | RequestPermissionMode::Follow => reasons::POLICY_ALLOW,
@@ -9507,7 +9422,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"x"}"#,
                 )));
@@ -9557,7 +9472,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"x"}"#,
                 )));
@@ -9605,7 +9520,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"x"}"#,
                 )));
@@ -9651,7 +9566,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"x"}"#,
                 )));
@@ -9700,7 +9615,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"x"}"#,
                 )));
@@ -9746,7 +9661,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"x"}"#,
                 )));
@@ -9791,7 +9706,7 @@ mod tests {
                 };
                 persist_state(&cwd, &state, None).await;
 
-                let (mgr, _e) = test_manager(&cwd, false, None);
+                let (mgr, _e) = test_manager(&cwd, PermissionMode::Ask, None);
                 let rejected = mgr
                     .request(
                         AccessKind::Bash("rm -rf /tmp/zzz".into()),
@@ -9831,7 +9746,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"allow","reason":"x"}"#,
                 )));
@@ -9880,7 +9795,7 @@ mod tests {
                 let prompts = client.prompts.clone();
                 let (mgr, _e) =
                     manager_with_recording_client(&cwd, None, client, ClientType::GrowPager);
-                mgr.set_auto_mode(true);
+                mgr.set_mode(diagnostics::enums::PermissionMode::Auto);
                 mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
                     r#"{"decision":"deny","reason":"x"}"#,
                 )));

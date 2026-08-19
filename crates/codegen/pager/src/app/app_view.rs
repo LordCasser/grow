@@ -137,9 +137,6 @@ pub enum NewWorktreeDialogOutcome {
 /// - `[hints] new_session_worktree_mode` (default: `ask`)
 /// - `[hints] fork_worktree_mode` (default: `ask`)
 ///
-/// The legacy `[hints] worktree_mode` key is read as a fallback when
-/// neither per-command key is set.
-///
 /// Startup resolution lives in
 /// [`shell::util::config::resolve_hints`]; this type is the pager's
 /// in-memory mirror.
@@ -176,36 +173,10 @@ impl WorktreeMode {
             Self::Never => "never",
         }
     }
-    /// Resolve per-command worktree modes from a parsed TOML document.
-    ///
-    /// Returns `(new_session_worktree_mode, fork_worktree_mode)`.
-    ///
-    /// Resolution order:
-    /// - `/new`: `new_session_worktree_mode` key, else legacy `worktree_mode`, else `Never` (no popup).
-    /// - `/fork`: `fork_worktree_mode` key, else legacy `worktree_mode`, else `Ask`.
-    pub fn resolve_from_hints(hints: Option<&toml_edit::Item>) -> (Self, Self) {
-        let get_str = |key: &str| -> Option<Self> {
-            hints
-                .and_then(|h| h.get(key))
-                .and_then(|v| v.as_str())
-                .map(Self::from_config_str)
-        };
-        Self::resolve_from_hint_strings(get_str)
-    }
-    /// Same as [`Self::resolve_from_hints`], for merged effective config (`toml::Value`).
+    /// Resolve modes from merged effective config (`toml::Value`).
     pub fn resolve_from_hints_value(hints: Option<&toml::Value>) -> (Self, Self) {
         let (new_session, fork) = shell::util::config::WorktreeHintMode::resolve_pair(hints);
         (new_session.into(), fork.into())
-    }
-    fn resolve_from_hint_strings(get_str: impl Fn(&str) -> Option<Self>) -> (Self, Self) {
-        let legacy = get_str("worktree_mode");
-        let new_session = get_str("new_session_worktree_mode")
-            .or(legacy)
-            .unwrap_or(Self::Never);
-        let fork = get_str("fork_worktree_mode")
-            .or(legacy)
-            .unwrap_or(Self::Ask);
-        (new_session, fork)
     }
 }
 use super::PagerTerminal;
@@ -548,13 +519,6 @@ pub struct AppView {
     /// non-selectable headers. Gated by `GROW_SESSION_PICKER_GROUPED` env var
     /// or remote settings `session_picker_grouped`; defaults to `false`.
     pub session_picker_grouped: bool,
-    /// Startup-only seed for `AgentView::scheduler_background_loops`, resolved
-    /// once from the config layers plus the remote tier known at connect.
-    /// Read only until a session's own value arrives on its `session/new` /
-    /// `session/load` response, and by the session-less dashboard. Never
-    /// refreshed afterwards — the authoritative value is per session, pinned by
-    /// the shell when that session's actor spawned.
-    pub scheduler_background_loops_seed: bool,
     /// Whether Ctrl+C before first server activity rewinds the prompt
     /// back into the input box. Gated by `GROW_CANCEL_REWIND` env /
     /// `[features] cancel_rewind` config / remote settings flag.
@@ -604,8 +568,6 @@ pub struct AppView {
     pub welcome_menu_index: Option<usize>,
     /// Hit-test rects for welcome menu items (populated during render).
     pub welcome_menu_rects: Vec<ratatui::layout::Rect>,
-    /// Hit-test rect for the import-claude banner on the welcome screen.
-    pub welcome_import_banner_rect: Option<ratatui::layout::Rect>,
     /// Last known mouse position (column, row), updated on every Mouse event.
     /// Used by the welcome screen to render fine-grained hover effects (e.g.
     /// brighter red on the import row's `[x]` when the mouse is exactly on
@@ -663,12 +625,12 @@ pub struct AppView {
     /// `AgentSession.deferred_model_switch` so the model is applied once
     /// the session is created.
     pub cli_model_override: Option<acp::ModelId>,
-    /// CLI effort token (`--reasoning-effort` / `--effort`). Applied on session create.
+    /// CLI effort token (`--reasoning-effort`). Applied on session create.
     pub cli_effort_token: Option<String>,
-    /// Default YOLO for new sessions, seeded at startup from `effective_yolo_for_launch`.
-    pub default_yolo: bool,
+    /// Canonical permission mode inherited by new sessions.
+    pub default_permission_mode: shell::util::config::PermissionMode,
     /// Soft-default still owns the mode: settings/update may rewrite UI +
-    /// `default_yolo`. Cleared when a session selector or CLI claims the mode.
+    /// `default_permission_mode`. Cleared when a session selector or CLI claims the mode.
     /// Not inferred from the rendered permission string.
     pub permission_mode_from_soft_default: bool,
     /// Whether the **auto** permission-mode feature gate is enabled (resolved at
@@ -677,13 +639,13 @@ pub struct AppView {
     /// `shell::util::config::resolve_auto_permission_mode_enabled`.
     pub auto_mode_gate: bool,
     /// Managed-policy pin (set at startup); gates every runtime always-approve enable.
-    pub yolo_policy_block: Option<&'static str>,
-    /// One-shot notice that a launch `--yolo` was pinned off; shown on the first agent view.
-    pub yolo_launch_block_notice: Option<&'static str>,
+    pub always_approve_policy_block: Option<&'static str>,
+    /// One-shot notice that a launch `--permission-mode always-approve` was pinned off; shown on the first agent view.
+    pub always_approve_launch_block_notice: Option<&'static str>,
     /// One-shot switch-back toast after a screen-mode re-exec.
     pub screen_mode_switch_hint: Option<&'static str>,
     /// Require explicit plan approval via the plan viewer UI even in
-    /// always-approve (YOLO) mode. Loaded from `[ui] require_plan_approval`
+    /// always-approve (always-approve) mode. Loaded from `[ui] require_plan_approval`
     /// in config.toml at startup.
     pub require_plan_approval: bool,
     /// Enable Plan Behavior for new sessions (`--plan`).
@@ -784,10 +746,6 @@ pub struct AppView {
     /// other screen mode. Driven by `/minimal` and `/fullscreen`. Captures the
     /// session id at action time so a later teardown cannot drop `--resume`.
     pub relaunch: Option<ScreenModeRelaunch>,
-    /// Whether importable `.claude/` settings were detected at startup.
-    pub has_claude_import: bool,
-    /// When set, the welcome screen renders an interactive import modal instead of normal content.
-    pub import_claude_modal: Option<crate::views::import_claude_modal::ImportClaudeModalState>,
     /// Whether the pager uses fullscreen (alt-screen) or inline mode.
     /// Set from the resolved terminal state at startup.
     pub(crate) screen_mode: super::ScreenMode,
@@ -908,7 +866,6 @@ impl AppView {
             minimal_state: crate::minimal_api::MinimalState::default(),
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
-            welcome_import_banner_rect: None,
             last_mouse_pos: None,
             last_scroll_pos: None,
             last_cache_evict_at: None,
@@ -930,11 +887,11 @@ impl AppView {
             session_picker_entries_query: None,
             cli_model_override: None,
             cli_effort_token: None,
-            default_yolo: false,
+            default_permission_mode: shell::util::config::PermissionMode::Ask,
             permission_mode_from_soft_default: true,
             auto_mode_gate: shell::util::config::auto_permission_mode_enabled_from_disk(),
-            yolo_policy_block: None,
-            yolo_launch_block_notice: None,
+            always_approve_policy_block: None,
+            always_approve_launch_block_notice: None,
             screen_mode_switch_hint: None,
             require_plan_approval: false,
             plan_mode: false,
@@ -965,8 +922,6 @@ impl AppView {
             pending_update_version: None,
             quit_for_update: false,
             relaunch: None,
-            has_claude_import: false,
-            import_claude_modal: None,
             screen_mode: ScreenMode::Inline,
             show_resolved_model: true,
             plugin_cta_enabled: false,
@@ -977,7 +932,6 @@ impl AppView {
             shared_prompt_queues: std::collections::HashMap::new(),
             optimistic_prompt_echoes: std::collections::HashMap::new(),
             session_picker_grouped: false,
-            scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
             session_recap_available: false,
             tutorial: None,
@@ -1051,8 +1005,7 @@ impl AppView {
     ///
     /// Mirrors `handle_input`'s intercepts, in their order: the focused dev
     /// tracing pane (step 1a consumes all non-global keys), the cloud modal
-    /// (step 1d), the import-Claude modal (agent-arm intercept),
-    /// and the dashboard's attached-agent popup (dashboard-arm intercept). Keep
+    /// (step 1d), and the dashboard's attached-agent popup. Keep
     /// this list in lockstep with those intercepts when adding a top-level
     /// Esc owner.
     pub(crate) fn esc_owned_before_agent(&self) -> bool {
@@ -1065,7 +1018,7 @@ impl AppView {
         {
             return true;
         }
-        self.import_claude_modal.is_some()
+        false
     }
     /// The active agent's view, when an agent tab is focused.
     ///
@@ -1542,8 +1495,7 @@ impl AppView {
                     new_worktree_dialog: &mut self.new_worktree_dialog,
                     menu_index: &mut self.welcome_menu_index,
                     menu_rects: &self.welcome_menu_rects,
-                    menu_count: 3 + if self.has_claude_import { 1 } else { 0 },
-                    import_banner_rect: self.welcome_import_banner_rect.as_ref(),
+                    menu_count: 3,
                     promo_cta_rect: self.welcome_promo_cta_rect.as_ref(),
                     on_promo_cta: &mut self.welcome_on_promo_cta,
                     promo_cta_keyboard: welcome_pinned_promo_cta,
@@ -1557,8 +1509,6 @@ impl AppView {
                     sp_content_results: &self.session_picker_content_results,
                     sp_content_loading: self.session_picker_content_loading,
                     sp_entries_query: &self.session_picker_entries_query,
-                    has_claude_import: self.has_claude_import,
-                    import_claude_modal: &mut self.import_claude_modal,
                     has_pending_update: self.pending_update_version.is_some(),
                     cwd_has_git_ancestor: self.cwd_has_git_ancestor,
                     session_picker_grouped: self.session_picker_grouped,
@@ -1701,33 +1651,6 @@ impl AppView {
                             _ => {}
                         }
                     }
-                }
-                if let Some(modal) = self.import_claude_modal.as_mut() {
-                    use crate::views::import_claude_modal::ImportClaudeModalOutcome;
-                    let outcome_to_input = |o: ImportClaudeModalOutcome| match o {
-                        ImportClaudeModalOutcome::Confirmed => {
-                            InputOutcome::Action(Action::ImportClaudeConfirm)
-                        }
-                        ImportClaudeModalOutcome::Cancelled => {
-                            InputOutcome::Action(Action::ImportClaudeCancel)
-                        }
-                        ImportClaudeModalOutcome::Changed => InputOutcome::Changed,
-                        ImportClaudeModalOutcome::Unchanged => InputOutcome::Unchanged,
-                    };
-                    if let Event::Key(key) = ev {
-                        if key.kind == KeyEventKind::Release {
-                            return InputOutcome::Unchanged;
-                        }
-                        return outcome_to_input(modal.handle_key(key));
-                    }
-                    if let Event::Mouse(mouse) = ev {
-                        return outcome_to_input(modal.handle_mouse(
-                            mouse.kind,
-                            mouse.column,
-                            mouse.row,
-                        ));
-                    }
-                    return InputOutcome::Unchanged;
                 }
                 if self.screen_mode.is_minimal()
                     && let Event::Key(key) = ev
@@ -2102,7 +2025,6 @@ struct WelcomeInputCtx<'a> {
     menu_index: &'a mut Option<usize>,
     menu_rects: &'a [ratatui::layout::Rect],
     menu_count: usize,
-    import_banner_rect: Option<&'a ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero promo CTA `[label]` button
     /// (click → open the promo url).
     promo_cta_rect: Option<&'a ratatui::layout::Rect>,
@@ -2110,7 +2032,7 @@ struct WelcomeInputCtx<'a> {
     /// button brightens/dims).
     on_promo_cta: &'a mut bool,
     /// A pinned (non-dismissible) promo CTA is live, so `Ctrl+O` opens it
-    /// (the welcome screen has no YOLO toggle to preserve).
+    /// (the welcome screen has no always-approve toggle to preserve).
     promo_cta_keyboard: bool,
     /// Whether the announcement overflowed — the "expandable" signal for click-to-toggle.
     announcement_truncated: bool,
@@ -2130,35 +2052,12 @@ struct WelcomeInputCtx<'a> {
     /// The query `sp_entries` were server-fetched with (see
     /// [`crate::views::session_picker::effective_filter_query`]).
     sp_entries_query: &'a Option<String>,
-    has_claude_import: bool,
-    import_claude_modal: &'a mut Option<crate::views::import_claude_modal::ImportClaudeModalState>,
     has_pending_update: bool,
     cwd_has_git_ancestor: bool,
     session_picker_grouped: bool,
 }
 /// Welcome view input -- auth-state-aware routing.
 fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutcome {
-    if let Some(modal) = ctx.import_claude_modal.as_mut() {
-        use crate::views::import_claude_modal::ImportClaudeModalOutcome;
-        let outcome_to_input = |o: ImportClaudeModalOutcome| match o {
-            ImportClaudeModalOutcome::Confirmed => {
-                InputOutcome::Action(Action::ImportClaudeConfirm)
-            }
-            ImportClaudeModalOutcome::Cancelled => InputOutcome::Action(Action::ImportClaudeCancel),
-            ImportClaudeModalOutcome::Changed => InputOutcome::Changed,
-            ImportClaudeModalOutcome::Unchanged => InputOutcome::Unchanged,
-        };
-        if let Event::Key(key) = ev {
-            if key.kind == crossterm::event::KeyEventKind::Release {
-                return InputOutcome::Unchanged;
-            }
-            return outcome_to_input(modal.handle_key(key));
-        }
-        if let Event::Mouse(mouse) = ev {
-            return outcome_to_input(modal.handle_mouse(mouse.kind, mouse.column, mouse.row));
-        }
-        return InputOutcome::Unchanged;
-    }
     if let Some(dialog) = ctx.new_worktree_dialog.as_mut() {
         let outcome = match ev {
             Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
@@ -2428,12 +2327,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
                 return InputOutcome::Action(Action::QuitForUpdate);
             }
-            if ctx.has_claude_import && key!('i', CONTROL).matches(key) {
-                return InputOutcome::Action(Action::ImportClaudeSettings);
-            }
-            if ctx.has_claude_import && key!('I', CONTROL | SHIFT).matches(key) {
-                return InputOutcome::Action(Action::DismissClaudeImport);
-            }
             if is_quit_signal(key) {
                 return InputOutcome::Action(Action::Quit);
             }
@@ -2451,7 +2344,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             if key!(Enter).matches(key) {
                 if let Some(idx) = *ctx.menu_index {
-                    return dispatch_menu_action(idx, ctx.has_claude_import);
+                    return dispatch_menu_action(idx);
                 }
                 return InputOutcome::Action(Action::NewSession);
             }
@@ -2488,14 +2381,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         && mouse.row >= rect.y
                         && mouse.row < rect.y + rect.height
                     {
-                        if ctx.has_claude_import
-                            && i == 0
-                            && mouse.column >= rect.x + rect.width.saturating_sub(4)
-                            && mouse.column < rect.x + rect.width.saturating_sub(1)
-                        {
-                            return InputOutcome::Action(Action::DismissClaudeImport);
-                        }
-                        return dispatch_menu_action(i, ctx.has_claude_import);
+                        return dispatch_menu_action(i);
                     }
                 }
                 if let Some(rect) = ctx.promo_cta_rect
@@ -2509,14 +2395,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 {
                     *ctx.announcement_expanded = !*ctx.announcement_expanded;
                     return InputOutcome::Changed;
-                }
-                if let Some(rect) = ctx.import_banner_rect
-                    && mouse.column >= rect.x
-                    && mouse.column < rect.x + rect.width
-                    && mouse.row >= rect.y
-                    && mouse.row < rect.y + rect.height
-                {
-                    return InputOutcome::Action(Action::ImportClaudeSettings);
                 }
             }
             MouseEventKind::Moved => {
@@ -2533,9 +2411,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 }
                 if new_index != *ctx.menu_index {
                     *ctx.menu_index = new_index;
-                    return InputOutcome::Changed;
-                }
-                if ctx.has_claude_import && new_index == Some(0) {
                     return InputOutcome::Changed;
                 }
                 let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
@@ -2586,24 +2461,13 @@ fn handle_menu_nav(
 }
 /// Dispatch an action for a welcome menu item by index.
 ///
-/// Menu order: `[Import Claude settings]`, New worktree, Resume session, Quit.
-/// `has_claude_import` shifts the indices by one when the import row is shown.
-fn dispatch_menu_action(index: usize, has_claude_import: bool) -> InputOutcome {
-    if has_claude_import {
-        match index {
-            0 => InputOutcome::Action(Action::ImportClaudeSettings),
-            1 => InputOutcome::Action(Action::OpenNewWorktreeDialog),
-            2 => InputOutcome::Action(Action::FetchSessionList),
-            3 => InputOutcome::Action(Action::Quit),
-            _ => InputOutcome::Unchanged,
-        }
-    } else {
-        match index {
-            0 => InputOutcome::Action(Action::OpenNewWorktreeDialog),
-            1 => InputOutcome::Action(Action::FetchSessionList),
-            2 => InputOutcome::Action(Action::Quit),
-            _ => InputOutcome::Unchanged,
-        }
+/// Menu order: New worktree, Resume session, Quit.
+fn dispatch_menu_action(index: usize) -> InputOutcome {
+    match index {
+        0 => InputOutcome::Action(Action::OpenNewWorktreeDialog),
+        1 => InputOutcome::Action(Action::FetchSessionList),
+        2 => InputOutcome::Action(Action::Quit),
+        _ => InputOutcome::Unchanged,
     }
 }
 impl AppView {
@@ -2846,7 +2710,7 @@ impl AppView {
                     ActiveView::Welcome => {
                         let mut flags_vec: Vec<crate::views::prompt_widget::PromptFlag<'_>> =
                             Vec::new();
-                        if self.default_yolo {
+                        if self.default_permission_mode.is_always_approve() {
                             flags_vec.push(crate::views::prompt_widget::PromptFlag {
                                 text: "always-approve",
                                 color: None,
@@ -2882,7 +2746,6 @@ impl AppView {
                             model_name: &model_name,
                             flags: &flags_vec,
                             selected: self.welcome_menu_index,
-                            has_claude_import: self.has_claude_import,
                             mouse_pos: self.last_mouse_pos,
                             session_picker: self.session_picker_entries.as_deref(),
                             session_picker_loading:
@@ -2913,7 +2776,6 @@ impl AppView {
                             &mut self.session_picker_state,
                         );
                         self.welcome_menu_rects = result.menu_rects;
-                        self.welcome_import_banner_rect = result.import_banner_rect;
                         self.welcome_promo_cta_rect = result.promo_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
                             paint_welcome_toast(f.buffer_mut(), view_area, msg);
@@ -2921,16 +2783,6 @@ impl AppView {
                         self.welcome_announcement.truncated = result.announcement_truncated;
                         self.welcome_announcement.rect = result.announcement_rect;
                         self.session_picker_state.hit_areas = result.session_picker_hit_areas;
-                        if let Some(modal) = self.import_claude_modal.as_mut() {
-                            let theme = crate::theme::Theme::current();
-                            crate::views::import_claude_modal::render_import_claude_modal(
-                                f.buffer_mut(),
-                                view_area,
-                                modal,
-                                &theme,
-                                compact,
-                            );
-                        }
                         if let Some(dialog) = self.new_worktree_dialog.as_ref() {
                             crate::views::new_worktree_dialog::render_new_worktree_dialog(
                                 view_area,
@@ -3064,16 +2916,6 @@ impl AppView {
                                     frame: frame_stamp,
                                 },
                             );
-                            if let Some(modal) = self.import_claude_modal.as_mut() {
-                                let theme = crate::theme::Theme::current();
-                                crate::views::import_claude_modal::render_import_claude_modal(
-                                    f.buffer_mut(),
-                                    view_area,
-                                    modal,
-                                    &theme,
-                                    compact,
-                                );
-                            }
                             if let Some(tutorial) = self.tutorial.as_mut() {
                                 crate::views::tutorial::render_tutorial(
                                     f.buffer_mut(),
@@ -3091,10 +2933,7 @@ impl AppView {
                             }
                             let (cursor_pos, post_flush) = result;
                             let has_cloud = false;
-                            if has_cloud
-                                || self.import_claude_modal.is_some()
-                                || self.tutorial.is_some()
-                            {
+                            if has_cloud || self.tutorial.is_some() {
                                 link_spans.clear();
                             }
                             let cursor = if has_cloud || self.tutorial.is_some() {
@@ -3275,7 +3114,6 @@ impl AppView {
     fn is_scroll_blocking_modal_open(&self) -> bool {
         let cloud_modal_open = false;
         matches!(self.active_view, ActiveView::Agent(id) if self.agents.get(&id).is_some_and(|a| a.extensions_modal.is_some() || a.active_modal.is_some()))
-            || self.import_claude_modal.is_some()
             || self.new_worktree_dialog.is_some()
             || self.tutorial.is_some()
             || matches!(self.active_view, ActiveView::AgentDashboard
@@ -4162,11 +4000,11 @@ pub(crate) mod tests {
             tip: None,
             cli_model_override: None,
             cli_effort_token: None,
-            default_yolo: false,
+            default_permission_mode: shell::util::config::PermissionMode::Ask,
             permission_mode_from_soft_default: true,
             auto_mode_gate: true,
-            yolo_policy_block: None,
-            yolo_launch_block_notice: None,
+            always_approve_policy_block: None,
+            always_approve_launch_block_notice: None,
             screen_mode_switch_hint: None,
             require_plan_approval: false,
             plan_mode: false,
@@ -4203,7 +4041,6 @@ pub(crate) mod tests {
             )),
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
-            welcome_import_banner_rect: None,
             last_mouse_pos: None,
             last_scroll_pos: None,
             last_cache_evict_at: None,
@@ -4227,8 +4064,6 @@ pub(crate) mod tests {
             pending_update_version: None,
             quit_for_update: false,
             relaunch: None,
-            has_claude_import: false,
-            import_claude_modal: None,
             screen_mode: ScreenMode::Inline,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -4245,7 +4080,6 @@ pub(crate) mod tests {
             shared_prompt_queues: std::collections::HashMap::new(),
             optimistic_prompt_echoes: std::collections::HashMap::new(),
             session_picker_grouped: false,
-            scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
             session_recap_available: false,
             tutorial: None,
@@ -4274,8 +4108,7 @@ pub(crate) mod tests {
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -4480,7 +4313,7 @@ pub(crate) mod tests {
             cwd: "/tmp".into(),
             is_worktree: false,
             model_id: None,
-            yolo: false,
+            permission_mode: diagnostics::enums::PermissionMode::Ask,
             activity: crate::app::roster::RosterActivity::Working,
             resident: false,
             last_change_unix_ms: 0,
@@ -4728,8 +4561,7 @@ pub(crate) mod tests {
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -6197,50 +6029,22 @@ pub(crate) mod tests {
         assert!(app.pending_action.is_none());
     }
     #[test]
-    fn menu_action_indices_without_import() {
-        // Menu order (no import row): New worktree, Resume session, Quit.
+    fn menu_action_indices() {
+        // Menu order: New worktree, Resume session, Quit.
         assert!(matches!(
-            dispatch_menu_action(0, false),
+            dispatch_menu_action(0),
             InputOutcome::Action(Action::OpenNewWorktreeDialog)
         ));
         assert!(matches!(
-            dispatch_menu_action(1, false),
+            dispatch_menu_action(1),
             InputOutcome::Action(Action::FetchSessionList)
         ));
         assert!(matches!(
-            dispatch_menu_action(2, false),
+            dispatch_menu_action(2),
             InputOutcome::Action(Action::Quit)
         ));
         // Out-of-range indices are a no-op.
-        assert!(matches!(
-            dispatch_menu_action(3, false),
-            InputOutcome::Unchanged
-        ));
-    }
-    #[test]
-    fn menu_action_indices_with_import() {
-        // Menu order (import row present): Import, New worktree, Resume
-        // session, Quit. The Changelog row is gone, so Quit is index 3.
-        assert!(matches!(
-            dispatch_menu_action(0, true),
-            InputOutcome::Action(Action::ImportClaudeSettings)
-        ));
-        assert!(matches!(
-            dispatch_menu_action(1, true),
-            InputOutcome::Action(Action::OpenNewWorktreeDialog)
-        ));
-        assert!(matches!(
-            dispatch_menu_action(2, true),
-            InputOutcome::Action(Action::FetchSessionList)
-        ));
-        assert!(matches!(
-            dispatch_menu_action(3, true),
-            InputOutcome::Action(Action::Quit)
-        ));
-        assert!(matches!(
-            dispatch_menu_action(4, true),
-            InputOutcome::Unchanged
-        ));
+        assert!(matches!(dispatch_menu_action(3), InputOutcome::Unchanged));
     }
     #[test]
     fn page_keys_from_prompt_page_conversation_without_mutating_prompt() {
@@ -6809,14 +6613,6 @@ pub(crate) mod tests {
     fn esc_owned_before_agent_covers_app_level_owners() {
         let mut app = test_app_with_agent();
         assert!(!app.esc_owned_before_agent());
-        app.import_claude_modal = Some(
-            crate::views::import_claude_modal::ImportClaudeModalState::new(
-                shell::claude_import::ImportPlan::default(),
-                std::path::PathBuf::from("/tmp"),
-            ),
-        );
-        assert!(app.esc_owned_before_agent(), "import-claude modal owns Esc");
-        app.import_claude_modal = None;
         app.active_view = ActiveView::AgentDashboard;
         app.dashboard = Some(crate::views::dashboard::DashboardState::new());
         if let Some(d) = app.dashboard.as_mut() {
@@ -7619,37 +7415,6 @@ pub(crate) mod tests {
         assert!(app.pending_action.is_none());
     }
     #[test]
-    fn welcome_done_enter_with_import_row_dispatches_menu_action() {
-        // With the import row: 0 = Import, 1 = New worktree, 2 = Resume, 3 = Quit.
-        let mut app = test_app();
-        app.has_claude_import = true;
-        app.welcome_menu_index = Some(0);
-        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::ImportClaudeSettings)
-        ));
-        app.welcome_menu_index = Some(2);
-        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::FetchSessionList)
-        ));
-        // Quit (index 3) on the welcome screen quits on the first press:
-        // no session to lose, so no double-press confirmation. A second
-        // Enter also quits and must not arm a pending action.
-        app.welcome_menu_index = Some(3);
-        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::Quit)),
-            "first Enter on Quit must quit immediately, got {outcome:?}"
-        );
-        assert!(app.pending_action.is_none());
-        let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
-        assert!(app.pending_action.is_none());
-    }
-    #[test]
     fn welcome_esc_clears_menu_selection() {
         let mut app = test_app();
         app.welcome_menu_index = Some(1);
@@ -7685,29 +7450,6 @@ pub(crate) mod tests {
         ));
     }
     #[test]
-    fn welcome_done_ctrl_i_opens_import_modal() {
-        let mut app = test_app();
-        app.has_claude_import = true;
-        let outcome = app.handle_input(&key_event(KeyCode::Char('i'), KeyModifiers::CONTROL));
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::ImportClaudeSettings)
-        ));
-    }
-    #[test]
-    fn welcome_done_ctrl_shift_i_dismisses_import() {
-        let mut app = test_app();
-        app.has_claude_import = true;
-        let outcome = app.handle_input(&key_event(
-            KeyCode::Char('I'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        ));
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::DismissClaudeImport)
-        ));
-    }
-    #[test]
     fn welcome_mouse_click_menu_row_dispatches_action() {
         let mut app = test_app();
         // 3 rows (no import) at y = 10..13, x = 0..40.
@@ -7725,36 +7467,6 @@ pub(crate) mod tests {
         // Row 2 (Quit).
         let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 5, 12));
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
-    }
-    #[test]
-    fn welcome_mouse_click_import_row_dismiss_region() {
-        let mut app = test_app();
-        app.has_claude_import = true;
-        // Import row spans x 0..40; the `[x]` affordance is the last 3 cols.
-        app.welcome_menu_rects = vec![ratatui::layout::Rect::new(0, 10, 40, 1)];
-        let outcome =
-            app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 38, 10));
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::DismissClaudeImport)
-        ));
-        // Clicking the label region (not the dismiss affordance) opens import.
-        let outcome =
-            app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::ImportClaudeSettings)
-        ));
-    }
-    #[test]
-    fn welcome_mouse_click_import_banner_opens_import() {
-        let mut app = test_app();
-        app.welcome_import_banner_rect = Some(ratatui::layout::Rect::new(0, 5, 40, 1));
-        let outcome = app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 10, 5));
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::ImportClaudeSettings)
-        ));
     }
     #[test]
     fn welcome_done_ctrl_w_opens_new_worktree_dialog() {
@@ -8225,65 +7937,6 @@ pub(crate) mod tests {
         assert_eq!(WorktreeMode::from_config_str("alway"), WorktreeMode::Never);
         assert_eq!(WorktreeMode::from_config_str(""), WorktreeMode::Never);
         assert_eq!(WorktreeMode::from_config_str("ALWAYS"), WorktreeMode::Never);
-    }
-    /// Helper: parse a TOML string and return the document.
-    fn parse_toml(s: &str) -> toml_edit::DocumentMut {
-        s.parse::<toml_edit::DocumentMut>().expect("valid TOML")
-    }
-    #[test]
-    fn resolve_from_hints_no_keys_returns_defaults() {
-        let doc = parse_toml("");
-        let (new_s, fork) = WorktreeMode::resolve_from_hints(doc.get("hints"));
-        assert_eq!(new_s, WorktreeMode::Never);
-        assert_eq!(fork, WorktreeMode::Ask);
-    }
-    #[test]
-    fn resolve_from_hints_legacy_key_sets_both() {
-        let doc = parse_toml("[hints]\nworktree_mode = \"always\"\n");
-        let (new_s, fork) = WorktreeMode::resolve_from_hints(doc.get("hints"));
-        assert_eq!(new_s, WorktreeMode::Always);
-        assert_eq!(fork, WorktreeMode::Always);
-    }
-    #[test]
-    fn resolve_from_hints_per_command_keys_override_legacy() {
-        let doc = parse_toml(
-            "[hints]\n\
-             worktree_mode = \"always\"\n\
-             new_session_worktree_mode = \"never\"\n\
-             fork_worktree_mode = \"ask\"\n",
-        );
-        let (new_s, fork) = WorktreeMode::resolve_from_hints(doc.get("hints"));
-        assert_eq!(new_s, WorktreeMode::Never);
-        assert_eq!(fork, WorktreeMode::Ask);
-    }
-    #[test]
-    fn resolve_from_hints_only_per_command_keys() {
-        let doc = parse_toml(
-            "[hints]\n\
-             new_session_worktree_mode = \"ask\"\n\
-             fork_worktree_mode = \"never\"\n",
-        );
-        let (new_s, fork) = WorktreeMode::resolve_from_hints(doc.get("hints"));
-        assert_eq!(new_s, WorktreeMode::Ask);
-        assert_eq!(fork, WorktreeMode::Never);
-    }
-    #[test]
-    fn resolve_from_hints_one_per_command_key_other_falls_back_to_legacy() {
-        let doc = parse_toml(
-            "[hints]\n\
-             worktree_mode = \"always\"\n\
-             fork_worktree_mode = \"never\"\n",
-        );
-        let (new_s, fork) = WorktreeMode::resolve_from_hints(doc.get("hints"));
-        assert_eq!(new_s, WorktreeMode::Always);
-        assert_eq!(fork, WorktreeMode::Never);
-    }
-    #[test]
-    fn resolve_from_hints_one_per_command_key_other_falls_back_to_default() {
-        let doc = parse_toml("[hints]\nnew_session_worktree_mode = \"always\"\n");
-        let (new_s, fork) = WorktreeMode::resolve_from_hints(doc.get("hints"));
-        assert_eq!(new_s, WorktreeMode::Always);
-        assert_eq!(fork, WorktreeMode::Ask);
     }
     fn scroll_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
         Event::Mouse(MouseEvent {

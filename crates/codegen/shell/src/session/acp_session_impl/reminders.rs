@@ -522,18 +522,8 @@ pub(super) fn todo_gate_active(
 impl SessionActor {
     /// Injects a one-shot date-rollover `<system-reminder>` when a long session crosses local
     /// midnight, since the cached `<user_info>` prefix keeps its startup date to preserve the prompt
-    /// cache. Self-dedupes via `last_announced_local_date` (at most once per day). Skipped for
-    /// date-free templates and the harness that owns this surface.
+    /// cache. Self-dedupes via `last_announced_local_date` (at most once per day).
     pub(super) async fn maybe_inject_date_rollover_reminder(&self) {
-        let template_surfaces_date = self
-            .agent
-            .borrow()
-            .definition()
-            .user_message_template
-            .surfaces_local_date();
-        if !template_surfaces_date && !self.prefix_carries_fallback_date.get() {
-            return;
-        }
         let today = chrono::Local::now().date_naive();
         let last = self.last_announced_local_date.get();
         let Some(reminder) = date_rollover_reminder(today, last) else {
@@ -711,7 +701,7 @@ impl SessionActor {
             fresh = ?names(&fresh),
             "draining between-turn workflow completions"
         );
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let session_dir = &self.session_dir;
         let bridge = self.tool_bridge_handle();
         let read_tool_name =
             tools::reminders::task_completion::resolve_read_tool_name(&bridge).await;
@@ -763,7 +753,7 @@ impl SessionActor {
                 "persisting background task manifest for session resume"
             );
         }
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let session_dir = &self.session_dir;
         crate::terminal::persist_manifest(&session_dir, entries);
     }
     /// Load the background task manifest from a prior session and inject a
@@ -771,7 +761,7 @@ impl SessionActor {
     ///
     /// The manifest file is deleted after loading so it is only shown once.
     pub(super) fn inject_resumed_tasks_reminder(&self) {
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let session_dir = &self.session_dir;
         let entries = crate::terminal::load_and_clear_manifest(&session_dir);
         if entries.is_empty() {
             return;

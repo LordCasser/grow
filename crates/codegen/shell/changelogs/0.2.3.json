@@ -6,7 +6,7 @@
   },
   {
     "category": "features",
-    "description": "Agent configuration: /config-agents modal with agents, personas, and defaults.",
+    "description": "Agent configuration: /config-agents modal with definitions and defaults.",
     "breaking_change": false
   },
   {

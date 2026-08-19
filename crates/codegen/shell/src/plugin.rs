@@ -15,7 +15,7 @@ use agent::plugins::install_registry::{
 use plugin_marketplace::git::{self, SourceCacheLease};
 use plugin_marketplace::{
     MarketplaceEntry, MarketplaceRelativePath, MarketplaceSource, SourceKind, install_resolve,
-    installer, load_extra_sources_from_settings, load_sources, scan_marketplace,
+    installer, load_sources, scan_marketplace,
 };
 
 // ── Helpers (internal) ──────────────────────────────────────────────
@@ -272,7 +272,10 @@ fn update_marketplace_repo(
     let marketplace_root = source_cache
         .get(&cache_key)
         .unwrap_or_else(|| unreachable!());
-    let scan = scan_marketplace(&marketplace_root.path);
+    let scan =
+        scan_marketplace(&marketplace_root.path).map_err(|detail| InstallError::InstallFailed {
+            detail: format!("invalid marketplace index: {detail}"),
+        })?;
     let entry = scan
         .entries
         .into_iter()
@@ -481,10 +484,8 @@ pub enum MarketplaceAddInput {
 ///
 /// The explicit path indicators (leading `/`, `.`, `~`, `\`, or a Windows
 /// drive prefix) mirror `is_github_shorthand`'s path checks in
-/// `git_install::parse_install_source`. Unlike `plugin install`, unmarked
-/// inputs (`foo`, `a/b/c`) keep the legacy git-URL normalization for
-/// back-compat. Without this split, a path input would be mangled into
-/// `https://github.com/<path>.git` and only fail after network clone attempts.
+/// `git_install::parse_install_source`. Unmarked `owner/repo` inputs are the
+/// documented GitHub shorthand; local paths must carry an explicit path marker.
 pub fn classify_marketplace_add_input(input: &str, cwd: &Path) -> MarketplaceAddInput {
     if !looks_like_local_path(input) {
         return MarketplaceAddInput::GitUrl(normalize_git_url(input));
@@ -711,47 +712,12 @@ pub fn marketplace_require_sha() -> bool {
         .unwrap_or_else(|_| plugin_marketplace::env_require_sha())
 }
 
-/// Marketplace sources from config.toml + settings JSON, unfiltered.
+/// Marketplace sources from the canonical `config.toml`.
 pub fn load_marketplace_sources() -> Vec<MarketplaceSource> {
     let config = crate::config::load_effective_config()
         .ok()
         .unwrap_or(toml::Value::Table(toml::map::Map::new()));
-    let mut sources = load_sources(&config);
-    sources.extend(load_extra_sources_from_settings(&sources));
-    sources
-}
-
-/// Like [`load_marketplace_sources`] but drops git sources blocked by the
-/// managed `marketplace_allowlist`. Install paths must use this so policy
-/// cannot be bypassed.
-pub fn load_filtered_marketplace_sources() -> Vec<MarketplaceSource> {
-    let allowlist = &workspace::permission::resolution::managed_settings().marketplace_allowlist;
-    filter_sources_by_allowlist(load_marketplace_sources(), allowlist)
-}
-
-fn filter_sources_by_allowlist(
-    mut sources: Vec<MarketplaceSource>,
-    allowlist: &workspace::permission::resolution::MarketplaceAllowlist,
-) -> Vec<MarketplaceSource> {
-    if allowlist.is_restricted() {
-        sources.retain(|source| match &source.kind {
-            SourceKind::Git { url, .. } => {
-                if allowlist.is_url_allowed(url) {
-                    true
-                } else {
-                    tracing::warn!(
-                        name = %source.name,
-                        url,
-                        reason = %allowlist.block_reason(),
-                        "Marketplace source blocked by allowlist"
-                    );
-                    false
-                }
-            }
-            SourceKind::Local { .. } => true,
-        });
-    }
-    sources
+    load_sources(&config)
 }
 
 fn registered_source_label(source: &MarketplaceSource) -> String {
@@ -926,7 +892,7 @@ pub fn install_marketplace_plugin(
     name: &str,
     qualifier: Option<&str>,
 ) -> Result<MarketplaceInstallOutcome, MarketplaceInstallError> {
-    let sources = load_filtered_marketplace_sources();
+    let sources = load_marketplace_sources();
     let mut registry = InstallRegistry::load();
     let cache_root = git::default_cache_root();
     install_marketplace_plugin_with(
@@ -949,7 +915,7 @@ fn install_marketplace_plugin_with(
 ) -> Result<MarketplaceInstallOutcome, MarketplaceInstallError> {
     let plan = plan_install(sources, name, qualifier, |source| {
         resolve_source_root_for_install(source, cache_root)
-            .map(|root| scan_marketplace(&root.path).entries)
+            .and_then(|root| scan_marketplace(&root.path).map(|scan| scan.entries))
     })?;
 
     let source = &sources[plan.source_index];
@@ -976,7 +942,7 @@ pub fn resolve_marketplace_source_name(
     name: &str,
     qualifier: Option<&str>,
 ) -> Result<String, MarketplaceInstallError> {
-    let sources = load_filtered_marketplace_sources();
+    let sources = load_marketplace_sources();
     let cache_root = git::default_cache_root();
     resolve_marketplace_source_name_with(&sources, &cache_root, name, qualifier)
 }
@@ -989,13 +955,13 @@ fn resolve_marketplace_source_name_with(
 ) -> Result<String, MarketplaceInstallError> {
     let plan = plan_install(sources, name, qualifier, |source| {
         resolve_source_root_for_install(source, cache_root)
-            .map(|root| scan_marketplace(&root.path).entries)
+            .and_then(|root| scan_marketplace(&root.path).map(|scan| scan.entries))
     })?;
     Ok(sources[plan.source_index].name.clone())
 }
 
 pub fn resolve_qualified_source_name(qualifier: &str) -> Result<String, MarketplaceInstallError> {
-    resolve_qualified_source_name_with(&load_filtered_marketplace_sources(), qualifier)
+    resolve_qualified_source_name_with(&load_marketplace_sources(), qualifier)
 }
 
 fn resolve_qualified_source_name_with(
@@ -1180,138 +1146,6 @@ pub fn remove_toml_marketplace_block(content: &str, source_identity: &str) -> Op
     }
 
     Some(doc.to_string())
-}
-
-/// Try removing a source from `settings.json` / `known_marketplaces.json` under
-/// `~/.grow/` and `~/.claude/`. Returns `true` if removed from at least one file.
-pub fn try_remove_source_from_json_files(source_url_or_path: &str) -> bool {
-    // Resolve user grow via user_grow_home() (None when no home resolves) and
-    // home separately, so removal still runs from $GROW_HOME when no home dir
-    // exists, and never touches a cwd-relative .grow.
-    let home = dirs::home_dir();
-    let grow = config::user_grow_home();
-
-    let mut settings_candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(ref grow) = grow {
-        settings_candidates.push(grow.join("settings.local.json"));
-        settings_candidates.push(grow.join("settings.json"));
-    }
-    if let Some(ref home) = home {
-        settings_candidates.push(home.join(".claude").join("settings.local.json"));
-        settings_candidates.push(home.join(".claude").join("settings.json"));
-    }
-
-    let mut known_candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(ref grow) = grow {
-        known_candidates.push(grow.join("plugins").join("known_marketplaces.json"));
-    }
-    if let Some(ref home) = home {
-        known_candidates.push(
-            home.join(".claude")
-                .join("plugins")
-                .join("known_marketplaces.json"),
-        );
-    }
-
-    let mut removed = false;
-
-    for path in &settings_candidates {
-        if try_remove_from_json_object(path, Some("extraKnownMarketplaces"), source_url_or_path) {
-            removed = true;
-        }
-    }
-
-    for path in &known_candidates {
-        if try_remove_from_json_object(path, None, source_url_or_path) {
-            removed = true;
-        }
-    }
-
-    removed
-}
-
-/// Check whether a JSON source config matches a URL/path identity.
-fn json_source_matches(config: &serde_json::Value, identity: &str) -> bool {
-    let source_obj = match config.get("source") {
-        Some(v) if v.is_string() => config,
-        Some(v) if v.is_object() => v,
-        _ => return false,
-    };
-    let Some(source_type) = source_obj.get("source").and_then(|v| v.as_str()) else {
-        return false;
-    };
-    match source_type {
-        "git" => source_obj
-            .get("url")
-            .and_then(|v| v.as_str())
-            .is_some_and(|u| u.trim_end_matches(".git") == identity.trim_end_matches(".git")),
-        "github" => source_obj
-            .get("repo")
-            .and_then(|v| v.as_str())
-            .is_some_and(|repo| {
-                let expanded = format!("https://github.com/{repo}.git");
-                expanded.trim_end_matches(".git") == identity.trim_end_matches(".git")
-            }),
-        "local" => source_obj
-            .get("path")
-            .and_then(|v| v.as_str())
-            .is_some_and(|p| p == identity),
-        _ => false,
-    }
-}
-
-/// Remove a matching source entry from a JSON file. Returns `true` if removed.
-fn try_remove_from_json_object(
-    path: &Path,
-    nested_key: Option<&str>,
-    source_url_or_path: &str,
-) -> bool {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let mut json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let map = if let Some(key) = nested_key {
-        match json.get_mut(key).and_then(|v| v.as_object_mut()) {
-            Some(m) => m,
-            None => return false,
-        }
-    } else {
-        match json.as_object_mut() {
-            Some(m) => m,
-            None => return false,
-        }
-    };
-
-    let matching_key = map.iter().find_map(|(name, config)| {
-        if json_source_matches(config, source_url_or_path) {
-            Some(name.clone())
-        } else {
-            None
-        }
-    });
-
-    let Some(key) = matching_key else {
-        return false;
-    };
-
-    map.remove(&key);
-
-    match serde_json::to_string_pretty(&json) {
-        Ok(new_content) => {
-            if std::fs::write(path, format!("{new_content}\n")).is_ok() {
-                tracing::info!(key = %key, "removed marketplace source from JSON file");
-                true
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
-    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1529,30 +1363,6 @@ mod tests {
             !new.contains("[[marketplace.sources]]"),
             "empty sources array should be dropped: {new}"
         );
-    }
-
-    #[test]
-    fn json_source_matches_with_git_normalization() {
-        let config = serde_json::json!({
-            "source": { "source": "git", "url": "https://github.com/org/repo.git" }
-        });
-        assert!(json_source_matches(
-            &config,
-            "https://github.com/org/repo.git"
-        ));
-        assert!(json_source_matches(&config, "https://github.com/org/repo")); // .git normalization
-        assert!(!json_source_matches(&config, "https://other.com"));
-    }
-
-    #[test]
-    fn json_source_matches_github_shorthand() {
-        let config = serde_json::json!({
-            "source": { "source": "github", "repo": "org/repo" }
-        });
-        assert!(json_source_matches(
-            &config,
-            "https://github.com/org/repo.git"
-        ));
     }
 
     fn git_source(name: &str, url: &str) -> MarketplaceSource {
@@ -1776,10 +1586,6 @@ mod tests {
             domains: Vec::new(),
             homepage: None,
             relative_path: format!("plugins/{name}"),
-            skill_count: 0,
-            has_hooks: false,
-            has_agents: false,
-            has_mcp: false,
             remote_url: None,
             remote_ref: None,
             remote_sha: None,
@@ -2067,47 +1873,21 @@ mod tests {
         }
     }
 
-    fn marketplace_allowlist(
-        urls: &[&str],
-    ) -> workspace::permission::resolution::MarketplaceAllowlist {
-        workspace::permission::resolution::MarketplaceAllowlist {
-            allowed_urls: urls.iter().map(|u| u.to_string()).collect(),
-            source_path: None,
-        }
-    }
-
-    #[test]
-    fn filter_sources_by_allowlist_drops_blocked_git_keeps_allowed_and_local() {
-        let allowlist = marketplace_allowlist(&["https://github.com/ok/repo.git"]);
-        let sources = vec![
-            git_source("Allowed", "https://github.com/ok/repo.git"),
-            git_source("Blocked", "https://github.com/bad/repo.git"),
-            local_source("Local", "/tmp/p"),
-        ];
-        let filtered = filter_sources_by_allowlist(sources, &allowlist);
-        let names: Vec<&str> = filtered.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["Allowed", "Local"]);
-    }
-
-    #[test]
-    fn filter_sources_by_allowlist_unrestricted_passes_everything() {
-        let allowlist = workspace::permission::resolution::MarketplaceAllowlist::default();
-        let sources = vec![
-            git_source("Any Git", "https://github.com/bad/repo.git"),
-            local_source("Local", "/tmp/p"),
-        ];
-        let filtered = filter_sources_by_allowlist(sources, &allowlist);
-        let names: Vec<&str> = filtered.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["Any Git", "Local"]);
-    }
-
     fn write_marketplace_plugin(marketplace: &Path, name: &str, version: &str) {
         let plugin_dir = marketplace.join("plugins").join(name);
-        let manifest_dir = plugin_dir.join(".claude-plugin");
-        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
-            manifest_dir.join("plugin.json"),
+            plugin_dir.join("plugin.json"),
             format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+        )
+        .unwrap();
+        let index_dir = marketplace.join(".grow-plugin");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(
+            index_dir.join("marketplace.json"),
+            format!(
+                r#"{{"version":1,"name":"test","plugins":[{{"name":"{name}","source":{{"type":"local","path":"plugins/{name}"}}}}]}}"#
+            ),
         )
         .unwrap();
         let skill_dir = plugin_dir.join("skills").join("demo");

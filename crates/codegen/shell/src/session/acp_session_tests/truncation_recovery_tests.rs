@@ -328,7 +328,6 @@ async fn run_user_turn(
             false,
             None,
             None,
-            None,
         ),
     )
     .await

@@ -31,4 +31,3 @@ pub mod slash_commands;
 pub mod tool_taxonomy;
 pub mod types;
 pub mod util;
-pub mod versions;

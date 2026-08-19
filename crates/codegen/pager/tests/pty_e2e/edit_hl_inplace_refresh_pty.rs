@@ -93,9 +93,15 @@ fn write_asciicast(path: &Path, cols: u16, rows: u16, events: &[(f64, String)]) 
 async fn edit_hl_inplace_refresh_pty() {
     fs::create_dir_all(ARTIFACT_DIR).expect("artifact dir");
     let content = ContentController::start().await.expect("start content");
-    // No config seeds: the collapsed_edit_blocks flag ships OFF, so Edit
-    // diffs arrive expanded — this test asserts the on-screen restyle of the
-    // diff BODY and doubles as the flag-off/legacy-default e2e.
+    // This test exercises the explicit expanded appearance because it asserts
+    // the on-screen restyle of the diff body.
+    let grow_home = content.sandbox().grow_home();
+    fs::create_dir_all(grow_home).expect("create grow home");
+    fs::write(
+        grow_home.join("pager.toml"),
+        "[scrollback.blocks.edit]\nexpanded_by_default = true\n",
+    )
+    .expect("write pager appearance");
 
     // ~2.5k pad lines: full-file HL takes hundreds of ms (visible upgrade).
     let pad = 2500usize;
@@ -128,7 +134,7 @@ async fn edit_hl_inplace_refresh_pty() {
         rows,
         cols,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

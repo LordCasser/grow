@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use shell::agent::config::Config as AgentConfig;
-use shell::session::merge::MergedSession;
+use shell::session::listing::SessionListing;
 use shell::util::grow_home::grow_home;
 #[derive(Debug, clap::Args, Clone)]
 pub struct SessionsArgs {
@@ -37,7 +37,7 @@ pub async fn run(args: SessionsArgs, _agent_config: &AgentConfig) -> Result<()> 
 
     match args.command {
         SessionsCommand::List { limit } => {
-            let sessions = shell::session::merge::fetch_merged(cwd.to_str(), None, limit).await;
+            let sessions = shell::session::listing::fetch_sessions(cwd.to_str(), None, limit).await;
             print_sessions_grouped(&sessions);
         }
         SessionsCommand::Search { query, limit } => {
@@ -95,14 +95,14 @@ pub async fn run(args: SessionsArgs, _agent_config: &AgentConfig) -> Result<()> 
 
 /// Print sessions grouped by worktree label, preserving the original table
 /// format with a `Label: <label>` header before each group.
-fn print_sessions_grouped(sessions: &[MergedSession]) {
+fn print_sessions_grouped(sessions: &[SessionListing]) {
     if sessions.is_empty() {
         println!("No sessions found.");
         return;
     }
 
     // Group by worktree_label, sort alphabetically, None last.
-    let mut groups: std::collections::BTreeMap<Option<&str>, Vec<&MergedSession>> =
+    let mut groups: std::collections::BTreeMap<Option<&str>, Vec<&SessionListing>> =
         std::collections::BTreeMap::new();
     for s in sessions {
         groups
@@ -118,22 +118,11 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
 
     // Labeled groups first (alphabetical), then unlabeled last.
     let none_group = groups.remove(&None);
-    let print_group = |label_line: &str, members: &[&MergedSession]| {
+    let print_group = |label_line: &str, members: &[&SessionListing]| {
         println!("\n{label_line}");
         println!("{header}");
         for s in members {
-            let first_line;
-            let summary: &str = if !s.summary.is_empty() {
-                &s.summary
-            } else if let Some(ref fp) = s.first_prompt
-                && let Some(line) = fp.lines().find(|l| !l.trim().is_empty())
-            {
-                first_line = line.trim().to_string();
-                &first_line
-            } else {
-                "(no summary)"
-            };
-            let truncated: String = summary.chars().take(50).collect();
+            let truncated: String = s.title.chars().take(50).collect();
             let created = &s.created_at[..s.created_at.len().min(10)];
             let updated = &s.updated_at[..s.updated_at.len().min(10)];
             println!("{}  {}  {}  {}", s.session_id, created, updated, truncated);

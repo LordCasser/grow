@@ -55,7 +55,6 @@ use tools::implementations::grow_build::task::types::{SubagentEvent, TaskModelVa
 use tools::implementations::grow_build::web_fetch::WebFetchConfig;
 use tools::implementations::lsp::LspBackend;
 use tools::notification::ToolNotificationHandle;
-use tools::types::compat::CompatConfig;
 use tools::types::memory_backend::MemoryBackend;
 /// Shell-resolved per-tool `ToolConfig.params` JSON maps, bundled into one
 /// named struct so the spawn telescopes carry a single argument instead of
@@ -78,15 +77,15 @@ pub(crate) struct AgentRebuildSpec {
     pub terminal_backend: Arc<dyn TerminalBackend>,
     pub fs_backend: Arc<dyn AsyncFileSystem>,
     pub tools_notification_handle: ToolNotificationHandle,
-    pub bridge_state_path: PathBuf,
+    pub resource_state_path: PathBuf,
     pub session_env: Arc<HashMap<String, String>>,
     pub models_manager: crate::agent::models::ModelsManager,
     pub compaction_policy: CompactionPolicy,
     pub reminder_policy: ReminderPolicy,
     pub memory_enabled: bool,
-    pub memory_global_path: Option<String>,
-    pub memory_workspace_path: Option<String>,
     pub memory_backend: Option<Arc<dyn MemoryBackend>>,
+    pub context_fetch_backend:
+        Arc<dyn tools::implementations::context_fetch::ContextFetchBackend>,
     pub web_fetch_config: WebFetchConfig,
     pub app_builder_deployer_config: AppBuilderDeployerConfig,
     pub write_file_enabled: bool,
@@ -94,14 +93,8 @@ pub(crate) struct AgentRebuildSpec {
     pub subagent_toggle: HashMap<String, bool>,
     pub background_workflows_enabled: bool,
     pub ask_user_question_enabled: bool,
-    pub persona_summaries: Vec<String>,
     pub prompt_audience: PromptAudience,
-    pub role_instructions: Option<String>,
-    pub persona_instructions: Option<String>,
     pub skills_config: SkillsConfig,
-    /// Resolved vendor-compat config (from `Config::compat_resolved`), threaded
-    /// into skills / rules / AGENTS.md discovery via the builder.
-    pub compat: CompatConfig,
     pub context_window_tokens: u64,
     pub prompt_working_directory: Option<String>,
     pub lsp: Option<Arc<dyn LspBackend>>,
@@ -116,12 +109,6 @@ pub(crate) struct AgentRebuildSpec {
     pub blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
     pub respect_gitignore: bool,
     pub path_not_found_hints: bool,
-    /// Fire side of the scheduler mode. The spawn copies the same resolution
-    /// onto [`SessionHandle::scheduler_background_loops`](crate::session::SessionHandle),
-    /// which is what clients read — keep the two on one resolve.
-    pub scheduler_background_loops: bool,
-    pub mcp_state: Arc<tokio::sync::Mutex<crate::session::mcp_servers::McpState>>,
-    pub managed_gateway_tool_client: Option<tools::types::resources::ManagedGatewayToolClient>,
     pub is_non_interactive: bool,
     pub system_prompt_label: String,
     pub owner_session_id: Option<String>,
@@ -174,15 +161,14 @@ impl AgentRebuildSpec {
             terminal_backend,
             fs_backend,
             tools_notification_handle,
-            bridge_state_path,
+            resource_state_path,
             session_env,
             models_manager,
             compaction_policy,
             reminder_policy,
             memory_enabled,
-            memory_global_path,
-            memory_workspace_path,
             memory_backend,
+            context_fetch_backend,
             web_fetch_config,
             app_builder_deployer_config,
             write_file_enabled,
@@ -190,12 +176,8 @@ impl AgentRebuildSpec {
             subagent_toggle,
             background_workflows_enabled,
             ask_user_question_enabled,
-            persona_summaries,
             prompt_audience,
-            role_instructions,
-            persona_instructions,
             skills_config,
-            compat,
             context_window_tokens,
             prompt_working_directory,
             lsp,
@@ -210,18 +192,11 @@ impl AgentRebuildSpec {
             blocking_wait_depth,
             respect_gitignore,
             path_not_found_hints,
-            scheduler_background_loops,
-            mcp_state,
-            managed_gateway_tool_client,
             is_non_interactive,
             system_prompt_label,
             owner_session_id,
             parent_scheduler_handle,
         } = self.as_ref();
-        let _ = mcp_state;
-        #[allow(unused_variables)]
-        let is_cursor_template =
-            crate::session::is_cursor_system_template(&definition.system_prompt);
         let mut builder = AgentBuilder::new(
             working_directory.clone(),
             terminal_backend.clone(),
@@ -231,11 +206,10 @@ impl AgentRebuildSpec {
         .with_compaction_policy(compaction_policy.clone())
         .with_reminder_policy(reminder_policy.clone())
         .with_memory_enabled(*memory_enabled)
-        .with_memory_paths(memory_global_path.clone(), memory_workspace_path.clone())
         .with_is_non_interactive(*is_non_interactive)
         .with_system_prompt_label(system_prompt_label.clone())
         .with_session_env(session_env.clone())
-        .with_state_path(bridge_state_path.clone())
+        .with_state_path(resource_state_path.clone())
         .with_app_builder_deployer_config(app_builder_deployer_config.clone())
         .with_web_fetch_config(web_fetch_config.clone())
         .with_write_file_enabled(*write_file_enabled)
@@ -251,12 +225,8 @@ impl AgentRebuildSpec {
                 .collect::<Vec<_>>(),
         )
         .with_ask_user_question_enabled(*ask_user_question_enabled)
-        .with_persona_summaries(persona_summaries.clone())
         .with_prompt_audience(*prompt_audience)
-        .with_role_instructions(role_instructions.clone())
-        .with_persona_instructions(persona_instructions.clone())
         .with_skills_config(skills_config.clone())
-        .with_compat_config(*compat)
         .with_context_window(*context_window_tokens)
         .with_mcp_max_output_bytes(
             crate::util::config::resolve_max_mcp_output_bytes_for_cwd(working_directory),
@@ -292,6 +262,10 @@ impl AgentRebuildSpec {
             builder = builder.with_preloaded_skills(skills);
         }
         let agent = builder.build().await?;
+        agent
+            .tool_bridge()
+            .update_resource(context_fetch_backend.clone())
+            .await;
         let model_validator = models_manager.clone();
         agent
             .tool_bridge()
@@ -345,19 +319,10 @@ impl AgentRebuildSpec {
             .await;
         agent
             .tool_bridge()
-            .update_resource(tools::types::resources::SchedulerBackgroundLoops(
-                *scheduler_background_loops,
-            ))
-            .await;
-        agent
-            .tool_bridge()
             .update_resource(tools::types::resources::PathNotFoundHints(
                 *path_not_found_hints,
             ))
             .await;
-        if let Some(client) = managed_gateway_tool_client.clone() {
-            agent.tool_bridge().update_resource(client).await;
-        }
         {
             use tools::implementations::grow_build::ask_user_question::UserQuestionSender;
             agent
@@ -382,15 +347,19 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         )),
         fs_backend: Arc::new(tools::computer::local::LocalFs),
         tools_notification_handle: ToolNotificationHandle::noop(),
-        bridge_state_path: std::env::temp_dir().join("test_tool_state.json"),
+        resource_state_path: std::env::temp_dir().join("test_resources_state.json"),
         session_env: Arc::new(HashMap::new()),
         models_manager: crate::agent::models::ModelsManager::default(),
         compaction_policy: CompactionPolicy::default(),
         reminder_policy: ReminderPolicy::default(),
         memory_enabled: false,
-        memory_global_path: None,
-        memory_workspace_path: None,
         memory_backend: None,
+        context_fetch_backend: Arc::new(
+            crate::session::context_fetch::TimelineContextFetchBackend::new(
+                "test-session".into(),
+                chat_state::ChatStateHandle::noop(),
+            ),
+        ),
         web_fetch_config: WebFetchConfig::Disabled,
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
         write_file_enabled: true,
@@ -398,12 +367,8 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         subagent_toggle: HashMap::new(),
         background_workflows_enabled: false,
         ask_user_question_enabled: true,
-        persona_summaries: vec![],
         prompt_audience: PromptAudience::Primary,
-        role_instructions: None,
-        persona_instructions: None,
         skills_config: SkillsConfig::default(),
-        compat: CompatConfig::default(),
         context_window_tokens: 256_000,
         prompt_working_directory: None,
         lsp: None,
@@ -417,12 +382,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         session_id_str: "test-session".to_string(),
         blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),
         respect_gitignore: false,
-        scheduler_background_loops: true,
         path_not_found_hints: false,
-        mcp_state: Arc::new(tokio::sync::Mutex::new(
-            crate::session::mcp_servers::McpState::new(vec![]),
-        )),
-        managed_gateway_tool_client: None,
         is_non_interactive: false,
         system_prompt_label: agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         owner_session_id: Some("test-session".to_string()),
@@ -434,7 +394,7 @@ mod tests {
     use super::*;
     use crate::agent::config::{EndpointsConfig, ModelEntry};
     fn model_entry(internal_id: &str) -> ModelEntry {
-        ModelEntry::fallback(internal_id)
+        ModelEntry::baseline(internal_id)
     }
     fn task_description(agent: &Agent) -> String {
         let toolset = agent.tool_bridge().toolset();

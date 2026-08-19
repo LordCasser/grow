@@ -29,7 +29,7 @@ async fn actor_with_sampler(
         actor.chat_state_handle.update_sampling_config(config);
     }
     if let Some(auxiliary_slug) = image_description_model {
-        let mut info = crate::agent::config::ModelInfo::fallback("vision-model");
+        let mut info = crate::agent::config::ModelInfo::baseline("vision-model");
         info.base_url = server.url();
         info.api_backend = sampling_types::ApiBackend::Messages;
         actor.models_manager.insert_test_entry(
@@ -177,7 +177,6 @@ fn explicit_image_400_retries_once_without_images_and_completes_turn() {
                     false,
                     None,
                     None,
-                    None,
                 ),
             )
             .await
@@ -284,7 +283,6 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
                     false,
                     None,
                     None,
-                    None,
                 )
                 .await
                 .expect("auxiliary conversion recovery must complete the turn");
@@ -377,7 +375,6 @@ fn auxiliary_image_400_is_cached_for_aux_runtime_then_images_are_removed() {
                     None,
                     None,
                     false,
-                    None,
                     None,
                     None,
                 )

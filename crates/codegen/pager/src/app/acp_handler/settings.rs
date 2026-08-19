@@ -97,7 +97,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     }
 
     // `permission_mode` is presence-aware (omit / null / string). While the
-    // soft default still owns the mode, a push re-arms `default_yolo` + UI for
+    // soft default still owns the mode, a push re-arms the typed default + UI for
     // the next `/new`; once the user claims a mode through a session selector,
     // the latch is cleared and pushes leave it alone.
     if let Some(remote_opt) = update.permission_mode.as_ref()
@@ -133,10 +133,8 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
             .unwrap_or(remote_val);
         app.session_picker_grouped = resolved;
     }
-    // Load config layers once for tips + group_tool_verbs +
-    // collapsed_edit_blocks resolution. Loaded unconditionally: the UI flags
-    // re-resolve on every update (see below), and updates are rare (post-auth
-    // refresh, `/new`), so three small TOML reads are fine.
+    // Load config layers once for tips + group_tool_verbs resolution. Loaded
+    // unconditionally because updates are rare (post-auth refresh, `/new`).
     let (requirements, user_config, managed_config) = (
         shell::config::load_merged_requirements(),
         shell::config::load_from_disk().ok(),
@@ -179,45 +177,6 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         }
     }
 
-    // Same None-reverts contract as group_tool_verbs above: re-resolve the
-    // full local chain with the pushed remote tier so a cleared remote settings
-    // field falls back to local/default instead of staying latched.
-    let remote = shell::util::config::RemoteSettings {
-        collapsed_edit_blocks: update.collapsed_edit_blocks,
-        ..Default::default()
-    };
-    let resolved = shell::util::config::resolve_collapsed_edit_blocks(
-        requirements.as_ref(),
-        user_config.as_ref(),
-        managed_config.as_ref(),
-        Some(&remote),
-    )
-    .value;
-    // On a real flip, re-materialize on-default Edit rows + repaint suffixes
-    // in every live transcript (mirrors dispatch's
-    // set_collapsed_edit_blocks_inner); unchanged values keep `/new` cheap.
-    let prev = crate::appearance::cache::load_collapsed_edit_blocks();
-    if resolved != prev {
-        crate::appearance::cache::set_collapsed_edit_blocks(resolved);
-        for agent in app.agents.values_mut() {
-            agent
-                .scrollback
-                .apply_collapsed_edit_blocks_flip(prev, resolved);
-            for child in agent.subagent_views.values_mut() {
-                child
-                    .scrollback
-                    .apply_collapsed_edit_blocks_flip(prev, resolved);
-            }
-        }
-    }
-
-    // `scheduler_background_loops` is deliberately absent from this handler,
-    // unlike the flags above. A live session's scheduled fires keep the mode
-    // the shell pinned when the session's actor spawned, so applying a pushed
-    // flip here would make `/loop` promise a runtime those fires never get.
-    // The per-session value arrives on the `session/new` / `session/load`
-    // response instead (`AgentView::scheduler_background_loops`).
-
     // Re-resolve tips from config layers + the updated remote tips.
     if let Some(remote_tips) = update.tips {
         use shell::util::config::resolve_tips;
@@ -257,52 +216,52 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
 /// (TOML `[ui]` > remote > Ask), for the next `/new` only — live sessions are
 /// untouched and nothing is persisted. `effective_ui` is injected so the
 /// resolve is deterministic under test. Enforcement gating reuses the app's
-/// startup snapshots (`yolo_policy_block`, `auto_mode_gate`); the agent's
+/// startup snapshots (`always_approve_policy_block`, `auto_mode_gate`); the agent's
 /// permission manager re-clamps authoritatively at decision time.
 pub(super) fn apply_soft_default_permission_mode(
     app: &mut AppView,
     effective_ui: Option<&toml::Value>,
     remote: Option<&str>,
 ) {
-    let mode = shell::util::config::resolve_permission_mode(effective_ui, remote);
-    app.default_yolo = mode.is_always_approve() && app.yolo_policy_block.is_none();
-    let auto = mode.is_auto() && app.auto_mode_gate && !app.default_yolo;
-    app.current_ui.permission_mode = Some(if auto {
-        "auto".to_string()
-    } else if app.default_yolo {
-        "always-approve".to_string()
-    } else {
-        shell::util::config::resolved_display_permission_mode(effective_ui, remote).to_string()
-    });
+    let requested = shell::util::config::resolve_permission_mode(effective_ui, remote);
+    let mode = match requested {
+        shell::util::config::PermissionMode::AlwaysApprove
+            if app.always_approve_policy_block.is_some() =>
+        {
+            shell::util::config::PermissionMode::Ask
+        }
+        shell::util::config::PermissionMode::Auto if !app.auto_mode_gate => {
+            shell::util::config::PermissionMode::Ask
+        }
+        mode => mode,
+    };
+    app.default_permission_mode = mode;
+    app.current_ui.permission_mode =
+        Some(shell::util::config::permission_mode_canonical_str(mode).to_string());
 }
 
 /// Tell live sessions to leave Auto on the mid-session kill-switch: fire the
-/// `grow/yolo_mode_changed` notification the agent maps to
-/// `SetAutoMode { enabled: false }`, fire-and-forget over the shared ACP channel.
-/// The notification is CLIENT-scoped (the agent applies it to every session of
-/// the sending client), so one send covers all affected sessions. `yolo_mode` is
-/// deliberately OMITTED — the agent skips the yolo branch when the key is absent,
-/// so a sibling tab's always-approve is preserved; only auto is cleared.
+/// canonical session-scoped permission notification, fire-and-forget over the
+/// shared ACP channel.
 pub(super) fn notify_sessions_leave_auto(app: &AppView, session_ids: &[acp::SessionId]) {
-    if session_ids.is_empty() {
-        return;
+    for session_id in session_ids {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "permissionMode": "ask",
+        });
+        let notification = acp::ExtNotification::new(
+            "grow/permission_mode_changed",
+            serde_json::value::to_raw_value(&params)
+                .expect("serialize permission_mode_changed params")
+                .into(),
+        );
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let args = acp_transport::AcpArgs {
+            request: notification,
+            response_tx,
+        };
+        let _ = app.acp_tx.send(args.into());
     }
-    let params = serde_json::json!({
-        "auto_mode": false,
-        "permission_mode": "ask",
-    });
-    let notification = acp::ExtNotification::new(
-        "grow/yolo_mode_changed",
-        serde_json::value::to_raw_value(&params)
-            .expect("serialize yolo_mode_changed params")
-            .into(),
-    );
-    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-    let args = acp_transport::AcpArgs {
-        request: notification,
-        response_tx,
-    };
-    let _ = app.acp_tx.send(args.into());
 }
 
 /// Handle `grow/sessions/changed` — the leader broadcasts roster
@@ -394,8 +353,6 @@ pub(super) struct PagerSettingsUpdate {
     permission_mode: Option<Option<String>>,
     #[serde(default)]
     group_tool_verbs: Option<bool>,
-    #[serde(default)]
-    collapsed_edit_blocks: Option<bool>,
 }
 
 /// Presence-aware string: omit → `None` (`#[serde(default)]`), null →

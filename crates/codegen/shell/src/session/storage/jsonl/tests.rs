@@ -1,9 +1,9 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+use std::collections::BTreeMap;
 use crate::session::info::Info;
-use crate::session::persistence::default_model_id;
+use crate::session::persistence::{SessionLineage, Summary, default_model_id};
 use crate::session::storage::{CopySessionOptions, SessionUpdate};
-use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
 use tempfile::TempDir;
 fn create_test_info() -> Info {
@@ -29,6 +29,70 @@ async fn append_timeline_seed(
         adapter.append_timeline_event(info, event).await.unwrap();
     }
 }
+fn loaded_surface(events: &[chat_state::TimelineEvent]) -> Vec<ConversationItem> {
+    chat_state::Timeline::from_events(events.to_vec())
+        .unwrap()
+        .surface()
+        .to_vec()
+}
+async fn append_control_snapshot(
+    adapter: &JsonlStorageAdapter,
+    info: &Info,
+    snapshot: &crate::session::control::SessionControlSnapshot,
+) {
+    let events = adapter.read_timeline_events_sync(info).unwrap();
+    let mut timeline = chat_state::Timeline::from_events(events).unwrap();
+    let event = timeline.record(snapshot.timeline_kind().unwrap()).unwrap();
+    adapter.append_timeline_event(info, &event).await.unwrap();
+}
+async fn append_completed_prompt_turn(
+    adapter: &JsonlStorageAdapter,
+    info: &Info,
+    id: u64,
+    prompt_index: usize,
+    prompt: &str,
+) {
+    let events = adapter.read_timeline_events_sync(info).unwrap();
+    let mut timeline = chat_state::Timeline::from_events(events).unwrap();
+    let turn = chat_state::TurnId(id);
+    let started = timeline
+        .record(chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+            id: turn,
+            identity: chat_state::TurnIdentity {
+                origin: "user".into(),
+                turn_kind: "interactive".into(),
+                goal_id: None,
+                stage_id: None,
+            },
+            model_id: "model".into(),
+            input_message_count: timeline.surface().len(),
+            prompt_index,
+            prompt_text: prompt.into(),
+            input_kind: chat_state::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .unwrap();
+    adapter.append_timeline_event(info, &started).await.unwrap();
+    let mut user = ConversationItem::user(prompt);
+    user.set_prompt_index(prompt_index);
+    let message = timeline.append(user, chat_state::MessageCause::User).unwrap();
+    adapter.append_timeline_event(info, &message).await.unwrap();
+    let ended = timeline
+        .record(chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended {
+            id: turn,
+            outcome: "completed".into(),
+            duration_ms: 1,
+            tool_count: 0,
+            terminal: chat_state::TurnTerminal {
+                stop_reason: "end_turn".into(),
+                completion_kind: "completed".into(),
+            },
+            cancellation_category: None,
+            details: None,
+        }))
+        .unwrap();
+    adapter.append_timeline_event(info, &ended).await.unwrap();
+}
 fn create_test_notification() -> acp::SessionNotification {
     acp::SessionNotification::new(
         acp::SessionId::new("test-session-123"),
@@ -41,45 +105,180 @@ fn create_test_notification() -> acp::SessionNotification {
         ),
     )
 }
-fn create_test_plan_state() -> TodoState {
-    TodoState::default()
-}
 #[tokio::test]
-async fn write_compaction_segment_numbers_and_indexes_resume_safely() {
-    use crate::extensions::notification::CompactionSegmentFile;
-    use sampling_types::ConversationItem;
+async fn prepared_session_is_published_once_with_lineage_and_timeline() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("child-session");
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(target.clone());
+    let info = create_test_info();
+    let lineage = SessionLineage {
+        session_kind: "subagent_fork".into(),
+        context_source: "forked".into(),
+        parent_session_id: "parent-session".into(),
+        parent_prompt_id: Some("prompt-7".into()),
+        subagent_seed: chat_state::SubagentSeedEvent {
+            parent_timeline_id: "parent-session".into(),
+            parent_spawn_seq: 1,
+            subagent_id: "child-session".into(),
+            context_source: chat_state::SubagentContextSource::Forked,
+            source_ref: None,
+            normalized: false,
+        },
+    };
+    let mut summary = Summary::new(&info, default_model_id()).unwrap();
+    lineage.apply_to(&mut summary);
+
+    let published = adapter
+        .init_session_with_summary(
+            &info,
+            summary,
+            vec![ConversationItem::user("inherited")],
+            Default::default(),
+            vec![chat_state::TimelineEventKind::SubagentSeed(
+                lineage.subagent_seed.clone(),
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(published.0.session_kind.as_deref(), Some("subagent_fork"));
+    assert_eq!(published.0.fork_context_source.as_deref(), Some("forked"));
+    assert_eq!(
+        published.0.parent_session_id.as_deref(),
+        Some("parent-session")
+    );
+    assert_eq!(published.1.len(), 2);
+    assert!(matches!(
+        published.1[1].kind,
+        chat_state::TimelineEventKind::SubagentSeed(_)
+    ));
+    assert!(target.join(super::super::TIMELINE_FILE).is_file());
+    assert!(target.join(super::super::SUMMARY_FILE).is_file());
+    assert!(!std::fs::read(target.join(super::super::TIMELINE_FILE)).unwrap().is_empty());
+    assert!(
+        std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".staging"))
+    );
+
+    let duplicate = Summary::new(&info, default_model_id()).unwrap();
+    let error = adapter
+        .init_session_with_summary(
+            &info,
+            duplicate,
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        adapter
+            .read_summary_sync(&info)
+            .unwrap()
+            .parent_session_id
+            .as_deref(),
+        Some("parent-session")
+    );
+}
+
+#[tokio::test]
+async fn prepared_session_atomically_publishes_the_exact_prompt_blob_set() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
-    let seg = |summary: &str| CompactionSegmentFile {
-        items: vec![ConversationItem::user("a"), ConversationItem::user("b")],
-        summary: summary.to_string(),
-        detail: chat_state::CompactionDetail::Verbose,
-        timestamp: "2026-01-01T00:00:00Z".to_string(),
-    };
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    adapter.write_compaction_segment(&info, &seg("first")).await.unwrap();
-    adapter.write_compaction_segment(&info, &seg("second")).await.unwrap();
-    let base = adapter
-        .session_dir(&info)
-        .join(chat_state::compaction_transcript::COMPACTION_DIR);
-    let read = |p: &str| std::fs::read_to_string(base.join(p)).unwrap();
-    assert!(read("segment_000.md").contains("# HISTORICAL -- DO NOT EDIT"));
-    assert!(read("segment_001.md").contains("second"));
-    let index = read("INDEX.md");
+    let content = b"inherited oversized prompt".to_vec();
+    let hash = blake3::hash(&content).to_hex().to_string();
+    let reference = format!(
+        "{}{}",
+        crate::session::persistence::PROMPT_BLOB_REF_PREFIX,
+        hash
+    );
+    let surface = vec![ConversationItem::user(format!("read\n{reference}\nthen continue"))];
+    let blobs = std::collections::BTreeMap::from([(hash.clone(), content.clone())]);
+    let target = temp_dir.path().join("complete-child");
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(target.clone());
+
+    adapter
+        .init_session_with_summary(
+            &info,
+            Summary::new(&info, default_model_id()).unwrap(),
+            surface.clone(),
+            blobs,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
-            index.matches("# Compaction Segment Index").count(),
-            1,
-            "title + header written exactly once"
-        );
-    assert!(index.contains("| 000 | segment_000.md | 2 |"));
-    assert!(index.contains("| 001 | segment_001.md | 2 |"));
-    let resumed = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    resumed.write_compaction_segment(&info, &seg("third")).await.unwrap();
-    assert!(read("segment_000.md").contains("first"));
-    assert!(base.join("segment_002.md").exists());
-    let index = read("INDEX.md");
-    assert_eq!(index.matches("# Compaction Segment Index").count(), 1);
-    assert_eq!(index.lines().filter(|l| l.contains("segment_")).count(), 3);
+        std::fs::read(target.join("prompts").join(format!("{hash}.txt"))).unwrap(),
+        content
+    );
+
+    let missing_target = temp_dir.path().join("missing-child");
+    let missing_adapter =
+        JsonlStorageAdapter::with_explicit_session_dir(missing_target.clone());
+    let error = missing_adapter
+        .init_session_with_summary(
+            &info,
+            Summary::new(&info, default_model_id()).unwrap(),
+            surface,
+            Default::default(),
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(!missing_target.exists());
+    assert!(
+        std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".staging"))
+    );
+}
+
+#[tokio::test]
+async fn session_load_rejects_missing_or_corrupt_prompt_blobs() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let content = b"canonical prompt blob";
+    let hash = blake3::hash(content).to_hex().to_string();
+    let reference = format!(
+        "{}{}",
+        crate::session::persistence::PROMPT_BLOB_REF_PREFIX,
+        hash
+    );
+    let path = adapter
+        .session_dir(&info)
+        .join("prompts")
+        .join(format!("{hash}.txt"));
+    crate::session::persistence::write_immutable_blob(&path, content).unwrap();
+    append_timeline_seed(
+        &adapter,
+        &info,
+        vec![ConversationItem::user(format!("read\n{reference}\nthen continue"))],
+    )
+    .await;
+    adapter.load_session_without_updates(&info).await.unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    let missing = adapter
+        .load_session_without_updates(&info)
+        .await
+        .unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+
+    std::fs::write(&path, b"tampered").unwrap();
+    let corrupt = adapter.load_session(&info).await.unwrap_err();
+    assert_eq!(corrupt.kind(), std::io::ErrorKind::InvalidData);
 }
 #[tokio::test]
 async fn update_current_model_persists_leaves_and_clears_reasoning_effort() {
@@ -102,7 +301,10 @@ async fn update_current_model_persists_leaves_and_clears_reasoning_effort() {
             adapter.read_summary_sync(&info).unwrap().reasoning_effort,
             Some(ReasoningEffort::High),
         );
-    adapter.update_current_model(&info, &model).await.unwrap();
+    adapter
+        .update_current_model_and_agent(&info, &model, None, None)
+        .await
+        .unwrap();
     assert_eq!(
             adapter.read_summary_sync(&info).unwrap().reasoning_effort,
             Some(ReasoningEffort::High),
@@ -126,29 +328,26 @@ async fn test_jsonl_round_trip() {
     assert_eq!(summary.info.id, info.id);
     assert_eq!(summary.current_model_id, default_model_id());
     let messages = create_test_chat_messages();
-    for msg in &messages {
-        adapter.append_chat_message(&info, msg).await.unwrap();
-    }
     append_timeline_seed(&adapter, &info, messages.clone()).await;
     let notification = create_test_notification();
     adapter
         .append_update(&info, &SessionUpdate::Acp(Box::new(notification)))
         .await
         .unwrap();
-    let plan_state = create_test_plan_state();
-    adapter.write_plan_state(&info, &plan_state).await.unwrap();
     let new_model = acp::ModelId::new("grow-4.3");
-    adapter.update_current_model(&info, &new_model).await.unwrap();
+    adapter
+        .update_current_model_and_agent(&info, &new_model, None, None)
+        .await
+        .unwrap();
     let loaded = adapter.load_session(&info).await.unwrap();
     assert_eq!(loaded.summary.info.id, info.id);
     assert_eq!(loaded.summary.current_model_id, new_model);
-    assert_eq!(loaded.chat_history.len(), messages.len());
+    assert_eq!(loaded_surface(&loaded.timeline_events).len(), messages.len());
     assert_eq!(loaded.updates.len(), 1);
-    assert!(loaded.plan_state.is_some());
 }
 
 #[tokio::test]
-async fn timeline_round_trip_is_independent_of_chat_history_cache() {
+async fn timeline_round_trip_folds_the_current_surface() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let info = create_test_info();
@@ -158,35 +357,137 @@ async fn timeline_round_trip_is_independent_of_chat_history_cache() {
         ConversationItem::user("old question"),
         ConversationItem::assistant("old answer"),
     ];
-    for item in &original {
-        adapter.append_chat_message(&info, item).await.unwrap();
-    }
     let mut timeline = chat_state::Timeline::from_seed(original).unwrap();
     timeline
-        .replace_all(
-            vec![ConversationItem::user("compacted surface")],
-            chat_state::MessageCause::Compaction,
-        )
+        .record(chat_state::TimelineEventKind::Compaction(
+            chat_state::CompactionEvent::Started {
+                id: "test-compaction".into(),
+                source_items: 2,
+                prompt_index: 0,
+            },
+        ))
+        .unwrap();
+    let input_ref = chat_state::TimelineRangeRef {
+        timeline_id: info.id.to_string(),
+        first_seq: 0,
+        last_seq: timeline.next_seq().get() - 1,
+    };
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    let target = chat_state::SurfaceRange {
+        start: *timeline.surface_ids().first().unwrap(),
+        end: *timeline.surface_ids().last().unwrap(),
+        shadowed: timeline.surface_ids().to_vec(),
+    };
+    let spawn = timeline
+        .record(chat_state::TimelineEventKind::Sideband(
+            chat_state::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: chat_state::SidebandPurpose::CompactionSummary,
+                input_refs: vec![input_ref.clone()],
+            },
+        ))
+        .unwrap();
+    let mut sideband = chat_state::SidebandTimeline::new(sideband_id.clone()).unwrap();
+    for kind in [
+        chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
+            purpose: chat_state::SidebandPurpose::CompactionSummary,
+            prompt: "summarize".into(),
+            input_refs: vec![input_ref.clone()],
+            route: chat_state::SidebandRoute {
+                model: "test-model".into(),
+                backend: "responses".into(),
+            },
+            initiator_ref: format!("t:{}/{}", info.id, spawn.seq.get()),
+            executor: "main".into(),
+            output_schema: None,
+        }),
+        chat_state::SidebandEventKind::Attempt(chat_state::SidebandAttempt {
+            attempt_no: 1,
+            feedback: None,
+        }),
+        chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
+            raw_output: "compacted surface".into(),
+            structured_output: None,
+            usage: chat_state::SidebandUsage::default(),
+            finish: "stop".into(),
+            source_event_seqs: [0, 1],
+        }),
+        chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+            outcome: chat_state::SidebandOutcome::Completed,
+            error: None,
+        }),
+    ] {
+        let event = sideband.prepare(kind).unwrap();
+        sideband.accept(event).unwrap();
+    }
+    timeline
+        .record(chat_state::TimelineEventKind::Compaction(
+            chat_state::CompactionEvent::Summary {
+                id: "test-compaction".into(),
+                input_ref,
+                result_ref: chat_state::TimelineRangeRef {
+                    timeline_id: sideband_id.clone(),
+                    first_seq: 2,
+                    last_seq: 2,
+                },
+                target: target.clone(),
+                source_tokens: 100,
+                summary_chars: 17,
+            },
+        ))
+        .unwrap();
+    timeline
+        .replace_compaction_range(target, vec![ConversationItem::user("compacted surface")])
+        .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Compaction(
+            chat_state::CompactionEvent::Completed {
+                id: "test-compaction".into(),
+                source_items: 2,
+                result_items: 1,
+                duration_ms: 1,
+            },
+        ))
         .unwrap();
     for event in timeline.events() {
         adapter.append_timeline_event(&info, event).await.unwrap();
     }
+    for event in sideband.events() {
+        adapter
+            .append_sideband_event_durable(&info, event)
+            .await
+            .unwrap();
+    }
 
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
-    assert_eq!(loaded.chat_history.len(), 1, "loaded conversation is the Timeline surface");
-    assert_eq!(loaded.chat_history[0].text_content(), "compacted surface");
-    assert_eq!(
-        std::fs::read_to_string(adapter.chat_file(&info))
-            .unwrap()
-            .lines()
-            .count(),
-        2,
-        "the stale cache remains a diagnostic artifact",
-    );
     let replayed = chat_state::Timeline::from_events(loaded.timeline_events).unwrap();
     assert_eq!(replayed.surface().len(), 1);
     assert_eq!(replayed.surface()[0].text_content(), "compacted surface");
-    assert_eq!(replayed.transcript().len(), 2);
+    assert_eq!(replayed.branch_transcript().len(), 2);
+    let ledgers = adapter.read_sideband_ledgers_sync(&info, &replayed).unwrap();
+    assert!(crate::session::storage::validate_sideband_ledgers(
+        &info.id.to_string(),
+        &replayed,
+        &BTreeMap::new(),
+    )
+    .is_err());
+    let mut tampered = ledgers;
+    let result = tampered
+        .get_mut(&sideband_id)
+        .unwrap()
+        .iter_mut()
+        .find_map(|event| match &mut event.kind {
+            chat_state::SidebandEventKind::Result(result) => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    result.raw_output.push('!');
+    assert!(crate::session::storage::validate_sideband_ledgers(
+        &info.id.to_string(),
+        &replayed,
+        &tampered,
+    )
+    .is_err());
 }
 /// UI updates cannot synthesize conversation facts. Without Timeline events,
 /// the restart Surface is empty even when updates contain transcript-looking
@@ -214,12 +515,8 @@ async fn updates_do_not_rebuild_timeline_surface() {
         .append_update(&info, &notify(Acp::AgentMessageChunk(text("pong"))))
         .await
         .unwrap();
-    let chat_path = adapter.session_dir(&info).join("chat_history.jsonl");
-    assert_eq!(std::fs::metadata(&chat_path).map(|m| m.len()).unwrap_or(0), 0);
     let loaded = adapter.load_session(&info).await.unwrap();
-    assert!(loaded.chat_history.is_empty());
     assert!(loaded.timeline_events.is_empty());
-    assert_eq!(std::fs::metadata(&chat_path).map(|m| m.len()).unwrap_or(0), 0);
 }
 #[tokio::test]
 async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
@@ -409,13 +706,13 @@ async fn merge_rewind_points_from_round_trips_file_snapshots() {
     let m0 = &after[0];
     assert_eq!(m0.prompt_index, 0);
     assert_eq!(
-            m0.get_snapshot_by_rel(&RelPathBuf::new("a.rs").unwrap())
+            m0.get_snapshot(&RelPathBuf::new("a.rs").unwrap())
                 .unwrap()
                 .content,
             Some("a-v0".into())
         );
     assert_eq!(
-            m0.get_snapshot_by_rel(&RelPathBuf::new("b.rs").unwrap())
+            m0.get_snapshot(&RelPathBuf::new("b.rs").unwrap())
                 .unwrap()
                 .content,
             Some("b-v1".into())
@@ -590,8 +887,6 @@ async fn test_subagent_notifications_round_trip() {
             capability_mode: None,
             permission_mode: None,
             effective_permission_mode: None,
-            persona: None,
-            role: None,
             model: None,
             resumed_from: None,
             workflow_run_id: None,
@@ -612,7 +907,6 @@ async fn test_subagent_notifications_round_trip() {
             duration_ms: 12345,
             tokens_used: 0,
             output: None,
-            will_wake: false,
         },
         meta: None,
     };
@@ -711,8 +1005,6 @@ async fn test_subagent_spawned_resumed_roundtrip() {
             capability_mode: None,
             permission_mode: None,
             effective_permission_mode: None,
-            persona: Some("implementer".to_string()),
-            role: None,
             model: None,
             resumed_from: Some("source-agent-id".to_string()),
             workflow_run_id: None,
@@ -729,13 +1021,11 @@ async fn test_subagent_spawned_resumed_roundtrip() {
                 GrowSessionUpdateType::SubagentSpawned {
                     subagent_id,
                     effective_context_source,
-                    persona,
                     resumed_from,
                     ..
                 } => {
                     assert_eq!(subagent_id, "child-resumed");
                     assert_eq!(effective_context_source.as_deref(), Some("resumed"),);
-                    assert_eq!(persona.as_deref(), Some("implementer"));
                     assert_eq!(
                         resumed_from.as_deref(),
                         Some("source-agent-id"),
@@ -749,69 +1039,106 @@ async fn test_subagent_spawned_resumed_roundtrip() {
     }
 }
 #[tokio::test]
-async fn copy_session_data_copies_compaction_segments_when_enabled() {
-    use crate::extensions::notification::CompactionSegmentFile;
-    use sampling_types::ConversationItem;
+async fn fork_copies_only_referenced_prompt_blobs_without_rewriting_identity() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let source_info = Info {
-        id: acp::SessionId::new("seg-src"),
+        id: acp::SessionId::new("blob-src"),
         cwd: "/source/workspace".to_string(),
     };
-    adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    for msg in &create_test_chat_messages() {
-        adapter.append_chat_message(&source_info, msg).await.unwrap();
-    }
-    let seg = |s: &str| CompactionSegmentFile {
-        items: vec![ConversationItem::user("a"), ConversationItem::user("b")],
-        summary: s.to_string(),
-        detail: chat_state::CompactionDetail::Verbose,
-        timestamp: "2026-01-01T00:00:00Z".to_string(),
-    };
-    adapter.write_compaction_segment(&source_info, &seg("first")).await.unwrap();
-    adapter.write_compaction_segment(&source_info, &seg("second")).await.unwrap();
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let source_prompts = adapter.session_dir(&source_info).join("prompts");
+    std::fs::create_dir_all(&source_prompts).unwrap();
+    let referenced_content = "complete oversized prompt";
+    let referenced_hash = blake3::hash(referenced_content.as_bytes()).to_hex().to_string();
+    let unreferenced_content = "future prompt must not leak";
+    let unreferenced_hash = blake3::hash(unreferenced_content.as_bytes())
+        .to_hex()
+        .to_string();
+    let referenced = source_prompts.join(format!("{referenced_hash}.txt"));
+    let unreferenced = source_prompts.join(format!("{unreferenced_hash}.txt"));
+    std::fs::write(&referenced, referenced_content).unwrap();
+    std::fs::write(&unreferenced, unreferenced_content).unwrap();
+    let prompt_ref = format!(
+        "{}{}",
+        crate::session::persistence::PROMPT_BLOB_REF_PREFIX,
+        referenced_hash
+    );
+    append_timeline_seed(
+        &adapter,
+        &source_info,
+        vec![ConversationItem::user(format!(
+            "[Full request offloaded to file]\n{prompt_ref}\nread it"
+        ))],
+    )
+    .await;
+
     let target_info = Info {
-        id: acp::SessionId::new("seg-dst"),
+        id: acp::SessionId::new("blob-dst"),
         cwd: "/target/workspace".to_string(),
     };
     let result = adapter
-        .copy_session_data(
-            &source_info,
-            &target_info,
-            CopySessionOptions {
-                copy_compaction_segments: true,
-                ..Default::default()
-            },
-        )
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
         .await
         .unwrap();
-    assert_eq!(result.compaction_segments_copied, 3);
-    let dst = adapter
-        .session_dir(&target_info)
-        .join(chat_state::compaction_transcript::COMPACTION_DIR);
-    assert!(dst.join("segment_000.md").is_file());
-    assert!(dst.join("segment_001.md").is_file());
-    assert!(dst.join("INDEX.md").is_file());
-    assert!(
-            std::fs::read_to_string(dst.join("segment_000.md"))
-                .unwrap()
-                .contains("# HISTORICAL -- DO NOT EDIT")
-        );
-    let target2 = Info {
-        id: acp::SessionId::new("seg-dst-default"),
-        cwd: "/target2/workspace".to_string(),
+
+    assert_eq!(result.prompt_blobs_copied, 1);
+    let target_prompts = adapter.session_dir(&target_info).join("prompts");
+    assert_eq!(
+        std::fs::read_to_string(target_prompts.join(format!("{referenced_hash}.txt"))).unwrap(),
+        referenced_content
+    );
+    assert!(!target_prompts.join(format!("{unreferenced_hash}.txt")).exists());
+    let loaded = adapter
+        .load_session_without_updates(&target_info)
+        .await
+        .unwrap();
+    let surface = loaded_surface(&loaded.timeline_events);
+    let text = surface[0].text_content();
+    assert!(text.contains(&prompt_ref));
+    assert!(!text.contains(&target_prompts.to_string_lossy().to_string()));
+    assert!(!text.contains(&source_prompts.to_string_lossy().to_string()));
+}
+
+#[tokio::test]
+async fn fork_fails_closed_when_a_prompt_blob_reference_is_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("missing-blob-src"),
+        cwd: "/source/workspace".to_string(),
     };
-    let result2 = adapter
-        .copy_session_data(&source_info, &target2, CopySessionOptions::default())
+    adapter
+        .init_session(&source_info, default_model_id())
         .await
         .unwrap();
-    assert_eq!(result2.compaction_segments_copied, 0);
-    assert!(
-            !adapter
-                .session_dir(&target2)
-                .join(chat_state::compaction_transcript::COMPACTION_DIR)
-                .exists()
-        );
+    let missing_ref = format!(
+        "{}{}",
+        crate::session::persistence::PROMPT_BLOB_REF_PREFIX,
+        "a".repeat(64)
+    );
+    append_timeline_seed(
+        &adapter,
+        &source_info,
+        vec![ConversationItem::user(format!(
+            "[Full request offloaded to file]\n{missing_ref}\nread it"
+        ))],
+    )
+    .await;
+
+    let target_info = Info {
+        id: acp::SessionId::new("missing-blob-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    let error = adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(!adapter.session_dir(&target_info).exists());
 }
 #[tokio::test]
 async fn test_copy_session_data_basic() {
@@ -823,17 +1150,12 @@ async fn test_copy_session_data_basic() {
     };
     adapter.init_session(&source_info, default_model_id()).await.unwrap();
     let messages = create_test_chat_messages();
-    for msg in &messages {
-        adapter.append_chat_message(&source_info, msg).await.unwrap();
-    }
     append_timeline_seed(&adapter, &source_info, messages.clone()).await;
     let notification = create_test_notification();
     adapter
         .append_update(&source_info, &SessionUpdate::Acp(Box::new(notification)))
         .await
         .unwrap();
-    let plan_state = create_test_plan_state();
-    adapter.write_plan_state(&source_info, &plan_state).await.unwrap();
     let target_info = Info {
         id: acp::SessionId::new("fork-source-session-123-abcd1234"),
         cwd: "/target/workspace".to_string(),
@@ -848,9 +1170,8 @@ async fn test_copy_session_data_basic() {
         .copy_session_data(&source_info, &target_info, options)
         .await
         .unwrap();
-    assert_eq!(result.chat_messages_copied, 3);
+    assert_eq!(result.surface_items_copied, 3);
     assert_eq!(result.updates_copied, 1);
-    assert!(result.plan_state_copied);
     let loaded = adapter.load_session(&target_info).await.unwrap();
     assert_eq!(loaded.summary.info.id, target_info.id);
     assert_eq!(loaded.summary.info.cwd, "/target/workspace");
@@ -859,7 +1180,7 @@ async fn test_copy_session_data_basic() {
             Some("source-session-123".to_string())
         );
     assert!(loaded.summary.forked_at.is_some());
-    assert_eq!(loaded.chat_history.len(), 3);
+    assert_eq!(loaded_surface(&loaded.timeline_events).len(), 3);
     assert_eq!(loaded.updates.len(), 1);
     match &loaded.updates[0] {
         SessionUpdate::Acp(notification) => {
@@ -870,41 +1191,94 @@ async fn test_copy_session_data_basic() {
         }
         _ => panic!("Expected ACP update"),
     }
-    assert!(loaded.plan_state.is_some());
 }
+
 #[tokio::test]
-async fn test_copy_session_data_without_plan() {
+async fn load_rejects_a_published_session_without_timeline() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let source_info = Info {
-        id: acp::SessionId::new("source-no-plan"),
-        cwd: "/source/workspace".to_string(),
-    };
-    adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    adapter
-        .append_chat_message(&source_info, &ConversationItem::user("Hello"))
-        .await
-        .unwrap();
-    append_timeline_seed(
-        &adapter,
-        &source_info,
-        vec![ConversationItem::user("Hello")],
-    )
-    .await;
-    let target_info = Info {
-        id: acp::SessionId::new("fork-source-no-plan-12345678"),
-        cwd: "/target/workspace".to_string(),
-    };
-    let result = adapter
-        .copy_session_data(&source_info, &target_info, Default::default())
-        .await
-        .unwrap();
-    assert_eq!(result.chat_messages_copied, 1);
-    assert_eq!(result.updates_copied, 0);
-    assert!(!result.plan_state_copied);
-    let loaded = adapter.load_session(&target_info).await.unwrap();
-    assert!(loaded.plan_state.is_none());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    std::fs::remove_file(adapter.timeline_file(&info)).unwrap();
+
+    let error = adapter.load_session_without_updates(&info).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("mandatory Timeline ledger is missing"));
 }
+
+#[tokio::test]
+async fn load_rejects_a_non_current_session_format() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    let mut summary = adapter.init_session(&info, default_model_id()).await.unwrap();
+    summary.session_format_version = crate::session::persistence::SESSION_FORMAT_VERSION - 1;
+    adapter.write_summary_sync(&info, &summary).unwrap();
+
+    let error = adapter.load_session_without_updates(&info).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("unsupported session format"));
+}
+
+#[tokio::test]
+async fn copy_rejects_an_existing_target_without_touching_it() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("existing-target-source"),
+        cwd: "/source".into(),
+    };
+    let target = Info {
+        id: acp::SessionId::new("existing-target"),
+        cwd: "/target".into(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    append_timeline_seed(&adapter, &source, vec![ConversationItem::user("source")]).await;
+    let target_dir = adapter.session_dir(&target);
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let marker = target_dir.join("owned-by-caller");
+    std::fs::write(&marker, b"untouched").unwrap();
+
+    let error = adapter
+        .copy_session_data(&source, &target, Default::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&marker).unwrap(), b"untouched");
+}
+
+#[tokio::test]
+async fn failed_copy_publishes_no_target_or_staging_directory() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("broken-source"),
+        cwd: "/source".into(),
+    };
+    let target = Info {
+        id: acp::SessionId::new("never-published"),
+        cwd: "/target".into(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    std::fs::remove_file(adapter.timeline_file(&source)).unwrap();
+
+    let error = adapter
+        .copy_session_data(&source, &target, Default::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    let target_dir = adapter.session_dir(&target);
+    assert!(!target_dir.exists(), "failed fork must not publish a target");
+    let parent = target_dir.parent().unwrap();
+    let staging_prefix = format!(".{}.", target.id);
+    assert!(
+        std::fs::read_dir(parent)
+            .unwrap()
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(&staging_prefix)),
+        "failed fork must clean its staging directory"
+    );
+}
+
 #[tokio::test]
 async fn test_copy_session_data_transforms_updates() {
     use crate::extensions::notification::{
@@ -1087,10 +1461,18 @@ async fn copy_session_data_fork_truncates_live_branch_inclusive() {
         ConversationItem::assistant("A1b"),
         chat_user("P2", 2),
     ];
-    for item in &conversation {
-        adapter.append_chat_message(&source_info, &item).await.unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    for item in conversation {
+        let cause = match &item {
+            ConversationItem::User(_) => chat_state::MessageCause::User,
+            ConversationItem::Assistant(_) => chat_state::MessageCause::Assistant,
+            _ => unreachable!("fixture contains only user and assistant items"),
+        };
+        timeline.append(item, cause).unwrap();
     }
-    append_timeline_seed(&adapter, &source_info, conversation).await;
+    for event in timeline.events() {
+        adapter.append_timeline_event(&source_info, event).await.unwrap();
+    }
     let fork_at = |target: usize, fork_id: &str| {
         let target_info = Info {
             id: acp::SessionId::new(fork_id),
@@ -1108,7 +1490,7 @@ async fn copy_session_data_fork_truncates_live_branch_inclusive() {
         .await
         .unwrap();
     assert_eq!(result.updates_copied, 4);
-    assert_eq!(result.chat_messages_copied, 4);
+    assert_eq!(result.surface_items_copied, 4);
     let loaded = adapter.load_session(&target_info).await.unwrap();
     let last = loaded.updates.last().unwrap();
     assert!(
@@ -1128,7 +1510,7 @@ async fn copy_session_data_fork_truncates_live_branch_inclusive() {
         .await
         .unwrap();
     assert_eq!(result.updates_copied, 2, "P0 + A0");
-    assert_eq!(result.chat_messages_copied, 2, "P0 + A0 in model context");
+    assert_eq!(result.surface_items_copied, 2, "P0 + A0 in model context");
 }
 #[tokio::test]
 async fn test_copy_session_data_source_not_found() {
@@ -1174,451 +1556,44 @@ async fn test_copy_session_data_with_model_override() {
             Some("source-model-test".to_string())
         );
 }
+
 #[tokio::test]
-async fn test_load_prompts_only() {
+async fn prompt_records_are_derived_from_timeline_turns() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let info = create_test_info();
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    let user_prompt1 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(
-                    acp::TextContent::new("First user prompt".to_string()),
-                ),
-            ),
-        ),
-    );
-    adapter
-        .append_update(&info, &SessionUpdate::Acp(Box::new(user_prompt1)))
-        .await
-        .unwrap();
-    let agent_msg = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::AgentMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(
-                    acp::TextContent::new("Agent response".to_string()),
-                ),
-            ),
-        ),
-    );
-    adapter
-        .append_update(&info, &SessionUpdate::Acp(Box::new(agent_msg)))
-        .await
-        .unwrap();
-    let user_prompt2 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(
-                    acp::TextContent::new("Second user prompt".to_string()),
-                ),
-            ),
-        ),
-    );
-    adapter
-        .append_update(&info, &SessionUpdate::Acp(Box::new(user_prompt2)))
-        .await
-        .unwrap();
-    let prompts = adapter.load_prompts_only(&info).await.unwrap();
-    assert_eq!(prompts.len(), 2);
-    assert_eq!(prompts[0], "First user prompt");
-    assert_eq!(prompts[1], "Second user prompt");
-}
-#[tokio::test]
-async fn test_load_prompts_only_empty_session() {
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = create_test_info();
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let prompts = adapter.load_prompts_only(&info).await.unwrap();
-    assert!(prompts.is_empty());
-}
-#[tokio::test]
-async fn test_load_prompts_only_nonexistent_session() {
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = Info {
-        id: acp::SessionId::new("nonexistent"),
-        cwd: "/nonexistent".to_string(),
-    };
-    let prompts = adapter.load_prompts_only(&info).await.unwrap();
-    assert!(prompts.is_empty());
-}
-/// A user prompt streamed as two consecutive `UserMessageChunk` updates
-/// must be merged into a single prompt string, not split into two.
-#[tokio::test]
-async fn test_load_prompts_only_merges_multi_chunk_prompt() {
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = Info {
-        id: acp::SessionId::new("multi-chunk-test"),
-        cwd: "/test".to_string(),
-    };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let chunk1 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(acp::TextContent::new("Hello ".to_string())),
-            ),
-        ),
-    );
-    let chunk2 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(acp::TextContent::new("world".to_string())),
-            ),
-        ),
-    );
-    let agent_reply = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::AgentMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(acp::TextContent::new("Hi!".to_string())),
-            ),
-        ),
-    );
-    adapter.append_update(&info, &SessionUpdate::Acp(Box::new(chunk1))).await.unwrap();
-    adapter.append_update(&info, &SessionUpdate::Acp(Box::new(chunk2))).await.unwrap();
-    adapter
-        .append_update(&info, &SessionUpdate::Acp(Box::new(agent_reply)))
-        .await
-        .unwrap();
-    let prompts = adapter.load_prompts_only(&info).await.unwrap();
+    append_completed_prompt_turn(&adapter, &info, 1, 0, "first prompt").await;
+    append_completed_prompt_turn(&adapter, &info, 2, 1, "second prompt").await;
+
+    let records = adapter.load_prompt_records(&info).await.unwrap();
     assert_eq!(
-            prompts.len(),
-            1,
-            "expected 1 merged prompt, got: {prompts:?}"
-        );
-    assert_eq!(prompts[0], "Hello world");
-}
-/// `RewindMarker` updates must truncate dead-branch prompts so only the
-/// current timeline's prompts are returned.
-#[tokio::test]
-async fn test_load_prompts_only_applies_rewind_truncation() {
-    use crate::extensions::notification::{
-        SessionNotification as GrowNotification, SessionUpdate as GrowSessionUpdate,
-    };
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = Info {
-        id: acp::SessionId::new("rewind-test"),
-        cwd: "/test".to_string(),
-    };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let user1 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(
-                    acp::TextContent::new("first prompt".to_string()),
-                ),
-            ),
-        ),
+        records
+            .iter()
+            .map(|record| record.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first prompt", "second prompt"]
     );
-    let agent1 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::AgentMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(acp::TextContent::new("answer1".to_string())),
-            ),
-        ),
-    );
-    let user2 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(acp::TextContent::new("dead branch".to_string())),
-            ),
-        ),
-    );
-    let agent2 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::AgentMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(acp::TextContent::new("answer2".to_string())),
-            ),
-        ),
-    );
-    let rewind = GrowNotification {
-        session_id: info.id.clone(),
-        update: GrowSessionUpdate::RewindMarker {
-            target_prompt_index: 1,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-        },
-        meta: None,
-    };
-    let user3 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(
-                    acp::TextContent::new("new second prompt".to_string()),
-                ),
-            ),
-        ),
-    );
-    let agent3 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::AgentMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(acp::TextContent::new("answer3".to_string())),
-            ),
-        ),
-    );
-    for update in [
-        SessionUpdate::Acp(Box::new(user1)),
-        SessionUpdate::Acp(Box::new(agent1)),
-        SessionUpdate::Acp(Box::new(user2)),
-        SessionUpdate::Acp(Box::new(agent2)),
-        SessionUpdate::Grow(Box::new(rewind)),
-        SessionUpdate::Acp(Box::new(user3)),
-        SessionUpdate::Acp(Box::new(agent3)),
-    ] {
-        adapter.append_update(&info, &update).await.unwrap();
-    }
-    let prompts = adapter.load_prompts_only(&info).await.unwrap();
-    assert_eq!(
-            prompts,
-            vec!["first prompt", "new second prompt"],
-            "dead-branch prompt should have been removed by rewind"
-        );
-}
-/// Malformed JSON lines between valid chunks must not break the extraction
-/// of surrounding prompts.
-#[tokio::test]
-async fn test_load_prompts_only_robust_to_malformed_lines() {
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = Info {
-        id: acp::SessionId::new("malformed-test"),
-        cwd: "/test".to_string(),
-    };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let user1 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(
-                    acp::TextContent::new("valid prompt".to_string()),
-                ),
-            ),
-        ),
-    );
-    let agent_end = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::AgentMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(acp::TextContent::new("ok".to_string())),
-            ),
-        ),
-    );
-    adapter.append_update(&info, &SessionUpdate::Acp(Box::new(user1))).await.unwrap();
-    adapter
-        .append_update(&info, &SessionUpdate::Acp(Box::new(agent_end)))
-        .await
-        .unwrap();
-    let updates_path = adapter.updates_file_path(&info).unwrap();
-    {
-        use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&updates_path)
-            .unwrap();
-        writeln!(f, "not valid json {{{{{{").unwrap();
-    }
-    let user2 = acp::SessionNotification::new(
-        info.id.clone(),
-        acp::SessionUpdate::UserMessageChunk(
-            acp::ContentChunk::new(
-                acp::ContentBlock::Text(
-                    acp::TextContent::new("second valid prompt".to_string()),
-                ),
-            ),
-        ),
-    );
-    adapter.append_update(&info, &SessionUpdate::Acp(Box::new(user2))).await.unwrap();
-    let prompts = adapter.load_prompts_only(&info).await.unwrap();
-    assert_eq!(
-            prompts,
-            vec!["valid prompt", "second valid prompt"],
-            "malformed line should not drop surrounding valid prompts"
-        );
-}
-/// Scale test: a large synthetic session with many turns and interleaved
-/// tool calls is extracted correctly and without panicking.
-///
-/// This serves as both a correctness regression test at realistic scale and
-/// a documented validation point for the load-path memory improvement: the
-/// selective parser avoids allocating full `acp::SessionNotification` objects
-/// for the many non-user-chunk updates that dominate a real session file.
-#[tokio::test]
-async fn test_load_prompts_only_large_session() {
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let info = Info {
-        id: acp::SessionId::new("large-session-test"),
-        cwd: "/test".to_string(),
-    };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    const TURNS: usize = 200;
-    for i in 0..TURNS {
-        let c1 = acp::SessionNotification::new(
-            info.id.clone(),
-            acp::SessionUpdate::UserMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(
-                        acp::TextContent::new(format!("turn {i} part1 ")),
-                    ),
-                ),
-            ),
-        );
-        let c2 = acp::SessionNotification::new(
-            info.id.clone(),
-            acp::SessionUpdate::UserMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(acp::TextContent::new(format!("part2"))),
-                ),
-            ),
-        );
-        let agent = acp::SessionNotification::new(
-            info.id.clone(),
-            acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(
-                        acp::TextContent::new(
-                            format!(
-                        "agent reply {i} with lots of content xxxxxx"
-                    ),
-                        ),
-                    ),
-                ),
-            ),
-        );
-        adapter.append_update(&info, &SessionUpdate::Acp(Box::new(c1))).await.unwrap();
-        adapter.append_update(&info, &SessionUpdate::Acp(Box::new(c2))).await.unwrap();
-        adapter
-            .append_update(&info, &SessionUpdate::Acp(Box::new(agent)))
-            .await
-            .unwrap();
-    }
-    let prompts = adapter.load_prompts_only(&info).await.unwrap();
-    assert_eq!(
-            prompts.len(),
-            TURNS,
-            "should extract exactly one merged prompt per turn"
-        );
-    assert_eq!(prompts[0], "turn 0 part1 part2");
-    assert_eq!(
-            prompts[TURNS - 1],
-            format!("turn {} part1 part2", TURNS - 1)
-        );
-}
-#[tokio::test]
-async fn test_copy_session_data_copies_tool_state() {
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let source_info = Info {
-        id: acp::SessionId::new("source-with-tool-state"),
-        cwd: "/source/project".to_string(),
-    };
-    adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    adapter
-        .append_chat_message(&source_info, &ConversationItem::user("Hello"))
-        .await
-        .unwrap();
-    let tool_state_json = serde_json::json!({
-            "state": {
-                "grow_build.TodoState": {
-                    "todos": []
-                }
-            }
-        });
-    let source_dir = adapter.session_dir(&source_info);
-    std::fs::write(
-            source_dir.join("tool_state.json"),
-            serde_json::to_string_pretty(&tool_state_json).unwrap(),
-        )
-        .unwrap();
-    let target_info = Info {
-        id: acp::SessionId::new("fork-with-tool-state"),
-        cwd: "/target/worktree".to_string(),
-    };
-    let result = adapter
-        .copy_session_data(&source_info, &target_info, Default::default())
-        .await
-        .unwrap();
-    assert!(result.tool_state_copied);
-    let target_dir = adapter.session_dir(&target_info);
-    let target_tool_state = target_dir.join("tool_state.json");
-    assert!(target_tool_state.exists());
-    let copied_content: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&target_tool_state).unwrap(),
-        )
-        .unwrap();
-    assert_eq!(copied_content, tool_state_json);
-}
-#[tokio::test]
-async fn test_copy_session_data_without_tool_state() {
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let source_info = Info {
-        id: acp::SessionId::new("source-no-tool-state"),
-        cwd: "/source/project".to_string(),
-    };
-    adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    adapter
-        .append_chat_message(&source_info, &ConversationItem::user("Hello"))
-        .await
-        .unwrap();
-    let target_info = Info {
-        id: acp::SessionId::new("fork-no-tool-state"),
-        cwd: "/target/worktree".to_string(),
-    };
-    let result = adapter
-        .copy_session_data(&source_info, &target_info, Default::default())
-        .await
-        .unwrap();
-    assert!(!result.tool_state_copied);
-    let target_dir = adapter.session_dir(&target_info);
-    assert!(!target_dir.join("tool_state.json").exists());
-}
-#[tokio::test]
-async fn test_copy_session_data_skips_tool_state_directory() {
-    let temp_dir = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let source_info = Info {
-        id: acp::SessionId::new("source-dir-tool-state"),
-        cwd: "/source/project".to_string(),
-    };
-    adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    adapter
-        .append_chat_message(&source_info, &ConversationItem::user("Hello"))
-        .await
-        .unwrap();
-    let source_dir = adapter.session_dir(&source_info);
-    std::fs::create_dir_all(source_dir.join("tool_state.json").join("terminal"))
-        .unwrap();
-    let target_info = Info {
-        id: acp::SessionId::new("fork-dir-tool-state"),
-        cwd: "/target/worktree".to_string(),
-    };
-    let result = adapter
-        .copy_session_data(&source_info, &target_info, Default::default())
-        .await
-        .unwrap();
-    assert!(!result.tool_state_copied);
     assert!(
-            !adapter
-                .session_dir(&target_info)
-                .join("tool_state.json")
-                .is_file()
-        );
+        records
+            .iter()
+            .all(|record| record.input_kind == chat_state::TurnInputKind::Prompt)
+    );
 }
+
+#[tokio::test]
+async fn prompt_records_fail_closed_without_timeline() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = Info {
+        id: acp::SessionId::new("missing"),
+        cwd: "/missing".into(),
+    };
+
+    let error = adapter.load_prompt_records(&info).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
 #[tokio::test]
 async fn copy_fork_provenance_persisted_in_summary() {
     let tmp = TempDir::new().unwrap();
@@ -1731,62 +1706,6 @@ async fn copy_session_kind_defaults_to_fork() {
     assert_eq!(summary.session_kind.as_deref(), Some("fork"));
 }
 #[tokio::test]
-async fn copy_plan_state_false_skips_plan() {
-    let tmp = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    let source_info = Info {
-        id: acp::SessionId::new("src-plan"),
-        cwd: "/src".to_string(),
-    };
-    let target_info = Info {
-        id: acp::SessionId::new("tgt-plan"),
-        cwd: "/tgt".to_string(),
-    };
-    adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    std::fs::write(adapter.plan_file(&source_info), b"plan content").unwrap();
-    let result = adapter
-        .copy_session_data(
-            &source_info,
-            &target_info,
-            CopySessionOptions {
-                copy_plan_state: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(!result.plan_state_copied);
-    assert!(!adapter.plan_file(&target_info).exists());
-}
-#[tokio::test]
-async fn copy_signals_false_skips_signals() {
-    let tmp = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    let source_info = Info {
-        id: acp::SessionId::new("src-sig"),
-        cwd: "/src".to_string(),
-    };
-    let target_info = Info {
-        id: acp::SessionId::new("tgt-sig"),
-        cwd: "/tgt".to_string(),
-    };
-    adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    std::fs::write(adapter.signals_file(&source_info), b"{}").unwrap();
-    let result = adapter
-        .copy_session_data(
-            &source_info,
-            &target_info,
-            CopySessionOptions {
-                copy_signals: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(!result.signals_copied);
-    assert!(!adapter.signals_file(&target_info).exists());
-}
-#[tokio::test]
 async fn copy_session_preserves_head_fields() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
@@ -1816,7 +1735,7 @@ async fn copy_session_preserves_head_fields() {
     assert_eq!(loaded.head_branch.as_deref(), Some("feature-branch"));
 }
 #[tokio::test]
-async fn copy_session_control_false_skips_control_snapshot() {
+async fn copy_without_control_inheritance_has_no_control_event() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
     let source_info = Info {
@@ -1828,32 +1747,34 @@ async fn copy_session_control_false_skips_control_snapshot() {
         cwd: "/tgt".to_string(),
     };
     adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    adapter
-        .write_session_control(
-            &source_info,
-            &crate::session::control::SessionControlSnapshot::new(
-                1,
-                crate::session::behavior::BehaviorSnapshot::selected(
-                    tool_types::BehaviorId::Clarify,
-                ),
-                None,
-            ),
-        )
-        .await
-        .unwrap();
+    append_control_snapshot(
+        &adapter,
+        &source_info,
+        &crate::session::control::SessionControlSnapshot::new(
+            1,
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Clarify),
+            None,
+        ),
+    )
+    .await;
     let result = adapter
         .copy_session_data(
             &source_info,
             &target_info,
             CopySessionOptions {
-                copy_session_control: false,
+                inherit_control: false,
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-    assert!(!result.session_control_copied);
-    assert!(!adapter.session_control_file(&target_info).exists());
+    assert!(!result.control_event_seeded);
+    assert!(adapter
+        .load_session_without_updates(&target_info)
+        .await
+        .unwrap()
+        .control_snapshot
+        .is_none());
 }
 
 #[tokio::test]
@@ -1878,28 +1799,28 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
         "2026-01-01T00:00:00Z".into(),
         None,
     );
-    adapter
-        .write_session_control(
-            &source_info,
-            &crate::session::control::SessionControlSnapshot::new(
-                7,
-                crate::session::behavior::BehaviorSnapshot::selected(
-                    tool_types::BehaviorId::Goal,
-                ),
-                goal.snapshot().cloned(),
-            ),
-        )
-        .await
-        .unwrap();
+    append_control_snapshot(
+        &adapter,
+        &source_info,
+        &crate::session::control::SessionControlSnapshot::new(
+            7,
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+            goal.snapshot().cloned(),
+        ),
+    )
+    .await;
 
     let result = adapter
         .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
         .await
         .unwrap();
-    assert!(result.session_control_copied);
-    let (forked, rejected) = adapter.read_session_control_sync(&target_info).unwrap();
-    assert!(!rejected);
-    let forked = forked.expect("fork keeps non-runtime control metadata");
+    assert!(result.control_event_seeded);
+    let forked = adapter
+        .load_session_without_updates(&target_info)
+        .await
+        .unwrap()
+        .control_snapshot
+        .expect("fork keeps non-runtime control metadata");
     assert!(forked.goal.is_none());
     assert_eq!(
         forked.behavior.state,
@@ -1907,40 +1828,6 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
     );
 }
 
-#[tokio::test]
-async fn copy_tool_state_false_skips_tool_state() {
-    let tmp = TempDir::new().unwrap();
-    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    let source_info = Info {
-        id: acp::SessionId::new("src-ts"),
-        cwd: "/src".to_string(),
-    };
-    let target_info = Info {
-        id: acp::SessionId::new("tgt-ts"),
-        cwd: "/tgt".to_string(),
-    };
-    adapter.init_session(&source_info, default_model_id()).await.unwrap();
-    std::fs::write(adapter.session_dir(&source_info).join("tool_state.json"), b"{}")
-        .unwrap();
-    let result = adapter
-        .copy_session_data(
-            &source_info,
-            &target_info,
-            CopySessionOptions {
-                copy_tool_state: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(!result.tool_state_copied);
-    assert!(
-            !adapter
-                .session_dir(&target_info)
-                .join("tool_state.json")
-                .exists()
-        );
-}
 #[test]
 fn fork_filter_removes_synthetic_user_messages() {
     use sampling_types::conversation::*;
@@ -1957,7 +1844,7 @@ fn fork_filter_removes_synthetic_user_messages() {
             }),
             ConversationItem::assistant("response"),
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert!(
             !items.iter().any(|i| match i {
                 ConversationItem::User(u) => u.synthetic_reason.is_some(),
@@ -1975,7 +1862,7 @@ fn fork_filter_truncates_at_complete_turn() {
             ConversationItem::user("q2"),
             // No assistant response — incomplete turn
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(items.len(), 3, "should truncate after last complete turn");
     assert!(matches!(items[2], ConversationItem::Assistant(_)));
 }
@@ -1987,7 +1874,7 @@ fn fork_filter_handles_consecutive_user_messages() {
             ConversationItem::user("actual user query"),
             ConversationItem::assistant("response to query"),
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(
             items.len(),
             4,
@@ -2020,7 +1907,7 @@ fn fork_filter_consecutive_users_with_tool_calls() {
             ConversationItem::user("follow-up"),
             // Incomplete turn — no assistant response
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(
             items.len(),
             5,
@@ -2045,7 +1932,7 @@ fn fork_filter_preserves_complete_tool_turn() {
             }),
             ConversationItem::tool_result("tc1", "output"),
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(items.len(), 3, "complete tool turn should be preserved");
 }
 #[test]
@@ -2068,7 +1955,7 @@ fn fork_filter_strips_incomplete_tool_turn() {
             }),
             // Missing tool result — incomplete
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(
             items.len(),
             2,
@@ -2090,11 +1977,12 @@ async fn fork_filter_clears_updates() {
         cwd: "/tgt".to_string(),
     };
     adapter.init_session(&source, default_model_id()).await.unwrap();
-    adapter.append_chat_message(&source, &ConversationItem::user("q")).await.unwrap();
-    adapter
-        .append_chat_message(&source, &ConversationItem::assistant("a"))
-        .await
-        .unwrap();
+    append_timeline_seed(
+        &adapter,
+        &source,
+        vec![ConversationItem::user("q"), ConversationItem::assistant("a")],
+    )
+    .await;
     let result = adapter
         .copy_session_data(
             &source,
@@ -2131,13 +2019,6 @@ async fn assert_copy_clears_pending_relocation(fork_filter: bool) {
         destination_project_instructions: None,
     });
     adapter.write_summary_sync(&source, &summary).unwrap();
-    adapter
-        .append_chat_message(
-            &source,
-            &ConversationItem::working_directory_switch("switch", 3),
-        )
-        .await
-        .unwrap();
     append_timeline_seed(
         &adapter,
         &source,
@@ -2214,7 +2095,7 @@ async fn fork_inherits_sandbox_profile() {
 #[test]
 fn fork_filter_empty_input_produces_empty() {
     let mut items: Vec<ConversationItem> = vec![];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert!(items.is_empty());
 }
 #[test]
@@ -2228,7 +2109,7 @@ fn fork_filter_keeps_turn_with_reasoning_between_user_and_assistant() {
             )),
             ConversationItem::assistant("a"),
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(
             items.len(),
             4,
@@ -2262,7 +2143,7 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
             )),
             ConversationItem::assistant("final text"),
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(
             items.len(),
             7,
@@ -2310,7 +2191,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
             )),
             ConversationItem::assistant("final"),
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(
             items.len(),
             9,
@@ -2333,7 +2214,7 @@ fn fork_filter_drops_trailing_incomplete_goal_turn_after_reasoning() {
             ConversationItem::assistant("a"),
             ConversationItem::user("/goal do the thing"),
         ];
-    super::fork_filter_chat(&mut items);
+    super::fork_filter_surface(&mut items);
     assert_eq!(
             items.len(),
             4,
@@ -2366,20 +2247,20 @@ fn write_test_summary(
         previous_cwd: None,
         pending_cwd_switch_reminder: None,
         cwd_switch_bookkeeping_generation: 0,
-        session_summary: format!("summary for {session_id}"),
+        title: None,
+        title_source: None,
+        title_event_seq: None,
         created_at: updated_at,
         updated_at,
         num_messages: 1,
-        num_chat_messages: 1,
         current_model_id: default_model_id(),
         parent_session_id: None,
         forked_at: None,
-        chat_format_version: 0,
+        session_format_version: crate::session::persistence::SESSION_FORMAT_VERSION,
         prompt_display_cwd: None,
         session_kind: session_kind.map(|s| s.to_string()),
         fork_context_source: None,
         fork_parent_prompt_id: None,
-        inherited_prefix_len: None,
         hidden,
         source_workspace_dir: None,
         git_root_dir: None,
@@ -2388,8 +2269,6 @@ fn write_test_summary(
         head_branch: None,
         grow_home: None,
         last_active_at,
-        generated_title: None,
-        title_is_manual: false,
         worktree_label: None,
         agent_name: None,
         sandbox_profile: None,
@@ -2403,6 +2282,95 @@ fn write_test_summary(
 fn scan_session_dirs_returns_empty_for_explicit_mode() {
     let adapter = JsonlStorageAdapter::with_explicit_session_dir(PathBuf::from("/fake"));
     assert!(adapter.scan_session_dirs(None).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn dormant_title_append_commits_timeline_and_projection_together() {
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(tmp.path().join("session"));
+    let info = Info {
+        id: acp::SessionId::new("title-session"),
+        cwd: "/workspace".into(),
+    };
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+
+    let first = adapter
+        .append_session_title_durable(&info, "First title".into())
+        .await
+        .unwrap();
+    assert_eq!(first.seq.get(), 0);
+    let second = adapter
+        .append_session_title_durable(&info, "Renamed title".into())
+        .await
+        .unwrap();
+    assert_eq!(second.seq.get(), 1);
+
+    let loaded = adapter.load_session(&info).await.unwrap();
+    assert_eq!(loaded.summary.display_title(), "Renamed title");
+    assert_eq!(loaded.summary.title_event_seq, Some(1));
+    let timeline = chat_state::Timeline::from_events(loaded.timeline_events).unwrap();
+    assert_eq!(timeline.session_title().unwrap().1.title, "Renamed title");
+}
+
+#[tokio::test]
+async fn load_repairs_a_lagging_title_projection_from_timeline() {
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(tmp.path().join("session"));
+    let info = Info {
+        id: acp::SessionId::new("title-repair"),
+        cwd: "/workspace".into(),
+    };
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    adapter
+        .append_session_title_durable(&info, "Canonical title".into())
+        .await
+        .unwrap();
+
+    let mut summary = adapter.read_summary_sync(&info).unwrap();
+    summary.title = None;
+    summary.title_source = None;
+    summary.title_event_seq = None;
+    adapter.write_summary_sync(&info, &summary).unwrap();
+
+    let loaded = adapter.load_session(&info).await.unwrap();
+    assert_eq!(loaded.summary.display_title(), "Canonical title");
+    assert_eq!(loaded.summary.title_event_seq, Some(0));
+    assert_eq!(
+        adapter.read_summary_sync(&info).unwrap().display_title(),
+        "Canonical title"
+    );
+}
+
+#[tokio::test]
+async fn load_rejects_a_conflicting_title_projection_at_canonical_seq() {
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(tmp.path().join("session"));
+    let info = Info {
+        id: acp::SessionId::new("title-conflict"),
+        cwd: "/workspace".into(),
+    };
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    adapter
+        .append_session_title_durable(&info, "Canonical title".into())
+        .await
+        .unwrap();
+
+    let mut summary = adapter.read_summary_sync(&info).unwrap();
+    summary.title = Some("Conflicting cache".into());
+    adapter.write_summary_sync(&info, &summary).unwrap();
+
+    let error = adapter.load_session(&info).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("conflicts"));
 }
 #[test]
 fn scan_session_dirs_returns_empty_when_no_sessions_dir() {
@@ -2622,54 +2590,6 @@ async fn read_updates_jsonl_skips_invalid_utf8_line() {
             "valid line kept, invalid-UTF8 line skipped"
         );
 }
-/// Self-healing append: a torn trailing line (previous append crashed
-/// mid-write, no trailing newline) is terminated before the new record is
-/// written, so the new record lands on its own line and only the torn
-/// record is lost on the next load.
-#[tokio::test]
-async fn append_chat_message_terminates_torn_trailing_line() {
-    let temp_dir = TempDir::new().unwrap();
-    let info = create_test_info();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let chat_path = adapter.chat_file(&info);
-    let good = r#"{"type":"user","content":[{"type":"text","text":"before crash"}]}"#;
-    let torn = r#"{"type":"assistant","content":"cut mid-wr"#;
-    std::fs::write(&chat_path, format!("{good}\n{torn}")).unwrap();
-    adapter
-        .append_chat_message(&info, &ConversationItem::user("after crash"))
-        .await
-        .unwrap();
-    let raw = std::fs::read_to_string(&chat_path).unwrap();
-    let lines: Vec<&str> = raw.lines().collect();
-    assert_eq!(
-            lines.len(),
-            3,
-            "good + torn(terminated) + appended: {raw:?}"
-        );
-    assert_eq!(lines[1], torn, "torn record isolated on its own line");
-    assert!(
-            lines[2].contains("after crash"),
-            "new record on a fresh line: {:?}",
-            lines[2]
-        );
-    assert!(lines[0].contains("before crash"));
-}
-/// Appending to a healthy file must not inject spurious blank lines.
-#[tokio::test]
-async fn append_chat_message_no_spurious_newlines_on_clean_tail() {
-    let temp_dir = TempDir::new().unwrap();
-    let info = create_test_info();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    adapter.append_chat_message(&info, &ConversationItem::user("one")).await.unwrap();
-    adapter.append_chat_message(&info, &ConversationItem::user("two")).await.unwrap();
-    let raw = std::fs::read_to_string(adapter.chat_file(&info)).unwrap();
-    assert_eq!(raw.lines().count(), 2);
-    assert!(!raw.contains("\n\n"), "no blank lines injected: {raw:?}");
-    assert!(raw.contains("one"));
-    assert!(raw.contains("two"));
-}
 /// Same self-healing for `updates.jsonl` appends, and the lenient reader
 /// skips the isolated torn line.
 #[tokio::test]
@@ -2711,45 +2631,8 @@ async fn append_update_terminates_torn_trailing_line() {
     let updates = adapter.read_updates_jsonl(updates_path).unwrap();
     assert_eq!(updates.len(), 2, "torn line skipped, real updates kept");
 }
-/// A corrupt projection cache cannot affect restart. The Surface is folded
-/// from Timeline without parsing `chat_history.jsonl`.
 #[tokio::test]
-async fn load_session_ignores_merged_chat_cache_line() {
-    let temp_dir = TempDir::new().unwrap();
-    let info = create_test_info();
-    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    adapter
-        .append_chat_message(&info, &ConversationItem::user("real turn"))
-        .await
-        .unwrap();
-    append_timeline_seed(&adapter, &info, vec![ConversationItem::user("real turn")]).await;
-    {
-        use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(adapter.chat_file(&info))
-            .unwrap();
-        f.write_all(
-                br#"{"type":"assistant","content":"cut mid{"type":"user","content":[{"type":"text","text":"merged"}]}"#,
-            )
-            .unwrap();
-        f.write_all(b"\n").unwrap();
-    }
-    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
-    assert_eq!(
-        loaded
-            .chat_history
-            .iter()
-            .map(ConversationItem::text_content)
-            .collect::<Vec<_>>(),
-        vec!["real turn"],
-        "restart uses Timeline and never parses the corrupt cache",
-    );
-}
-
-#[tokio::test]
-async fn session_control_roundtrips_goal_through_light_session_load() {
+async fn timeline_control_roundtrips_goal_through_light_session_load() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -2768,14 +2651,10 @@ async fn session_control_roundtrips_goal_through_light_session_load() {
         crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
         tracker.snapshot().cloned(),
     );
-    adapter
-        .write_session_control(&info, &snapshot)
-        .await
-        .unwrap();
+    append_control_snapshot(&adapter, &info, &snapshot).await;
 
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
-    let control = loaded.session_control.expect("control state should load");
-    assert!(!loaded.session_control_rejected);
+    let control = loaded.control_snapshot.expect("control state should load");
     assert_eq!(control.control_revision, 7);
     assert_eq!(control.behavior.state, crate::session::behavior::BehaviorState::Goal);
     let goal = control.goal.expect("Goal state should load");
@@ -2787,19 +2666,125 @@ async fn session_control_roundtrips_goal_through_light_session_load() {
 }
 
 #[tokio::test]
-async fn malformed_session_control_is_quarantined_without_bricking_session_load() {
+async fn malformed_timeline_control_bricks_session_load() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    let path = adapter.session_control_file(&info);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, b"{broken").unwrap();
+    let events = adapter.read_timeline_events_sync(&info).unwrap();
+    let mut timeline = chat_state::Timeline::from_events(events).unwrap();
+    let event = timeline
+        .record(chat_state::TimelineEventKind::Control(chat_state::ControlEvent {
+            revision: 1,
+            snapshot: serde_json::json!({ "broken": true }),
+        }))
+        .unwrap();
+    adapter.append_timeline_event(&info, &event).await.unwrap();
+
+    let error = adapter
+        .load_session_without_updates(&info)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn committed_timeline_is_not_rejected_when_summary_projection_fails() {
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    std::fs::write(adapter.summary_file(&info), b"not valid json").unwrap();
+
+    let events = adapter.read_timeline_events_sync(&info).unwrap();
+    let mut timeline = chat_state::Timeline::from_events(events).unwrap();
+    let event = timeline
+        .append(
+            ConversationItem::user("canonical fact"),
+            chat_state::MessageCause::User,
+        )
+        .unwrap();
+
+    adapter
+        .append_timeline_event_durable(&info, &event)
+        .await
+        .expect("summary is a projection and cannot reject a committed Timeline fact");
+
+    let stored = adapter.read_timeline_events_sync(&info).unwrap();
+    assert_eq!(
+        serde_json::to_value(stored.last().unwrap()).unwrap(),
+        serde_json::to_value(&event).unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn session_signals_restore_only_from_timeline() {
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let events = adapter.read_timeline_events_sync(&info).unwrap();
+    let mut timeline = chat_state::Timeline::from_events(events).unwrap();
+    let signals = crate::session::signals::SessionSignals {
+        turn_count: 3,
+        tool_call_count: 8,
+        ..Default::default()
+    };
+    let event = timeline.record(signals.timeline_kind().unwrap()).unwrap();
+    adapter.append_timeline_event(&info, &event).await.unwrap();
 
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
-    assert!(loaded.session_control.is_none());
-    assert!(loaded.session_control_rejected);
-    assert!(!path.exists(), "malformed control state must not be retried");
+    assert_eq!(loaded.signals, Some(signals));
+    assert!(!adapter.session_dir(&info).join("signals.json").exists());
+}
+
+#[tokio::test]
+async fn announcement_state_restores_and_forks_only_through_timeline() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = create_test_info();
+    let target = Info {
+        id: acp::SessionId::new("announcement-fork-target"),
+        cwd: "/test/fork".into(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    let events = adapter.read_timeline_events_sync(&source).unwrap();
+    let mut timeline = chat_state::Timeline::from_events(events).unwrap();
+    let state = crate::session::announcement_state::AnnouncementState {
+        mcp_server_fingerprints: std::collections::HashMap::from([(
+            "source-control".into(),
+            crate::session::announcement_state::McpServerFingerprint {
+                tool_count: 2,
+                description_hash: 11,
+                tool_names_hash: 22,
+            },
+        )]),
+        announced_skill_names: std::collections::HashSet::from(["review".into()]),
+    };
+    let event = timeline.record(state.timeline_kind().unwrap()).unwrap();
+    adapter.append_timeline_event(&source, &event).await.unwrap();
+
+    let resumed = adapter.load_session_without_updates(&source).await.unwrap();
+    assert_eq!(resumed.announcement_state, Some(state.clone()));
+    assert!(
+        !adapter
+            .session_dir(&source)
+            .join("announcement_state.json")
+            .exists()
+    );
+
+    adapter
+        .copy_session_data(&source, &target, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let forked = adapter.load_session_without_updates(&target).await.unwrap();
+    assert_eq!(forked.announcement_state, Some(state));
+    assert!(
+        !adapter
+            .session_dir(&target)
+            .join("announcement_state.json")
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -2821,30 +2806,68 @@ async fn session_copy_does_not_clone_goal_runtime_state() {
         "now".into(),
         None,
     );
-    adapter
-        .write_session_control(
-            &source,
-            &crate::session::control::SessionControlSnapshot::new(
-                3,
-                crate::session::behavior::BehaviorSnapshot::selected(
-                    tool_types::BehaviorId::Goal,
-                ),
-                tracker.snapshot().cloned(),
-            ),
-        )
-        .await
-        .unwrap();
+    append_control_snapshot(
+        &adapter,
+        &source,
+        &crate::session::control::SessionControlSnapshot::new(
+            3,
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+            tracker.snapshot().cloned(),
+        ),
+    )
+    .await;
 
     adapter
         .copy_session_data(&source, &target, CopySessionOptions::default())
         .await
         .unwrap();
     let loaded = adapter.load_session_without_updates(&target).await.unwrap();
-    let control = loaded.session_control.expect("sanitized control snapshot");
+    let control = loaded.control_snapshot.expect("sanitized control snapshot");
     assert!(control.goal.is_none());
     assert_eq!(
         control.behavior.state,
         crate::session::behavior::BehaviorState::Normal
     );
-    assert!(!loaded.session_control_rejected);
+}
+
+#[tokio::test]
+async fn durable_sideband_append_is_sequence_aware_and_idempotent() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut timeline = chat_state::SidebandTimeline::new(id.clone()).unwrap();
+    let event = timeline
+        .prepare(chat_state::SidebandEventKind::Request(
+            chat_state::SidebandRequest {
+                purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                prompt: "summarize".into(),
+                input_refs: Vec::new(),
+                route: chat_state::SidebandRoute {
+                    model: "test-model".into(),
+                    backend: "responses".into(),
+                },
+                initiator_ref: "t:test-session-123/0".into(),
+                executor: "main".into(),
+                output_schema: None,
+            },
+        ))
+        .unwrap();
+    adapter
+        .append_sideband_event_durable(&info, &event)
+        .await
+        .unwrap();
+    adapter
+        .append_sideband_event_durable(&info, &event)
+        .await
+        .unwrap();
+    let path = adapter.sideband_timeline_file(&info, &id).unwrap();
+    let lines = std::fs::read_to_string(path).unwrap();
+    assert_eq!(lines.lines().count(), 1);
+    let stored = lines
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect::<Vec<chat_state::SidebandEvent>>();
+    chat_state::SidebandTimeline::from_events(stored).unwrap();
 }

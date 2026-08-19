@@ -8,48 +8,38 @@ use crate::theme::Theme;
 use crate::views::prompt_widget::StashedPrompt;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindPointInfo {
-    #[serde(alias = "promptIndex")]
     pub prompt_index: usize,
-    #[serde(default, alias = "createdAt")]
     pub created_at: String,
-    #[serde(default, alias = "numFileSnapshots")]
     pub num_file_snapshots: usize,
-    #[serde(default, alias = "promptPreview")]
     pub prompt_preview: Option<String>,
-    #[serde(default, alias = "hasFileChanges")]
     pub has_file_changes: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindPointsResponse {
-    #[serde(alias = "rewindPoints")]
     pub rewind_points: Vec<RewindPointInfo>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindResponse {
     pub success: bool,
-    #[serde(alias = "targetPromptIndex")]
     pub target_prompt_index: usize,
-    #[serde(default, alias = "revertedFiles")]
     pub reverted_files: Vec<String>,
-    #[serde(default, alias = "cleanFiles")]
     pub clean_files: Vec<String>,
-    #[serde(default)]
     pub conflicts: Vec<RewindConflictInfo>,
-    #[serde(default)]
     pub error: Option<String>,
-    #[serde(default)]
     pub mode: Option<String>,
-    #[serde(default, alias = "promptText")]
     pub prompt_text: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindConflictInfo {
     pub path: String,
-    #[serde(alias = "conflictType")]
     pub conflict_type: String,
 }
 

@@ -416,7 +416,7 @@ fn paint_hide_button(
 /// (slot precedence lives there alone) with the severity-matched painter.
 ///
 /// `caption_allowed` gates the promo row's dim `cta.caption`: the caller
-/// passes `false` while a permission prompt owns `Ctrl+O` (it toggles YOLO
+/// passes `false` while a permission prompt owns `Ctrl+O` (it toggles always-approve
 /// there, so advertising the CTA open would be a mislabeled control). The
 /// `[label]` button + its mouse/OSC 8 open are unaffected.
 ///
@@ -580,7 +580,7 @@ fn render_critical_rows(
 /// here (it renders on the roomy welcome hero instead); a pinned
 /// (non-dismissible) promo shows its dim `cta.caption` after the button when
 /// one is configured and `caption_allowed` (a dismissible twin keeps `Ctrl+O`
-/// on YOLO, so no caption; no caption configured = bare button).
+/// on always-approve, so no caption; no caption configured = bare button).
 /// The right-hand hide affordances are reserved first (dismissible promos only)
 /// so the button + caption never overpaint them.
 fn render_promo_row(

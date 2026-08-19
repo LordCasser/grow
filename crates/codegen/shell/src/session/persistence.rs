@@ -1,16 +1,15 @@
 use chrono::{DateTime, Utc};
-use std::io;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::sampling::Client as OaiCompatClient;
 use crate::sampling::ConversationItem;
 use workspace::session::file_state::RewindPoint;
 
 use crate::session::signals::SessionSignals;
 use crate::session::storage::relocation::{RelocationError, RelocationView};
 use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
-use crate::tools::todo::TodoState;
 use crate::util::grow_home::grow_home;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
 use agent_client_protocol as acp;
@@ -19,61 +18,17 @@ use sampling_types::ReasoningEffort;
 use crate::session::info::Info;
 use tokio::sync::mpsc;
 
-/// Current chat history format version.
-/// - Version 0: Legacy ChatRequestMessage format (default for old sessions)
-/// - Version 1: ConversationItem format (used for new sessions)
-pub const CHAT_FORMAT_VERSION: u8 = 1;
-
-#[derive(Debug, Clone)]
-pub struct PersistenceContentChunk {
-    content_chunks: Vec<acp::ContentBlock>,
-}
-
-impl PersistenceContentChunk {
-    pub fn new(content_chunks: Vec<acp::ContentBlock>) -> Self {
-        Self { content_chunks }
-    }
-}
+/// Current persisted session format.
+///
+/// Version 5 uses host-independent content references for immutable prompt
+/// blobs in Timeline messages. Parent/child subagent lifecycle and independent
+/// Sideband ledgers remain part of the only supported architecture; older
+/// path-bearing prompts, Chat snapshots, and mutable subagent metadata are not
+/// loaded or rewritten in place.
+pub const SESSION_FORMAT_VERSION: u8 = 5;
 
 use crate::session::storage::SessionUpdate;
 use serde::{Deserialize, Serialize};
-
-// /btw side question persistence types
-
-/// A single /btw side question entry persisted to `btw_history.jsonl`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BtwEntry {
-    /// Unique ID for this side question.
-    pub btw_session_id: String,
-    /// The parent session ID.
-    pub parent_session_id: String,
-    /// When the question was asked.
-    pub asked_at: DateTime<Utc>,
-    /// The user's question.
-    pub question: String,
-    /// The model's response (empty if failed).
-    pub answer: String,
-    /// Model used.
-    pub model: String,
-    /// Whether the request succeeded.
-    pub success: bool,
-    /// Error message if failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Model-call attempts made (1 = no retry). Entries written before this
-    /// field existed deserialize as 1.
-    #[serde(default = "default_btw_attempts")]
-    pub attempts: u32,
-}
-
-fn default_btw_attempts() -> u32 {
-    1
-}
-
-fn is_false(value: &bool) -> bool {
-    !value
-}
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -85,15 +40,15 @@ pub enum PersistenceMsg {
         respond_to:
             tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
     },
-    ContentChunk(PersistenceContentChunk),
     Timeline(chat_state::TimelineEvent),
     TimelineDurablyAndAck {
         event: chat_state::TimelineEvent,
         respond_to: tokio::sync::oneshot::Sender<std::io::Result<()>>,
     },
-    Chat(ConversationItem),
-    /// Replace the entire chat history (used for compaction)
-    ReplaceChatHistory(Vec<ConversationItem>),
+    SidebandDurablyAndAck {
+        event: chat_state::SidebandEvent,
+        respond_to: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    },
     CurrentModel {
         model_id: acp::ModelId,
         /// The active agent definition name (e.g. `"grow-build"`).
@@ -101,13 +56,6 @@ pub enum PersistenceMsg {
         /// on the mutable model catalog.
         agent_name: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
-    },
-    PlanState(TodoState),
-    /// Atomic Behavior/Goal control-plane snapshot.
-    SessionControl(crate::session::control::SessionControlSnapshot),
-    SessionControlAndAck {
-        state: crate::session::control::SessionControlSnapshot,
-        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
     /// A rewind point to persist
     RewindPoint(RewindPoint),
@@ -122,38 +70,17 @@ pub enum PersistenceMsg {
     MergeRewindPointsFrom {
         target_index: usize,
     },
-    /// Persist a snapshot of the session signals.
-    Signals(SessionSignals),
-    /// Persist announcement tracking state (MCP + skill announcement dedup).
-    AnnouncementState(crate::session::announcement_state::AnnouncementState),
     WorkflowRunState(crate::session::workflow::store::WorkflowRunManifest),
     WorkflowRunStateAndAck {
         manifest: crate::session::workflow::store::WorkflowRunManifest,
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
     DeleteWorkflowRunState(String),
-    /// Persist a /btw side question entry
-    Btw(BtwEntry),
     /// Persist updated HEAD commit and branch to summary.
     GitHead {
         commit: Option<String>,
         branch: Option<String>,
     },
-    /// Persist a compaction request+response artifact to
-    /// `compaction_requests/{request_id}.json`. Used for offline prompt
-    /// iteration — captures the exact ConversationItem list sent to the
-    /// compaction model plus the summary it returned (or the final error).
-    /// Stored under the local session directory for offline diagnostics.
-    CompactionRequest(crate::extensions::notification::CompactionRequestFile),
-    /// Persist a recap request+response artifact to
-    /// `recap_requests/{request_id}.json` for offline recap prompt / garble replay.
-    RecapRequest(crate::extensions::notification::RecapRequestFile),
-    /// Persist a compaction segment (`Segments` mode).
-    CompactionSegment(crate::extensions::notification::CompactionSegmentFile),
-    /// Generated session title from background LLM task.
-    /// Routed back through the persistence channel so the storage write
-    /// stays sequential with other summary.json mutations.
-    GeneratedTitle(String),
     Flush,
     /// Flush all pending writes, then signal the caller once the flush is complete.
     /// Unlike `Flush` (fire-and-forget), this is a **sync barrier**: the caller's
@@ -180,10 +107,8 @@ pub fn session_exists_for_cwd(session_id: &str, cwd: &str) -> bool {
     session_exists_for_cwd_in_root(session_id, cwd, &sessions_root)
 }
 
-/// A directory is a resumable session only if it has a `summary.json`; this
-/// skips `images/`-only stubs that would otherwise hijack `--resume`. Used by
-/// the resume/restore resolution path; `find_session_dir_by_id` intentionally
-/// stays dir-only for non-resume compatibility.
+/// A directory is a session only if it has a `summary.json`; this skips
+/// `images/`-only stubs that would otherwise hijack ID-based resolution.
 fn is_persisted_session_dir(session_path: &Path) -> bool {
     session_path.join("summary.json").is_file()
 }
@@ -295,7 +220,9 @@ fn resolve_local_session_any_cwd_in_root(
 
 /// Scan all CWD directories for a session and return its directory path.
 pub fn find_session_dir_by_id(session_id: &str) -> Option<PathBuf> {
-    find_any_session_dir_by_id_result(session_id).ok().flatten()
+    find_persisted_session_dir_by_id_result(session_id)
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn find_persisted_session_dir_by_id_result(
@@ -310,12 +237,6 @@ pub(crate) fn find_persisted_session_dir_by_id_in_root_result(
 ) -> io::Result<Option<PathBuf>> {
     storage_view(sessions_root)
         .and_then(|view| view.find_persisted_session_dir(session_id))
-        .map_err(io::Error::other)
-}
-
-pub(crate) fn find_any_session_dir_by_id_result(session_id: &str) -> io::Result<Option<PathBuf>> {
-    storage_view(&grow_home().join("sessions"))
-        .and_then(|view| view.find_any_session_dir(session_id))
         .map_err(io::Error::other)
 }
 
@@ -350,7 +271,15 @@ fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
         path: path.clone(),
         source: error,
     })?;
-    serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json { path, source })
+    let summary: Summary =
+        serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json {
+            path: path.clone(),
+            source,
+        })?;
+    summary
+        .validate_current_format()
+        .map_err(|error| RelocationError::Inconsistent(format!("{}: {error}", path.display())))?;
+    Ok(summary)
 }
 
 /// The most recently updated local session summary for `cwd` (by
@@ -425,8 +354,8 @@ fn local_summaries_for_cwd_sync_in_root(
 /// about to be resumed, used at startup to restore the session's profile before
 /// the (irreversible) OS sandbox is applied.
 ///
-/// - `session_id`: the explicit id from `--resume <id>` / `--load <id>` /
-///   `-s <id>`, resolved directly across all local cwd directories.
+/// - `session_id`: the explicit id from `--resume <id>`, resolved directly
+///   across all local cwd directories.
 /// - `cwd`: the lookup key for `-c` / `--continue` and bare `--resume`.
 ///
 /// Returns `None` when not resuming, the session isn't found locally, or it has
@@ -458,13 +387,239 @@ fn resumed_session_sandbox_profile_in_root(
     None
 }
 
-/// Get file path for storing a large prompt.
-/// Creates the prompts subdirectory if it doesn't exist.
-/// Path format: `{session_dir}/prompts/prompt_{prompt_index}.txt`
-pub fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
-    let prompts_dir = session_dir(info).join("prompts");
-    std::fs::create_dir_all(&prompts_dir).ok();
-    prompts_dir.join(format!("prompt_{}.txt", prompt_index))
+/// Content-addressed path for an immutable large-prompt blob. The writer owns
+/// directory creation so it can apply the required durability barriers.
+pub fn get_prompt_blob_path(session_dir: &Path, content: &str) -> PathBuf {
+    let prompts_dir = session_dir.join("prompts");
+    prompts_dir.join(format!("{}.txt", blake3::hash(content.as_bytes()).to_hex()))
+}
+
+pub const PROMPT_BLOB_REF_PREFIX: &str = "artifact:prompt:blake3:";
+
+/// Host-independent identity persisted in Timeline text. The absolute file
+/// path is materialized only in a request clone immediately before sampling.
+pub fn get_prompt_blob_ref(content: &str) -> String {
+    format!(
+        "{PROMPT_BLOB_REF_PREFIX}{}",
+        blake3::hash(content.as_bytes()).to_hex()
+    )
+}
+
+pub(crate) type ImmutablePromptBlobs = BTreeMap<String, Vec<u8>>;
+
+pub(crate) fn referenced_prompt_blob_hashes(
+    items: &[ConversationItem],
+) -> io::Result<BTreeSet<String>> {
+    let mut hashes = BTreeSet::new();
+    for item in items {
+        let text = item.text_content();
+        for line in text.lines() {
+            let Some(hash) = line
+                .strip_suffix('\r')
+                .unwrap_or(line)
+                .strip_prefix(PROMPT_BLOB_REF_PREFIX)
+            else {
+                continue;
+            };
+            let valid_hash = hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            if !valid_hash {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Timeline contains an invalid prompt blob reference",
+                ));
+            }
+            hashes.insert(hash.to_string());
+        }
+    }
+    Ok(hashes)
+}
+
+pub(crate) fn verified_prompt_blob_bytes(session_dir: &Path, hash: &str) -> io::Result<Vec<u8>> {
+    let path = session_dir.join("prompts").join(format!("{hash}.txt"));
+    let bytes = std::fs::read(&path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Timeline references missing prompt blob {}", path.display()),
+            )
+        } else {
+            error
+        }
+    })?;
+    if blake3::hash(&bytes).to_hex().as_str() != hash {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("prompt blob hash mismatch at {}", path.display()),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Freeze the exact immutable prompt artifacts referenced by one inherited
+/// Surface. The returned bytes, rather than a source path, cross the entity
+/// creation boundary so child publication cannot race source relocation or
+/// deletion.
+pub(crate) fn freeze_prompt_blobs(
+    items: &[ConversationItem],
+    source_session_dir: &Path,
+) -> io::Result<ImmutablePromptBlobs> {
+    referenced_prompt_blob_hashes(items)?
+        .into_iter()
+        .map(|hash| {
+            verified_prompt_blob_bytes(source_session_dir, &hash).map(|bytes| (hash, bytes))
+        })
+        .collect()
+}
+
+/// Write the exact artifact set required by an initial Surface. Missing,
+/// extra, or content-mismatched blobs reject the staged session before it is
+/// atomically published.
+pub(crate) fn write_initial_prompt_blobs(
+    items: &[ConversationItem],
+    session_dir: &Path,
+    blobs: &ImmutablePromptBlobs,
+) -> io::Result<()> {
+    let expected = referenced_prompt_blob_hashes(items)?;
+    let actual = blobs.keys().cloned().collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "initial prompt blob set differs from Surface references: expected {expected:?}, got {actual:?}"
+            ),
+        ));
+    }
+    for (hash, bytes) in blobs {
+        if blake3::hash(bytes).to_hex().as_str() != hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("initial prompt blob {hash} does not match its content hash"),
+            ));
+        }
+        write_immutable_blob(
+            &session_dir.join("prompts").join(format!("{hash}.txt")),
+            bytes,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_timeline_prompt_blobs(
+    session_dir: &Path,
+    timeline: &chat_state::Timeline,
+) -> io::Result<usize> {
+    let mut hashes = BTreeSet::new();
+    for event in timeline.events() {
+        if let chat_state::TimelineEventKind::Messages(messages) = &event.kind {
+            hashes.extend(referenced_prompt_blob_hashes(&messages.items)?);
+        }
+    }
+    for hash in &hashes {
+        verified_prompt_blob_bytes(session_dir, hash)?;
+    }
+    Ok(hashes.len())
+}
+
+/// Resolve logical prompt refs into local paths in an ephemeral provider
+/// request. Timeline and Surface remain host-independent and unchanged.
+pub(crate) fn materialize_prompt_blob_refs(
+    items: &mut [ConversationItem],
+    session_dir: &Path,
+) -> io::Result<usize> {
+    let hashes = referenced_prompt_blob_hashes(items)?;
+    for hash in &hashes {
+        verified_prompt_blob_bytes(session_dir, hash)?;
+        let reference = format!("{PROMPT_BLOB_REF_PREFIX}{hash}");
+        let path = session_dir.join("prompts").join(format!("{hash}.txt"));
+        sampling_types::transform_conversation_cwd(items, &reference, &path.to_string_lossy());
+    }
+    Ok(hashes.len())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Create a directory tree and cross a durability barrier for every newly
+/// linked component. Concurrent creators are accepted.
+fn create_dir_all_durable(path: &Path) -> io::Result<()> {
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        cursor = cursor.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory has no existing ancestor",
+            )
+        })?;
+    }
+    for dir in missing.into_iter().rev() {
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        sync_directory(&dir)?;
+        if let Some(parent) = dir.parent() {
+            sync_directory(parent)?;
+        }
+    }
+    Ok(())
+}
+
+/// Create one immutable content-addressed blob.
+///
+/// A pre-existing path is accepted only when its bytes match the requested
+/// content. This makes hash collision, corruption, and accidental overwrite
+/// fail closed while allowing concurrent writers of the same blob.
+pub fn write_immutable_blob(path: &Path, content: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "immutable blob path has no parent",
+        )
+    })?;
+    create_dir_all_durable(parent)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(content)?;
+            file.sync_all()?;
+            crate::util::secure_file::ensure_owner_only_permissions(path)?;
+            sync_directory(parent)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read(path)?;
+            if existing != content {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "immutable blob hash collision or corruption at {}",
+                        path.display()
+                    ),
+                ));
+            }
+            crate::util::secure_file::ensure_owner_only_permissions(path)?;
+            sync_directory(parent)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -472,10 +627,10 @@ fn is_zero(value: &u64) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PendingCwdSwitchReminder {
     pub cwd_generation: u64,
     pub previous_cwd: String,
-    #[serde(alias = "cwd")]
     pub destination_cwd: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -483,6 +638,7 @@ pub struct PendingCwdSwitchReminder {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Summary {
     pub info: Info,
     /// Monotonic generation of the authoritative cwd in `info.cwd`.
@@ -494,15 +650,19 @@ pub struct Summary {
     /// Reminder staged for exactly-once append during relocation completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_cwd_switch_reminder: Option<PendingCwdSwitchReminder>,
-    /// Latest switch generation reflected in `num_chat_messages` bookkeeping.
+    /// Latest working-directory reminder generation committed to Timeline.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cwd_switch_bookkeeping_generation: u64,
-    pub session_summary: String,
+    /// Denormalized projection of the latest canonical `session/title` event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<chat_state::SessionTitleSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_event_seq: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub num_messages: usize,
-    #[serde(default)]
-    pub num_chat_messages: usize,
     pub current_model_id: acp::ModelId,
     /// Parent session ID if this session was forked from another session
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -510,15 +670,12 @@ pub struct Summary {
     /// Timestamp when this session was forked (only set for forked sessions)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_at: Option<DateTime<Utc>>,
-    /// Chat history format version:
-    /// - 0 (default): Legacy ChatRequestMessage format
-    /// - 1: ConversationItem format
-    #[serde(default)]
-    pub chat_format_version: u8,
+    /// Persisted session schema. Only [`SESSION_FORMAT_VERSION`] is accepted.
+    pub session_format_version: u8,
     /// Stable display path for forked sessions.
     ///
-    /// When set, the system prompt's `Workspace Path` and prompt metadata
-    /// paths show this value instead of the real worktree/overlay path
+    /// When set, the runtime snapshot and other model-facing path projections
+    /// show this value instead of the real worktree/overlay path
     /// (`info.cwd`). Persisted so the override survives session
     /// restore/reload without the caller needing to resend it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -526,18 +683,13 @@ pub struct Summary {
     /// What created this session: `"fork"`, `"subagent"`, `"subagent_fork"`, etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_kind: Option<String>,
-    /// How the session's initial context was bootstrapped: `"new"` or `"forked"`.
+    /// How the session's initial context was bootstrapped: `"new"`, `"forked"`,
+    /// or `"resumed"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_context_source: Option<String>,
     /// The parent prompt/turn ID that triggered this fork.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_parent_prompt_id: Option<String>,
-    /// Number of conversation items inherited from the parent session.
-    /// During compaction, items below this index are preserved as-is
-    /// (the "inherited prefix"). Only items after this boundary are
-    /// summarized. `None` means no inherited prefix (non-forked session).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inherited_prefix_len: Option<usize>,
     /// Visibility override. None = default for `session_kind`, Some = explicit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
@@ -559,20 +711,11 @@ pub struct Summary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grow_home: Option<String>,
     /// When the session last had content added (user or model messages).
-    /// Only advanced locally by `append_update` / `append_chat_message`;
+    /// Only advanced locally by durable conversation/update activity;
     /// never touched by remote registry operations or metadata-only writes.
     /// `None` for sessions created before this field was added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<DateTime<Utc>>,
-    /// LLM-generated session title persisted separately from `session_summary`.
-    /// When present, this is preferred for display over `session_summary`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generated_title: Option<String>,
-    /// True when `generated_title` was set by a manual `/rename` (vs auto LLM
-    /// title). Manual titles render inline in the prompt's top border on
-    /// resume.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub title_is_manual: bool,
     /// Human-readable label for the worktree directory (e.g. "nuke-v-tables").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_label: Option<String>,
@@ -594,6 +737,33 @@ pub struct Summary {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
+/// Immutable provenance supplied when a child session is first materialized.
+///
+/// Fork bootstrap may obtain the initial Surface from live memory or from an
+/// atomically copied durable session, but both paths publish the same lineage
+/// fields through the persistence layer. Callers never write `summary.json`
+/// directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionLineage {
+    pub session_kind: String,
+    pub context_source: String,
+    pub parent_session_id: String,
+    pub parent_prompt_id: Option<String>,
+    pub subagent_seed: chat_state::SubagentSeedEvent,
+}
+
+impl SessionLineage {
+    pub(crate) fn apply_to(&self, summary: &mut Summary) {
+        summary.session_kind = Some(self.session_kind.clone());
+        summary.fork_context_source = Some(self.context_source.clone());
+        summary.parent_session_id = Some(self.parent_session_id.clone());
+        summary.fork_parent_prompt_id = self.parent_prompt_id.clone();
+        if self.context_source != "new" && summary.forked_at.is_none() {
+            summary.forked_at = Some(chrono::Utc::now());
+        }
+    }
+}
+
 /// Current `grow_home` as a UTF-8 string, or `None` if the path isn't valid UTF-8.
 pub fn grow_home_string() -> Option<String> {
     crate::util::grow_home::grow_home()
@@ -606,6 +776,65 @@ pub fn default_model_id() -> acp::ModelId {
 }
 
 impl Summary {
+    pub fn validate_current_format(&self) -> io::Result<()> {
+        if self.session_format_version != SESSION_FORMAT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported session format {}; expected {} (legacy Chat snapshots are not loadable)",
+                    self.session_format_version, SESSION_FORMAT_VERSION
+                ),
+            ));
+        }
+        match (&self.title, &self.title_source, self.title_event_seq) {
+            (None, None, None) => {}
+            (Some(title), Some(source), Some(_)) => {
+                if title.trim().is_empty() || title.chars().count() > 160 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "summary contains an invalid session/title projection",
+                    ));
+                }
+                match source {
+                    chat_state::SessionTitleSource::User => {}
+                    chat_state::SessionTitleSource::Generated {
+                        sideband_id,
+                        result_seq,
+                    } => {
+                        if chat_state::validate_sideband_id(sideband_id).is_err()
+                            || *result_seq == 0
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "summary contains an invalid generated-title source",
+                            ));
+                        }
+                    }
+                    chat_state::SessionTitleSource::Fallback {
+                        sideband_id,
+                        terminal_seq,
+                    } => {
+                        if chat_state::validate_sideband_id(sideband_id).is_err()
+                            || *terminal_seq == 0
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "summary contains an invalid fallback-title source",
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "summary contains a partial session/title projection",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(info: &Info, model_id: acp::ModelId) -> std::io::Result<Self> {
         let git_metadata = workspace::session::git::resolve_persisted_session_git_metadata_sync(
             std::path::Path::new(&info.cwd),
@@ -616,20 +845,20 @@ impl Summary {
             previous_cwd: None,
             pending_cwd_switch_reminder: None,
             cwd_switch_bookkeeping_generation: 0,
-            session_summary: String::new(),
+            title: None,
+            title_source: None,
+            title_event_seq: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             num_messages: 0,
-            num_chat_messages: 0,
             current_model_id: model_id,
             parent_session_id: None,
             forked_at: None,
-            chat_format_version: CHAT_FORMAT_VERSION,
+            session_format_version: SESSION_FORMAT_VERSION,
             prompt_display_cwd: None,
             session_kind: None,
             fork_context_source: None,
             fork_parent_prompt_id: None,
-            inherited_prefix_len: None,
             hidden: None,
             source_workspace_dir: None,
             git_root_dir: git_metadata.git_root_dir,
@@ -638,8 +867,6 @@ impl Summary {
             head_branch: git_metadata.head_branch,
             grow_home: grow_home_string(),
             last_active_at: None,
-            generated_title: None,
-            title_is_manual: false,
             worktree_label: crate::session::worktree::lookup_worktree_label(&info.cwd),
             agent_name: None,
             sandbox_profile: None,
@@ -656,13 +883,8 @@ impl Summary {
         )
     }
 
-    /// Preferred display title: `generated_title` if non-empty, else `session_summary`.
     pub fn display_title(&self) -> &str {
-        self.generated_title
-            .as_deref()
-            .map(|t| t.trim())
-            .filter(|t| !t.is_empty())
-            .unwrap_or(&self.session_summary)
+        self.title.as_deref().map(str::trim).unwrap_or_default()
     }
 
     /// [`Self::display_title`] as an `Option`, `None` when blank.
@@ -671,19 +893,16 @@ impl Summary {
         (!title.is_empty()).then(|| title.to_string())
     }
 
-    /// The manually-`/rename`d title (trimmed), `None` for auto-generated or
-    /// blank titles. Binds to `generated_title` — the field `title_is_manual`
-    /// describes — never the `session_summary` display fallback, so a stale
-    /// flag over a blank manual title can't relabel an auto summary as
-    /// manual. When `Some`, it equals [`Self::display_title_opt`] (a
-    /// non-blank `generated_title` wins the display chain).
     pub fn manual_title_opt(&self) -> Option<String> {
-        self.title_is_manual
-            .then_some(self.generated_title.as_deref())
-            .flatten()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(str::to_owned)
+        matches!(
+            self.title_source,
+            Some(chat_state::SessionTitleSource::User)
+        )
+        .then_some(self.title.as_deref())
+        .flatten()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
     }
 
     /// Last-change time (unix millis): `last_active_at`, else `updated_at`.
@@ -785,15 +1004,13 @@ mod head_fields_tests {
     }
 
     #[test]
-    fn summary_deserializes_without_head_fields_backward_compat() {
-        // Simulate an old summary.json that lacks head_commit/head_branch.
+    fn current_summary_defaults_optional_head_fields() {
         let json = r#"{
-            "info": { "id": "old-session", "cwd": "/tmp" },
-            "session_summary": "",
+            "info": { "id": "current-session", "cwd": "/tmp" },
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
             "num_messages": 0,
-            "num_chat_messages": 0,
+            "session_format_version": 5,
             "current_model_id": "test-model"
         }"#;
         let summary: Summary = serde_json::from_str(json).unwrap();
@@ -802,14 +1019,13 @@ mod head_fields_tests {
     }
 
     #[test]
-    fn summary_relocation_metadata_is_backward_compatible() {
+    fn current_summary_defaults_optional_relocation_metadata() {
         let json = r#"{
-            "info": { "id": "old-session", "cwd": "/tmp" },
-            "session_summary": "",
+            "info": { "id": "current-session", "cwd": "/tmp" },
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
             "num_messages": 0,
-            "num_chat_messages": 0,
+            "session_format_version": 5,
             "current_model_id": "test-model"
         }"#;
         let summary: Summary = serde_json::from_str(json).unwrap();
@@ -868,14 +1084,13 @@ mod head_fields_tests {
         );
         assert_eq!(back.info.cwd, "/new");
 
-        let pending: PendingCwdSwitchReminder = serde_json::from_value(serde_json::json!({
+        let old_shape = serde_json::from_value::<PendingCwdSwitchReminder>(serde_json::json!({
             "cwd_generation": 2,
             "previous_cwd": "/old",
             "cwd": "/new",
             "content": "moved"
-        }))
-        .unwrap();
-        assert_eq!(pending.destination_cwd, "/new");
+        }));
+        assert!(old_shape.is_err(), "the old cwd field must be rejected");
     }
 
     #[test]
@@ -903,11 +1118,11 @@ mod head_fields_tests {
 }
 
 #[cfg(test)]
-mod generated_title_tests {
+mod title_projection_tests {
     use super::*;
 
     #[test]
-    fn summary_round_trips_generated_title_through_json() {
+    fn summary_round_trips_canonical_title_projection() {
         let mut summary = Summary::new(
             &Info {
                 id: acp::SessionId::new("test"),
@@ -916,15 +1131,22 @@ mod generated_title_tests {
             default_model_id(),
         )
         .unwrap();
-        summary.generated_title = Some("Refactor auth middleware".into());
+        summary.title = Some("Refactor auth middleware".into());
+        summary.title_source = Some(chat_state::SessionTitleSource::User);
+        summary.title_event_seq = Some(7);
         summary.worktree_label = Some("auth-refactor".into());
 
         let json = serde_json::to_string(&summary).unwrap();
         let deserialized: Summary = serde_json::from_str(&json).unwrap();
 
         assert_eq!(
-            deserialized.generated_title.as_deref(),
+            deserialized.title.as_deref(),
             Some("Refactor auth middleware")
+        );
+        assert_eq!(deserialized.title_event_seq, Some(7));
+        assert_eq!(
+            deserialized.title_source,
+            Some(chat_state::SessionTitleSource::User)
         );
         assert_eq!(
             deserialized.worktree_label.as_deref(),
@@ -933,24 +1155,7 @@ mod generated_title_tests {
     }
 
     #[test]
-    fn summary_deserializes_without_new_fields_backward_compat() {
-        let json = r#"{
-            "info": { "id": "old-session", "cwd": "/tmp" },
-            "session_summary": "first prompt text",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "num_messages": 5,
-            "num_chat_messages": 3,
-            "current_model_id": "test-model"
-        }"#;
-        let summary: Summary = serde_json::from_str(json).unwrap();
-        assert!(summary.generated_title.is_none());
-        assert!(summary.worktree_label.is_none());
-        assert_eq!(summary.session_summary, "first prompt text");
-    }
-
-    #[test]
-    fn summary_skips_none_generated_title_in_json() {
+    fn summary_skips_absent_title_projection_in_json() {
         let summary = Summary::new(
             &Info {
                 id: acp::SessionId::new("test"),
@@ -960,12 +1165,14 @@ mod generated_title_tests {
         )
         .unwrap();
         let json = serde_json::to_string(&summary).unwrap();
-        assert!(!json.contains("generated_title"));
+        assert!(!json.contains("\"title\""));
+        assert!(!json.contains("title_source"));
+        assert!(!json.contains("title_event_seq"));
         assert!(!json.contains("worktree_label"));
     }
 
     #[test]
-    fn summary_includes_generated_title_when_set() {
+    fn display_and_manual_title_follow_projection_source() {
         let mut summary = Summary::new(
             &Info {
                 id: acp::SessionId::new("test"),
@@ -974,170 +1181,49 @@ mod generated_title_tests {
             default_model_id(),
         )
         .unwrap();
-        summary.generated_title = Some("Fix K8s deployment".into());
-        let json = serde_json::to_string(&summary).unwrap();
-        assert!(json.contains("generated_title"));
-        assert!(json.contains("Fix K8s deployment"));
+        summary.title = Some("Manual Title".into());
+        summary.title_source = Some(chat_state::SessionTitleSource::User);
+        summary.title_event_seq = Some(3);
+        assert_eq!(summary.display_title(), "Manual Title");
+        assert_eq!(summary.manual_title_opt().as_deref(), Some("Manual Title"));
+        summary.title_source = Some(chat_state::SessionTitleSource::Generated {
+            sideband_id: uuid::Uuid::now_v7().to_string(),
+            result_seq: 2,
+        });
+        assert!(summary.manual_title_opt().is_none());
+        assert_eq!(summary.display_title_opt().as_deref(), Some("Manual Title"));
     }
 
     #[test]
-    fn summary_deserializes_with_all_fields_present() {
-        let json = r#"{
-            "info": { "id": "full-session", "cwd": "/tmp" },
-            "session_summary": "first prompt",
+    fn legacy_summary_owned_title_fields_are_rejected() {
+        let legacy = serde_json::json!({
+            "info": { "id": "legacy", "cwd": "/tmp" },
+            "session_summary": "old summary",
+            "generated_title": "old title",
+            "title_is_manual": true,
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
-            "num_messages": 10,
-            "num_chat_messages": 5,
-            "current_model_id": "test-model",
-            "head_branch": "feature/xyz",
-            "git_root_dir": "/home/user/myrepo",
-            "generated_title": "Implement XYZ feature",
-            "worktree_label": "xyz-feature"
-        }"#;
-        let summary: Summary = serde_json::from_str(json).unwrap();
+            "num_messages": 0,
+            "session_format_version": 2,
+            "current_model_id": "model"
+        });
+        assert!(serde_json::from_value::<Summary>(legacy).is_err());
+    }
+
+    #[test]
+    fn partial_title_projection_fails_current_format_validation() {
+        let mut summary = Summary::new(
+            &Info {
+                id: acp::SessionId::new("partial"),
+                cwd: "/tmp".into(),
+            },
+            default_model_id(),
+        )
+        .unwrap();
+        summary.title = Some("orphan cache".into());
         assert_eq!(
-            summary.generated_title.as_deref(),
-            Some("Implement XYZ feature")
-        );
-        assert_eq!(summary.worktree_label.as_deref(), Some("xyz-feature"));
-        assert_eq!(summary.head_branch.as_deref(), Some("feature/xyz"));
-        assert_eq!(summary.git_root_dir.as_deref(), Some("/home/user/myrepo"));
-    }
-
-    // ── display_title direct tests ──────────────────────────────────────
-
-    #[test]
-    fn display_title_returns_generated_title_when_set() {
-        let mut summary = Summary::new(
-            &Info {
-                id: acp::SessionId::new("test"),
-                cwd: "/tmp".into(),
-            },
-            default_model_id(),
-        )
-        .unwrap();
-        summary.generated_title = Some("Refactor auth layer".into());
-        assert_eq!(summary.display_title(), "Refactor auth layer");
-    }
-
-    #[test]
-    fn display_title_falls_back_on_empty_generated_title() {
-        let mut summary = Summary::new(
-            &Info {
-                id: acp::SessionId::new("test"),
-                cwd: "/tmp".into(),
-            },
-            default_model_id(),
-        )
-        .unwrap();
-        summary.session_summary = "first prompt fallback".into();
-        summary.generated_title = Some(String::new());
-        assert_eq!(summary.display_title(), "first prompt fallback");
-    }
-
-    #[test]
-    fn display_title_falls_back_on_none_generated_title() {
-        let mut summary = Summary::new(
-            &Info {
-                id: acp::SessionId::new("test"),
-                cwd: "/tmp".into(),
-            },
-            default_model_id(),
-        )
-        .unwrap();
-        summary.session_summary = "session summary fallback".into();
-        summary.generated_title = None;
-        assert_eq!(summary.display_title(), "session summary fallback");
-    }
-
-    // ── title_is_manual / manual_title_opt ──────────────────────────────
-
-    #[test]
-    fn title_is_manual_round_trips_through_json() {
-        let mut summary = Summary::new(
-            &Info {
-                id: acp::SessionId::new("test"),
-                cwd: "/tmp".into(),
-            },
-            default_model_id(),
-        )
-        .unwrap();
-        summary.generated_title = Some("Manual Title".into());
-        summary.title_is_manual = true;
-
-        let json = serde_json::to_string(&summary).unwrap();
-        assert!(json.contains("title_is_manual"));
-        let deserialized: Summary = serde_json::from_str(&json).unwrap();
-
-        assert!(deserialized.title_is_manual);
-        assert_eq!(
-            deserialized.manual_title_opt().as_deref(),
-            Some("Manual Title")
-        );
-    }
-
-    #[test]
-    fn title_is_manual_defaults_false_and_skips_when_unset() {
-        // Old summary.json without the field: default false, so pre-existing
-        // renames show no border title until renamed again.
-        let json = r#"{
-            "info": { "id": "old-session", "cwd": "/tmp" },
-            "session_summary": "first prompt text",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "num_messages": 5,
-            "num_chat_messages": 3,
-            "current_model_id": "test-model",
-            "generated_title": "Old Rename"
-        }"#;
-        let summary: Summary = serde_json::from_str(json).unwrap();
-        assert!(!summary.title_is_manual);
-        assert!(summary.manual_title_opt().is_none());
-        assert_eq!(summary.display_title_opt().as_deref(), Some("Old Rename"));
-
-        // And false is omitted on write, keeping old files byte-stable.
-        let json = serde_json::to_string(&summary).unwrap();
-        assert!(!json.contains("title_is_manual"));
-    }
-
-    #[test]
-    fn manual_title_opt_none_for_auto_generated_title() {
-        let mut summary = Summary::new(
-            &Info {
-                id: acp::SessionId::new("test"),
-                cwd: "/tmp".into(),
-            },
-            default_model_id(),
-        )
-        .unwrap();
-        summary.generated_title = Some("Auto Title".into());
-
-        assert!(summary.manual_title_opt().is_none());
-        assert_eq!(summary.display_title_opt().as_deref(), Some("Auto Title"));
-    }
-
-    /// A stale `title_is_manual` over a blank `generated_title` (e.g. written
-    /// by an old client before the ext boundary rejected blank renames) must
-    /// not relabel the `session_summary` display fallback as manual.
-    #[test]
-    fn manual_title_opt_ignores_stale_flag_over_blank_generated_title() {
-        let mut summary = Summary::new(
-            &Info {
-                id: acp::SessionId::new("test"),
-                cwd: "/tmp".into(),
-            },
-            default_model_id(),
-        )
-        .unwrap();
-        summary.session_summary = "auto first-prompt summary".into();
-        summary.generated_title = Some("   ".into());
-        summary.title_is_manual = true;
-
-        assert!(summary.manual_title_opt().is_none());
-        assert_eq!(
-            summary.display_title_opt().as_deref(),
-            Some("auto first-prompt summary")
+            summary.validate_current_format().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
         );
     }
 }
@@ -1148,15 +1234,10 @@ pub struct PersistenceHandle {
     noop: bool,
 }
 
-fn actor_channel() -> (
-    PersistenceHandle,
-    mpsc::UnboundedReceiver<PersistenceMsg>,
-    mpsc::WeakUnboundedSender<PersistenceMsg>,
-) {
+fn actor_channel() -> (PersistenceHandle, mpsc::UnboundedReceiver<PersistenceMsg>) {
     let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
-    let weak = tx.downgrade();
     let handle = PersistenceHandle { tx, noop: false };
-    (handle, rx, weak)
+    (handle, rx)
 }
 
 #[derive(Debug)]
@@ -1237,6 +1318,36 @@ impl PersistenceHandle {
             })?
             .map_err(DurableAppendError::from)
     }
+
+    /// Append one already-validated canonical Timeline event after all older
+    /// persistence messages and wait for the durability acknowledgement.
+    pub(crate) async fn append_timeline_event_durably(
+        &self,
+        event: chat_state::TimelineEvent,
+    ) -> io::Result<()> {
+        if self.noop {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable Timeline append is unsupported by a no-op persistence handle",
+            ));
+        }
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(PersistenceMsg::TimelineDurablyAndAck { event, respond_to })
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "session persistence actor stopped before Timeline append dispatch",
+                )
+            })?;
+        response.await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "session persistence actor stopped before Timeline append acknowledgement",
+            )
+        })??;
+        Ok(())
+    }
 }
 
 enum PendingAppendOutcome {
@@ -1251,13 +1362,10 @@ struct SessionPersistence {
     /// Pending ACP notification for merging consecutive text chunks
     pending_notification: Option<acp::SessionNotification>,
     rx: mpsc::UnboundedReceiver<PersistenceMsg>,
-    /// Session title generation lifecycle.
-    summary: crate::session::summary::SummaryGenerator,
-    /// Client gateway for `SessionSummaryGenerated` notifications. Used to
-    /// announce an auto-generated title only once it has actually been adopted
-    /// (see the `GeneratedTitle` handler), so a title rejected for racing a
-    /// manual `/rename` never reaches the client. `None` for the subagent
-    /// variant, whose lifecycle notifications are handled by the coordinator.
+    /// Client gateway for canonical ACP `SessionInfoUpdate.title`
+    /// notifications. A title is announced only after its Timeline event was
+    /// durably adopted and projected. `None` for subagents, whose lifecycle
+    /// notifications are handled by the coordinator.
     gateway: Option<GatewaySender>,
 }
 
@@ -1461,39 +1569,79 @@ impl SessionPersistence {
                     let _ = respond_to.send(result);
                 }
                 PersistenceMsg::Timeline(event) => {
-                    if let Err(error) = self.storage.append_timeline_event(&self.info, &event).await
-                    {
-                        tracing::warn!(%error, seq = event.seq.get(), "failed to append timeline event");
+                    let refreshes_session_index = matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Messages(_)
+                            | chat_state::TimelineEventKind::Turn(
+                                chat_state::TurnEvent::Started { .. }
+                            )
+                            | chat_state::TimelineEventKind::SessionTitle(_)
+                            | chat_state::TimelineEventKind::Subagent(_)
+                            | chat_state::TimelineEventKind::SubagentResult(_)
+                    );
+                    match self.storage.append_timeline_event(&self.info, &event).await {
+                        Ok(()) => {
+                            if refreshes_session_index {
+                                crate::session::storage::search::notify_session_updated(
+                                    &self.info.id.to_string(),
+                                    &self.info.cwd,
+                                );
+                            }
+                            if let chat_state::TimelineEventKind::SessionTitle(title) = &event.kind
+                            {
+                                crate::session::summary::notify_client(
+                                    &self.gateway,
+                                    &self.info,
+                                    event.seq.get(),
+                                    title,
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, seq = event.seq.get(), "failed to append timeline event");
+                        }
                     }
                 }
                 PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
+                    let refreshes_session_index = matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Messages(_)
+                            | chat_state::TimelineEventKind::Turn(
+                                chat_state::TurnEvent::Started { .. }
+                            )
+                            | chat_state::TimelineEventKind::SessionTitle(_)
+                            | chat_state::TimelineEventKind::Subagent(_)
+                            | chat_state::TimelineEventKind::SubagentResult(_)
+                    );
                     let result = self
                         .storage
                         .append_timeline_event_durable(&self.info, &event)
                         .await;
+                    if result.is_ok() && refreshes_session_index {
+                        crate::session::storage::search::notify_session_updated(
+                            &self.info.id.to_string(),
+                            &self.info.cwd,
+                        );
+                    }
+                    if result.is_ok()
+                        && let chat_state::TimelineEventKind::SessionTitle(title) = &event.kind
+                    {
+                        crate::session::summary::notify_client(
+                            &self.gateway,
+                            &self.info,
+                            event.seq.get(),
+                            title,
+                        );
+                    }
                     let _ = respond_to.send(result);
                 }
-                PersistenceMsg::Chat(chat_msg) => {
-                    if let Err(e) = self
+                PersistenceMsg::SidebandDurablyAndAck { event, respond_to } => {
+                    self.flush_pending().await;
+                    let result = self
                         .storage
-                        .append_chat_message(&self.info, &chat_msg)
-                        .await
-                    {
-                        tracing::warn!(?e, "failed to write chat message");
-                    }
-                }
-                PersistenceMsg::ReplaceChatHistory(messages) => {
-                    tracing::info!(
-                        num_messages = messages.len(),
-                        "Replacing chat history (compaction)"
-                    );
-                    if let Err(e) = self
-                        .storage
-                        .replace_chat_history(&self.info, &messages)
-                        .await
-                    {
-                        tracing::warn!(?e, "failed to replace chat history");
-                    }
+                        .append_sideband_event_durable(&self.info, &event)
+                        .await;
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::CurrentModel {
                     model_id,
@@ -1512,23 +1660,6 @@ impl SessionPersistence {
                     {
                         tracing::warn!(?e, "failed to update current model");
                     }
-                }
-                PersistenceMsg::PlanState(state) => {
-                    if let Err(e) = self.storage.write_plan_state(&self.info, &state).await {
-                        tracing::warn!(?e, "failed to write plan state");
-                    }
-                }
-                PersistenceMsg::SessionControl(state) => {
-                    if let Err(e) = self.storage.write_session_control(&self.info, &state).await {
-                        tracing::warn!(?e, "failed to write session control state");
-                    }
-                }
-                PersistenceMsg::SessionControlAndAck { state, respond_to } => {
-                    let result = self.storage.write_session_control(&self.info, &state).await;
-                    if let Err(e) = &result {
-                        tracing::warn!(?e, "failed to durably write session control state");
-                    }
-                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::WorkflowRunState(manifest) => {
                     if let Err(error) = self
@@ -1561,56 +1692,6 @@ impl SessionPersistence {
                         tracing::warn!(%run_id, ?e, "failed to delete workflow run state");
                     }
                 }
-                PersistenceMsg::ContentChunk(content_chunks) => {
-                    let content_part = content_chunks
-                        .content_chunks
-                        .into_iter()
-                        .filter_map(|content_chunk| match content_chunk {
-                            acp::ContentBlock::Text(text) => Some(text.text),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.summary.update(content_part);
-
-                    // Notify session search index so this turn becomes searchable
-                    crate::session::storage::search::notify_session_updated(
-                        &self.info.id.to_string(),
-                        &self.info.cwd,
-                    );
-                }
-                PersistenceMsg::GeneratedTitle(title) => {
-                    // Auto-generated titles must never overwrite a title the
-                    // user set via `/rename`. `set_generated_title_if_absent`
-                    // writes only when the session still has no title (checked
-                    // atomically under the summary lock) and reports whether it
-                    // did, so a manual rename that raced this generation wins
-                    // and its title is not clobbered locally or on remotes.
-                    match self
-                        .storage
-                        .set_generated_title_if_absent(&self.info, title.clone())
-                        .await
-                    {
-                        Ok(true) => {
-                            // Announce to clients only now that the title is
-                            // adopted, so a title rejected for racing a manual
-                            // `/rename` never overwrites the client's title.
-                            crate::session::summary::notify_client(
-                                &self.gateway,
-                                &self.info,
-                                &title,
-                            );
-                        }
-                        Ok(false) => {
-                            tracing::debug!(
-                                "skipped auto-generated title; session already has a title"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(?e, "failed to persist generated session title");
-                        }
-                    }
-                }
                 PersistenceMsg::RewindPoint(point) => {
                     if let Err(e) = self.storage.append_rewind_point(&self.info, &point).await {
                         tracing::warn!(?e, "failed to write rewind point");
@@ -1634,25 +1715,6 @@ impl SessionPersistence {
                         tracing::warn!(?e, target_index, "failed to merge rewind points");
                     }
                 }
-                PersistenceMsg::Signals(signals) => {
-                    if let Err(e) = self.storage.write_signals(&self.info, &signals).await {
-                        tracing::warn!(?e, "failed to write session signals");
-                    }
-                }
-                PersistenceMsg::AnnouncementState(state) => {
-                    if let Err(e) = self
-                        .storage
-                        .write_announcement_state(&self.info, &state)
-                        .await
-                    {
-                        tracing::warn!(?e, "failed to write announcement state");
-                    }
-                }
-                PersistenceMsg::Btw(entry) => {
-                    if let Err(e) = self.storage.append_btw(&self.info, &entry).await {
-                        tracing::warn!(?e, "failed to write btw entry");
-                    }
-                }
                 PersistenceMsg::GitHead { commit, branch } => {
                     if let Err(e) = self
                         .storage
@@ -1660,29 +1722,6 @@ impl SessionPersistence {
                         .await
                     {
                         tracing::warn!(?e, "failed to persist git HEAD");
-                    }
-                }
-                PersistenceMsg::CompactionRequest(request) => {
-                    if let Err(e) = self
-                        .storage
-                        .write_compaction_request(&self.info, &request)
-                        .await
-                    {
-                        tracing::warn!(?e, "failed to write compaction request artifact");
-                    }
-                }
-                PersistenceMsg::RecapRequest(request) => {
-                    if let Err(e) = self.storage.write_recap_request(&self.info, &request).await {
-                        tracing::warn!(?e, "failed to write recap request artifact");
-                    }
-                }
-                PersistenceMsg::CompactionSegment(segment) => {
-                    if let Err(e) = self
-                        .storage
-                        .write_compaction_segment(&self.info, &segment)
-                        .await
-                    {
-                        tracing::warn!(?e, "failed to write compaction segment");
                     }
                 }
             }
@@ -1782,9 +1821,7 @@ const WORKTREE_TOUCH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 pub(crate) async fn new(
     info: &Info,
     model_id: acp::ModelId,
-    sampling_client: OaiCompatClient,
     gateway: Option<GatewaySender>,
-    session_summary_model: String,
 ) -> io::Result<PersistenceHandle> {
     let root_dir = grow_home();
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
@@ -1795,11 +1832,13 @@ pub(crate) async fn new(
 
     // Update model if different
     if summary.current_model_id != model_id {
-        storage.update_current_model(info, &model_id).await?;
+        storage
+            .update_current_model_and_agent(info, &model_id, None, None)
+            .await?;
         summary.current_model_id = model_id;
     }
 
-    let (handle, rx, summary_tx) = actor_channel();
+    let (handle, rx) = actor_channel();
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
@@ -1810,13 +1849,6 @@ pub(crate) async fn new(
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            summary: crate::session::summary::SummaryGenerator::new(
-                crate::session::summary::SummaryConfig {
-                    sampling_client,
-                    model: session_summary_model,
-                    persistence_tx: summary_tx,
-                },
-            ),
             gateway,
         };
         persistence.run().await;
@@ -1827,166 +1859,87 @@ pub(crate) async fn new(
 
 /// Create a persistence handle that writes to an explicit directory on disk.
 ///
-/// Used for subagent child sessions whose files live under the parent's
-/// session directory: `{parent_session_dir}/subagents/{subagent_id}/`.
+/// Used for subagent child sessions that need lineage-aware initialization at
+/// their already-resolved canonical session directory.
 ///
 /// Unlike [`new()`], this:
 /// - Uses `JsonlStorageAdapter::with_explicit_session_dir()` to bypass
 ///   the standard `{root}/sessions/{cwd}/{id}/` path computation.
 /// - Skips gateway (lifecycle notifications are handled by the coordinator).
-pub async fn new_with_explicit_dir(
+pub(crate) async fn new_with_explicit_dir(
     info: &Info,
     target_dir: PathBuf,
     model_id: acp::ModelId,
-    sampling_client: OaiCompatClient,
-    session_summary_model: String,
-) -> io::Result<PersistenceHandle> {
-    let summary_path = target_dir.join("summary.json");
-    let storage: Box<dyn StorageAdapter> =
-        Box::new(JsonlStorageAdapter::with_explicit_session_dir(target_dir));
-
-    // Initialize session in storage (creates summary.json, etc.)
-    let mut summary = storage.init_session(info, model_id.clone()).await?;
+    lineage: SessionLineage,
+    initial_surface: Vec<ConversationItem>,
+    initial_prompt_blobs: ImmutablePromptBlobs,
+) -> io::Result<(PersistenceHandle, Vec<chat_state::TimelineEvent>)> {
+    let storage = JsonlStorageAdapter::with_explicit_session_dir(target_dir);
+    let mut initial_summary = Summary::new(info, model_id.clone())?;
+    lineage.apply_to(&mut initial_summary);
+    let (mut summary, timeline_events) = storage
+        .init_session_with_summary(
+            info,
+            initial_summary,
+            initial_surface,
+            initial_prompt_blobs,
+            vec![chat_state::TimelineEventKind::SubagentSeed(
+                lineage.subagent_seed,
+            )],
+        )
+        .await?;
+    let mut timeline = chat_state::Timeline::from_events(timeline_events)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     touch_worktree_for_session(info).await;
-    if summary.session_kind.is_none() {
-        summary.session_kind = Some("subagent".to_string());
-    }
-    let summary_json = serde_json::to_vec_pretty(&summary)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&summary_path, summary_json)?;
 
     if summary.current_model_id != model_id {
-        storage.update_current_model(info, &model_id).await?;
+        storage
+            .update_current_model_and_agent(info, &model_id, None, None)
+            .await?;
         summary.current_model_id = model_id;
     }
 
-    let (handle, rx, summary_tx) = actor_channel();
+    let (handle, rx) = actor_channel();
 
     let info_clone = info.clone();
-    let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
+    let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
     tokio::task::spawn(async move {
         let persistence = SessionPersistence {
             info: info_clone,
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            summary: crate::session::summary::SummaryGenerator::new(
-                crate::session::summary::SummaryConfig {
-                    sampling_client,
-                    model: session_summary_model,
-                    persistence_tx: summary_tx,
-                },
-            ),
             gateway: None,
         };
         persistence.run().await;
     });
 
-    Ok(handle)
+    Ok((handle, timeline.events().to_vec()))
 }
 
-pub struct PersistedInfo {
-    pub summary: Summary,
-    pub timeline_events: Vec<chat_state::TimelineEvent>,
-    pub chat_history: Vec<ConversationItem>,
-    /// All session updates (ACP updates and Grow extension updates) in chronological order
-    pub updates: Vec<SessionUpdate>,
-    pub plan_state: Option<TodoState>,
-    pub session_control: Option<crate::session::control::SessionControlSnapshot>,
-    pub session_control_rejected: bool,
-    pub rewind_points: Vec<RewindPoint>,
-    /// Persisted session signals (None for old sessions without signals file)
-    pub signals: Option<SessionSignals>,
-    pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
-}
-
-/// Same as PersistedInfo but without updates - for memory efficiency when streaming
+/// Canonical resume payload. Client updates and rewind snapshots remain lazy.
 pub struct PersistedInfoLight {
     pub summary: Summary,
     pub timeline_events: Vec<chat_state::TimelineEvent>,
-    pub chat_history: Vec<ConversationItem>,
-    pub plan_state: Option<TodoState>,
-    pub session_control: Option<crate::session::control::SessionControlSnapshot>,
+    pub control_snapshot: Option<crate::session::control::SessionControlSnapshot>,
     /// Path to updates file for streaming reads
     pub updates_file_path: Option<std::path::PathBuf>,
     /// Adapter-owned path to `rewind_points.jsonl` for the session's
     /// `FileStateTracker` to load lazily. `None` if the backend doesn't persist
     /// rewind points to a streamable file.
     pub rewind_points_file_path: Option<std::path::PathBuf>,
-    /// Persisted session signals (None for old sessions without signals file)
+    /// Latest session-signals projection folded from Timeline observations.
     pub signals: Option<SessionSignals>,
-    /// Persisted announcement tracking state (None for sessions before this feature)
+    /// Latest announcement projection folded from Timeline observations.
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
-    pub session_control_rejected: bool,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
-#[expect(dead_code, reason = "wired when session restore flow calls load")]
-pub(crate) async fn load(
-    info: &Info,
-    sampling_client: OaiCompatClient,
-    gateway: Option<GatewaySender>,
-    session_summary_model: String,
-) -> io::Result<(PersistedInfo, PersistenceHandle)> {
-    let root_dir = grow_home();
-    let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
-
-    let persisted = storage.load_session(info).await?;
-    let loaded_info = info.clone();
-    // Touch on load too: resuming must reset the worktree's gc expiry clock.
-    touch_worktree_for_session(&loaded_info).await;
-
-    let persisted_info = PersistedInfo {
-        summary: persisted.summary,
-        timeline_events: persisted.timeline_events,
-        chat_history: persisted.chat_history,
-        updates: persisted.updates,
-        plan_state: persisted.plan_state,
-        session_control: persisted.session_control,
-        session_control_rejected: persisted.session_control_rejected,
-        rewind_points: persisted.rewind_points,
-        signals: persisted.signals,
-        workflow_runs: persisted.workflow_runs,
-    };
-
-    let (handle, rx, summary_tx) = actor_channel();
-
-    let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
-
-    let has_title = !persisted_info.summary.display_title().is_empty();
-    tokio::task::spawn(async move {
-        let mut summary_gen = crate::session::summary::SummaryGenerator::new(
-            crate::session::summary::SummaryConfig {
-                sampling_client,
-                model: session_summary_model,
-                persistence_tx: summary_tx,
-            },
-        );
-        if has_title {
-            summary_gen.mark_done();
-        }
-        let persistence = SessionPersistence {
-            info: loaded_info,
-            storage: storage.clone(),
-            pending_notification: None,
-            rx,
-            summary: summary_gen,
-            gateway,
-        };
-        persistence.run().await;
-    });
-
-    Ok((persisted_info, handle))
-}
-
-/// Like `load`, but doesn't load updates into memory.
-/// Instead, provides the path to the updates file for streaming reads.
-/// Use this for memory-efficient session loading when replaying updates.
+/// Load canonical session state without materializing the replay stream or
+/// rewind snapshots. Those projections are streamed or loaded on demand.
 pub(crate) async fn load_light(
     info: &Info,
-    sampling_client: OaiCompatClient,
     gateway: Option<GatewaySender>,
-    session_summary_model: String,
 ) -> io::Result<(PersistedInfoLight, PersistenceHandle)> {
     let root_dir = grow_home();
     let storage: Box<dyn StorageAdapter> =
@@ -2003,39 +1956,24 @@ pub(crate) async fn load_light(
     let persisted_info = PersistedInfoLight {
         summary: persisted.summary,
         timeline_events: persisted.timeline_events,
-        chat_history: persisted.chat_history,
-        plan_state: persisted.plan_state,
-        session_control: persisted.session_control,
+        control_snapshot: persisted.control_snapshot,
         updates_file_path,
         rewind_points_file_path,
         signals: persisted.signals,
         announcement_state: persisted.announcement_state,
-        session_control_rejected: persisted.session_control_rejected,
         workflow_runs: persisted.workflow_runs,
     };
 
-    let (handle, rx, summary_tx) = actor_channel();
+    let (handle, rx) = actor_channel();
 
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
 
-    let has_title = !persisted_info.summary.display_title().is_empty();
     tokio::task::spawn(async move {
-        let mut summary_gen = crate::session::summary::SummaryGenerator::new(
-            crate::session::summary::SummaryConfig {
-                sampling_client,
-                model: session_summary_model,
-                persistence_tx: summary_tx,
-            },
-        );
-        if has_title {
-            summary_gen.mark_done();
-        }
         let persistence = SessionPersistence {
             info: loaded_info,
             storage: storage.clone(),
             pending_notification: None,
             rx,
-            summary: summary_gen,
             gateway,
         };
         persistence.run().await;
@@ -2414,22 +2352,19 @@ mod agent_name_persistence_tests {
     }
 
     #[test]
-    fn summary_deserializes_without_agent_name_backward_compat() {
-        // Simulate an old summary.json that lacks agent_name — must still
-        // deserialize successfully (serde default → None).
-        let json = r#"{
-            "info": { "id": "old-session", "cwd": "/tmp" },
-            "session_summary": "",
+    fn current_summary_defaults_optional_agent_name() {
+        let json = serde_json::json!({
+            "info": { "id": "current-session", "cwd": "/tmp" },
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
             "num_messages": 0,
-            "num_chat_messages": 0,
+            "session_format_version": SESSION_FORMAT_VERSION,
             "current_model_id": "test-model"
-        }"#;
-        let summary: Summary = serde_json::from_str(json).unwrap();
+        });
+        let summary: Summary = serde_json::from_value(json).unwrap();
         assert!(
             summary.agent_name.is_none(),
-            "old summaries without agent_name should deserialize as None"
+            "current summaries without agent_name should deserialize as None"
         );
     }
 
@@ -2492,22 +2427,23 @@ mod agent_name_persistence_tests {
     #[test]
     fn summary_with_agent_name_in_full_json() {
         // Verify agent_name deserializes correctly alongside all other fields.
-        let json = r#"{
+        let json = serde_json::json!({
             "info": { "id": "full-session", "cwd": "/tmp" },
-            "session_summary": "test session",
+            "title": "Fix editor mode",
+            "title_source": { "kind": "user" },
+            "title_event_seq": 4,
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
             "num_messages": 10,
-            "num_chat_messages": 5,
+            "session_format_version": SESSION_FORMAT_VERSION,
             "current_model_id": "cursor-model",
             "agent_name": "cursor",
-            "generated_title": "Fix editor mode",
             "head_branch": "main"
-        }"#;
-        let summary: Summary = serde_json::from_str(json).unwrap();
+        });
+        let summary: Summary = serde_json::from_value(json).unwrap();
         assert_eq!(summary.agent_name.as_deref(), Some("cursor"));
         assert_eq!(summary.current_model_id.0.as_ref(), "cursor-model");
-        assert_eq!(summary.generated_title.as_deref(), Some("Fix editor mode"));
+        assert_eq!(summary.display_title(), "Fix editor mode");
     }
 }
 
@@ -2588,7 +2524,7 @@ mod session_exists_tests {
 
 #[cfg(test)]
 mod find_summary_by_session_id_tests {
-    use super::find_summary_by_session_id_in_root;
+    use super::{SESSION_FORMAT_VERSION, find_summary_by_session_id_in_root};
     use std::fs;
     use tempfile::TempDir;
 
@@ -2601,10 +2537,10 @@ mod find_summary_by_session_id_tests {
     fn minimal_summary(head_commit: &str, head_branch: &str) -> String {
         serde_json::json!({
             "info": { "id": "test-session", "cwd": "/tmp" },
-            "session_summary": "",
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
             "num_messages": 0,
+            "session_format_version": SESSION_FORMAT_VERSION,
             "current_model_id": "grow-3",
             "head_commit": head_commit,
             "head_branch": head_branch
@@ -2659,16 +2595,16 @@ mod find_summary_by_session_id_tests {
 #[cfg(test)]
 mod resumed_sandbox_profile_tests {
     use super::{
-        RelocationError, RelocationView, most_recent_local_summary_for_cwd_in_root,
-        most_recent_local_summary_for_cwd_in_view, read_summary_from_dir,
-        resumed_session_sandbox_profile_in_root,
+        RelocationError, RelocationView, SESSION_FORMAT_VERSION,
+        most_recent_local_summary_for_cwd_in_root, most_recent_local_summary_for_cwd_in_view,
+        read_summary_from_dir, resumed_session_sandbox_profile_in_root,
     };
     use std::{fs, io};
     use tempfile::TempDir;
 
     /// Write a session summary under the *encoded* cwd dir (matching how the
     /// resume helpers locate sessions). `sandbox_profile` is included only when
-    /// `Some`, mirroring older summaries that predate the field.
+    /// `Some`.
     fn write_session(
         root: &std::path::Path,
         cwd: &str,
@@ -2683,10 +2619,10 @@ mod resumed_sandbox_profile_tests {
         fs::create_dir_all(&dir).unwrap();
         let mut summary = serde_json::json!({
             "info": { "id": session_id, "cwd": cwd },
-            "session_summary": "",
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": updated_at,
             "num_messages": 0,
+            "session_format_version": SESSION_FORMAT_VERSION,
             "current_model_id": "grow-3",
         });
         if let Some(la) = last_active_at {
@@ -2725,7 +2661,7 @@ mod resumed_sandbox_profile_tests {
     fn explicit_id_without_persisted_profile_is_none() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("sessions");
-        // Older session, created before the field existed.
+        // A current-format session may intentionally omit a sandbox profile.
         write_session(
             &root,
             "/work/a",
@@ -3173,14 +3109,10 @@ mod actor_lifetime_tests {
 
     #[tokio::test]
     async fn dropping_the_session_handle_closes_the_actor_channel() {
-        let (handle, mut rx, summary_tx) = actor_channel();
+        let (handle, mut rx) = actor_channel();
 
         drop(handle);
 
-        assert!(
-            summary_tx.upgrade().is_none(),
-            "the generator's sender must not keep the channel open"
-        );
         assert!(
             rx.recv().await.is_none(),
             "the actor's receive loop must end once the session drops its handle"

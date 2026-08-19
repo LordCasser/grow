@@ -10,7 +10,7 @@ use agent::plugins::git_install::{self, InstallSource};
 use agent::plugins::install_registry::{
     InstallError, InstallKind, InstallRegistry, InstalledRepo, MarketplaceProvenance, RepoPlugin,
 };
-use agent::plugins::manifest::{ManifestLoadResult, load_manifest, name_from_dirname};
+use agent::plugins::manifest::load_manifest;
 
 use crate::types::{MarketplaceEntry, MarketplaceRelativePath};
 
@@ -658,33 +658,12 @@ fn discover_plugins_in_dir(
 }
 
 fn try_load_plugin(dir: &Path, subdir: Option<&str>) -> Option<StagedPlugin> {
-    match load_manifest(dir) {
-        Ok(ManifestLoadResult::Found(manifest)) => {
-            return Some(StagedPlugin {
-                name: manifest.name.clone(),
-                subdir: subdir.map(|s| s.to_string()),
-                version: manifest.version.clone(),
-            });
-        }
-        Ok(ManifestLoadResult::NotFound) => {}
-        Err(_) => {}
-    }
-
-    let has_skills = dir.join("skills").is_dir();
-    let has_agents = dir.join("agents").is_dir();
-    let has_mcp = dir.join(".mcp.json").is_file();
-    let has_hooks = dir.join("hooks").join("hooks.json").is_file();
-
-    if has_skills || has_agents || has_mcp || has_hooks {
-        let name = name_from_dirname(dir)?;
-        Some(StagedPlugin {
-            name,
-            subdir: subdir.map(|s| s.to_string()),
-            version: None,
-        })
-    } else {
-        None
-    }
+    let manifest = load_manifest(dir).ok()?;
+    Some(StagedPlugin {
+        name: manifest.name.clone(),
+        subdir: subdir.map(str::to_owned),
+        version: manifest.version.clone(),
+    })
 }
 
 fn plugins_to_repo_plugins(plugins: &[StagedPlugin]) -> HashMap<String, RepoPlugin> {
@@ -914,6 +893,7 @@ mod tests {
             write_plugin(marketplace.path(), "demo", "1.0.0", "old");
             let repo_key = install_test_plugin(registry, marketplace.path(), "demo");
             let mut entry = crate::scan_marketplace(marketplace.path())
+                .unwrap()
                 .entries
                 .into_iter()
                 .find(|p| p.relative_path == "plugins/demo")
@@ -958,11 +938,19 @@ mod tests {
 
     fn write_plugin(marketplace: &Path, name: &str, version: &str, marker: &str) {
         let plugin_dir = marketplace.join("plugins").join(name);
-        let manifest_dir = plugin_dir.join(".claude-plugin");
-        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
-            manifest_dir.join("plugin.json"),
+            plugin_dir.join("plugin.json"),
             format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+        )
+        .unwrap();
+        let index_dir = marketplace.join(".grow-plugin");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(
+            index_dir.join("marketplace.json"),
+            format!(
+                r#"{{"version":1,"name":"test","plugins":[{{"name":"{name}","source":{{"type":"local","path":"plugins/{name}"}}}}]}}"#
+            ),
         )
         .unwrap();
         let skill_dir = plugin_dir.join("skills").join("demo");
@@ -1030,6 +1018,7 @@ mod tests {
             let repo_key = install_test_plugin(registry, marketplace.path(), "demo");
             write_plugin(marketplace.path(), "demo", "2.0.0", "new");
             let entry = crate::scan_marketplace(marketplace.path())
+                .unwrap()
                 .entries
                 .into_iter()
                 .find(|p| p.relative_path == "plugins/demo")
@@ -1105,6 +1094,7 @@ mod tests {
 
             write_plugin(marketplace.path(), "demo", "1.1.0", "new");
             let entry = crate::scan_marketplace(marketplace.path())
+                .unwrap()
                 .entries
                 .into_iter()
                 .find(|p| p.relative_path == "plugins/demo")
@@ -1134,6 +1124,7 @@ mod tests {
                 std::fs::read_to_string(registry.install_dir().join("registry.json")).unwrap();
             write_plugin(marketplace.path(), "demo", "2.0.0", "new");
             let entry = crate::scan_marketplace(marketplace.path())
+                .unwrap()
                 .entries
                 .into_iter()
                 .find(|p| p.relative_path == "plugins/demo")
@@ -1182,10 +1173,6 @@ mod tests {
                 domains: Vec::new(),
                 homepage: None,
                 relative_path: "plugins/demo".into(),
-                skill_count: 0,
-                has_hooks: false,
-                has_agents: false,
-                has_mcp: false,
                 remote_url: None,
                 remote_ref: None,
                 remote_sha: None,
@@ -1269,10 +1256,9 @@ mod tests {
 
     fn write_subdir_plugin(repo: &Path, subdir: &str, name: &str, version: &str) {
         let plugin_dir = repo.join(subdir);
-        let manifest_dir = plugin_dir.join(".claude-plugin");
-        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
-            manifest_dir.join("plugin.json"),
+            plugin_dir.join("plugin.json"),
             format!(r#"{{"name":"{name}","version":"{version}"}}"#),
         )
         .unwrap();
@@ -1347,10 +1333,6 @@ mod tests {
                 domains: Vec::new(),
                 homepage: None,
                 relative_path: "acme".into(),
-                skill_count: 0,
-                has_hooks: false,
-                has_agents: false,
-                has_mcp: false,
                 remote_url: Some(url.clone()),
                 remote_ref: Some("main".into()),
                 remote_sha: None,
@@ -1380,10 +1362,9 @@ mod tests {
     }
 
     fn write_root_plugin(repo: &Path, name: &str, version: &str) {
-        let manifest_dir = repo.join(".claude-plugin");
-        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::create_dir_all(repo).unwrap();
         std::fs::write(
-            manifest_dir.join("plugin.json"),
+            repo.join("plugin.json"),
             format!(r#"{{"name":"{name}","version":"{version}"}}"#),
         )
         .unwrap();
@@ -1412,10 +1393,6 @@ mod tests {
                     domains: Vec::new(),
                     homepage: None,
                     relative_path: "acme".into(),
-                    skill_count: 0,
-                    has_hooks: false,
-                    has_agents: false,
-                    has_mcp: false,
                     remote_url: Some("https://example.com/r.git".into()),
                     remote_ref: Some("main".into()),
                     remote_sha: None,

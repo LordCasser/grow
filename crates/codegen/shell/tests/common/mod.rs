@@ -1,6 +1,6 @@
 //! Shared helpers for shell integration tests.
 
-use shell::sampling::{ApiBackend, Client, SamplerConfig};
+use shell::sampling::{ApiBackend, SamplerConfig, SamplingClient};
 
 #[cfg(unix)]
 pub mod leader {
@@ -296,7 +296,7 @@ pub mod leader {
 /// integration tests so the ~30-field `SamplerConfig` literal lives in one
 /// place (`SamplerConfig` has no `Default`).
 #[allow(dead_code)]
-pub fn create_test_client(base_url: &str, api_backend: ApiBackend) -> Client {
+pub fn create_test_client(base_url: &str, api_backend: ApiBackend) -> SamplingClient {
     create_test_client_with_extra_headers(base_url, api_backend, &[])
 }
 
@@ -307,8 +307,8 @@ pub fn create_test_client_with_extra_headers(
     base_url: &str,
     api_backend: ApiBackend,
     extra_headers: &[(&str, &str)],
-) -> Client {
-    Client::new(test_sampler_config(base_url, api_backend, extra_headers)).unwrap()
+) -> SamplingClient {
+    SamplingClient::new(test_sampler_config(base_url, api_backend, extra_headers)).unwrap()
 }
 
 /// The shared mock-server `SamplerConfig`; tests needing a non-default field
@@ -320,8 +320,7 @@ pub fn test_sampler_config(
     api_backend: ApiBackend,
     extra_headers: &[(&str, &str)],
 ) -> SamplerConfig {
-    // Shell `Client` is `sampler::SamplingClient`, which takes a
-    // `SamplerConfig` directly. Construct one inline here.
+    // SamplingClient takes a SamplerConfig directly.
     SamplerConfig {
         api_key: Some("test-api-key".to_string()),
         base_url: base_url.to_string(),

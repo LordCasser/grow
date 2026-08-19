@@ -2,22 +2,20 @@
 
 use crate::implementations::grow_build::search_replace::{SearchReplaceInput, run_search_replace};
 
-/// Concise description — no read-before-edit enforcement, simplified formatting guidance.
+/// Concise presentation of the canonical edit contract.
 const DESCRIPTION_CONCISE: &str = r#"Replace an exact string in a file.
 
 - Do not include the "LINE_NUMBER→" prefixes from file reads in ${{ params.edit.old_string }} or ${{ params.edit.new_string }}; keep the exact indentation.
 - ${{ params.edit.old_string }} must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set ${{ params.edit.replace_all }} to change every occurrence (handy for renaming an identifier).
-- To create a new file, set ${{ params.edit.old_string }} to an empty string."#;
+- To create a new file, set ${{ params.edit.old_string }} to an empty string. It cannot overwrite an existing non-empty file."#;
 use crate::types::output::SearchReplaceOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 /// Concise variant of `SearchReplaceTool`.
 ///
-/// Differences from `SearchReplaceTool`:
-/// - Always skips the read-before-edit guard.
-/// - Uses the shorter `tool_output_for_prompt_concise` as prompt output.
-/// - No `IfParams` requirement for a Read tool (guard is always skipped).
+/// It shares the same input, dependency, and mutation contract and only uses
+/// the shorter prompt output.
 #[derive(Debug, Default)]
 pub struct SearchReplaceConciseTool;
 
@@ -40,6 +38,7 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceConciseTool {
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         Expr::And(vec![
+            Expr::Value(ToolRequirement::tool_kind(ToolKind::Read)),
             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "old_string")),
             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "new_string")),
             Expr::Value(ToolRequirement::input_param(ToolKind::Edit, "replace_all")),
@@ -140,7 +139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concise_tool_skips_read_guard() {
+    async fn concise_tool_uses_canonical_edit_path() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), "hello world\n").unwrap();
 

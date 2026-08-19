@@ -13,8 +13,8 @@
         let id = acp::ModelId::new(std::sync::Arc::from("reason-model"));
         let mut info = make_model_info("reason-model");
         info.meta = serde_json::json!({
-            "supportsReasoningEffort": true,
             "reasoningEffort": "high",
+            "reasoningEfforts": ["high", "xhigh"],
         })
         .as_object()
         .cloned();

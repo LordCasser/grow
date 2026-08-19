@@ -15,14 +15,21 @@ use serde::{Deserialize, Serialize};
 
 use config::grow_home;
 
-/// Binary version stamped into every log entry. Set once at startup via
-/// [`set_version()`]; entries emitted before that get `None`.
+/// Binary version stamped into every log entry. A launcher may set the exact
+/// binary version once; direct library users use this crate's build version.
 static VERSION: OnceLock<String> = OnceLock::new();
 
 /// Register the binary version (e.g. shell's `CARGO_PKG_VERSION`).
 /// Call once at startup; subsequent calls are no-ops.
 pub fn set_version(ver: &str) {
     let _ = VERSION.set(ver.to_owned());
+}
+
+fn current_version() -> String {
+    VERSION
+        .get()
+        .map_or(env!("CARGO_PKG_VERSION"), String::as_str)
+        .to_owned()
 }
 
 pub const LOG_DIR: &str = "logs";
@@ -60,6 +67,7 @@ pub enum LogSource {
 
 /// A single unified log entry, written as one JSONL line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogEntry {
     /// RFC 3339 timestamp (millisecond precision, UTC).
     pub ts: String,
@@ -70,17 +78,10 @@ pub struct LogEntry {
     /// `unified.jsonl`, so multiple shell processes' lines interleave
     /// indistinguishably without it.
     ///
-    /// `Option<u32>` is for wire compatibility only -- shell and pager
-    /// both stamp `Some(std::process::id())` at emit time. A
-    /// `None` here means the entry came from an older client/server that
-    /// predates this field; current code never emits one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid: Option<u32>,
+    pub pid: u32,
     /// Binary version (e.g. `"0.1.211"`). Stamped by [`set_version()`]
     /// at startup so stale zombie processes are identifiable in logs.
-    /// `None` for entries from older binaries that predate this field.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ver: Option<String>,
+    pub ver: String,
     /// Log level.
     pub lvl: LogLevel,
     /// Session ID, if one exists.
@@ -95,6 +96,7 @@ pub struct LogEntry {
 
 /// Wire format for the `grow/log` ACP notification params.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogNotificationParams {
     /// Source component identifier.
     pub src: LogSource,
@@ -103,19 +105,16 @@ pub struct LogNotificationParams {
 
 /// Entry as sent by a client (no `src` field -- shell stamps it).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientLogEntry {
     pub ts: String,
     /// Client process id. Stamped by the client when the entry is
     /// created; preserved through ACP forwarding so the on-disk log
     /// reflects the originating process.
     ///
-    /// Optional only for wire compatibility with clients that predate
-    /// this field; in-tree clients always populate it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid: Option<u32>,
-    /// Binary version. Optional for wire compatibility with older clients.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ver: Option<String>,
+    pub pid: u32,
+    /// Binary version of the originating client.
+    pub ver: String,
     pub lvl: LogLevel,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sid: Option<String>,
@@ -457,8 +456,8 @@ pub fn emit(lvl: LogLevel, msg: &str, sid: Option<&str>, ctx: Option<serde_json:
     let entry = LogEntry {
         ts: now_ts(),
         src: LogSource::Shell,
-        pid: Some(std::process::id()),
-        ver: VERSION.get().cloned(),
+        pid: std::process::id(),
+        ver: current_version(),
         lvl,
         sid: sid.map(Into::into),
         msg: msg.into(),
@@ -601,12 +600,12 @@ mod tests {
     }
 
     #[test]
-    fn log_entry_serializes_minimal() {
+    fn log_entry_serializes_required_identity() {
         let entry = LogEntry {
             ts: "2025-07-14T10:30:00.123Z".into(),
             src: LogSource::Shell,
-            pid: None,
-            ver: None,
+            pid: 4242,
+            ver: "1.0.0".into(),
             lvl: LogLevel::Info,
             sid: None,
             msg: "test".into(),
@@ -615,8 +614,8 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("sid"));
         assert!(!json.contains("ctx"));
-        assert!(!json.contains("pid"));
-        assert!(!json.contains("ver"));
+        assert!(json.contains("\"pid\":4242"));
+        assert!(json.contains("\"ver\":\"1.0.0\""));
         assert!(json.contains("\"src\":\"shell\""));
     }
 
@@ -625,8 +624,8 @@ mod tests {
         let entry = LogEntry {
             ts: "2025-07-14T10:30:00.123Z".into(),
             src: LogSource::GrowPager,
-            pid: Some(4242),
-            ver: Some("0.1.211".into()),
+            pid: 4242,
+            ver: "0.1.211".into(),
             lvl: LogLevel::Warn,
             sid: Some("abc123".into()),
             msg: "connection lost".into(),
@@ -641,7 +640,7 @@ mod tests {
 
     #[test]
     fn client_entry_round_trip() {
-        let wire = r#"{"ts":"2025-07-14T10:30:00.123Z","lvl":"info","msg":"hello"}"#;
+        let wire = r#"{"ts":"2025-07-14T10:30:00.123Z","pid":42,"ver":"1.0.0","lvl":"info","msg":"hello"}"#;
         let entry: ClientLogEntry = serde_json::from_str(wire).unwrap();
         assert_eq!(entry.msg, "hello");
         assert!(entry.sid.is_none());
@@ -975,8 +974,8 @@ mod tests {
             LogSource::Shell,
             &[ClientLogEntry {
                 ts: "2025-01-01T00:00:00.000Z".into(),
-                pid: None,
-                ver: None,
+                pid: 4242,
+                ver: "1.0.0".into(),
                 lvl: LogLevel::Info,
                 sid: None,
                 msg: "sneaky".into(),
@@ -997,14 +996,22 @@ mod tests {
     }
 
     #[test]
+    fn client_log_identity_is_required() {
+        let missing_pid = r#"{"ts":"2025-01-01T00:00:00Z","ver":"1.0.0","lvl":"info","msg":"x"}"#;
+        let missing_version = r#"{"ts":"2025-01-01T00:00:00Z","pid":42,"lvl":"info","msg":"x"}"#;
+        assert!(serde_json::from_str::<ClientLogEntry>(missing_pid).is_err());
+        assert!(serde_json::from_str::<ClientLogEntry>(missing_version).is_err());
+    }
+
+    #[test]
     fn notification_params_round_trip() {
         let params = LogNotificationParams {
             src: LogSource::GrowPager,
             entries: vec![
                 ClientLogEntry {
                     ts: "2025-07-14T10:30:00.123Z".into(),
-                    pid: Some(1234),
-                    ver: None,
+                    pid: 1234,
+                    ver: "1.0.0".into(),
                     lvl: LogLevel::Info,
                     sid: Some("s1".into()),
                     msg: "first".into(),
@@ -1012,8 +1019,8 @@ mod tests {
                 },
                 ClientLogEntry {
                     ts: "2025-07-14T10:30:00.456Z".into(),
-                    pid: Some(1234),
-                    ver: Some("0.1.211".into()),
+                    pid: 1234,
+                    ver: "0.1.211".into(),
                     lvl: LogLevel::Error,
                     sid: None,
                     msg: "second".into(),

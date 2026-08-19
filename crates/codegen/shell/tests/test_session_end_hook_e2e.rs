@@ -51,7 +51,7 @@ async fn run_with_session_end_hook() -> (HeadlessResult, MockInferenceServer, te
         hooks_dir.join("session_end.json"),
         serde_json::json!({
             "hooks": {
-                "SessionEnd": [{
+                "session_end": [{
                     "hooks": [{
                         "type": "command",
                         "command": format!("sh {}", script_path.display()),
@@ -65,7 +65,7 @@ async fn run_with_session_end_hook() -> (HeadlessResult, MockInferenceServer, te
     .expect("write hook config");
 
     let mut cmd = tokio::process::Command::new(grow_binary());
-    cmd.args(["-p", "say hello", "--yolo"])
+    cmd.args(["-p", "say hello", "--permission-mode", "always-approve"])
         .current_dir(sandbox.workspace())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -100,7 +100,7 @@ async fn session_end_hook_fires_on_headless_exit() {
         .as_str()
         .unwrap_or_else(|| panic!("hookEventName missing: {envelope}"));
     assert!(
-        event == "session_end" || event == "SessionEnd",
+        event == "session_end" || event == "session_end",
         "expected SessionEnd event name, got {event:?}"
     );
 

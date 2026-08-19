@@ -169,13 +169,18 @@ pub(crate) async fn start_dual_agent_type_content() -> ContentController {
 /// Title line of the folder-trust question (see `render_welcome_trust`).
 pub(crate) const TRUST_QUESTION_SENTINEL: &str = "Do you trust the contents of this directory";
 
-/// A `git init`'d temp dir containing a repo-local `.mcp.json` (code-exec
-/// config). `repo_configs_present` returns true for it, so an untrusted clone
-/// with the feature on resolves to `Prompt` => the trust question renders.
-pub(crate) fn git_repo_with_mcp_json() -> tempfile::TempDir {
+/// A `git init`'d temp dir containing a repo-local Grow MCP configuration.
+/// `repo_configs_present` returns true for it, so an untrusted clone with the
+/// feature on resolves to `Prompt` => the trust question renders.
+pub(crate) fn git_repo_with_project_mcp() -> tempfile::TempDir {
     let repo = tempfile::tempdir().expect("repo tempdir");
     git2::Repository::init(repo.path()).expect("git init");
-    std::fs::write(repo.path().join(".mcp.json"), "{}").expect("write .mcp.json");
+    std::fs::create_dir_all(repo.path().join(".grow")).expect("create .grow");
+    std::fs::write(
+        repo.path().join(".grow/config.toml"),
+        "[mcp_servers.fixture]\ncommand = \"/usr/bin/true\"\n",
+    )
+    .expect("write .grow/config.toml");
     repo
 }
 

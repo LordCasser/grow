@@ -37,8 +37,8 @@ pub enum PrCreationSource {
 }
 
 /// How the agent handles tool execution permissions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
     /// Prompt the user for each tool call (default).
     #[default]
@@ -50,15 +50,19 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AlwaysApprove => "always-approve",
+            Self::Auto => "auto",
+        }
+    }
+
     pub fn is_always_approve(self) -> bool {
         matches!(self, Self::AlwaysApprove)
     }
 
     pub fn is_auto(self) -> bool {
         matches!(self, Self::Auto)
-    }
-
-    pub fn from_yolo(yolo: bool) -> Self {
-        if yolo { Self::AlwaysApprove } else { Self::Ask }
     }
 }

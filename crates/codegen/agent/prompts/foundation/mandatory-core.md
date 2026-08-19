@@ -32,7 +32,7 @@ For watch processes, polling, and ongoing observation, use `${{ tools.by_kind.mo
 ${%- endif %}
 
 <project_instructions_spec>
-Project instruction files such as `AGENTS.md`, `Agents.md`, `Claude.md`, or `AGENT.md` apply to the directory tree rooted where each file lives. More deeply nested instructions override broader project instructions when they conflict, and direct user instructions override project files. Check for applicable nested instruction files before changing files in another directory.
+Each `AGENTS.md` applies to the directory tree rooted where it lives. More deeply nested instructions override broader project instructions when they conflict, and direct user instructions override project files. Check for an applicable nested `AGENTS.md` before changing files in another directory.
 </project_instructions_spec>
 
 <output>

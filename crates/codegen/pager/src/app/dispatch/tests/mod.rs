@@ -30,7 +30,7 @@ use super::dashboard::{
     dispatch_dashboard_question_answer, dispatch_dashboard_stop, dispatch_exit_dashboard,
     dispatch_open_dashboard, ensure_dashboard_state, resolve_location_input,
 };
-use super::modes::{YOLO_ON_UNDER_PLAN_TOAST, permission_mode_toast};
+use super::modes::{ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST, permission_mode_toast};
 use super::permissions::drain_root_permission_queue;
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
@@ -89,11 +89,11 @@ fn test_app() -> AppView {
         tip: None,
         cli_model_override: None,
         cli_effort_token: None,
-        default_yolo: false,
+        default_permission_mode: shell::util::config::PermissionMode::Ask,
         permission_mode_from_soft_default: true,
         auto_mode_gate: true,
-        yolo_policy_block: None,
-        yolo_launch_block_notice: None,
+        always_approve_policy_block: None,
+        always_approve_launch_block_notice: None,
         screen_mode_switch_hint: None,
         require_plan_approval: false,
         plan_mode: false,
@@ -128,7 +128,6 @@ fn test_app() -> AppView {
         command_tags: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         welcome_menu_index: None,
         welcome_menu_rects: Vec::new(),
-        welcome_import_banner_rect: None,
         last_mouse_pos: None,
         last_scroll_pos: None,
         last_cache_evict_at: None,
@@ -152,7 +151,6 @@ fn test_app() -> AppView {
         pending_update_version: None,
         quit_for_update: false,
         relaunch: None,
-        import_claude_modal: None,
         screen_mode: crate::app::ScreenMode::Inline,
         pending_effects: Vec::new(),
         pending_editor: None,
@@ -169,7 +167,6 @@ fn test_app() -> AppView {
         shared_prompt_queues: std::collections::HashMap::new(),
         optimistic_prompt_echoes: std::collections::HashMap::new(),
         session_picker_grouped: false,
-        scheduler_background_loops_seed: true,
         cancel_rewind_enabled: true,
         session_recap_available: false,
         tutorial: None,
@@ -177,7 +174,6 @@ fn test_app() -> AppView {
         dashboard_return: None,
         dashboard_persisted: None,
         keyboard_normalizer: crate::input::KeyboardNormalizer::from_terminal_context(),
-        has_claude_import: false,
     }
 }
 /// Build a default `AgentSession` for
@@ -199,8 +195,7 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         forked_from: None,
         pending_prompts: std::collections::VecDeque::new(),
         next_queue_id: 0,
-        yolo_mode: false,
-        auto_mode: false,
+        permission_mode: shell::util::config::PermissionMode::Ask,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -249,8 +244,6 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         child_session_id: Arc::from(child_sid),
         description: Arc::from("test subagent"),
         subagent_type: Arc::from("general-purpose"),
-        persona: None,
-        role: None,
         model: None,
         context_source: None,
         resumed_from: None,
@@ -298,10 +291,6 @@ fn cta_entry(name: &str, status: &str) -> extension_types::MarketplacePluginEntr
         domains: Vec::new(),
         homepage: None,
         relative_path: format!("plugins/{name}"),
-        skill_count: 0,
-        has_hooks: false,
-        has_agents: false,
-        has_mcp: false,
         install_status: status.into(),
         installed_version: None,
         components: None,
@@ -327,7 +316,6 @@ fn cta_mcp_server(
     plugin: Option<&str>,
     status: crate::views::mcps_modal::McpServerDisplayStatus,
 ) -> crate::views::mcps_modal::McpServerInfo {
-    use crate::views::mcps_modal::McpWireSource;
     crate::views::mcps_modal::McpServerInfo {
         name: name.into(),
         display_name: None,
@@ -341,9 +329,7 @@ fn cta_mcp_server(
         source: plugin
             .map(|p| format!("plugin: {p}"))
             .unwrap_or_else(|| "local".into()),
-        wire_source: McpWireSource::Local,
         plugin_name: plugin.map(str::to_string),
-        is_managed_gateway: false,
     }
 }
 /// Extract text from the last system message in an agent's scrollback.
@@ -380,8 +366,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -523,8 +508,7 @@ fn two_agent_app_with_bg_task() -> AppView {
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: false,
-            auto_mode: false,
+            permission_mode: shell::util::config::PermissionMode::Ask,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -689,7 +673,8 @@ fn enqueue_permission_with_enable_always_approve(
     });
     response_rx
 }
-const POLICY_WARNING: &str = workspace::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
+const POLICY_WARNING: &str =
+    workspace::permission::resolution::ALWAYS_APPROVE_PIN_REASON_REQUIREMENTS;
 fn agent_toast(app: &AppView) -> Option<String> {
     app.agents[&AgentId(0)]
         .toast

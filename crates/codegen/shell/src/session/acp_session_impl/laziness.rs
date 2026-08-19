@@ -314,7 +314,7 @@ impl SessionActor {
 
     /// Layer-3 LazinessDetector: ask the active session model whether
     /// the current idle slice looks like a stall, and if so push a
-    /// `<system-reminder>` nudge into chat history for the next real
+    /// `<system-reminder>` nudge into Surface for the next real
     /// user turn to pick up. Default behavior is no-op — the feature
     /// is per-model opt-in (default off) with a separate per-session
     /// nudge cap (default 0). See plan §3 "Layer 3 — LazinessDetector".
@@ -464,7 +464,29 @@ impl SessionActor {
         // reports the number of SOURCE chat items the classifier saw,
         // not the 2 wire items. That matches the historical meaning
         // and keeps the cost dashboard interpretable.
-        let mut source_items = self.chat_state_handle.get_conversation().await;
+        let Some(materialized) = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await
+        else {
+            let detail = "chat-state actor unavailable while freezing classifier input";
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            self.maybe_write_laziness_debug_log(
+                meta.take(),
+                &model_id,
+                0,
+                elapsed_ms,
+                LazinessFireOutcome::Aborted {
+                    reason: LazinessAbortReason::ClassifierError,
+                    error_detail: Some(detail.into()),
+                },
+            )
+            .await;
+            self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
+            return;
+        };
+        let input_ref = materialized.input_ref;
+        let mut source_items = materialized.surface;
         let window_start = laziness_window_start(
             &source_items,
             LAZINESS_CONTEXT_ITEM_LIMIT,
@@ -589,6 +611,64 @@ impl SessionActor {
                 return;
             }
         };
+        let mut sideband = match self
+            .begin_sideband(
+                chat_state::SidebandPurpose::LazinessJudgment,
+                format!("{LAZINESS_CLASSIFIER_PROMPT}\n\n{LAZINESS_USER_PREAMBLE}{runtime_state}"),
+                SidebandInput::Frozen(vec![input_ref]),
+                chat_state::SidebandRoute {
+                    model: model_id.clone(),
+                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                },
+                Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["category", "confidence", "evidence"],
+                    "properties": {
+                        "category": { "type": "string" },
+                        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "evidence": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                })),
+            )
+            .await
+        {
+            Ok(sideband) => sideband,
+            Err(error) => {
+                let detail = error.to_string();
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                self.maybe_write_laziness_debug_log(
+                    meta.take(),
+                    &model_id,
+                    items_count_after_trim,
+                    elapsed_ms,
+                    LazinessFireOutcome::Aborted {
+                        reason: LazinessAbortReason::ClassifierError,
+                        error_detail: Some(detail),
+                    },
+                )
+                .await;
+                self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
+                return;
+            }
+        };
+        if let Err(error) = sideband.attempt(None).await {
+            let detail = error.to_string();
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            self.maybe_write_laziness_debug_log(
+                meta.take(),
+                &model_id,
+                items_count_after_trim,
+                elapsed_ms,
+                LazinessFireOutcome::Aborted {
+                    reason: LazinessAbortReason::ClassifierError,
+                    error_detail: Some(detail),
+                },
+            )
+            .await;
+            self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
+            return;
+        }
 
         // Sampler call wrapped in a generation-poll loop AND a
         // wall-clock timeout. Dropping the `conversation_collect`
@@ -607,6 +687,12 @@ impl SessionActor {
                     Ok(response) => break response,
                     Err(err) => {
                         let detail = err.to_string();
+                        if let Err(record_error) = sideband
+                            .fail(chat_state::SidebandOutcome::Failed, detail.clone())
+                            .await
+                        {
+                            tracing::warn!(%record_error, "laziness classifier: failed to commit Sideband failure");
+                        }
                         tracing::debug!(error = %detail, "laziness classifier sampler call failed");
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         self.maybe_write_laziness_debug_log(
@@ -625,6 +711,12 @@ impl SessionActor {
                     }
                 },
                 _ = &mut timeout => {
+                    if let Err(record_error) = sideband
+                        .fail(chat_state::SidebandOutcome::Cancelled, "laziness classifier timed out")
+                        .await
+                    {
+                        tracing::warn!(%record_error, "laziness classifier: failed to commit timeout");
+                    }
                     let elapsed_ms = started.elapsed().as_millis() as u64;
                     self.maybe_write_laziness_debug_log(
                         meta.take(),
@@ -642,6 +734,12 @@ impl SessionActor {
                 }
                 _ = tokio::time::sleep(poll_interval) => {
                     if let Some(reason) = self.laziness_abort_check(abort_snapshot) {
+                        if let Err(record_error) = sideband
+                            .fail(chat_state::SidebandOutcome::Cancelled, reason.as_const_str())
+                            .await
+                        {
+                            tracing::warn!(%record_error, "laziness classifier: failed to commit cancellation");
+                        }
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         self.maybe_write_laziness_debug_log(
                             meta.take(),
@@ -667,6 +765,15 @@ impl SessionActor {
             Ok(p) => p,
             Err(parse_err) => {
                 let parse_error_detail = parse_err.to_string();
+                if let Err(record_error) = sideband
+                    .fail(
+                        chat_state::SidebandOutcome::Failed,
+                        parse_error_detail.clone(),
+                    )
+                    .await
+                {
+                    tracing::warn!(%record_error, "laziness classifier: failed to commit parse failure");
+                }
                 // Truncate raw to 200 chars for offline analysis.
                 let snippet: String = raw_text.chars().take(200).collect();
                 tracing::debug!(
@@ -692,6 +799,36 @@ impl SessionActor {
 
         let category = parsed.category;
         let confidence = parsed.confidence;
+        let usage = sideband_usage(&response);
+        let finish = sideband_finish(&response);
+        if let Err(error) = sideband
+            .complete(
+                raw_text.clone(),
+                Some(serde_json::json!({
+                    "category": parsed.category.as_const_str(),
+                    "confidence": parsed.confidence,
+                    "evidence": parsed.evidence.clone(),
+                })),
+                usage,
+                finish,
+            )
+            .await
+        {
+            let detail = error.to_string();
+            self.maybe_write_laziness_debug_log(
+                meta.take(),
+                &model_id,
+                items_count_after_trim,
+                elapsed_ms,
+                LazinessFireOutcome::Aborted {
+                    reason: LazinessAbortReason::ClassifierError,
+                    error_detail: Some(detail),
+                },
+            )
+            .await;
+            self.emit_laziness_abort(LazinessAbortReason::ClassifierError);
+            return;
+        }
         let decision =
             evaluate_laziness(&parsed, &cfg, nudges_used, LAZINESS_DEFAULT_MIN_CONFIDENCE);
 

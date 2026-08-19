@@ -19,8 +19,8 @@ pub mod streaming;
 pub mod tool;
 
 pub use context::{
-    BehaviorVersion, Cancellation, Cwd, ListToolsContext, SessionContext, ToolCallContext,
-    TypedExtensions, WorkspaceViewerContext,
+    Cancellation, Cwd, ListToolsContext, SessionContext, ToolCallContext, TypedExtensions,
+    WorkspaceViewerContext,
 };
 pub use dispatch::ToolDispatch;
 pub use error::{ToolError, ToolErrorKind};

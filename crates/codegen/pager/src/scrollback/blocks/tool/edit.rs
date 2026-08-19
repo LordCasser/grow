@@ -1201,9 +1201,7 @@ impl EditToolCallBlock {
         let tool_cfg = &ctx.appearance.scrollback.blocks.tool;
         let muted_collapsed = ctx.mute_when_collapsed(tool_cfg.muted_collapsed);
         let dim_details = tool_cfg.dim_details;
-        // Explicit pager.toml value wins; unset follows the shell-owned flag.
-        let show_summary =
-            edit_cfg.effective_line_summary(crate::appearance::cache::load_collapsed_edit_blocks());
+        let show_summary = edit_cfg.line_summary;
 
         let cwd = ctx.cwd.as_deref();
         let link_target = self.path_link_target(cwd);
@@ -1400,9 +1398,8 @@ impl BlockContent for EditToolCallBlock {
     }
 
     fn default_display_mode(&self) -> DisplayMode {
-        // Context-free: the effective expanded default (pager.toml shape >
-        // collapsed_edit_blocks flag) and the untrusted-summary escape live
-        // in ScrollbackState's materialize policy (push / replace_tool_block).
+        // Context-free: the explicit appearance default and untrusted-summary
+        // escape live in ScrollbackState's materialize policy.
         DisplayMode::Collapsed
     }
 
@@ -1424,14 +1421,9 @@ impl BlockContent for EditToolCallBlock {
     fn preamble(&self, ctx: &BlockContext) -> Option<Text<'static>> {
         let theme = Theme::current();
         let dim_details = ctx.appearance.scrollback.blocks.tool.dim_details;
-        // Same effective toggle as `rendered_output` (moot here: the suffix
-        // is collapsed-only and this is the Fullscreen surface).
-        let show_summary = ctx
-            .appearance
-            .scrollback
-            .blocks
-            .edit
-            .effective_line_summary(crate::appearance::cache::load_collapsed_edit_blocks());
+        // Same toggle as `rendered_output` (moot here: the suffix is
+        // collapsed-only and this is the Fullscreen surface).
+        let show_summary = ctx.appearance.scrollback.blocks.edit.line_summary;
         Some(Text::from(self.header_line(
             &theme,
             false,

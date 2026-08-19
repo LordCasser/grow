@@ -118,10 +118,9 @@ impl SessionActor {
                         ..
                     } => (
                         hook_name.clone(),
-                        HookRunStatusDto::Failed {
-                            error: detail.clone(),
+                        HookRunStatusDto::Blocked {
+                            detail: detail.clone(),
                             elapsed_ms: elapsed.as_millis() as u64,
-                            blocked: true,
                         },
                     ),
                     HookRunResult::Failed {
@@ -134,7 +133,6 @@ impl SessionActor {
                         HookRunStatusDto::Failed {
                             error: error.clone(),
                             elapsed_ms: elapsed.as_millis() as u64,
-                            blocked: false,
                         },
                     ),
                 };
@@ -184,10 +182,10 @@ impl SessionActor {
             .flatten();
         match self.permissions.effective_request_mode(request_mode) {
             workspace::permission::types::EffectivePermissionMode::AlwaysApprove => {
-                "bypassPermissions"
+                "always-approve"
             }
             workspace::permission::types::EffectivePermissionMode::Auto => "auto",
-            workspace::permission::types::EffectivePermissionMode::Ask => "default",
+            workspace::permission::types::EffectivePermissionMode::Ask => "ask",
         }
     }
 
@@ -328,7 +326,6 @@ mod notification_hook_filter_tests {
                 description: None,
                 is_backgrounded: false,
             },
-            will_wake: false,
         };
         assert!(notification_hook_for_update(&update).is_none());
     }

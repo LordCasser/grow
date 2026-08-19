@@ -19,7 +19,10 @@ fn complete_jsonl_snapshot_never_returns_a_partial_record_offset() {
         assert_eq!(snapshot.as_bytes(), first, "cut={cut}");
         assert_eq!(offset, first.len() as u64, "cut={cut}");
 
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         file.write_all(&second[cut..]).unwrap();
         drop(file);
         let mut file = std::fs::File::open(&path).unwrap();
@@ -532,7 +535,7 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: tmp.path().join("state.json"),
+        state_path: tmp.path().join("resources_state.json"),
         memory_backend: None,
         web_fetch_config: Default::default(),
         lsp: None,
@@ -566,13 +569,9 @@ fn file_toolset_override_invalid_config_returns_error() {
     assert!(err.is_err());
     assert!(err.unwrap_err().contains("unknown"));
 }
-/// Helper: creates a real SessionHandle with the given model, yolo, and client id.
+/// Helper: creates a real SessionHandle with the given model and client id.
 /// Requires a tokio runtime for SessionSignalsHandle::new().
-fn make_test_handle(
-    model: &str,
-    yolo: bool,
-    client_id: Option<&str>,
-) -> crate::session::SessionHandle {
+fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::SessionHandle {
     let (cmd_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let (hunk_event_tx, _hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -614,9 +613,8 @@ fn make_test_handle(
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new(model),
-        scheduler_background_loops: true,
         reasoning_effort: None,
-        yolo_mode: yolo,
+        permission_mode: crate::util::config::PermissionMode::Ask,
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
             product: s.to_string(),
             version: None,
@@ -631,7 +629,6 @@ fn make_test_handle(
         delegable_capability_ceiling: None,
         agent_name: "grow-build".to_string(),
         subagent_filter: Default::default(),
-        managed_mcp_proxy_base_url: String::new(),
         hook_registry: None,
         workspace_ops: workspace::WorkspaceOps::for_test(),
         terminal_backend: None,
@@ -646,8 +643,8 @@ async fn lookup_session_model_returns_per_session_model() {
     let sid_b = acp::SessionId::new("sess-b");
     let default_model = acp::ModelId::new("default-model");
     let sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
-        (sid_a.clone(), make_test_handle("grow-3-fast", false, None)),
-        (sid_b.clone(), make_test_handle("grow-mini", false, None)),
+        (sid_a.clone(), make_test_handle("grow-3-fast", None)),
+        (sid_b.clone(), make_test_handle("grow-mini", None)),
     ]
     .into();
     assert_eq!(
@@ -682,8 +679,8 @@ async fn set_session_model_does_not_cross_contaminate() {
     let sid_b = acp::SessionId::new("sess-b");
     let default_model = acp::ModelId::new("default");
     let mut sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
-        (sid_a.clone(), make_test_handle("grow-3", false, None)),
-        (sid_b.clone(), make_test_handle("grow-3", false, None)),
+        (sid_a.clone(), make_test_handle("grow-3", None)),
+        (sid_b.clone(), make_test_handle("grow-3", None)),
     ]
     .into();
     sessions.get_mut(&sid_a).unwrap().model_id = acp::ModelId::new("grow-mini");
@@ -704,11 +701,22 @@ async fn set_session_model_does_not_cross_contaminate() {
 #[tokio::test]
 async fn model_state_prefers_session_reasoning_effort_over_model_default() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
-    use sampling_types::{REASONING_EFFORT_META_KEY, ReasoningEffort};
+    use sampling_types::{REASONING_EFFORT_META_KEY, ReasoningEffort, ReasoningEffortOption};
     let agent = build_minimal_agent_for_tests();
-    let mut entry = ModelEntry::fallback("effort-model");
-    entry.info.supports_reasoning_effort = true;
-    entry.info.reasoning_effort = Some(ReasoningEffort::Low);
+    let mut entry = ModelEntry::baseline("effort-model");
+    entry.info.reasoning_efforts = [
+        (ReasoningEffort::Low, true),
+        (ReasoningEffort::Xhigh, false),
+    ]
+    .into_iter()
+    .map(|(value, default)| ReasoningEffortOption {
+        id: value.as_str().to_string(),
+        value,
+        label: value.to_string(),
+        description: None,
+        default,
+    })
+    .collect();
     agent
         .models_manager
         .insert_test_entry("effort-model", entry);
@@ -723,7 +731,7 @@ async fn model_state_prefers_session_reasoning_effort_over_model_default() {
             .map(str::to_owned)
     };
     let pinned = acp::SessionId::new("sess-pinned");
-    let mut handle = make_test_handle("effort-model", false, None);
+    let mut handle = make_test_handle("effort-model", None);
     handle.reasoning_effort = Some(ReasoningEffort::Xhigh);
     agent.sessions.borrow_mut().insert(pinned.clone(), handle);
     assert_eq!(
@@ -735,66 +743,11 @@ async fn model_state_prefers_session_reasoning_effort_over_model_default() {
     agent
         .sessions
         .borrow_mut()
-        .insert(unset.clone(), make_test_handle("effort-model", false, None));
+        .insert(unset.clone(), make_test_handle("effort-model", None));
     assert_eq!(
         read_effort(&agent.model_state(Some(&unset))).as_deref(),
         Some("low"),
         "absent session effort falls back to the resolved model default",
-    );
-}
-/// YOLO toggle scoped by client_identifier: only matching sessions are updated.
-#[tokio::test]
-async fn yolo_toggle_scoped_by_client_identifier() {
-    let sid_tui = acp::SessionId::new("sess-tui");
-    let sid_vscode = acp::SessionId::new("sess-vscode");
-    let mut sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
-        (
-            sid_tui.clone(),
-            make_test_handle("grow-3", false, Some("grow-tui")),
-        ),
-        (
-            sid_vscode.clone(),
-            make_test_handle("grow-3", false, Some("grow-code-extension")),
-        ),
-    ]
-    .into();
-    let updated = apply_yolo_mode_to_matching_sessions(&mut sessions, Some("grow-tui"), true);
-    assert_eq!(updated, 1, "exactly one matching session should be updated");
-    assert!(
-        sessions[&sid_tui].yolo_mode,
-        "TUI session should have yolo=true after TUI toggle"
-    );
-    assert!(
-        !sessions[&sid_vscode].yolo_mode,
-        "VS Code session must NOT be affected by TUI's yolo toggle"
-    );
-}
-/// A client can explicitly disable YOLO for its own sessions after startup,
-/// even if those sessions were initially created with yolo=true.
-#[tokio::test]
-async fn yolo_toggle_can_disable_session_started_with_yolo_enabled() {
-    let sid_tui = acp::SessionId::new("sess-tui");
-    let sid_other = acp::SessionId::new("sess-other");
-    let mut sessions: HashMap<acp::SessionId, crate::session::SessionHandle> = [
-        (
-            sid_tui.clone(),
-            make_test_handle("grow-3", true, Some("grow-tui")),
-        ),
-        (
-            sid_other.clone(),
-            make_test_handle("grow-3", true, Some("grow-code-extension")),
-        ),
-    ]
-    .into();
-    let updated = apply_yolo_mode_to_matching_sessions(&mut sessions, Some("grow-tui"), false);
-    assert_eq!(updated, 1, "only the sender's session should be updated");
-    assert!(
-        !sessions[&sid_tui].yolo_mode,
-        "sender session should be switched to yolo=false"
-    );
-    assert!(
-        sessions[&sid_other].yolo_mode,
-        "other client's session must keep its previous yolo state"
     );
 }
 /// `drain_old_session_thread` returns immediately when the thread has
@@ -921,12 +874,12 @@ fn parse_code_nav_capability_false_returns_false() {
 #[tokio::test]
 async fn test_per_session_code_nav_isolation() {
     let web_handle = {
-        let mut h = make_test_handle("model", false, Some("grow-web"));
+        let mut h = make_test_handle("model", Some("grow-web"));
         h.code_nav_enabled = true;
         h
     };
     let tui_handle = {
-        let mut h = make_test_handle("model", false, Some("grow-tui"));
+        let mut h = make_test_handle("model", Some("grow-tui"));
         h.code_nav_enabled = false;
         h
     };
@@ -980,72 +933,6 @@ fn test_sessionless_request_requires_session_id() {
         "cwd-only requests with no sessionId must return SessionRequired"
     );
 }
-/// Fresh managed catalog sync must push UpdateMcpServers with the injected
-/// managed connector. The `search_tool` rebuild is a SEPARATE broadcast
-/// (`refresh_mcp_search_index_in_sessions`), so it is not asserted here.
-#[tokio::test(flavor = "current_thread")]
-async fn sync_fresh_managed_mcp_pushes_update() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let agent = build_minimal_agent_for_tests();
-            let sid = acp::SessionId::new("sess-managed-sync");
-            let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-            agent.sessions.borrow_mut().insert(sid, handle);
-            let managed = vec![crate::session::managed_mcp::ManagedMcpConfig {
-                name: "Linear".into(),
-                endpoint: "https://mcp.example.com/linear".into(),
-                headers: std::collections::HashMap::from([(
-                    "Authorization".into(),
-                    "Bearer tok".into(),
-                )]),
-                scope: None,
-                scope_id: None,
-                scope_name: None,
-            }];
-            agent.sync_fresh_managed_mcp_to_sessions(&managed);
-            let first = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
-                .await
-                .expect("UpdateMcpServers should be sent")
-                .expect("channel should stay open");
-            let SessionCommand::UpdateMcpServers { mcp_servers, .. } = first else {
-                panic!("expected UpdateMcpServers as the first synced command");
-            };
-            let managed_name = crate::session::managed_mcp::to_managed_name("Linear");
-            let linear = mcp_servers
-                .iter()
-                .find_map(|s| match s {
-                    acp::McpServer::Http(http) if http.name == managed_name => Some(http),
-                    _ => None,
-                })
-                .unwrap_or_else(|| {
-                    panic!("merged catalog must contain managed HTTP server {managed_name}")
-                });
-            assert!(
-                linear
-                    .headers
-                    .iter()
-                    .any(|h| h.name == "Authorization" && h.value == "Bearer tok"),
-                "managed server must carry the injected Authorization header"
-            );
-        })
-        .await;
-}
-/// The gateway-catalog refresh broadcast pushes `RefreshMcpSearchIndex` to every
-/// live session (independent of the legacy managed-connector sync).
-#[tokio::test(flavor = "current_thread")]
-async fn refresh_mcp_search_index_broadcasts_to_sessions() {
-    let agent = build_minimal_agent_for_tests();
-    let sid = acp::SessionId::new("sess-search-index");
-    let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-    agent.sessions.borrow_mut().insert(sid, handle);
-    agent.refresh_mcp_search_index_in_sessions();
-    let cmd = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
-        .await
-        .expect("RefreshMcpSearchIndex should be sent")
-        .expect("channel should stay open");
-    assert!(matches!(cmd, SessionCommand::RefreshMcpSearchIndex));
-}
 /// Build a minimal MvpAgent suitable for testing extension methods.
 fn build_minimal_agent_for_tests() -> MvpAgent {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1076,7 +963,7 @@ async fn session_usage_unknown_session_is_resource_not_found() {
 async fn session_usage_dead_chat_state_actor_fails_closed() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("usage-dead-actor-sess");
-    let mut handle = make_test_handle("test-model", false, None);
+    let mut handle = make_test_handle("test-model", None);
     handle.info.id = sid.clone();
     agent.sessions.borrow_mut().insert(sid, handle);
     let err =
@@ -1084,25 +971,6 @@ async fn session_usage_dead_chat_state_actor_fails_closed() {
             .await
             .expect_err("dead chat-state actor");
     assert_eq!(err.code, acp::Error::internal_error().code);
-}
-/// The session responses publish the value THIS session's spawn pinned, so a
-/// client describing `/loop` fires can never contradict what the fires do.
-#[tokio::test(flavor = "current_thread")]
-async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops() {
-    let agent = build_minimal_agent_for_tests();
-    let sid = acp::SessionId::new("loop-mode-sess");
-    let mut handle = make_test_handle("test-model", false, None);
-    handle.info.id = sid.clone();
-    handle.scheduler_background_loops = false;
-    agent.sessions.borrow_mut().insert(sid.clone(), handle);
-    let model_state = agent.model_state(Some(&sid));
-    let mut meta = serde_json::Map::new();
-    agent.insert_session_config_meta(&mut meta, &sid, "/tmp".to_string(), None, &model_state);
-    assert_eq!(
-        meta.get(crate::session::SCHEDULER_BACKGROUND_LOOPS_META_KEY),
-        Some(&serde_json::json!(false)),
-        "session meta must carry the handle's pinned value"
-    );
 }
 /// Regression: boot-time plugin discovery is deferred past ACP
 /// `initialize`, so the shared plugin registry starts empty.
@@ -1193,7 +1061,7 @@ async fn wait_for_in_flight_load_blocks_until_load_completes() {
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             assert!(!waiter.is_finished(), "waiter must block while loading");
-            let handle = make_test_handle("test-model", false, None);
+            let handle = make_test_handle("test-model", None);
             agent.sessions.borrow_mut().insert(sid.clone(), handle);
             drop(guard);
             let found_session = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
@@ -1265,7 +1133,7 @@ async fn resident_activity_reports_needs_input_when_pending() {
     use crate::agent::roster::RosterActivity;
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("sess-pending");
-    let handle = make_test_handle("grow-3", false, None);
+    let handle = make_test_handle("grow-3", None);
     let pending = handle.pending_interactions.clone();
     let prompt_id = handle.current_prompt_id.clone();
     agent.sessions.borrow_mut().insert(sid.clone(), handle);
@@ -1322,7 +1190,7 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     agent
         .sessions
         .borrow_mut()
-        .insert(sid.clone(), make_test_handle("grow-3", false, None));
+        .insert(sid.clone(), make_test_handle("grow-3", None));
     agent.push_roster_activity_delta(&sid, RosterActivity::Working);
     let changed = drain_roster_changed(&mut rx).expect("turn-start delta emitted");
     assert_eq!(changed.upserted.len(), 1);
@@ -1380,7 +1248,7 @@ fn check_nav_eligibility_from_sessions(
 #[tokio::test]
 async fn test_web_session_with_capability_is_eligible() {
     let sid = acp::SessionId::new("sess-web");
-    let mut handle = make_test_handle("model", false, Some("grow-web"));
+    let mut handle = make_test_handle("model", Some("grow-web"));
     handle.code_nav_enabled = true;
     let sessions = [(sid.clone(), handle)].into();
     assert!(
@@ -1392,7 +1260,7 @@ async fn test_web_session_with_capability_is_eligible() {
 #[tokio::test]
 async fn test_tui_session_is_rejected() {
     let sid = acp::SessionId::new("sess-tui");
-    let mut handle = make_test_handle("model", false, Some("grow-tui"));
+    let mut handle = make_test_handle("model", Some("grow-tui"));
     handle.code_nav_enabled = true;
     let sessions = [(sid.clone(), handle)].into();
     assert_eq!(
@@ -1405,7 +1273,7 @@ async fn test_tui_session_is_rejected() {
 #[tokio::test]
 async fn test_web_session_without_capability_is_rejected() {
     let sid = acp::SessionId::new("sess-web-no-cap");
-    let mut handle = make_test_handle("model", false, Some("grow-web"));
+    let mut handle = make_test_handle("model", Some("grow-web"));
     handle.code_nav_enabled = false;
     let sessions = [(sid.clone(), handle)].into();
     assert_eq!(
@@ -1420,9 +1288,9 @@ async fn test_web_session_without_capability_is_rejected() {
 async fn test_leader_mode_two_sessions_stay_isolated() {
     let web_sid = acp::SessionId::new("web");
     let tui_sid = acp::SessionId::new("tui");
-    let mut web_handle = make_test_handle("model", false, Some("grow-web"));
+    let mut web_handle = make_test_handle("model", Some("grow-web"));
     web_handle.code_nav_enabled = true;
-    let mut tui_handle = make_test_handle("model", false, Some("grow-tui"));
+    let mut tui_handle = make_test_handle("model", Some("grow-tui"));
     tui_handle.code_nav_enabled = false;
     let sessions = [(web_sid.clone(), web_handle), (tui_sid.clone(), tui_handle)].into();
     assert!(
@@ -1443,7 +1311,7 @@ async fn test_leader_mode_two_sessions_stay_isolated() {
 #[tokio::test]
 async fn test_unknown_session_id_returns_session_required() {
     let known_sid = acp::SessionId::new("known");
-    let mut known_handle = make_test_handle("model", false, Some("grow-web"));
+    let mut known_handle = make_test_handle("model", Some("grow-web"));
     known_handle.code_nav_enabled = true;
     let sessions = [(known_sid.clone(), known_handle)].into();
     let stale_sid = acp::SessionId::new("stale-or-evicted");
@@ -1550,7 +1418,7 @@ mod eligibility_gates {
     }
 }
 #[test]
-fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
+fn find_model_by_catalog_id_never_matches_routing_slug() {
     let entry = |model: &str| ModelEntry {
         info: config::ModelInfo {
             user_selectable: true,
@@ -1575,8 +1443,6 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -1592,14 +1458,22 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
     models.insert("a".to_string(), entry("target"));
     models.insert("target".to_string(), entry("other"));
     assert_eq!(
-        config::find_model_by_id(&models, "target").unwrap().model,
+        config::find_model_by_catalog_id(&models, "target")
+            .unwrap()
+            .model,
         "other",
-        "key match should win over slug scan"
+        "catalog identity is the exact map key"
     );
     assert_eq!(
-        config::find_model_by_id(&models, "a").unwrap().model,
+        config::find_model_by_catalog_id(&models, "a")
+            .unwrap()
+            .model,
         "target",
         "exact key match for 'a'"
+    );
+    assert!(
+        config::find_model_by_catalog_id(&models, "other").is_none(),
+        "the routing slug is not a catalog identity"
     );
 }
 fn write_updates(dir: &std::path::Path, lines: &[&str]) -> PathBuf {
@@ -1622,13 +1496,13 @@ fn orphaned_ids(tasks: &[OrphanedTask]) -> std::collections::HashSet<&str> {
 }
 #[test]
 fn orphaned_tasks_returns_empty_for_no_file() {
-    let result = MvpAgent::find_orphaned_background_tasks(&None);
+    let result = MvpAgent::find_stale_background_task_projections(&None);
     assert!(result.is_empty());
 }
 #[test]
 fn orphaned_tasks_returns_empty_for_missing_file() {
     let path = PathBuf::from("/nonexistent/updates.jsonl");
-    let result = MvpAgent::find_orphaned_background_tasks(&Some(path));
+    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
     assert!(result.is_empty());
 }
 #[test]
@@ -1637,7 +1511,7 @@ fn orphaned_tasks_returns_empty_when_all_completed() {
     let bg = bg_line("t1");
     let done = completed_line("t1");
     let path = write_updates(tmp.path(), &[&bg, &done]);
-    let result = MvpAgent::find_orphaned_background_tasks(&Some(path));
+    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
     assert!(result.is_empty());
 }
 #[test]
@@ -1647,7 +1521,7 @@ fn orphaned_tasks_returns_uncompleted() {
     let bg2 = bg_line("t2");
     let done1 = completed_line("t1");
     let path = write_updates(tmp.path(), &[&bg1, &bg2, &done1]);
-    let result = MvpAgent::find_orphaned_background_tasks(&Some(path));
+    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
     let ids = orphaned_ids(&result);
     assert_eq!(ids.len(), 1);
     assert!(ids.contains("t2"));
@@ -1660,7 +1534,7 @@ fn orphaned_tasks_returns_multiple_uncompleted() {
     let bg3 = bg_line("t3");
     let done2 = completed_line("t2");
     let path = write_updates(tmp.path(), &[&bg1, &bg2, &bg3, &done2]);
-    let result = MvpAgent::find_orphaned_background_tasks(&Some(path));
+    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
     let ids = orphaned_ids(&result);
     assert_eq!(ids.len(), 2);
     assert!(ids.contains("t1"));
@@ -1671,7 +1545,7 @@ fn orphaned_tasks_captures_command_and_cwd() {
     let tmp = tempfile::tempdir().unwrap();
     let bg = bg_line("t1");
     let path = write_updates(tmp.path(), &[&bg]);
-    let result = MvpAgent::find_orphaned_background_tasks(&Some(path));
+    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].command, "sleep 99");
     assert_eq!(result[0].cwd, "/tmp");
@@ -1681,7 +1555,7 @@ fn orphaned_tasks_skips_malformed_lines() {
     let tmp = tempfile::tempdir().unwrap();
     let bg = bg_line("t1");
     let path = write_updates(tmp.path(), &["not json", &bg, "{}"]);
-    let result = MvpAgent::find_orphaned_background_tasks(&Some(path));
+    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
     assert_eq!(result.len(), 1);
 }
 #[test]
@@ -1690,7 +1564,7 @@ fn orphaned_tasks_ignores_unrelated_updates() {
     let bg = bg_line("t1");
     let unrelated = r#"{"timestamp":1,"method":"_grow/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"auto_compact_started","percentage":80}}}"#;
     let path = write_updates(tmp.path(), &[&bg, unrelated]);
-    let result = MvpAgent::find_orphaned_background_tasks(&Some(path));
+    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
     assert_eq!(result.len(), 1);
 }
 #[test]
@@ -1711,7 +1585,7 @@ fn orphaned_tasks_filters_rewind_dead_branches() {
             &bg_after_rewind,
         ],
     );
-    let result = MvpAgent::find_orphaned_background_tasks(&Some(path));
+    let result = MvpAgent::find_stale_background_task_projections(&Some(path));
     let ids = orphaned_ids(&result);
     assert!(
         ids.contains("t-alive"),
@@ -1743,8 +1617,7 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("test-session-workspace-release");
     let ops = workspace::WorkspaceOps::for_test();
-    let toolset =
-        std::sync::Arc::new(tools::registry::types::FinalizedToolset::empty_for_test());
+    let toolset = std::sync::Arc::new(tools::registry::types::FinalizedToolset::empty_for_test());
     let toolset_weak = std::sync::Arc::downgrade(&toolset);
     ops.bind_local_session(
         sid.0.as_ref(),
@@ -1848,11 +1721,17 @@ fn cancel_forwards_pause_goal_meta() {
         agent.cancel(notif).await.expect("cancel must succeed");
         let mut saw_pause = false;
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if let SessionCommand::Cancel { pause_goal: true, .. } = cmd {
+            if let SessionCommand::Cancel {
+                pause_goal: true, ..
+            } = cmd
+            {
                 saw_pause = true;
             }
         }
-        assert!(saw_pause, "pauseGoal meta must reach SessionCommand::Cancel");
+        assert!(
+            saw_pause,
+            "pauseGoal meta must reach SessionCommand::Cancel"
+        );
 
         // Absent meta → false (older clients / programmatic cancels).
         let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
@@ -1863,7 +1742,10 @@ fn cancel_forwards_pause_goal_meta() {
             .expect("cancel must succeed");
         let mut saw_no_pause = false;
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if let SessionCommand::Cancel { pause_goal: false, .. } = cmd {
+            if let SessionCommand::Cancel {
+                pause_goal: false, ..
+            } = cmd
+            {
                 saw_no_pause = true;
             }
         }
@@ -1940,7 +1822,7 @@ fn make_live_session_handle(
     tokio::sync::mpsc::UnboundedReceiver<TestSessionCommand>,
 ) {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut handle = make_test_handle("test-model", false, Some("grow-tui"));
+    let mut handle = make_test_handle("test-model", Some("grow-tui"));
     handle.cmd_tx = cmd_tx.clone();
     handle.info = crate::session::info::Info {
         id: sid.clone(),
@@ -2468,148 +2350,6 @@ fn build_agent_with_gateway_rx() -> (
     let cfg = valid_agent_config();
     let agent = MvpAgent::new(gateway, &cfg).expect("valid test config");
     (agent, rx)
-}
-fn write_project_subagent_definitions(cwd: &std::path::Path) {
-    let roles = cwd.join(".grow/roles");
-    let personas = cwd.join(".grow/personas");
-    std::fs::create_dir_all(&roles).unwrap();
-    std::fs::create_dir_all(&personas).unwrap();
-    std::fs::write(roles.join("probe.toml"), "description = \"Project role\"").unwrap();
-    std::fs::write(
-        personas.join("probe.toml"),
-        "instructions = \"Project persona\"",
-    )
-    .unwrap();
-}
-fn folder_trust_on() -> crate::util::config::RemoteSettings {
-    crate::util::config::RemoteSettings {
-        folder_trust_enabled: Some(true),
-        ..Default::default()
-    }
-}
-#[test]
-#[serial_test::serial]
-fn subagent_spawn_context_reloads_project_definitions_after_trust_changes() {
-    let repo = tempfile::tempdir().unwrap();
-    git2::Repository::init(repo.path()).unwrap();
-    write_project_subagent_definitions(repo.path());
-    run_local_for_bridge_test(|| async {
-        let (agent, _rx) = build_agent_with_gateway_rx();
-        let sid = acp::SessionId::new("roles-personas-trust-transition");
-        let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
-        handle.info.cwd = repo.path().display().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
-        {
-            let mut cfg = agent.cfg.borrow_mut();
-            cfg.subagent_roles.insert(
-                "refreshed".into(),
-                crate::agent::subagent::resolution::config::SubagentRole {
-                    description: "Refreshed user role".into(),
-                    source_dir: Some(repo.path().join("user-roles")),
-                    ..Default::default()
-                },
-            );
-            cfg.subagent_model_overrides
-                .insert("probe".into(), "refreshed-model".into());
-            cfg.subagent_toggle.insert("probe".into(), false);
-        }
-        crate::agent::folder_trust::record_for_test(repo.path(), false);
-        let untrusted = agent.build_subagent_spawn_context(sid.0.as_ref());
-        assert!(!untrusted.subagent_roles.contains_key("probe"));
-        assert!(!untrusted.subagent_personas.contains_key("probe"));
-        assert_eq!(
-            untrusted
-                .subagent_roles
-                .get("refreshed")
-                .map(|role| role.description.as_str()),
-            Some("Refreshed user role")
-        );
-        assert_eq!(
-            untrusted
-                .subagent_model_overrides
-                .get("probe")
-                .map(String::as_str),
-            Some("refreshed-model")
-        );
-        assert_eq!(untrusted.subagent_toggle.get("probe"), Some(&false));
-        crate::agent::folder_trust::record_for_test(repo.path(), true);
-        let trusted = agent.build_subagent_spawn_context(sid.0.as_ref());
-        assert_eq!(
-            trusted
-                .subagent_roles
-                .get("probe")
-                .map(|role| role.description.as_str()),
-            Some("Project role")
-        );
-        assert!(trusted.subagent_personas.contains_key("probe"));
-        crate::agent::folder_trust::record_for_test(repo.path(), false);
-        let revoked = agent.build_subagent_spawn_context(sid.0.as_ref());
-        assert!(!revoked.subagent_roles.contains_key("probe"));
-        assert!(!revoked.subagent_personas.contains_key("probe"));
-    });
-}
-/// End-to-end gate wiring: project `.grow/roles` / `personas` alone must drive
-/// real `resolve_and_record` untrusted (not a forced `record_for_test` verdict),
-/// keep project defs out of Task spawn context, then re-admit them after grant.
-#[test]
-#[serial_test::serial]
-fn project_roles_personas_gated_via_resolve_and_record_chain() {
-    use test_support::EnvGuard;
-    let home = tempfile::tempdir().unwrap();
-    let _env = EnvGuard::set("GROW_HOME", home.path());
-    let _sim = EnvGuard::set(version::TEST_VERSION_ENV, "0.0-sim");
-    let _flag = EnvGuard::unset("GROW_FOLDER_TRUST");
-    let repo = tempfile::tempdir().unwrap();
-    git2::Repository::init(repo.path()).unwrap();
-    write_project_subagent_definitions(repo.path());
-    run_local_for_bridge_test(|| async {
-        let (agent, _rx) = build_agent_with_gateway_rx();
-        let sid = acp::SessionId::new("roles-personas-resolve-chain");
-        let (mut handle, _tx, _cmd_rx) = make_live_session_handle(&sid, None);
-        handle.info.cwd = repo.path().display().to_string();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
-        let allowed = crate::agent::folder_trust::resolve_and_record(
-            repo.path(),
-            Some(&folder_trust_on()),
-            false,
-        );
-        assert!(
-            !allowed,
-            "roles/personas markers alone must resolve untrusted without a grant"
-        );
-        assert!(
-            !crate::agent::folder_trust::project_scope_allowed(repo.path()),
-            "cached verdict after resolve_and_record must stay untrusted"
-        );
-        let untrusted = agent.build_subagent_spawn_context(sid.0.as_ref());
-        assert!(
-            !untrusted.subagent_roles.contains_key("probe"),
-            "untrusted: project role must stay out of spawn context"
-        );
-        assert!(
-            !untrusted.subagent_personas.contains_key("probe"),
-            "untrusted: project persona must stay out of spawn context"
-        );
-        crate::agent::folder_trust::grant_folder_trust(repo.path());
-        let allowed = crate::agent::folder_trust::resolve_and_record(
-            repo.path(),
-            Some(&folder_trust_on()),
-            false,
-        );
-        assert!(allowed, "store-granted folder must resolve trusted");
-        let trusted = agent.build_subagent_spawn_context(sid.0.as_ref());
-        assert_eq!(
-            trusted
-                .subagent_roles
-                .get("probe")
-                .map(|role| role.description.as_str()),
-            Some("Project role")
-        );
-        assert!(
-            trusted.subagent_personas.contains_key("probe"),
-            "trusted: project persona must enter spawn context after grant"
-        );
-    });
 }
 #[tokio::test]
 async fn local_announcement_reload_updates_config_and_clients() {

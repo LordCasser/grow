@@ -1779,7 +1779,7 @@ mod tests {
         let mut state = ScrollbackState::new();
         state.push_block(RenderBlock::read("a.rs", None));
         let mut block = SubagentBlock::started(
-            "task", "child-A", "explore", None, None, None, /*is_background=*/ false,
+            "task", "child-A", "explore", None, /*is_background=*/ false,
         );
         block.activity_label = Some("Thinking".to_string());
         state.push_block(RenderBlock::Subagent(block));

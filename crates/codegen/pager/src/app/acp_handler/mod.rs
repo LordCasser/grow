@@ -26,11 +26,12 @@ use crate::app::agent::{
     AgentId, AgentSession, AgentState, BgTaskState, BgTaskStatus, GoalDisplayPhase,
     GoalDisplayState, GoalDisplayStatus,
 };
+use crate::app::subagent::SubagentInfo;
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::views::permission_view::{
-    McpScope, McpScopeState, PermissionFocus, PermissionViewState, SubagentInfo,
+    McpScope, McpScopeState, PermissionFocus, PermissionViewState,
 };
 
 mod background;
@@ -76,17 +77,13 @@ use queue::handle_queue_changed;
 
 use background::{
     derive_child_cwd, handle_git_head_changed, handle_monitor_event, handle_scheduled_task_created,
-    handle_scheduled_task_deleted, handle_scheduled_task_fired,
-    handle_scheduled_task_inject_prompt, handle_task_backgrounded, handle_task_completed,
-    route_bg_task_stdout,
+    handle_scheduled_task_deleted, handle_scheduled_task_fired, handle_task_backgrounded,
+    handle_task_completed, route_bg_task_stdout,
 };
 use follow_ups::handle_follow_ups;
 pub(crate) use interactions::handle_ask_user_question;
 use interactions::handle_plan_approval;
-use mcp::{
-    handle_mcp_init_progress, handle_mcp_server_status, handle_mcp_servers_updated,
-    handle_mcp_tools_changed, push_server_status_enabled,
-};
+use mcp::{handle_mcp_init_progress, handle_mcp_initialized, handle_mcp_server_status};
 use settings::{
     handle_announcements_update, handle_models_update, handle_sessions_changed,
     handle_settings_update,
@@ -251,6 +248,33 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // Already-applied event delivered again — drop it (do not
                         // re-render). Not a mutation, so no redraw.
                         false
+                    } else if let acp::SessionUpdate::SessionInfoUpdate(ref update) =
+                        notif.request.update
+                    {
+                        let changed = match &update.title {
+                            acp::MaybeUndefined::Value(title) => {
+                                let title = crate::util::decode_html_entities(title).into_owned();
+                                let is_user = update
+                                    .meta
+                                    .as_ref()
+                                    .and_then(|meta| meta.get("grow/titleSource"))
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("user");
+                                agent.generated_session_title = Some(title.clone());
+                                if is_user {
+                                    agent.display_name = Some(title);
+                                }
+                                true
+                            }
+                            acp::MaybeUndefined::Null => {
+                                agent.generated_session_title = None;
+                                agent.display_name = None;
+                                true
+                            }
+                            acp::MaybeUndefined::Undefined => false,
+                        };
+                        advance_reconnect_cursor(agent, &mut meta);
+                        changed
                     } else if let acp::SessionUpdate::Plan(plan) = notif.request.update {
                         // A Plan update may still be useful to the transcript
                         // after its turn stopped being foreground, but only
@@ -654,15 +678,11 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "grow/scheduled_task_created" => handle_scheduled_task_created(notif, app),
         "grow/scheduled_task_fired" => handle_scheduled_task_fired(notif, app),
         "grow/scheduled_task_deleted" => handle_scheduled_task_deleted(notif, app),
-        "grow/scheduled_task_inject_prompt" => handle_scheduled_task_inject_prompt(notif, app),
         "grow/announcements/update" => handle_announcements_update(notif, app),
         "grow/git_head_changed" => handle_git_head_changed(notif, app),
         "grow/mcp/init_progress" => handle_mcp_init_progress(notif, app),
-        "grow/mcp/tools_changed" | "grow/mcp_initialized" => handle_mcp_tools_changed(notif, app),
-        "grow/mcp/server_status" if push_server_status_enabled() => {
-            handle_mcp_server_status(notif, app)
-        }
-        "grow/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
+        "grow/mcp_initialized" => handle_mcp_initialized(notif, app),
+        "grow/mcp/server_status" => handle_mcp_server_status(notif, app),
         _ => false,
     }
 }

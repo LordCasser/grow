@@ -47,7 +47,7 @@ pub struct HeadlessOptions {
     /// Resume was pinned pre-sandbox; materialization must not re-run title selection.
     pub resume_title_pinned: bool,
     pub cwd: Option<PathBuf>,
-    pub yolo: bool,
+    pub permission_mode: shell::util::config::PermissionMode,
     pub trust: bool,
     pub output_format: OutputFormat,
     /// Emit `stream_event` deltas for `streaming-messages-json`.
@@ -68,8 +68,7 @@ pub struct HeadlessOptions {
     pub allow_rules: Vec<String>,
     pub deny_rules: Vec<String>,
     pub max_turns: Option<u32>,
-    pub permission_mode_flag: Option<String>,
-    /// Effort token (`--reasoning-effort` / `--effort`); resolved like `/effort` after models load.
+    /// Effort token (`--reasoning-effort`); resolved like `/effort` after models load.
     pub reasoning_effort: Option<String>,
     /// Wait for background tasks to report `task_completed` before exiting (default true).
     pub wait_for_background: bool,
@@ -402,7 +401,7 @@ fn stop_reason_wire(reason: acp::StopReason) -> String {
 
 /// Configured MCP servers for the `init` line; all report `"connected"` (status is not resolved here).
 fn mcp_server_names(cwd: &Path) -> Vec<McpServer> {
-    let servers = cli_config::load_mcp_servers(cwd, &tools::types::compat::CompatConfig::default());
+    let servers = cli_config::load_mcp_servers(cwd);
     servers
         .iter()
         .filter_map(|s| {
@@ -506,9 +505,7 @@ async fn open_session(
     session_id_flag: Option<&str>,
     restore_code: Option<bool>,
 ) -> anyhow::Result<OpenedSession> {
-    // Sessions open before the agent resolves per-vendor compat; default all-on until it does.
-    let mcp_servers =
-        cli_config::load_mcp_servers(cwd, &tools::types::compat::CompatConfig::default());
+    let mcp_servers = cli_config::load_mcp_servers(cwd);
 
     if let Some(sid) = session_id_flag {
         let try_load: Result<acp::LoadSessionResponse, _> = acp_send(
@@ -554,8 +551,7 @@ async fn open_session_with_id(
 ) -> anyhow::Result<OpenedSession> {
     let cwd_str = cwd.to_string_lossy();
     crate::app::session_startup::ensure_session_id_available(session_id, &cwd_str)?;
-    let mcp_servers =
-        cli_config::load_mcp_servers(cwd, &tools::types::compat::CompatConfig::default());
+    let mcp_servers = cli_config::load_mcp_servers(cwd);
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
@@ -631,7 +627,7 @@ async fn apply_headless_model_and_effort(
             .unwrap_or_else(|| acp::ModelId::new(name))
     } else {
         models.current.clone().ok_or_else(|| {
-            anyhow::anyhow!("--effort/--reasoning-effort: no active model to apply effort to")
+            anyhow::anyhow!("--reasoning-effort: no active model to apply effort to")
         })?
     };
 
@@ -641,7 +637,7 @@ async fn apply_headless_model_and_effort(
         Some(token) if models.available.is_empty() => {
             if parse_canonical_effort_token(token).is_none() {
                 anyhow::bail!(
-                    "--effort/--reasoning-effort: unknown effort level '{token}' \
+                    "--reasoning-effort: unknown effort level '{token}' \
                      (model catalog unavailable; remapped menu ids require a loaded catalog)"
                 );
             }
@@ -653,11 +649,11 @@ async fn apply_headless_model_and_effort(
                 tracing::warn!(
                     model = %model_id.0,
                     token,
-                    "--effort/--reasoning-effort: model does not support reasoning effort; ignoring"
+                    "--reasoning-effort: model does not support reasoning effort; ignoring"
                 );
                 None
             }
-            Err(err) => anyhow::bail!("--effort/--reasoning-effort: {}", err.message()),
+            Err(err) => anyhow::bail!("--reasoning-effort: {}", err.message()),
         },
     };
 
@@ -757,9 +753,8 @@ pub async fn run_single_turn(
     agent_config.resolve_runtime_fields(&shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
         remote_settings: None,
-        is_headless: true,
         cli_subagents: None,
-        cli_session_summary_model: None,
+        cli_session_title_model: None,
         cli_experimental_memory: false,
         cli_no_memory: false,
         todo_gate: false,
@@ -767,12 +762,7 @@ pub async fn run_single_turn(
     });
 
     agent_config.mode = shell::agent::config::AgentMode::Headless;
-    agent_config.default_yolo_mode = options.yolo;
-    agent_config.default_auto_mode = shell::util::config::effective_auto_for_launch(
-        options.yolo,
-        options.permission_mode_flag.as_deref(),
-        None,
-    );
+    agent_config.default_permission_mode = options.permission_mode;
 
     apply_agent_flag(&options.agent, &mut agent_config);
 
@@ -785,14 +775,6 @@ pub async fn run_single_turn(
         disallowed_tools: parse_comma_list(options.cli_disallowed_tools.as_deref()),
         permission_rules: parse_permission_rules_strict(&options.allow_rules, &options.deny_rules)?,
         max_turns: options.max_turns,
-        permission_mode: options
-            .permission_mode_flag
-            .as_deref()
-            .map(|s| {
-                serde_json::from_value(serde_json::Value::String(s.to_string()))
-                    .map_err(|e| anyhow::anyhow!("--permission-mode: invalid value: {e}"))
-            })
-            .transpose()?,
     };
 
     if options.trust {
@@ -940,10 +922,9 @@ pub async fn run_single_turn(
             .model
             .clone()
             .or_else(|| session_models.current_model_id_str().map(str::to_string));
-        let permission_mode = options
-            .permission_mode_flag
-            .clone()
-            .or_else(|| options.yolo.then(|| "bypassPermissions".to_string()));
+        let permission_mode = Some(
+            shell::util::config::permission_mode_canonical_str(options.permission_mode).to_owned(),
+        );
         emitter.begin_session(SessionContext {
             session_id: session_id.0.to_string(),
             model,
@@ -1012,7 +993,7 @@ pub async fn run_single_turn(
                 &mut emitter,
                 t_prompt,
                 &mut ttf_logged,
-                options.yolo,
+                options.permission_mode,
                 &session_id,
                 &mut pending_bg,
                 &mut completed_bg,
@@ -1065,7 +1046,7 @@ pub async fn run_single_turn(
                     &mut emitter,
                     t_prompt,
                     &mut ttf_logged,
-                    options.yolo,
+                    options.permission_mode,
                     &session_id,
                     &mut pending_bg,
                     &mut completed_bg,
@@ -1081,7 +1062,7 @@ pub async fn run_single_turn(
                         &mut emitter,
                         t_prompt,
                         &mut ttf_logged,
-                        options.yolo,
+                        options.permission_mode,
                         &session_id,
                         &mut pending_bg,
                         &mut completed_bg,
@@ -1095,7 +1076,7 @@ pub async fn run_single_turn(
                     &mut emitter,
                     t_prompt,
                     &mut ttf_logged,
-                    options.yolo,
+                    options.permission_mode,
                     &session_id,
                     &mut pending_bg,
                     &mut completed_bg,
@@ -1116,7 +1097,7 @@ pub async fn run_single_turn(
         &mut emitter,
         t_prompt,
         &mut ttf_logged,
-        options.yolo,
+        options.permission_mode,
         &session_id,
         &mut pending_bg,
         &mut completed_bg,
@@ -1353,7 +1334,7 @@ fn drain_pending_acp_messages(
     emitter: &mut HeadlessEmitter,
     t_prompt: Instant,
     ttf_logged: &mut bool,
-    yolo: bool,
+    permission_mode: shell::util::config::PermissionMode,
     root_session_id: &acp::SessionId,
     pending_bg: &mut HashSet<BackgroundWork>,
     completed_bg: &mut HashSet<BackgroundWork>,
@@ -1364,7 +1345,7 @@ fn drain_pending_acp_messages(
             emitter,
             t_prompt,
             ttf_logged,
-            yolo,
+            permission_mode,
             root_session_id,
             pending_bg,
             completed_bg,
@@ -1379,7 +1360,7 @@ async fn drain_acp_with_grace(
     emitter: &mut HeadlessEmitter,
     t_prompt: Instant,
     ttf_logged: &mut bool,
-    yolo: bool,
+    permission_mode: shell::util::config::PermissionMode,
     root_session_id: &acp::SessionId,
     pending_bg: &mut HashSet<BackgroundWork>,
     completed_bg: &mut HashSet<BackgroundWork>,
@@ -1392,7 +1373,7 @@ async fn drain_acp_with_grace(
                 emitter,
                 t_prompt,
                 ttf_logged,
-                yolo,
+                permission_mode,
                 root_session_id,
                 pending_bg,
                 completed_bg,
@@ -1411,7 +1392,7 @@ async fn drain_acp_with_grace(
                     emitter,
                     t_prompt,
                     ttf_logged,
-                    yolo,
+                    permission_mode,
                     root_session_id,
                     pending_bg,
                     completed_bg,
@@ -1431,7 +1412,7 @@ fn handle_headless_acp_message(
     emitter: &mut HeadlessEmitter,
     t_prompt: Instant,
     ttf_logged: &mut bool,
-    yolo: bool,
+    permission_mode: shell::util::config::PermissionMode,
     root_session_id: &acp::SessionId,
     pending_bg: &mut HashSet<BackgroundWork>,
     completed_bg: &mut HashSet<BackgroundWork>,
@@ -1480,7 +1461,7 @@ fn handle_headless_acp_message(
             let _ = boxed.response_tx.send(Ok(()));
         }
         AcpClientMessageBox::RequestPermission(req) => {
-            if yolo && req.request.session_id == *root_session_id {
+            if permission_mode.is_always_approve() && req.request.session_id == *root_session_id {
                 if let Some(resp) = auto_respond_to_permissions(
                     &req.request,
                     &[

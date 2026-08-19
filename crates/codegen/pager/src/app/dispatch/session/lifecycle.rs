@@ -11,7 +11,7 @@ use crate::app::app_view::{ActiveView, AppView, TrustState};
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, reseed_tip_for_new_session, show_welcome, switch_to_agent,
 };
-use crate::app::dispatch::modes::inherit_auto_mode;
+use crate::app::dispatch::modes::inherit_permission_mode;
 use crate::app::dispatch::prompt::dispatch_initial_prompt;
 use crate::app::dispatch::queue::{QueueDrain, maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::dispatch;
@@ -102,7 +102,7 @@ pub(crate) fn apply_deferred_switch_outcome(
     outcome: DeferredSwitchOutcome,
 ) -> Option<(acp::ModelId, Option<ReasoningEffort>)> {
     if let Some(err) = outcome.effort_error {
-        let msg = format!("--effort/--reasoning-effort: {}", err.message());
+        let msg = format!("--reasoning-effort: {}", err.message());
         tracing::warn!("{msg}");
         agent.show_toast(&msg);
         agent.scrollback.push_block(RenderBlock::system(msg));
@@ -241,8 +241,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: app.default_yolo,
-            auto_mode: inherit_auto_mode(app),
+            permission_mode: inherit_permission_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -613,8 +612,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
-            yolo_mode: app.default_yolo,
-            auto_mode: inherit_auto_mode(app),
+            permission_mode: inherit_permission_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -739,7 +737,6 @@ pub(in crate::app::dispatch) fn handle_session_created(
     agent_id: AgentId,
     session_id: acp::SessionId,
     new_models: Option<acp::SessionModelState>,
-    scheduler_background_loops: Option<bool>,
 ) -> Vec<Effect> {
     let agent_count = app.agents.len();
     let switch_hint =
@@ -761,7 +758,6 @@ pub(in crate::app::dispatch) fn handle_session_created(
             )));
         }
         agent.bind_session_id(session_id);
-        agent.scheduler_background_loops = scheduler_background_loops;
         if let Some(m) = new_models {
             app.models = Some(m).into();
             agent.session.models = app.models.clone();
@@ -846,14 +842,12 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
     worktree_path: std::path::PathBuf,
     session_cwd: std::path::PathBuf,
     new_models: Option<acp::SessionModelState>,
-    scheduler_background_loops: Option<bool>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.finish_command();
         agent.mark_turn_finished();
         let session_id_clone = session_id.clone();
         agent.bind_session_id(session_id);
-        agent.scheduler_background_loops = scheduler_background_loops;
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
         if let Some(m) = new_models {

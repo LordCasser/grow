@@ -1679,8 +1679,6 @@ mod link_click_tests {
                     "child-sid",
                     "general-purpose",
                     None,
-                    None,
-                    None,
                     false,
                 ),
             ));
@@ -2138,12 +2136,8 @@ mod link_click_tests {
         let bundle = crate::app::bundle::BundleState {
             has_cache: false,
             version: String::new(),
-            personas: Vec::new(),
-            roles: Vec::new(),
             agents: Vec::new(),
             skills: Vec::new(),
-            persona_details: Vec::new(),
-            role_details: Vec::new(),
         };
         agent.draw(
             area,
@@ -2236,12 +2230,8 @@ mod link_click_tests {
         let bundle = crate::app::bundle::BundleState {
             has_cache: false,
             version: String::new(),
-            personas: Vec::new(),
-            roles: Vec::new(),
             agents: Vec::new(),
             skills: Vec::new(),
-            persona_details: Vec::new(),
-            role_details: Vec::new(),
         };
         agent.draw(
             tall,
@@ -2310,12 +2300,8 @@ mod link_click_tests {
         let bundle = crate::app::bundle::BundleState {
             has_cache: false,
             version: String::new(),
-            personas: Vec::new(),
-            roles: Vec::new(),
             agents: Vec::new(),
             skills: Vec::new(),
-            persona_details: Vec::new(),
-            role_details: Vec::new(),
         };
         agent.draw(
             tall,

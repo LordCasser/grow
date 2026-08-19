@@ -88,9 +88,8 @@ Usage notes:
   - Long pages will be truncated to fit your context window"#
     }
 
-    fn versioned_definition(
+    fn finalized_definition(
         &self,
-        _contract_version: Option<&str>,
         client_name: &str,
         description_override: Option<&str>,
         renderer: &crate::types::template_renderer::TemplateRenderer,

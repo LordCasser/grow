@@ -3,8 +3,8 @@
 //! run-state, and a backtest bound can't be bypassed by delegating to a subagent.
 
 use super::{build_minimal_agent_for_tests, make_test_handle};
-use agent_client_protocol as acp;
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
+use agent_client_protocol as acp;
 
 /// Subagents inherit the parent permission handle, so a managed `Read(**/.env)`
 /// deny still blocks the child — direct read and the `cat .env` shell equivalent.
@@ -39,12 +39,12 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
                     }])),
                     Vec::new(), // deny_read_globs
                     Vec::new(),
-                    false,
+                    diagnostics::enums::PermissionMode::Ask,
                     None,
                     false,
                 );
 
-            let mut handle = make_test_handle("test-model", false, None);
+            let mut handle = make_test_handle("test-model", None);
             handle.permission_prompt_timeout = permission_prompt_timeout;
             handle.permission_handle = permission_handle;
             agent.sessions.borrow_mut().insert(sid.clone(), handle);
@@ -88,7 +88,7 @@ async fn subagent_spawn_context_shares_parent_goal_loop_gate() {
 
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("parent-goal");
-    let handle = make_test_handle("test-model", false, None);
+    let handle = make_test_handle("test-model", None);
     // Clone the parent's live gate before the handle moves into `sessions`.
     let parent_gate = handle.tool_context.goal_loop_active_gate.clone();
     agent.sessions.borrow_mut().insert(sid.clone(), handle);
@@ -111,7 +111,7 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
 
     // Parent with the tool disabled (the `--no-ask-user` case) → child off.
     let sid_off = acp::SessionId::new("parent-no-ask");
-    let mut handle_off = make_test_handle("test-model", false, None);
+    let mut handle_off = make_test_handle("test-model", None);
     handle_off.ask_user_question_enabled = false;
     agent
         .sessions
@@ -125,7 +125,7 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
 
     // Parent with the tool enabled (the default) → child on.
     let sid_on = acp::SessionId::new("parent-ask");
-    let handle_on = make_test_handle("test-model", false, None);
+    let handle_on = make_test_handle("test-model", None);
     agent
         .sessions
         .borrow_mut()
@@ -143,7 +143,7 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
 async fn subagent_spawn_context_inherits_parent_process_scope() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("parent-process-scope");
-    let mut handle = make_test_handle("test-model", false, None);
+    let mut handle = make_test_handle("test-model", None);
     let parent_scope = tty_utils::ProcessScope::new();
     handle.tool_context.process_scope = Some(parent_scope.clone());
     agent.sessions.borrow_mut().insert(sid.clone(), handle);

@@ -6,7 +6,7 @@ use crate::app::agent::{AgentId, AgentSession, AgentState, InFlightPrompt};
 use crate::app::agent_view::AgentView;
 use crate::scrollback::entry::EntryId;
 use crate::scrollback::state::ScrollbackState;
-use crate::views::permission_view::SubagentInfo;
+use crate::app::subagent::SubagentInfo;
 use std::path::PathBuf;
 use std::time::Instant;
 use shell::extensions::notification::RetryState;
@@ -25,8 +25,7 @@ pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
         forked_from: None,
         pending_prompts: std::collections::VecDeque::new(),
         next_queue_id: 0,
-        yolo_mode: false,
-        auto_mode: false,
+        permission_mode: shell::util::config::PermissionMode::Ask,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -76,8 +75,6 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         child_session_id: Arc::from(child_sid),
         description: Arc::from("test"),
         subagent_type: Arc::from("general-purpose"),
-        persona: None,
-        role: None,
         model: None,
         context_source: None,
         resumed_from: None,
@@ -190,6 +187,42 @@ pub(super) fn make_app_with_agent(session_id: &str) -> AppView {
     );
     app
 }
+#[test]
+fn canonical_session_info_title_update_replaces_legacy_extension_channel() {
+    fn title_message(session_id: &str, title: &str, source: &str) -> AcpClientMessage {
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let update = acp::SessionInfoUpdate::new()
+            .title(title)
+            .meta(serde_json::json!({
+                "grow/titleEventSeq": 3,
+                "grow/titleSource": source,
+            }).as_object().cloned());
+        AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+            request: acp::SessionNotification::new(
+                acp::SessionId::new(session_id),
+                acp::SessionUpdate::SessionInfoUpdate(update),
+            ),
+            response_tx,
+        })
+    }
+
+    let mut app = make_app_with_agent("session-title");
+    assert!(handle(
+        title_message("session-title", "Generated title", "generated"),
+        &mut app,
+    ));
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert_eq!(agent.generated_session_title.as_deref(), Some("Generated title"));
+    assert!(agent.display_name.is_none());
+
+    assert!(handle(
+        title_message("session-title", "User title", "user"),
+        &mut app,
+    ));
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert_eq!(agent.generated_session_title.as_deref(), Some("User title"));
+    assert_eq!(agent.display_name.as_deref(), Some("User title"));
+}
 /// A server-shape interjection broadcast (no `interjectionId`, like the
 /// shared-queue interject path — every pane renders it).
 pub(super) fn interjection_broadcast(
@@ -240,35 +273,19 @@ pub(super) fn insert_running_task(agent: &mut AgentView, task_id: &str, command:
         );
 }
 pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) {
-    use crate::app::agent_view::test_fixtures::simulate_wait_all;
+    use crate::app::agent_view::test_fixtures::simulate_task_output_wait_ids;
     agent.session.state = AgentState::TurnRunning;
     agent.session.current_prompt_id = Some("p1".into());
     for &child_id in child_ids {
         agent.subagent_sessions.insert(child_id.into(), make_subagent_info(child_id));
     }
-    simulate_wait_all(agent);
+    simulate_task_output_wait_ids(agent, child_ids);
     assert!(agent.renders_parked());
 }
 pub(super) fn follow_ups_ext(
-    response_id: &str,
-    labels: &[&str],
-) -> acp::ExtNotification {
-    let suggestions: Vec<serde_json::Value> = labels
-        .iter()
-        .map(|l| serde_json::json!({ "label": l }))
-        .collect();
-    let params = serde_json::json!({
-            "response_id": response_id,
-            "suggestions": suggestions,
-        });
-    acp::ExtNotification::new(
-        "grow/follow_ups",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
-}
-pub(super) fn follow_ups_ext_with_prompt(
-    response_id: &str,
+    session_id: &str,
     prompt_id: &str,
+    response_id: &str,
     labels: &[&str],
 ) -> acp::ExtNotification {
     let suggestions: Vec<serde_json::Value> = labels
@@ -276,10 +293,11 @@ pub(super) fn follow_ups_ext_with_prompt(
         .map(|l| serde_json::json!({ "label": l }))
         .collect();
     let params = serde_json::json!({
-            "response_id": response_id,
-            "promptId": prompt_id,
-            "suggestions": suggestions,
-        });
+        "sessionId": session_id,
+        "response_id": response_id,
+        "promptId": prompt_id,
+        "suggestions": suggestions,
+    });
     acp::ExtNotification::new(
         "grow/follow_ups",
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
@@ -290,18 +308,6 @@ pub(super) fn group_tool_verbs_settings_update(
 ) -> acp::ExtNotification {
     let params = match value {
         Some(v) => serde_json::json!({ "group_tool_verbs": v }),
-        None => serde_json::json!({}),
-    };
-    acp::ExtNotification::new(
-        "grow/settings/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
-}
-pub(super) fn collapsed_edit_blocks_settings_update(
-    value: Option<bool>,
-) -> acp::ExtNotification {
-    let params = match value {
-        Some(v) => serde_json::json!({ "collapsed_edit_blocks": v }),
         None => serde_json::json!({}),
     };
     acp::ExtNotification::new(
@@ -357,13 +363,6 @@ pub(super) fn make_exit_plan_ext_with_tool_call_id(
         rx,
     )
 }
-pub(super) fn make_inject_notif(payload: &serde_json::Value) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(payload).unwrap();
-    acp::ExtNotification::new(
-        "grow/scheduled_task_inject_prompt",
-        std::sync::Arc::from(raw),
-    )
-}
 pub(super) fn make_fired_notif(
     session_id: &str,
     task_id: &str,
@@ -378,7 +377,7 @@ pub(super) fn make_fired_notif(
             prompt: prompt.into(),
             human_schedule: human_schedule.into(),
             next_fire_at: next_fire_at.map(str::to_string),
-            subagent_id: None,
+            subagent_id: "subagent-1".into(),
         },
         meta: None,
     };
@@ -397,7 +396,7 @@ pub(super) fn make_fired_notif_with_subagent(
             prompt: "p".into(),
             human_schedule: "every 1 minute".into(),
             next_fire_at: Some("2026-02-02T02:02:02Z".into()),
-            subagent_id: Some(subagent_id.into()),
+            subagent_id: subagent_id.into(),
         },
         meta: None,
     };
@@ -902,8 +901,6 @@ pub(super) fn test_subagent_spawned(
         permission_mode: None,
         effective_permission_mode: None,
         workflow_run_id: None,
-        persona: None,
-        role: None,
         model: None,
         resumed_from: None,
         goal_id: None,
@@ -920,7 +917,6 @@ pub(super) fn test_subagent_finished(child_sid: &str) -> GrowSessionUpdate {
         duration_ms: 500,
         tokens_used: 0,
         output: None,
-        will_wake: false,
     }
 }
 pub(super) fn test_subagent_progress(
@@ -1088,21 +1084,48 @@ pub(super) fn child_user_message_line(child_sid: &str, text: &str) -> String {
             r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":{escaped}}},"_meta":{{"messageId":"{child_sid}-initial"}}}}}}}}"#
         )
 }
-pub(super) fn write_subagent_meta_json(
+pub(super) fn write_subagent_spawn_timeline(
     grow_home: &std::path::Path,
     parent_sid: &str,
     subagent_id: &str,
     prompt: &str,
 ) {
-    let sessions_dir = grow_home
+    let session_dir = grow_home
         .join("sessions")
         .join(urlencoding::encode("/tmp").as_ref())
-        .join(parent_sid)
-        .join("subagents")
-        .join(subagent_id);
-    std::fs::create_dir_all(&sessions_dir).unwrap();
-    let json = format!(r#"{{"prompt":{}}}"#, serde_json::to_string(prompt).unwrap());
-    std::fs::write(sessions_dir.join("meta.json"), json).unwrap();
+        .join(parent_sid);
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    timeline
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                subagent_id: subagent_id.into(),
+                child_session_id: subagent_id.into(),
+                subagent_type: "general-purpose".into(),
+                description: "task".into(),
+                prompt: prompt.into(),
+                context_source: chat_state::SubagentContextSource::New,
+                source_ref: None,
+                context_normalized: false,
+                resumed_from: None,
+                parent_prompt_id: None,
+                capability_mode: None,
+                permission_mode: None,
+                effective_permission_mode: None,
+                workflow_run_id: None,
+                goal_id: None,
+                child_cwd: "/tmp".into(),
+                worktree_path: None,
+                effective_model_id: "grow-3".into(),
+            }),
+        ))
+        .unwrap();
+    let mut bytes = Vec::new();
+    for event in timeline.events() {
+        serde_json::to_writer(&mut bytes, event).unwrap();
+        bytes.push(b'\n');
+    }
+    std::fs::write(session_dir.join("timeline.jsonl"), bytes).unwrap();
 }
 pub(super) fn child_scrollback_matching_prompt_count(
     agent: &AgentView,
@@ -1343,16 +1366,6 @@ pub(super) fn make_task_completed_notif_with_signal(
     exit_code: Option<i32>,
     signal: Option<&str>,
 ) -> acp::ExtNotification {
-    task_completed_notif(session_id, task_id, command, exit_code, signal, false)
-}
-pub(super) fn task_completed_notif(
-    session_id: &str,
-    task_id: &str,
-    command: &str,
-    exit_code: Option<i32>,
-    signal: Option<&str>,
-    will_wake: bool,
-) -> acp::ExtNotification {
     use tools::types::TaskSnapshot;
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
@@ -1377,7 +1390,6 @@ pub(super) fn task_completed_notif(
                 description: None,
                 is_backgrounded: false,
             },
-            will_wake,
         },
         meta: None,
     };
@@ -1428,8 +1440,8 @@ pub(super) fn make_reasoning_models_update_notif(
 ) -> acp::ExtNotification {
     let mut info = make_model_info(current_model_id);
     info.meta = serde_json::json!({
-            "supportsReasoningEffort": true,
             "reasoningEffort": default_effort,
+            "reasoningEfforts": [default_effort],
         })
         .as_object()
         .cloned();
@@ -1518,6 +1530,7 @@ pub(super) fn make_mcp_init_progress_notif(
             &serde_json::json!({
             "total": total,
             "connected": connected,
+            "sessionId": "sess-1",
         }),
         )
         .unwrap();
@@ -1534,7 +1547,7 @@ pub(super) fn make_mcps_modal_with_servers(
     state
 }
 pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
-    use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};
+    use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo};
     let owner = app.agents.get_mut(&AgentId(0)).expect("owner present");
     owner.extensions_modal = Some(
         make_mcps_modal_with_servers(
@@ -1549,9 +1562,7 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
             tools: Vec::new(),
             enabled: true,
             source: "local".into(),
-            wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }],
         ),
     );
@@ -1564,15 +1575,12 @@ pub(super) fn make_server_status_notif(
     session_id: &str,
     name: &str,
     status: shell::extensions::mcp::McpServerStatus,
-    tools: Option<serde_json::Value>,
+    tools: Option<Vec<shell::extensions::mcp::McpToolEntry>>,
 ) -> acp::ExtNotification {
-    use shell::extensions::mcp::{
-        McpServerSource, McpServerStatusPayload, McpServerStatusReason,
-    };
+    use shell::extensions::mcp::{McpServerStatusPayload, McpServerStatusReason};
     let payload = McpServerStatusPayload {
         session_id: session_id.to_string(),
         name: name.to_string(),
-        source: McpServerSource::Local,
         status,
         reason: McpServerStatusReason::Initialized,
         detail: None,
@@ -1581,35 +1589,24 @@ pub(super) fn make_server_status_notif(
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
     acp::ExtNotification::new("grow/mcp/server_status", std::sync::Arc::from(raw))
 }
-/// `mcp/servers_updated` real wire shape — `{ mcpServers: [...] }`
-/// with NO `sessionId`. Regression guard: anything that tries to
-/// extract a session id here must fail and fall through to the
-/// broadcast path.
-pub(super) fn make_servers_updated_notif() -> acp::ExtNotification {
-    let payload = serde_json::json!({ "mcpServers": [] });
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("grow/mcp/servers_updated", std::sync::Arc::from(raw))
-}
-/// Real post-handshake / auth-recovery wire shape:
-/// `McpToolsChanged { sessionId, serverName, tools }`.
-pub(super) fn make_tools_changed_notif_post_h2(
+/// Canonical catalog-change delta without an embedded inventory.
+pub(super) fn make_catalog_refresh_notif(
     session_id: &str,
+    server_name: &str,
 ) -> acp::ExtNotification {
-    let payload = shell::extensions::mcp::McpToolsChanged {
+    use shell::extensions::mcp::{
+        McpServerStatus, McpServerStatusPayload, McpServerStatusReason,
+    };
+    let payload = McpServerStatusPayload {
         session_id: session_id.to_string(),
-        server_name: "grow_managed_linear".to_string(),
-        tools: Vec::new(),
+        name: server_name.to_string(),
+        status: McpServerStatus::Ready,
+        reason: McpServerStatusReason::ConfigChanged,
+        detail: None,
+        tools: None,
     };
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("grow/mcp/tools_changed", std::sync::Arc::from(raw))
-}
-/// Legacy / forward-compat wire shape: older shells emit
-/// `{ serverName, tools }` with NO sessionId. The pager must fall
-/// back to active_view for this shape.
-pub(super) fn make_tools_changed_notif_pre_h2() -> acp::ExtNotification {
-    let payload = serde_json::json!({ "serverName": "grow_managed_linear", "tools": [] });
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("grow/mcp/tools_changed", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("grow/mcp/server_status", std::sync::Arc::from(raw))
 }
 /// Real `mcp_initialized` wire shape:
 /// `{ sessionId, mcpToolCount, elapsedMs }`.

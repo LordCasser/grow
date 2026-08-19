@@ -29,13 +29,12 @@ Grow processes the prompt, runs any necessary tools, and prints the result to st
 | `--cwd <PATH>`          | Set working directory                                 |
 | `--output-format <FMT>` | Output format: `plain`, `json`, `streaming-json`, `streaming-messages-json` |
 | `--include-partial-messages` | Emit raw `stream_event` deltas. Only affects `--output-format streaming-messages-json`; ignored (with a warning) otherwise. |
-| `--yolo`                | Auto-approve all tool executions                      |
 | `--rules <TEXT>`        | Custom rules for the system prompt                    |
 | `--tools <TOOLS>`       | Allowlist of built-in tools (comma-separated). MCP meta-tools remain available unless denied. Headless only. |
 | `--disallowed-tools <TOOLS>` | Denylist of built-in tools to remove (comma-separated). Supports `Agent` entries. Headless only. |
 | `--max-turns <N>`       | Maximum number of agentic turns before stopping. Headless only. |
-| `--reasoning-effort` / `--effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (each a distinct tier; a model only accepts the levels its menu advertises). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
-| `--permission-mode <MODE>` | Permission mode. `bypassPermissions` enables always-approve (see [Permissions and safety](22-permissions-and-safety.md#permission-modes)); for deny-by-default use `defaultMode` in `.claude/settings.json`. |
+| `--reasoning-effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (each a distinct tier; a model only accepts the levels its menu advertises). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
+| `--permission-mode <MODE>` | Permission mode: `ask`, `auto`, or `always-approve` (see [Permissions and safety](22-permissions-and-safety.md#permission-modes)). |
 | `--allow <RULE>`        | Permission allow rule with glob patterns (repeatable). Works in TUI and headless. |
 | `--deny <RULE>`         | Permission deny rule with glob patterns (repeatable). Works in TUI and headless. |
 | `--prompt-json <JSON>`  | Prompt as JSON content blocks                         |
@@ -44,7 +43,7 @@ Grow processes the prompt, runs any necessary tools, and prints the result to st
 | `--no-auto-update`      | Disable update checks for this session                |
 | `--sandbox <PROFILE>`   | Sandbox profile for filesystem/network access         |
 
-> **Note:** `--tools`, `--disallowed-tools`, `--max-turns`, and `--agents` are headless-only flags. If used in the interactive TUI, a warning is printed and the flag is ignored. `--reasoning-effort`/`--effort`, `--permission-mode`, `--allow`, and `--deny` work in both modes. For more flags (agents and worktrees), see [Additional Headless Flags](#additional-headless-flags).
+> **Note:** `--tools`, `--disallowed-tools`, `--max-turns`, and `--agents` are headless-only flags. If used in the interactive TUI, a warning is printed and the flag is ignored. `--reasoning-effort`, `--permission-mode`, `--allow`, and `--deny` work in both modes. For more flags (agents and worktrees), see [Additional Headless Flags](#additional-headless-flags).
 
 ### Tool Filtering
 
@@ -281,7 +280,7 @@ On `init`, `skills` is live. It lists the session's user-invocable skill names, 
 The other `init` fields carry real data:
 
 - `apiKeySource` is `user`; Grow only supports user-supplied provider credentials.
-- `permissionMode` is the effective headless mode mapped to the Messages enum: the `--permission-mode` value, or `bypassPermissions` under `--yolo`, else `default`. Grow-only modes such as `auto` collapse to `default`.
+- `permissionMode` is the effective mode mapped at the Claude Messages boundary: `always-approve` becomes `bypassPermissions`; `ask` and `auto` become `default`.
 - `mcp_servers[].status` reflects configuration, not live connection state. A configured server always reports `"connected"`, because per-server handshake state is not resolved by the time `init` is emitted.
 
 Grow omits the schema's pure-placeholder `init` fields it has no data for, rather than emitting dummy values: `claude_code_version`, `output_style`, and `plugins`.
@@ -410,21 +409,21 @@ grow --prompt-file ./prompt.txt
 
 ```bash
 grow -p "Review changes for bugs and security issues." \
-  --output-format json --yolo | jq -r '.text' > review.md
+  --output-format json --permission-mode always-approve | jq -r '.text' > review.md
 ```
 
 ### Pre-Commit Hook
 
 ```bash
 grow -p "Review staged changes for obvious bugs. Reply OK if fine, or list issues." \
-  --yolo --output-format json | jq -r '.text' | grep -q "^OK" || exit 1
+  --permission-mode always-approve --output-format json | jq -r '.text' | grep -q "^OK" || exit 1
 ```
 
 ### Batch Processing
 
 ```bash
 for file in src/*.js; do
-  grow -p "Migrate $file from CommonJS to ES modules." --yolo
+  grow -p "Migrate $file from CommonJS to ES modules." --permission-mode always-approve
 done
 ```
 
@@ -451,7 +450,7 @@ class GrowChat:
     def _build_cmd(self, prompt, model, stream):
         return ["grow", "-p", prompt, "-m", model, "--cwd", self.cwd,
                 "--output-format", "streaming-json" if stream else "json",
-                "--yolo"]
+                "--permission-mode", "always-approve"]
 
     async def create(self, messages, model="deepseek/deepseek-chat", stream=False):
         prompt = messages[-1]["content"] if len(messages) == 1 else "\n".join(
@@ -505,7 +504,7 @@ asyncio.run(main())
 # Run a code review and exit with failure if issues are found
 
 RESULT=$(grow -p "Review this PR for bugs. Output JSON with 'issues' array." \
-  --output-format json --yolo | jq -r '.text')
+  --output-format json --permission-mode always-approve | jq -r '.text')
 
 ISSUE_COUNT=$(echo "$RESULT" | jq '.issues | length' 2>/dev/null || echo "0")
 
@@ -522,11 +521,11 @@ echo "No issues found"
 
 ## Always-approve for automation
 
-`--always-approve` (alias `--yolo`, same as `--permission-mode bypassPermissions`) runs tool calls without interactive permission prompts. Deny rules, hooks, and admin locks still apply (see [Permissions and safety](22-permissions-and-safety.md#permission-modes)).
+`--permission-mode always-approve` runs tool calls without interactive permission prompts. Deny rules, hooks, and admin locks still apply (see [Permissions and safety](22-permissions-and-safety.md#permission-modes)).
 
 ```bash
-grow -p "Format all files" --always-approve
-grow -p "Run the tests and fix any failures" --cwd ~/projects/my-app --always-approve
+grow -p "Format all files" --permission-mode always-approve
+grow -p "Run the tests and fix any failures" --cwd ~/projects/my-app --permission-mode always-approve
 ```
 
 For agent servers and SDKs, see [Agent mode](15-agent-mode.md#automation-and-sdks).
@@ -548,7 +547,7 @@ For CI environments, set the environment variable named by the selected provider
 
 ```bash
 export DEEPSEEK_API_KEY="sk-..."
-grow -p "Run the test suite" --yolo
+grow -p "Run the test suite" --permission-mode always-approve
 ```
 
 ---
@@ -576,7 +575,7 @@ nor `env_key`. See [Authentication](02-authentication.md).
 
 - Headless mode starts a **fresh session by default**. Use `-r/--resume` or `-c/--continue` to maintain context across calls.
 - The `--output-format json` response always includes a `sessionId` you can use with `--resume` for follow-up calls.
-- Combine `--yolo` with `--rules` to set guardrails: `grow -p "..." --yolo --rules "Never delete files"`.
+- Combine `--permission-mode always-approve` with `--rules` to set guardrails: `grow -p "..." --permission-mode always-approve --rules "Never delete files"`.
 - For debugging, raise the log level and capture stderr: `RUST_LOG=debug grow -p "..." 2> debug.log`.
 
 ---
@@ -606,7 +605,7 @@ Grow stores data in `~/.grow` (override with `GROW_HOME`; see [Environment Varia
 | `logs/`                  | Internal log files (for example `unified.jsonl`) |
 | `logs/mcp/`              | MCP server logs                       |
 | `skills/`                | User skill definitions                |
-| `personas/`              | User-scoped agent personas            |
+| `agents/`                | User-scoped Agent definitions         |
 | `crash/`                 | Crash reports                         |
 | `trace-exports/`         | Session trace exports                 |
 | `worktrees/`             | Git worktree metadata                 |

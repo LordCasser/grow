@@ -8,10 +8,10 @@ Hooks let you run a script or send an HTTP request at key moments in a Grow sess
 
 A hook is a shell command or HTTP endpoint that Grow calls when a specific lifecycle event occurs. Hooks can:
 
-- **Block actions** -- A `PreToolUse` hook can deny a dangerous command before it runs.
-- **Keep the agent working** -- A `Stop` hook can block the agent from finishing its turn until a condition holds (e.g. the test suite passes) and feed the reason back to the model.
-- **React to events** -- A `PostToolUse` hook can log every tool execution to a file.
-- **Set up context** -- A `SessionStart` hook can export environment variables or run setup scripts.
+- **Block actions** -- A `pre_tool_use` hook can deny a dangerous command before it runs.
+- **Keep the agent working** -- A `stop` hook can block the agent from finishing its turn until a condition holds (e.g. the test suite passes) and feed the reason back to the model.
+- **React to events** -- A `post_tool_use` hook can log every tool execution to a file.
+- **Set up context** -- A `session_start` hook can export environment variables or run setup scripts.
 
 ---
 
@@ -39,7 +39,7 @@ A hook is a shell command or HTTP endpoint that Grow calls when a specific lifec
    ```json
    {
      "hooks": {
-       "SessionStart": [
+       "session_start": [
          {
            "hooks": [
              { "type": "command", "command": "echo 'Grow session started in '$(pwd)" }
@@ -50,7 +50,7 @@ A hook is a shell command or HTTP endpoint that Grow calls when a specific lifec
    }
    ```
 
-3. Start (or restart) a Grow session. The hook runs automatically on `SessionStart`.
+3. Start (or restart) a Grow session. The hook runs automatically on `session_start`.
 
 4. Press `Ctrl+L` on non–VS Code family terminals (or run `/hooks` anywhere — preferred on VS Code family) and check the Hooks tab to confirm it loaded.
 
@@ -63,17 +63,13 @@ Hooks are discovered from several places (all are merged):
 | Scope | Path | Trusted? | Notes |
 |-------|------|----------|-------|
 | Global | `~/.grow/hooks/*.json` | Always | Personal hooks |
-| Global | `~/.claude/settings.json` (and `settings.local.json`) | Always | Claude Code compatibility (configurable) |
-| Global | `~/.cursor/hooks.json` | Always | Cursor compatibility (configurable) |
 | Project | `<project>/.grow/hooks/*.json` | Requires trust | Per-repo automation |
-| Project | `<project>/.claude/settings.json` (and `settings.local.json`) | Requires trust | Claude compatibility (configurable) |
-| Project | `<project>/.cursor/hooks.json` | Requires trust | Cursor compatibility (configurable) |
 | Config | `~/.grow/config.toml` | Always | Your hooks alongside the rest of your config |
 | Config | `managed_config.toml` (`$GROW_HOME` and `/etc/grow`) | Always | Organization-distributed hooks (server-synced and on-device) |
 | Config | `requirements.toml` (user and system) | Always | Organization-distributed hooks in the requirements layer |
 | Plugin | Bundled inside installed plugins | Per-plugin | Shared team hooks |
 
-Config-file hooks live in the same TOML your organization already controls; see [Hooks in Config Files](#hooks-in-config-files) for the format. The compatible vendor hook sources are scanned by default. To disable scanning for a specific vendor, set `[compat.<vendor>] hooks = false` in `~/.grow/config.toml` or the corresponding environment variable. See [Configuration](05-configuration.md#harness-compatibility) for details.
+Config-file hooks live in the same TOML your organization already controls; see [Hooks in Config Files](#hooks-in-config-files) for the format.
 
 **Trusting a project**: The first time you open a project with hooks, you must trust it before its project hooks will run -- until then they are silently skipped. Grant trust by running `/hooks-trust` (or launching with `--trust`); the decision is recorded in the unified folder-trust store (`~/.grow/trusted_folders.toml`), the same gate that governs repo-local MCP/LSP servers. Global hooks in `~/.grow/hooks/` are always trusted and need no entry. This prevents untrusted repos from running arbitrary code.
 
@@ -85,40 +81,23 @@ Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant
 
 | Event | When it fires | Blocking? |
 |-------|---------------|-----------|
-| `SessionStart` | A session starts. | No |
-| `UserPromptSubmit` | You submit a prompt. | No |
-| `PreToolUse` | A tool is about to run. | Yes — can deny |
-| `PostToolUse` | A tool completes successfully. | No |
-| `PostToolUseFailure` | A tool fails. | No |
-| `PermissionDenied` | The permission system denies a tool call. | No |
-| `Stop` | An agent turn ends on a genuine completion (not on a user interrupt). | Yes — can block the stop |
-| `StopFailure` | A turn ends because of an API error. | No |
-| `StopCancelled` | A turn is cancelled by the user (Esc / Ctrl+C) or aborted mid-run. | No |
+| `session_start` | A session starts. | No |
+| `user_prompt_submit` | You submit a prompt. | No |
+| `pre_tool_use` | A tool is about to run. | Yes — can deny |
+| `post_tool_use` | A tool completes successfully. | No |
+| `post_tool_use_failure` | A tool fails. | No |
+| `permission_denied` | The permission system denies a tool call. | No |
+| `stop` | An agent turn ends on a genuine completion (not on a user interrupt). | Yes — can block the stop |
+| `stop_failure` | A turn ends because of an API error. | No |
+| `stop_cancelled` | A turn is cancelled by the user (Esc / Ctrl+C) or aborted mid-run. | No |
 | `Notification` | The agent sends a notification. | No |
-| `SubagentStart` | A subagent starts. | No |
-| `SubagentStop` | A subagent's turn ends (fires once, in the subagent, with stop decision control). | Yes — can block the stop |
-| `PreCompact` | Conversation compaction is about to run. | No |
-| `PostCompact` | Conversation compaction completes. | No |
-| `SessionEnd` | The session ends. | No |
+| `subagent_start` | A subagent starts. | No |
+| `subagent_stop` | A subagent's turn ends (fires once, in the subagent, with stop decision control). | Yes — can block the stop |
+| `pre_compact` | Conversation compaction is about to run. | No |
+| `post_compact` | Conversation compaction completes. | No |
+| `session_end` | The session ends. | No |
 
-`SubagentEnd` is accepted as an alias for `SubagentStop`. `PreToolUse` can block a tool call, and `Stop`/`SubagentStop` can block the agent from stopping (see [Stop Decision Control](#stop-decision-control)); every other event is passive.
-
-### Cursor Hook Compatibility
-
-Grow accepts Cursor's camelCase hook event names, so `~/.cursor/hooks.json` loads unchanged:
-
-| Cursor event | Maps to |
-|---|---|
-| `sessionStart`, `sessionEnd` | `SessionStart`, `SessionEnd` |
-| `preToolUse`, `postToolUse`, `postToolUseFailure` | `PreToolUse`, `PostToolUse`, `PostToolUseFailure` |
-| `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile` | `PreToolUse` |
-| `afterShellExecution`, `afterMCPExecution`, `afterFileEdit` | `PostToolUse` |
-| `afterAgentResponse`, `afterAgentThought` | `PostToolUse` |
-| `beforeSubmitPrompt` | `UserPromptSubmit` |
-| `subagentStart`, `subagentStop` | `SubagentStart`, `SubagentStop` |
-| `preCompact`, `stop` | `PreCompact`, `Stop` |
-
-Cursor's per-operation hooks (`beforeShellExecution`, `afterFileEdit`, etc.) map to the generic `PreToolUse`/`PostToolUse` events. The hook script receives the tool name in the JSON input and can filter accordingly, or use the `matcher` field.
+`pre_tool_use` can block a tool call, and `stop`/`subagent_stop` can block the Agent from stopping (see [Stop Decision Control](#stop-decision-control)); every other event is passive. Event keys are exact snake_case values; alternate spellings are rejected.
 
 ---
 
@@ -129,15 +108,15 @@ Each `.json` file can define hooks for multiple events:
 ```json
 {
   "hooks": {
-    "PreToolUse": [
+    "pre_tool_use": [
       {
-        "matcher": "Bash",
+        "matcher": "run_terminal_command",
         "hooks": [
           { "type": "command", "command": "bin/safety-check.sh", "timeout": 10 }
         ]
       }
     ],
-    "PostToolUse": [
+    "post_tool_use": [
       {
         "hooks": [
           { "type": "command", "command": "bin/log-activity.sh" }
@@ -150,24 +129,11 @@ Each `.json` file can define hooks for multiple events:
 
 ### Key Fields
 
-- **Event name** (top-level key): any event listed in [Hook Events](#hook-events). Grow skips unrecognized event names so a shared Claude or Cursor settings file still loads.
-- **matcher** (optional): A regular expression that selects which invocations trigger the hook. What it tests depends on the event: the tool name on tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`), the notification type on `Notification`, the subagent type on `SubagentStart`/`SubagentStop` (e.g. `explore`), the start source on `SessionStart` (`startup`, `resume`, …), the end reason on `SessionEnd`, the compaction trigger on `PreCompact`/`PostCompact` (`manual` or `auto`), and the error type on `StopFailure` (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`). A matcher on `Stop`, `StopCancelled`, or `UserPromptSubmit` is ignored with a warning (those events always fire). An empty or omitted matcher matches everything. The matcher tests the real tool name; MCP calls routed through the internal `use_tool` dispatcher appear as the qualified `server__tool` name (e.g. `linear__save_issue`), so match on that, not the dispatcher name.
+- **Event name** (top-level key): any event listed in [Hook Events](#hook-events). Unrecognized event names are rejected.
+- **matcher** (optional): A regular expression that selects which invocations trigger the hook. What it tests depends on the event: the tool name on tool events (`pre_tool_use`, `post_tool_use`, `post_tool_use_failure`, `permission_denied`), the notification type on `Notification`, the subagent type on `subagent_start`/`subagent_stop` (e.g. `explore`), the start source on `session_start` (`startup`, `resume`, …), the end reason on `session_end`, the compaction trigger on `pre_compact`/`post_compact` (`manual` or `auto`), and the error type on `stop_failure` (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`). A matcher on `stop`, `stop_cancelled`, or `user_prompt_submit` is ignored with a warning (those events always fire). An empty or omitted matcher matches everything. The matcher tests the real tool name; MCP calls routed through the internal `use_tool` dispatcher appear as the qualified `server__tool` name (e.g. `linear__save_issue`), so match on that, not the dispatcher name.
 - **type**: `"command"` (run a script or shell one-liner) or `"http"` (POST the event to a URL).
 - **command**: Path to executable (relative to the JSON file) or inline shell command.
-- **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop` gates, matching Claude Code). All hook failures (timeouts, crashes, malformed output, missing required env vars) are fail-open: the failure is recorded for the UI scrollback but the tool call is not blocked. Only an explicit `deny` decision returned by the hook blocks a tool call.
-
-### Tool Name Aliases
-
-In a `matcher`, Grow maps Claude-style tool names to its own so hooks migrated from Claude fire correctly. Common aliases include:
-
-- `Bash` → `run_terminal_command`
-- `Read` → `read_file`
-- `Edit`, `Write`, and `MultiEdit` → `search_replace`
-- `Grep` → `grep`
-- `Glob` and `ListDir` → `list_dir`
-- `Task` → `spawn_subagent`
-
-A matcher keeps its original name too, so `Bash` matches both `Bash` and `run_terminal_command`.
+- **timeout**: Seconds before killing the hook (default: 5, or 600 for `stop`/`subagent_stop` gates). All hook failures (timeouts, crashes, malformed output, missing required env vars) are fail-open: the failure is recorded for the UI scrollback but the tool call is not blocked. Only an explicit `deny` decision returned by the hook blocks a tool call.
 
 ---
 
@@ -184,8 +150,8 @@ Hooks can also live directly in your Grow config, so a team can distribute them 
 The TOML is structurally identical to the JSON hook object, so an existing hook transliterates directly:
 
 ```toml
-[[hooks.PreToolUse]]
-matcher = "Bash|Write|Edit"
+[[hooks.pre_tool_use]]
+matcher = "run_terminal_command|search_replace"
 hooks = [
   { type = "command", command = "/opt/guard/pretooluse.sh", timeout = 10 },
 ]
@@ -196,9 +162,9 @@ Each matcher group is a `[[hooks.<Event>]]` entry with an optional `matcher` and
 TOML offers two equivalent notations for the inner handlers, and both parse to the identical structure. The inline-table array shown above is recommended: it reads best for the common single-handler case. The nested array-of-tables form is also accepted:
 
 ```toml
-[[hooks.PreToolUse]]
+[[hooks.pre_tool_use]]
 matcher = "Bash|Write|Edit"
-[[hooks.PreToolUse.hooks]]
+[[hooks.pre_tool_use.hooks]]
 type = "command"
 command = "/opt/guard/pretooluse.sh"
 timeout = 10
@@ -216,7 +182,7 @@ Prefer the inline form to avoid repeating the `[[hooks.<Event>.hooks]]` header f
 
 ### Input
 
-The event is sent as JSON on **stdin** (for example, a `PreToolUse` event; the payload also always includes `toolUseId` and `toolInputTruncated`):
+The event is sent as JSON on **stdin** (for example, a `pre_tool_use` event; the payload also always includes `toolUseId` and `toolInputTruncated`):
 
 ```json
 {
@@ -235,7 +201,7 @@ Every event carries the same common fields: `hookEventName`, `sessionId`, `cwd`,
 
 ### Output (Blocking Hooks)
 
-For `PreToolUse` hooks, write JSON to **stdout**:
+For `pre_tool_use` hooks, write JSON to **stdout**:
 
 - **Allow**: `{"decision": "allow"}`
 - **Deny**: `{"decision": "deny", "reason": "Unsafe command detected"}`
@@ -245,15 +211,15 @@ For `PreToolUse` hooks, write JSON to **stdout**:
 | Exit Code | Meaning |
 |-----------|---------|
 | `0` | Success / allow (for blocking hooks) |
-| `2` | Explicit deny (`PreToolUse`) or block-stop with stderr as feedback (`Stop`/`SubagentStop`) |
-| Other | Fail-open — the failure is recorded but nothing is blocked. For `PreToolUse`, a `deny` decision in stdout JSON is honored regardless of exit code. For `Stop`/`SubagentStop`, a valid decision JSON on stdout wins over the exit code (matching Claude Code); the exit code decides only when stdout has no usable JSON, in which case exit 2 blocks with stderr as the feedback. |
+| `2` | Explicit deny (`pre_tool_use`) or block-stop with stderr as feedback (`stop`/`subagent_stop`) |
+| Other | Fail-open — the failure is recorded but nothing is blocked. For `pre_tool_use`, a `deny` decision in stdout JSON is honored regardless of exit code. For `stop`/`subagent_stop`, valid decision JSON on stdout wins over the exit code; the exit code decides only when stdout has no usable JSON, in which case exit 2 blocks with stderr as feedback. |
 
 ### Stop Decision Control
 
-`Stop` and `SubagentStop` hooks run when the agent is about to finish its turn and can keep it working (Claude Code-compatible). Write JSON to **stdout**:
+`stop` and `subagent_stop` hooks run when the Agent is about to finish its turn and can keep it working. Write JSON to **stdout**:
 
 - **Block the stop**: `{"decision": "block", "reason": "The test suite hasn't been run yet"}`. The reason is fed back to the model as a user message and the agent runs another round in the same turn.
-- **Non-error feedback**: `{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "Run the linter before finishing"}}`. Also keeps the agent working, but is surfaced as hook feedback rather than a hook error.
+- **Non-error feedback**: `{"additionalContext": "Run the linter before finishing"}`. Also keeps the Agent working, but is surfaced as hook feedback rather than a hook error.
 - **Force stop**: `{"continue": false, "stopReason": "Budget exhausted"}`. Ends the turn, overriding any blocks.
 - **Allow the stop**: exit 0 with no output (or any non-JSON output).
 
@@ -261,31 +227,19 @@ Exiting with code `2` also blocks the stop, with **stderr** as the feedback.
 
 The hook input includes `stopHookActive` and `lastAssistantMessage`. `stopHookActive` is true when the agent is already continuing due to a previous stop-hook block this turn; check it, or the transcript, to avoid blocking on a condition that will never resolve. `lastAssistantMessage` carries the text of the agent's final response this turn, so hooks can act on it without parsing the transcript. After **8 continuations** (blocks or non-error feedback) in one turn the gate is overridden and the turn ends; hooks are not consulted for that final, forced stop. The counter is per turn: the next user prompt starts fresh, so a long-running goal can span turns. Hook failures fail open: the agent stops normally.
 
-`Stop` and `SubagentStop` hooks default to a 600-second timeout (matching Claude Code) because gates commonly run builds or test suites, and a timed-out hook fails open, so the agent stops anyway. Other events keep the 5-second default. Set `timeout` explicitly when a gate needs more: `{ "type": "command", "command": "bin/verify.sh", "timeout": 1200 }`.
+`stop` and `subagent_stop` hooks default to a 600-second timeout because gates commonly run builds or test suites, and a timed-out hook fails open. Other events keep the 5-second default. Set `timeout` explicitly when a gate needs more: `{ "type": "command", "command": "bin/verify.sh", "timeout": 1200 }`.
 
-The gate runs only for genuine completions. Interrupted (Esc / Ctrl+C), refused, and max-turns turns skip Stop hooks entirely, and API-error turns fire `StopFailure` instead. A separate Stop also fires at session end (`reason: "channel_closed"` or `"shutdown"`); its decision output is parsed but ignored, since there is no turn left to continue. A script that counts or gates on Stop fires should check `reason == "end_turn"` so the session-end fire doesn't skew it.
+The gate runs only for genuine completions. Interrupted (Esc / Ctrl+C), refused, and max-turns turns skip Stop hooks entirely, and API-error turns fire `stop_failure` instead. A separate Stop also fires at session end (`reason: "channel_closed"` or `"shutdown"`); its decision output is parsed but ignored, since there is no turn left to continue. A script that counts or gates on Stop fires should check `reason == "end_turn"` so the session-end fire doesn't skew it.
 
-`StopFailure` is observation-only (use it to log failures or send alerts; output and exit code are ignored). Its input carries `error` (one of `rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`; capacity errors fold into `rate_limit`), `errorDetails` (the raw error detail, when available), and `lastAssistantMessage` (the rendered error text shown in the conversation; for this event it is the error string, not assistant output).
+`stop_failure` is observation-only (use it to log failures or send alerts; output and exit code are ignored). Its input carries `error` (one of `rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`; capacity errors fold into `rate_limit`), `errorDetails` (the raw error detail, when available), and `lastAssistantMessage` (the rendered error text shown in the conversation; for this event it is the error string, not assistant output).
 
-`StopCancelled` is observation-only (output and exit code are ignored). It fires after the cancelled turn's terminal is fully resolved, so a hook can never delay the cancel itself. Its input carries `reason` (one of `hook_denied`, `permission_rejected`, `permission_cancelled`, `permission_timed_out`, `mid_turn_abort`) and optionally `trigger` (the free-text cancel trigger, e.g. `ctrl_c`, `esc`). A matcher on it is ignored with a warning.
+`stop_cancelled` is observation-only (output and exit code are ignored). It fires after the cancelled turn's terminal is fully resolved, so a hook can never delay the cancel itself. Its input carries `reason` (one of `hook_denied`, `permission_rejected`, `permission_cancelled`, `permission_timed_out`, `mid_turn_abort`) and optionally `trigger` (the free-text cancel trigger, e.g. `ctrl_c`, `esc`). A matcher on it is ignored with a warning.
 
-`Stop` input also carries `backgroundTasks` and `sessionCrons`, so a hook can distinguish "session is done" from "session is paused waiting for background work to wake it back up". Both arrays are empty when nothing is in flight or scheduled. Each `backgroundTasks` entry describes one in-flight task: `id`, `type` (`shell`, `monitor`, or `subagent`), `status`, and (depending on the type) `command` (shell tasks only), `description` (a monitor's watched command line, or a subagent's task description), and `agentType` (subagents). Each `sessionCrons` entry describes one scheduled wakeup (`scheduler_create` or `/loop`): `id`, `schedule`, `recurring`, and `prompt`. The `schedule` value is a human-readable interval such as `every 5 minutes`; grow schedules are intervals, not cron expressions. Free-text entry fields are capped at 1000 characters with an in-string `… [+N chars]` marker.
+`stop` input also carries `backgroundTasks` and `sessionCrons`, so a hook can distinguish "session is done" from "session is paused waiting for background work to wake it back up". Both arrays are empty when nothing is in flight or scheduled. Each `backgroundTasks` entry describes one in-flight task: `id`, `type` (`shell`, `monitor`, or `subagent`), `status`, and (depending on the type) `command` (shell tasks only), `description` (a monitor's watched command line, or a subagent's task description), and `agentType` (subagents). Each `sessionCrons` entry describes one scheduled wakeup (`scheduler_create` or `/loop`): `id`, `schedule`, `recurring`, and `prompt`. The `schedule` value is a human-readable interval such as `every 5 minutes`; grow schedules are intervals, not cron expressions. Free-text entry fields are capped at 1000 characters with an in-string `… [+N chars]` marker.
 
-Inside a subagent, the gate fires as `SubagentStop` (agent-frontmatter `Stop` hooks are automatically remapped). A `Stop` hook only gates the main agent.
+Inside a subagent, the gate fires as `subagent_stop` (agent-frontmatter `stop` hooks are automatically remapped). A `stop` hook only gates the main agent.
 
-`SubagentStop` fires once per subagent, at the subagent's own turn end, matching Claude Code. Its input carries a `phase` field (currently always `"gate"`) reserved for forward compatibility.
-
-**Porting Claude Code stop hooks**: the output vocabulary (`decision`, `reason`, `continue`, `stopReason`, `additionalContext`) works unchanged. Check this list for what does not match Claude:
-
-- **camelCase input**: grow's stdin envelope uses camelCase keys throughout where Claude uses snake_case. A script reading `.stop_hook_active`, `.hook_event_name`, or `.background_tasks[].agent_type` must switch to `.stopHookActive`, `.hookEventName`, and `.backgroundTasks[].agentType` (the event value is `"stop"`). Hooks registered through the agent-sdk convert both the top-level keys and the `backgroundTasks`/`sessionCrons` entry keys to snake_case, so the wire's `.backgroundTasks[].agentType` reads as `.background_tasks[].agent_type` in the SDK.
-- **`toolResult` field**: the `PostToolUse` tool output is `toolResult` (SDK: `tool_result`), not Claude's `tool_response`; a hook reading `.tool_response` must switch to `.toolResult`.
-- **Session-end fire**: an extra observe-only Stop fires at session end; filter on `reason == "end_turn"` (see above).
-- **Interval schedules**: `sessionCrons[].schedule` is a human-readable interval, never a cron expression.
-- **Task types**: `backgroundTasks[].type` is only `shell`, `monitor`, or `subagent`; Claude's other labels (`workflow`, `teammate`, …) are not emitted.
-- **StopFailure classes**: Grow emits `rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`; capacity errors (503/529) fold into `rate_limit`.
-- **permission_mode values**: grow emits `default`, `auto`, `plan`, or `bypassPermissions`. Claude's `acceptEdits`/`dontAsk` have no grow equivalent (grow's `auto` is the nearest), so a check like `permission_mode === "acceptEdits"` never matches.
-- **Client (SDK) gate timeouts**: SDK `Stop`/`SubagentStop` gates default to 600 seconds like file hooks; `PreToolUse` client gates default to 30 seconds (the interactive hot path). Either can be overridden per matcher group via `timeoutS`, capped at 600.
-- **`/goal`**: grow's goal loop is a separate feature that runs before the stop gate; it is not a prompt-type Stop hook.
+`subagent_stop` fires once per subagent, at the child's own turn end. Its input carries a `phase` field (currently always `"gate"`) reserved for future protocol evolution.
 
 A complete keep-working policy in one script:
 
@@ -303,7 +257,7 @@ registered as `{ "type": "command", "command": "bin/stop-gate.sh", "timeout": 30
 
 ### Passive Hooks
 
-For events like `SessionStart` or `PostToolUse`, stdout is ignored. Just exit 0 on success.
+For events like `session_start` or `post_tool_use`, stdout is ignored. Just exit 0 on success.
 
 ### Environment Variables
 
@@ -319,7 +273,6 @@ These variables are set by the hook runner for **every** hook:
 | `GROW_HOOK_NAME`      | The configured name of this specific hook (includes the plugin prefix for plugin-provided hooks). |
 | `GROW_SESSION_ID`     | The unique identifier of the current Grow session. |
 | `GROW_WORKSPACE_ROOT` | Absolute path to the root of the current workspace. |
-| `CLAUDE_PROJECT_DIR`  | Absolute path to the workspace root. A Claude Code-compatible alias for `GROW_WORKSPACE_ROOT`, set for every hook. |
 
 These variables are **reserved**. Any values you attempt to set for them via the `env` field in your hook JSON are stripped at load time (a warning is logged), and the runner always injects the real values at spawn time.
 
@@ -332,7 +285,7 @@ When a hook originates from a plugin, Grow additionally injects the following va
 | `GROW_PLUGIN_ROOT`   | Absolute path to the plugin's installed directory. |
 | `GROW_PLUGIN_DATA`   | Absolute path to the plugin's writable data directory (for storing plugin state, caches, etc.). |
 
-These values are provided by the plugin system. For the four plugin-related keys (`GROW_PLUGIN_ROOT`, `GROW_PLUGIN_DATA`, and their Claude aliases), the plugin adapter ensures the official plugin values always win over any user-declared values in the hook's `env` map.
+These values are provided by the plugin system. The plugin adapter ensures the official `GROW_PLUGIN_ROOT` and `GROW_PLUGIN_DATA` values always win over any user-declared values in the hook's `env` map.
 
 #### User-defined environment variables
 
@@ -426,7 +379,7 @@ Block dangerous shell commands:
 ```json
 {
   "hooks": {
-    "PreToolUse": [
+    "pre_tool_use": [
       {
         "matcher": "Bash",
         "hooks": [

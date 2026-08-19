@@ -22,14 +22,6 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default()
     }
-    if let Some(TomlValue::Table(toolset)) = table.get("toolset")
-        && toolset.get("use_concise").is_some()
-    {
-        tracing::warn!(
-            "`[toolset] use_concise` is deprecated and no longer has any effect. \
-             Set `use_concise = true` on individual model entries in config.toml instead."
-        );
-    }
     let management_api_key = table
         .get("endpoints")
         .and_then(|v| v.get("management_api_key"))
@@ -43,7 +35,6 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
         models: section(table, "models"),
         ui: section(table, "ui"),
         skills: section(table, "skills"),
-        compat: section(table, "compat"),
         management_api_key,
         permission,
         diagnostics: section(table, "diagnostics"),

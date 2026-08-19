@@ -232,18 +232,14 @@ pub fn resolve_initial_theme_no_osc11() -> ThemeKind {
 /// Read the theme from the effective config (managed_config.toml merged
 /// under config.toml — user wins).
 ///
-/// Checks `[ui].theme` first (the canonical location), then falls back
-/// to a top-level `theme` key for backwards compatibility.
+/// Reads the canonical `[ui].theme` key.
 fn load_from_disk() -> Option<ThemeKind> {
     let root = config::load_effective_config_disk_only().ok()?;
     let table = root.as_table()?;
-    // Canonical: [ui] section
     let value = table
         .get("ui")
         .and_then(|ui| ui.get("theme"))
-        .and_then(|v| v.as_str())
-        // Fallback: top-level `theme` key (legacy)
-        .or_else(|| table.get("theme").and_then(|v| v.as_str()));
+        .and_then(|v| v.as_str());
     value.and_then(ThemeKind::from_name)
 }
 

@@ -322,7 +322,6 @@ fn memory_config_defaults_are_correct() {
         assert!((mem.search.min_score - 0.35).abs() < f32::EPSILON);
         assert!((mem.search.vector_weight - 0.7).abs() < f32::EPSILON);
         assert!((mem.search.text_weight - 0.3).abs() < f32::EPSILON);
-        assert!((mem.search.recency_decay - 0.95).abs() < f32::EPSILON);
         assert!(mem.search.temporal_decay.enabled);
         assert!((mem.search.temporal_decay.half_life_days - 7.0).abs() < f64::EPSILON);
         assert!(!mem.search.mmr.enabled);
@@ -353,19 +352,11 @@ fn memory_config_defaults_are_correct() {
         assert_eq!(mem.dream.check_interval_secs, None);
     });
 }
-/// `debounce_ms` was a dead field on `MemoryWatcherConfig` that was never
-/// read by any watcher or search path.  Verify that existing TOML config
-/// files that contain `debounce_ms` are still parsed without error
-/// (unknown fields are silently ignored by serde default).
 #[test]
-fn memory_config_watcher_debounce_ms_in_toml_is_silently_ignored() {
-    without_memory(|| {
-        let toml_str = "[memory.watcher]\nenabled = true\ndebounce_ms = 2000\n";
-        let config: toml::Value = toml::from_str(toml_str).unwrap();
-        let mem = MemoryConfig::resolve(false, false, &config, None);
-        assert!(mem.watcher.enabled);
-        assert_eq!(mem.watcher.stale_claim_secs, 60);
-    });
+fn memory_watcher_rejects_removed_debounce_ms() {
+    assert!(
+        toml::from_str::<MemoryWatcherConfig>("enabled = true\ndebounce_ms = 2000\n").is_err()
+    );
 }
 #[test]
 fn memory_config_full_toml_parsing() {
@@ -388,7 +379,6 @@ max_results = 10
 min_score = 0.5
 vector_weight = 0.6
 text_weight = 0.4
-recency_decay = 0.9
 
 [memory.initial_injection]
 enabled = false
@@ -810,74 +800,19 @@ fn effective_half_life_temporal_decay_enabled_negative_disables() {
         );
 }
 #[test]
-fn effective_half_life_disabled_default_recency_returns_none() {
+fn effective_half_life_disabled_returns_none() {
     let config = MemorySearchConfig {
         temporal_decay: TemporalDecayConfig {
             enabled: false,
             half_life_days: 30.0,
         },
-        recency_decay: DEFAULT_RECENCY_DECAY,
         ..Default::default()
     };
     assert_eq!(
             config.effective_half_life_days(),
             None,
-            "disabled + default recency_decay should return None"
+            "disabled temporal decay should return None"
         );
-}
-#[test]
-fn effective_half_life_disabled_legacy_recency_converts() {
-    let config = MemorySearchConfig {
-        temporal_decay: TemporalDecayConfig {
-            enabled: false,
-            half_life_days: 30.0,
-        },
-        recency_decay: 0.9,
-        ..Default::default()
-    };
-    let half_life = config
-        .effective_half_life_days()
-        .expect("should convert legacy recency_decay=0.9");
-    assert!(
-            (half_life - 6.58).abs() < 0.1,
-            "recency_decay=0.9 should convert to ~6.58 day half-life, got {half_life}"
-        );
-}
-#[test]
-fn effective_half_life_disabled_legacy_recency_098() {
-    let config = MemorySearchConfig {
-        temporal_decay: TemporalDecayConfig {
-            enabled: false,
-            half_life_days: 30.0,
-        },
-        recency_decay: 0.98,
-        ..Default::default()
-    };
-    let half_life = config
-        .effective_half_life_days()
-        .expect("should convert legacy recency_decay=0.98");
-    assert!(
-            (half_life - 34.3).abs() < 0.5,
-            "recency_decay=0.98 should convert to ~34.3 day half-life, got {half_life}"
-        );
-}
-#[test]
-fn effective_half_life_disabled_legacy_recency_out_of_range_ignored() {
-    for bad_value in [0.0_f32, 1.0, -0.5, 1.5] {
-        let config = MemorySearchConfig {
-            temporal_decay: TemporalDecayConfig {
-                enabled: false,
-                half_life_days: 30.0,
-            },
-            recency_decay: bad_value,
-            ..Default::default()
-        };
-        assert_eq!(
-                config.effective_half_life_days(),
-                None,
-                "recency_decay={bad_value} should not convert"
-            );
-    }
 }
 #[test]
 fn mmr_lambda_clamped_above_one() {
@@ -1367,156 +1302,8 @@ fn subagents_config_is_subagent_enabled_false_when_toggled_off() {
             "explore = true should return enabled"
         );
 }
-fn with_managed_mcp_env<T>(
-    managed_mcps: Option<&str>,
-    gateway_tools: Option<&str>,
-    f: impl FnOnce() -> T,
-) -> T {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_env_var_opt(
-        "GROW_MANAGED_MCPS_ENABLED",
-        managed_mcps,
-        || with_env_var_opt("GROW_MANAGED_MCP_GATEWAY_TOOLS_ENABLED", gateway_tools, f),
-    )
-}
-#[test]
-#[serial_test::serial]
-fn managed_mcps_interactive_default_enabled() {
-    with_managed_mcp_env(
-        None,
-        None,
-        || {
-            let empty = toml::Value::Table(toml::map::Map::new());
-            let cfg = ManagedMcpsConfig::resolve(&empty, None, false);
-            assert!(cfg.enabled);
-        },
-    );
-}
-#[test]
-#[serial_test::serial]
-fn managed_mcps_headless_default_disabled() {
-    with_managed_mcp_env(
-        None,
-        None,
-        || {
-            let empty = toml::Value::Table(toml::map::Map::new());
-            let cfg = ManagedMcpsConfig::resolve(&empty, None, true);
-            assert!(!cfg.enabled);
-        },
-    );
-}
-#[test]
-#[serial_test::serial]
-fn managed_mcp_gateway_tools_default_disabled() {
-    with_managed_mcp_env(
-        None,
-        None,
-        || {
-            let empty = toml::Value::Table(toml::map::Map::new());
-            let cfg = ManagedMcpsConfig::resolve(&empty, None, false);
-            assert!(!cfg.gateway_tools_enabled);
-        },
-    );
-}
-#[test]
-#[serial_test::serial]
-fn managed_mcp_gateway_tools_require_managed_master() {
-    with_managed_mcp_env(
-        None,
-        None,
-        || {
-            let config: toml::Value = toml::from_str(
-                    r#"
-                [managed_mcps]
-                gateway_tools_enabled = true
-                "#,
-                )
-                .unwrap();
-            let remote = crate::util::config::RemoteSettings {
-                managed_mcps_enabled: Some(false),
-                ..Default::default()
-            };
-            let cfg = ManagedMcpsConfig::resolve(&config, Some(&remote), true);
-            assert!(!cfg.enabled);
-            assert!(!cfg.gateway_tools_enabled);
-        },
-    );
-}
-#[test]
-#[serial_test::serial]
-fn managed_mcp_gateway_tools_remote_enabled() {
-    with_managed_mcp_env(
-        None,
-        None,
-        || {
-            let empty = toml::Value::Table(toml::map::Map::new());
-            let remote = crate::util::config::RemoteSettings {
-                managed_mcp_gateway_tools_enabled: Some(true),
-                ..Default::default()
-            };
-            let cfg = ManagedMcpsConfig::resolve(&empty, Some(&remote), false);
-            assert!(cfg.gateway_tools_enabled);
-        },
-    );
-}
-#[test]
-#[serial_test::serial]
-fn managed_mcp_gateway_tools_env_overrides_remote() {
-    with_managed_mcp_env(
-        None,
-        Some("0"),
-        || {
-            let empty = toml::Value::Table(toml::map::Map::new());
-            let remote = crate::util::config::RemoteSettings {
-                managed_mcp_gateway_tools_enabled: Some(true),
-                ..Default::default()
-            };
-            let cfg = ManagedMcpsConfig::resolve(&empty, Some(&remote), false);
-            assert!(!cfg.gateway_tools_enabled);
-        },
-    );
-}
-#[test]
-#[serial_test::serial]
-fn managed_mcp_gateway_tools_env_on_overrides_remote_off() {
-    with_managed_mcp_env(
-        None,
-        Some("1"),
-        || {
-            let empty = toml::Value::Table(toml::map::Map::new());
-            let remote = crate::util::config::RemoteSettings {
-                managed_mcp_gateway_tools_enabled: Some(false),
-                ..Default::default()
-            };
-            let cfg = ManagedMcpsConfig::resolve(&empty, Some(&remote), false);
-            assert!(cfg.gateway_tools_enabled);
-        },
-    );
-}
-#[test]
-#[serial_test::serial]
-fn managed_mcp_gateway_tools_enabled_with_managed_master() {
-    with_managed_mcp_env(
-        None,
-        None,
-        || {
-            let config: toml::Value = toml::from_str(
-                    r#"
-                [managed_mcps]
-                enabled = true
-                gateway_tools_enabled = true
-                "#,
-                )
-                .unwrap();
-            let cfg = ManagedMcpsConfig::resolve(&config, None, false);
-            assert!(cfg.enabled);
-            assert!(cfg.gateway_tools_enabled);
-        },
-    );
-}
 fn with_model_overrides_env_full<T>(
-    ss: Option<&str>,
+    title: Option<&str>,
     id: Option<&str>,
     ps: Option<&str>,
     f: impl FnOnce() -> T,
@@ -1524,8 +1311,8 @@ fn with_model_overrides_env_full<T>(
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     with_env_var_opt(
-        "GROW_SESSION_SUMMARY_MODEL",
-        ss,
+        "GROW_SESSION_TITLE_MODEL",
+        title,
         || with_env_var_opt(
             "GROW_IMAGE_DESCRIPTION_MODEL",
             id,
@@ -1534,11 +1321,11 @@ fn with_model_overrides_env_full<T>(
     )
 }
 fn with_model_overrides_env<T>(
-    ss: Option<&str>,
+    title: Option<&str>,
     id: Option<&str>,
     f: impl FnOnce() -> T,
 ) -> T {
-    with_model_overrides_env_full(ss, id, None, f)
+    with_model_overrides_env_full(title, id, None, f)
 }
 #[test]
 fn model_overrides_remote_settings_applies_without_local_config() {
@@ -1548,12 +1335,12 @@ fn model_overrides_remote_settings_applies_without_local_config() {
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
-                session_summary_model: Some("remote-ss".to_owned()),
+                session_title_model: Some("remote-ss".to_owned()),
                 image_description_model: Some("remote-id".to_owned()),
                 ..Default::default()
             };
             let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
-            assert_eq!(cfg.session_summary, Some("remote-ss".to_owned()));
+            assert_eq!(cfg.session_title, Some("remote-ss".to_owned()));
             assert_eq!(cfg.image_description, Some("remote-id".to_owned()));
         },
     );
@@ -1593,19 +1380,19 @@ fn model_overrides_default_image_description_is_unconfigured() {
     );
 }
 #[test]
-fn model_overrides_default_session_summary_uses_active_model() {
+fn model_overrides_default_session_title_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let cfg = ModelOverrideConfig::resolve(None, &empty, None);
-            assert_eq!(cfg.session_summary, None);
+            assert_eq!(cfg.session_title, None);
         },
     );
 }
 #[test]
-fn model_overrides_local_session_summary_wins_over_remote() {
+fn model_overrides_local_session_title_wins_over_remote() {
     with_model_overrides_env(
         None,
         None,
@@ -1613,37 +1400,37 @@ fn model_overrides_local_session_summary_wins_over_remote() {
             let config: toml::Value = toml::from_str(
                     r#"
                 [models]
-                session_summary = "local-ss"
+                session_title = "local-ss"
                 "#,
                 )
                 .unwrap();
             let remote = crate::util::config::RemoteSettings {
-                session_summary_model: Some("remote-ss".to_owned()),
+                session_title_model: Some("remote-ss".to_owned()),
                 ..Default::default()
             };
             let cfg = ModelOverrideConfig::resolve(None, &config, Some(&remote));
-            assert_eq!(cfg.session_summary, Some("local-ss".to_owned()));
+            assert_eq!(cfg.session_title, Some("local-ss".to_owned()));
         },
     );
 }
 #[test]
-fn model_overrides_env_session_summary_overrides_remote() {
+fn model_overrides_env_session_title_overrides_remote() {
     with_model_overrides_env(
         Some("env-ss"),
         None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
-                session_summary_model: Some("remote-ss".to_owned()),
+                session_title_model: Some("remote-ss".to_owned()),
                 ..Default::default()
             };
             let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
-            assert_eq!(cfg.session_summary, Some("env-ss".to_owned()));
+            assert_eq!(cfg.session_title, Some("env-ss".to_owned()));
         },
     );
 }
 #[test]
-fn model_overrides_env_session_summary_overrides_local() {
+fn model_overrides_env_session_title_overrides_local() {
     with_model_overrides_env(
         Some("env-ss"),
         None,
@@ -1651,17 +1438,17 @@ fn model_overrides_env_session_summary_overrides_local() {
             let config: toml::Value = toml::from_str(
                     r#"
                 [models]
-                session_summary = "local-ss"
+                session_title = "local-ss"
                 "#,
                 )
                 .unwrap();
             let cfg = ModelOverrideConfig::resolve(None, &config, None);
-            assert_eq!(cfg.session_summary, Some("env-ss".to_owned()));
+            assert_eq!(cfg.session_title, Some("env-ss".to_owned()));
         },
     );
 }
 #[test]
-fn model_overrides_empty_session_summary_toml_uses_active_model() {
+fn model_overrides_empty_session_title_toml_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
@@ -1669,33 +1456,33 @@ fn model_overrides_empty_session_summary_toml_uses_active_model() {
             let config: toml::Value = toml::from_str(
                     r#"
                 [models]
-                session_summary = ""
+                session_title = ""
                 "#,
                 )
                 .unwrap();
             let cfg = ModelOverrideConfig::resolve(None, &config, None);
-            assert_eq!(cfg.session_summary, None);
+            assert_eq!(cfg.session_title, None);
         },
     );
 }
 #[test]
-fn model_overrides_empty_session_summary_remote_uses_active_model() {
+fn model_overrides_empty_session_title_remote_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let remote = crate::util::config::RemoteSettings {
-                session_summary_model: Some("   ".to_owned()),
+                session_title_model: Some("   ".to_owned()),
                 ..Default::default()
             };
             let cfg = ModelOverrideConfig::resolve(None, &empty, Some(&remote));
-            assert_eq!(cfg.session_summary, None);
+            assert_eq!(cfg.session_title, None);
         },
     );
 }
 #[test]
-fn model_overrides_cli_session_summary_overrides_everything() {
+fn model_overrides_cli_session_title_overrides_everything() {
     with_model_overrides_env(
         Some("env-ss"),
         None,
@@ -1703,12 +1490,12 @@ fn model_overrides_cli_session_summary_overrides_everything() {
             let config: toml::Value = toml::from_str(
                     r#"
                 [models]
-                session_summary = "local-ss"
+                session_title = "local-ss"
                 "#,
                 )
                 .unwrap();
             let remote = crate::util::config::RemoteSettings {
-                session_summary_model: Some("remote-ss".to_owned()),
+                session_title_model: Some("remote-ss".to_owned()),
                 ..Default::default()
             };
             let cfg = ModelOverrideConfig::resolve(
@@ -1716,19 +1503,19 @@ fn model_overrides_cli_session_summary_overrides_everything() {
                 &config,
                 Some(&remote),
             );
-            assert_eq!(cfg.session_summary, Some("cli-ss".to_owned()));
+            assert_eq!(cfg.session_title, Some("cli-ss".to_owned()));
         },
     );
 }
 #[test]
-fn model_overrides_empty_cli_session_summary_uses_active_model() {
+fn model_overrides_empty_cli_session_title_uses_active_model() {
     with_model_overrides_env(
         None,
         None,
         || {
             let empty = toml::Value::Table(toml::map::Map::new());
             let cfg = ModelOverrideConfig::resolve(Some(""), &empty, None);
-            assert_eq!(cfg.session_summary, None);
+            assert_eq!(cfg.session_title, None);
         },
     );
 }
@@ -1995,582 +1782,15 @@ fn tools_config_env_false_overrides_toml_true() {
     );
 }
 #[test]
-fn roles_parse_from_toml() {
-    let toml_str = r#"
-            [roles.researcher]
-            description = "Deep research agent"
-            default_capability_mode = "read-only"
-            model = "grow-3"
-
-            [roles.implementer]
-            description = "Implementation agent"
-            default_capability_mode = "all"
-            prompt_file = ".grow/prompts/impl.md"
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.roles.len(), 2);
-    let researcher = cfg.get_role("researcher").unwrap();
-    assert_eq!(researcher.description, "Deep research agent");
-    assert_eq!(
-            researcher.default_capability_mode.as_deref(),
-            Some("read-only")
-        );
-    assert_eq!(researcher.model.as_deref(), Some("grow-3"));
-    assert!(researcher.prompt_file.is_none());
-    let implementer = cfg.get_role("implementer").unwrap();
-    assert_eq!(implementer.description, "Implementation agent");
-    assert_eq!(implementer.default_capability_mode.as_deref(), Some("all"));
-    assert!(implementer.model.is_none());
-    assert_eq!(
-            implementer.prompt_file.as_deref(),
-            Some(".grow/prompts/impl.md")
-        );
-}
-#[test]
-fn roles_default_to_empty() {
-    let cfg: SubagentsConfig = toml::from_str("").unwrap();
-    assert!(cfg.roles.is_empty());
-}
-#[test]
-fn role_lookup_returns_none_for_unknown() {
-    let cfg: SubagentsConfig = toml::from_str("").unwrap();
-    assert!(cfg.get_role("nonexistent").is_none());
-}
-#[test]
-fn role_minimal_config() {
-    let toml_str = r#"
-            [roles.simple]
-            description = "A simple role"
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    let role = cfg.get_role("simple").unwrap();
-    assert_eq!(role.description, "A simple role");
-    assert!(role.default_capability_mode.is_none());
-    assert!(role.model.is_none());
-    assert!(role.prompt_file.is_none());
-}
-#[test]
-fn validate_roles_catches_empty_description() {
-    let toml_str = r#"
-            [roles.bad]
-            default_capability_mode = "read-only"
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    let errors = cfg.validate_roles();
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].0, "bad");
-    assert!(errors[0].1.contains("description is required"));
-}
-#[test]
-fn validate_roles_catches_invalid_capability_mode() {
-    let toml_str = r#"
-            [roles.bad]
-            description = "Has invalid mode"
-            default_capability_mode = "readonly"
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    let errors = cfg.validate_roles();
-    assert_eq!(errors.len(), 1);
-    assert!(errors[0].1.contains("invalid default_capability_mode"));
-    assert!(errors[0].1.contains("readonly"));
-}
-#[test]
-fn validate_roles_passes_valid_config() {
-    let toml_str = r#"
-            [roles.good]
-            description = "Valid role"
-            default_capability_mode = "read-write"
-            model = "grow-3"
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    assert!(cfg.validate_roles().is_empty());
-}
-#[test]
-fn validate_roles_catches_empty_prompt_file() {
-    let toml_str = r#"
-            [roles.bad]
-            description = "Has blank prompt_file"
-            prompt_file = "  "
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    let errors = cfg.validate_roles();
-    assert_eq!(errors.len(), 1);
-    assert!(errors[0].1.contains("prompt_file must not be empty"));
-}
-#[test]
-fn validate_roles_accepts_valid_prompt_file() {
-    let toml_str = r#"
-            [roles.ok]
-            description = "Valid prompt file"
-            prompt_file = ".grow/prompts/ok.md"
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    assert!(cfg.validate_roles().is_empty());
-}
-#[test]
-fn discover_roles_loads_from_directory() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let roles_dir = tmp.path().join(".grow").join("roles");
-    std::fs::create_dir_all(&roles_dir).unwrap();
-    std::fs::write(
-            roles_dir.join("reviewer.toml"),
-            r#"
-                description = "Code reviewer"
-                default_capability_mode = "read-only"
-            "#,
-        )
-        .unwrap();
-    let mut cfg: SubagentsConfig = toml::from_str("").unwrap();
-    cfg.discover_roles(tmp.path());
-    let role = cfg.get_role("reviewer").unwrap();
-    assert_eq!(role.description, "Code reviewer");
-    assert_eq!(role.default_capability_mode.as_deref(), Some("read-only"));
-}
-#[test]
-fn discover_roles_inline_takes_precedence() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let roles_dir = tmp.path().join(".grow").join("roles");
-    std::fs::create_dir_all(&roles_dir).unwrap();
-    std::fs::write(
-            roles_dir.join("researcher.toml"),
-            r#"description = "File-based researcher""#,
-        )
-        .unwrap();
-    let mut cfg: SubagentsConfig = toml::from_str(
-            r#"
-            [roles.researcher]
-            description = "Inline researcher"
+fn removed_role_config_is_rejected() {
+    let error = toml::from_str::<SubagentsConfig>(
+        r#"
+        [roles.researcher]
+        description = "old role"
         "#,
-        )
-        .unwrap();
-    cfg.discover_roles(tmp.path());
-    let role = cfg.get_role("researcher").unwrap();
-    assert_eq!(
-            role.description, "Inline researcher",
-            "inline config should take precedence over file"
-        );
-}
-#[test]
-fn discover_roles_ignores_non_toml_files() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let roles_dir = tmp.path().join(".grow").join("roles");
-    std::fs::create_dir_all(&roles_dir).unwrap();
-    std::fs::write(roles_dir.join("readme.md"), "This is not a role definition")
-        .unwrap();
-    let mut cfg: SubagentsConfig = toml::from_str("").unwrap();
-    cfg.discover_roles(tmp.path());
-    assert!(cfg.roles.is_empty());
-}
-#[test]
-fn discover_roles_skips_missing_directory() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mut cfg: SubagentsConfig = toml::from_str("").unwrap();
-    cfg.discover_roles(tmp.path());
-    assert!(cfg.roles.is_empty());
-}
-#[test]
-fn personas_parse_from_toml() {
-    let toml_str = r#"
-            [personas.researcher]
-            instructions = "You are a thorough researcher."
-
-            [personas.concise]
-            instructions = "Be concise."
-            instructions_file = ".grow/personas/concise.md"
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.personas.len(), 2);
-    let researcher = cfg.get_persona("researcher").unwrap();
-    assert_eq!(
-            researcher.instructions.as_deref(),
-            Some("You are a thorough researcher.")
-        );
-    assert!(researcher.instructions_file.is_none());
-    let concise = cfg.get_persona("concise").unwrap();
-    assert_eq!(concise.instructions.as_deref(), Some("Be concise."));
-    assert_eq!(
-            concise.instructions_file.as_deref(),
-            Some(".grow/personas/concise.md")
-        );
-}
-#[test]
-fn personas_default_to_empty() {
-    let cfg: SubagentsConfig = toml::from_str("").unwrap();
-    assert!(cfg.personas.is_empty());
-}
-#[test]
-fn persona_lookup_returns_none_for_unknown() {
-    let cfg: SubagentsConfig = toml::from_str("").unwrap();
-    assert!(cfg.get_persona("nonexistent").is_none());
-}
-#[test]
-fn discover_personas_loads_from_directory() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let dir = tmp.path().join(".grow").join("personas");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-            dir.join("friendly.toml"),
-            r#"instructions = "Be friendly and warm.""#,
-        )
-        .unwrap();
-    let mut cfg: SubagentsConfig = toml::from_str("").unwrap();
-    cfg.discover_personas(tmp.path());
-    let p = cfg.get_persona("friendly").unwrap();
-    assert_eq!(p.instructions.as_deref(), Some("Be friendly and warm."));
-}
-#[test]
-fn discover_personas_inline_takes_precedence() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let dir = tmp.path().join(".grow").join("personas");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("strict.toml"), r#"instructions = "File-based strict""#)
-        .unwrap();
-    let mut cfg: SubagentsConfig = toml::from_str(
-            r#"
-            [personas.strict]
-            instructions = "Inline strict"
-        "#,
-        )
-        .unwrap();
-    cfg.discover_personas(tmp.path());
-    assert_eq!(
-            cfg.get_persona("strict").unwrap().instructions.as_deref(),
-            Some("Inline strict"),
-        );
-}
-fn write_subagent_definitions(root: &std::path::Path, definitions: &[(&str, &str)]) {
-    let roles = root.join("roles");
-    let personas = root.join("personas");
-    std::fs::create_dir_all(&roles).unwrap();
-    std::fs::create_dir_all(&personas).unwrap();
-    for (name, source) in definitions {
-        std::fs::write(
-                roles.join(format!("{name}.toml")),
-                format!("description = \"{source} role\""),
-            )
-            .unwrap();
-        std::fs::write(
-                personas.join(format!("{name}.toml")),
-                format!("instructions = \"{source} persona\""),
-            )
-            .unwrap();
-    }
-}
-#[test]
-fn project_overlay_preserves_source_precedence() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let project = tmp.path().join("project");
-    let home = tmp.path().join("home");
-    let bundled = tmp.path().join("bundled");
-    write_subagent_definitions(
-        &project.join(".grow"),
-        &[
-            ("shadowed", "Project"),
-            ("bundled-shadowed", "Project"),
-            ("inline", "Project"),
-            ("project-only", "Project"),
-        ],
-    );
-    write_subagent_definitions(
-        &home.join(".grow"),
-        &[("shadowed", "User"), ("user-only", "User")],
-    );
-    write_subagent_definitions(
-        &bundled,
-        &[("bundled-shadowed", "Bundled"), ("bundled-only", "Bundled")],
-    );
-    let config = toml::from_str::<
-        toml::Value,
-    >(
-            r#"
-            [subagents]
-            enabled = true
-
-            [subagents.roles.inline]
-            description = "Inline role"
-
-            [subagents.personas.inline]
-            instructions = "Inline persona"
-            "#,
-        )
-        .unwrap();
-    let base = SubagentsConfig::resolve_base_with_sources(
-        false,
-        &config,
-        Some(&home.join(".grow")),
-        &bundled,
-    );
-    let resolve = |project_trusted| {
-        let (roles, personas) = SubagentsConfig::effective_definition_maps(
-            &base.roles,
-            &base.personas,
-            &project,
-            project_trusted,
-        );
-        SubagentsConfig {
-            roles,
-            personas,
-            ..Default::default()
-        }
-    };
-    let untrusted = resolve(false);
-    assert_eq!(
-            untrusted.get_role("shadowed").unwrap().description,
-            "User role"
-        );
-    assert_eq!(
-            untrusted
-                .get_persona("shadowed")
-                .and_then(|persona| persona.instructions.as_deref()),
-            Some("User persona")
-        );
-    assert!(untrusted.get_role("project-only").is_none());
-    assert!(untrusted.get_persona("project-only").is_none());
-    assert!(untrusted.get_role("user-only").is_some());
-    assert!(untrusted.get_persona("user-only").is_some());
-    assert!(untrusted.get_role("bundled-only").is_some());
-    assert!(untrusted.get_persona("bundled-only").is_some());
-    assert_eq!(
-            untrusted.get_role("bundled-shadowed").unwrap().description,
-            "Bundled role"
-        );
-    assert_eq!(
-            untrusted
-                .get_persona("bundled-shadowed")
-                .and_then(|persona| persona.instructions.as_deref()),
-            Some("Bundled persona")
-        );
-    let trusted = resolve(true);
-    assert_eq!(
-            trusted.get_role("shadowed").unwrap().description,
-            "Project role"
-        );
-    assert_eq!(
-            trusted
-                .get_persona("shadowed")
-                .and_then(|persona| persona.instructions.as_deref()),
-            Some("Project persona")
-        );
-    assert_eq!(
-            trusted.get_role("bundled-shadowed").unwrap().description,
-            "Project role"
-        );
-    assert_eq!(
-            trusted
-                .get_persona("bundled-shadowed")
-                .and_then(|persona| persona.instructions.as_deref()),
-            Some("Project persona")
-        );
-    assert_eq!(
-            trusted.get_role("inline").unwrap().description,
-            "Inline role"
-        );
-    assert_eq!(
-            trusted
-                .get_persona("inline")
-                .and_then(|persona| persona.instructions.as_deref()),
-            Some("Inline persona")
-        );
-    let denied_again = resolve(false);
-    assert_eq!(
-            denied_again.get_role("shadowed").unwrap().description,
-            "User role"
-        );
-    assert!(denied_again.get_role("project-only").is_none());
-}
-#[test]
-fn bundled_personas_and_roles_have_lowest_priority_in_resolve_order() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let workspace = tmp.path().join("workspace");
-    let bundled = home.join(".grow").join("bundled");
-    std::fs::create_dir_all(workspace.join(".grow").join("roles")).unwrap();
-    std::fs::create_dir_all(workspace.join(".grow").join("personas")).unwrap();
-    std::fs::create_dir_all(home.join(".grow").join("roles")).unwrap();
-    std::fs::create_dir_all(home.join(".grow").join("personas")).unwrap();
-    std::fs::create_dir_all(bundled.join("roles")).unwrap();
-    std::fs::create_dir_all(bundled.join("personas")).unwrap();
-    std::fs::write(
-            bundled.join("roles/reviewer.toml"),
-            r#"description = "Bundled reviewer""#,
-        )
-        .unwrap();
-    std::fs::write(
-            bundled.join("personas/reviewer.toml"),
-            r#"instructions = "Bundled persona""#,
-        )
-        .unwrap();
-    std::fs::write(
-            home.join(".grow/roles/reviewer.toml"),
-            r#"description = "User reviewer""#,
-        )
-        .unwrap();
-    std::fs::write(
-            home.join(".grow/personas/reviewer.toml"),
-            r#"instructions = "User persona""#,
-        )
-        .unwrap();
-    std::fs::write(
-            workspace.join(".grow/roles/reviewer.toml"),
-            r#"description = "Project reviewer""#,
-        )
-        .unwrap();
-    std::fs::write(
-            workspace.join(".grow/personas/reviewer.toml"),
-            r#"instructions = "Project persona""#,
-        )
-        .unwrap();
-    let config = toml::from_str::<
-        toml::Value,
-    >(
-            r#"
-            [subagents]
-            enabled = true
-
-            [subagents.roles.reviewer]
-            description = "Inline reviewer"
-
-            [subagents.personas.reviewer]
-            instructions = "Inline persona"
-            "#,
-        )
-        .unwrap();
-    let base = SubagentsConfig::resolve_base_with_sources(
-        true,
-        &config,
-        Some(&home.join(".grow")),
-        &bundled,
-    );
-    let (roles, personas) = SubagentsConfig::effective_definition_maps(
-        &base.roles,
-        &base.personas,
-        &workspace,
-        true,
-    );
-    let resolved = SubagentsConfig {
-        roles,
-        personas,
-        ..Default::default()
-    };
-    assert_eq!(
-            resolved.get_role("reviewer").unwrap().description,
-            "Inline reviewer"
-        );
-    assert_eq!(
-            resolved
-                .get_persona("reviewer")
-                .unwrap()
-                .instructions
-                .as_deref(),
-            Some("Inline persona")
-        );
-    std::fs::remove_file(workspace.join(".grow/roles/reviewer.toml")).unwrap();
-    std::fs::remove_file(workspace.join(".grow/personas/reviewer.toml")).unwrap();
-    let config = toml::from_str::<
-        toml::Value,
-    >(r#"
-            [subagents]
-            enabled = true
-            "#)
-        .unwrap();
-    let base = SubagentsConfig::resolve_base_with_sources(
-        true,
-        &config,
-        Some(&home.join(".grow")),
-        &bundled,
-    );
-    let (roles, personas) = SubagentsConfig::effective_definition_maps(
-        &base.roles,
-        &base.personas,
-        &workspace,
-        true,
-    );
-    let resolved = SubagentsConfig {
-        roles,
-        personas,
-        ..Default::default()
-    };
-    assert_eq!(
-            resolved.get_role("reviewer").unwrap().description,
-            "User reviewer"
-        );
-    assert_eq!(
-            resolved
-                .get_persona("reviewer")
-                .unwrap()
-                .instructions
-                .as_deref(),
-            Some("User persona")
-        );
-    std::fs::remove_file(home.join(".grow/roles/reviewer.toml")).unwrap();
-    std::fs::remove_file(home.join(".grow/personas/reviewer.toml")).unwrap();
-    let config = toml::from_str::<
-        toml::Value,
-    >(r#"
-            [subagents]
-            enabled = true
-            "#)
-        .unwrap();
-    let base = SubagentsConfig::resolve_base_with_sources(
-        true,
-        &config,
-        Some(&home.join(".grow")),
-        &bundled,
-    );
-    let (roles, personas) = SubagentsConfig::effective_definition_maps(
-        &base.roles,
-        &base.personas,
-        &workspace,
-        true,
-    );
-    let resolved = SubagentsConfig {
-        roles,
-        personas,
-        ..Default::default()
-    };
-    assert_eq!(
-            resolved.get_role("reviewer").unwrap().description,
-            "Bundled reviewer"
-        );
-    assert_eq!(
-            resolved
-                .get_persona("reviewer")
-                .unwrap()
-                .instructions
-                .as_deref(),
-            Some("Bundled persona")
-        );
-}
-#[test]
-fn render_io_summary_shows_bundled_for_bundled_personas() {
-    let persona = SubagentPersona {
-        instructions: Some("Bundled instructions".to_string()),
-        source_path: Some("/tmp/home/.grow/bundled/personas/reviewer.toml".to_string()),
-        ..Default::default()
-    };
-    let summary = persona.render_io_summary("reviewer");
-    assert!(summary.contains("[bundled]"));
-}
-#[test]
-fn roles_coexist_with_models_and_toggle() {
-    let toml_str = r#"
-            enabled = true
-            [models]
-            explore = "grow-fast"
-            [toggle]
-            plan = false
-            [roles.researcher]
-            description = "Research agent"
-            default_capability_mode = "read-only"
-        "#;
-    let cfg: SubagentsConfig = toml::from_str(toml_str).unwrap();
-    assert!(cfg.enabled);
-    assert_eq!(
-            cfg.models.get("explore").map(|s| s.as_str()),
-            Some("grow-fast")
-        );
-    assert!(!cfg.is_subagent_enabled("plan"));
-    assert!(cfg.get_role("researcher").is_some());
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown field `roles`"));
 }
 #[test]
 fn add_hooks_path_appends() {
@@ -2749,7 +1969,7 @@ fn auth_provider_honored_only_from_trusted_disk_layers() {
         );
 }
 #[test]
-fn model_provider_honored_only_from_trusted_disk_layers() {
+fn provider_catalog_honored_only_from_trusted_disk_layers() {
     let layers = ConfigLayers {
         managed: toml::from_str(
                 "[provider.gateway]\napi_backend = \"responses\"\n\
@@ -2765,12 +1985,12 @@ fn model_provider_honored_only_from_trusted_disk_layers() {
         )
         .unwrap();
     assert!(
-            cfg.model_providers.contains_key("gateway"),
-            "a model provider in a trusted disk layer is honored"
+            cfg.config_models.contains_key("gateway/gateway-model"),
+            "a provider model in a trusted disk layer is honored"
         );
     assert_eq!(
             cfg.auth_providers
-                .get("model_provider:gateway")
+                .get("provider:gateway")
                 .map(|c| c.command.as_str()),
             Some("/usr/local/bin/gw-token"),
             "its inline auth registers as a synthetic auth provider"
@@ -2796,13 +2016,14 @@ fn enterprise_two_file_merge_routes_deployment_key_to_proxy() {
 inference_base_url = "https://inference.acme-corp.example/provider/v1"
 cli_chat_proxy_base_url = "https://service.example.com/v1"
 
-[model.grow-build]
+[provider.acme.options]
 base_url = "https://inference.acme-corp.example/provider/v1"
 env_key = "ANTHROPIC_AUTH_TOKEN"
+[provider.acme.models.grow-build]
 model = "grow-4.5"
 
 [models]
-default = "grow-4.5"
+default = "acme/grow-build"
 "#,
         )
         .unwrap();
@@ -2889,13 +2110,12 @@ fn config_layers_system_managed_lowest_priority() {
 #[test]
 fn apply_requirements_value_overrides_user_settings() {
     let raw_config: toml::Value = toml::from_str(
-            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\n",
+            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[models]\ndefault = \"user-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ninference_base_url = \"https://user-api.example/v1\"\n",
         )
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw_config).unwrap();
-    cfg.default_yolo_mode = true;
     let requirements: toml::Value = toml::from_str(
-            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\n",
+            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\n\n[models]\ndefault = \"managed-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ninference_base_url = \"https://managed-api.example/v1\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\n",
         )
         .unwrap();
     let source = RequirementSource::Requirements {
@@ -2906,8 +2126,6 @@ fn apply_requirements_value_overrides_user_settings() {
     assert_eq!(Some(false), cfg.features.web_fetch);
     assert_eq!(Some(false), cfg.features.write_file);
     assert_eq!(Some(false), cfg.cli.auto_update);
-    assert!(!cfg.ui.yolo);
-    assert!(!cfg.default_yolo_mode);
     assert_eq!(Some("managed-model"), cfg.models.default.as_deref());
     assert_eq!(Some("stable"), cfg.cli.channel.as_deref());
     assert_eq!(
@@ -2917,11 +2135,6 @@ fn apply_requirements_value_overrides_user_settings() {
     assert_eq!(
             "https://managed-api.example/v1",
             cfg.endpoints.inference_base_url
-        );
-    assert!(
-            enforced
-                .iter()
-                .any(|e| e.path == "ui.yolo" && e.value == "--yolo blocked")
         );
     assert_eq!(
             Some("enterprise-deploy-key-should-not-log"),
@@ -3035,116 +2248,10 @@ fn validate_hooks_path_accepts_hooks_subdir() {
     let result = validate_hooks_path(valid_path.to_str().unwrap());
     assert!(result.is_ok(), "path under ~/.grow/ should be accepted");
 }
-/// REGRESSION: external managed-settings.json is advisory, not authoritative.
-/// disableBypassPermissionsMode (-> features.disable_yolo) must NOT clamp the user's own grow yolo.
-#[test]
-fn managed_settings_does_not_override_user_yolo() {
-    use workspace::permission::resolution::ManagedSettingsFeatures;
-    let mut cfg = crate::agent::config::Config::default();
-    cfg.ui.yolo = true;
-    cfg.default_yolo_mode = true;
-    let features = ManagedSettingsFeatures {
-        disable_yolo: Some(true),
-        source_path: Some(
-            std::path::PathBuf::from("/etc/claude-code/managed-settings.json"),
-        ),
-    };
-    let enforced = apply_managed_settings_features_inner(&mut cfg, &features);
-    assert!(cfg.ui.yolo);
-    assert!(cfg.default_yolo_mode);
-    assert!(enforced.is_empty());
-    assert!(!enforced.iter().any(|e| e.path == "ui.yolo"));
-}
 /// Simulate a release-stamped build so the folder-trust gate engages (a
 /// local/dev build auto-trusts). Hold the returned guard for the test body.
 fn simulate_release_build() -> test_support::EnvGuard {
     test_support::EnvGuard::set(version::TEST_VERSION_ENV, "0.0.0-sim")
-}
-#[test]
-fn project_overlay_tracks_authoritative_trust_transitions() {
-    let source_root = tempfile::tempdir().unwrap();
-    let repo = tempfile::tempdir().unwrap();
-    git2::Repository::init(repo.path()).unwrap();
-    write_subagent_definitions(
-        &repo.path().join(".grow"),
-        &[("shared", "Project"), ("project-only", "Project")],
-    );
-    let mut base = SubagentsConfig::default();
-    base.roles
-        .insert(
-            "shared".into(),
-            SubagentRole {
-                description: "User role".into(),
-                source_dir: Some(source_root.path().join("roles")),
-                ..Default::default()
-            },
-        );
-    base.personas
-        .insert(
-            "shared".into(),
-            SubagentPersona {
-                instructions: Some("User persona".into()),
-                source_path: Some(
-                    source_root.path().join("personas/shared.toml").display().to_string(),
-                ),
-                ..Default::default()
-            },
-        );
-    let (untrusted_roles, _) = SubagentsConfig::effective_definition_maps(
-        &base.roles,
-        &base.personas,
-        repo.path(),
-        false,
-    );
-    assert_eq!(untrusted_roles["shared"].description, "User role");
-    assert!(!untrusted_roles.contains_key("project-only"));
-    let (trusted_roles, trusted_personas) = SubagentsConfig::effective_definition_maps(
-        &base.roles,
-        &base.personas,
-        repo.path(),
-        true,
-    );
-    assert_eq!(trusted_roles["shared"].description, "Project role");
-    assert!(trusted_personas.contains_key("project-only"));
-    let (revoked_roles, _) = SubagentsConfig::effective_definition_maps(
-        &base.roles,
-        &base.personas,
-        repo.path(),
-        false,
-    );
-    assert_eq!(revoked_roles["shared"].description, "User role");
-    assert!(!revoked_roles.contains_key("project-only"));
-}
-#[test]
-fn base_resolver_without_project_cwd_keeps_project_files_out() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_subagent_definitions(&tmp.path().join(".grow"), &[("project", "Project")]);
-    let base = SubagentsConfig::resolve_base_with_sources(
-        false,
-        &toml::Value::Table(Default::default()),
-        None,
-        &tmp.path().join("bundled"),
-    );
-    assert!(base.get_role("project").is_none());
-    assert!(base.get_persona("project").is_none());
-}
-#[test]
-fn explicit_grow_root_is_the_only_user_source() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ambient = tmp.path().join("ambient-home/.grow");
-    let configured = tmp.path().join("configured-grow-home");
-    write_subagent_definitions(&ambient, &[("ambient", "Ambient")]);
-    write_subagent_definitions(&configured, &[("configured", "Configured")]);
-    let base = SubagentsConfig::resolve_base_with_sources(
-        false,
-        &toml::Value::Table(Default::default()),
-        Some(&configured),
-        &configured.join("bundled"),
-    );
-    assert!(base.get_role("ambient").is_none());
-    assert!(base.get_persona("ambient").is_none());
-    assert!(base.get_role("configured").is_some());
-    assert!(base.get_persona("configured").is_some());
 }
 /// SECURITY (plugin-RCE): a PROJECT-declared `[plugins].paths` loads as an
 /// auto-enabled, auto-trusted ConfigPath plugin, so it must merge into the

@@ -6,7 +6,7 @@
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-/// Select always-approve (YOLO / `permission_mode`).
+/// Select always-approve (always-approve / `permission_mode`).
 pub struct AlwaysApproveCommand;
 
 impl SlashCommand for AlwaysApproveCommand {
@@ -47,7 +47,7 @@ mod tests {
     fn make_ctx<'a>(
         models: &'a ModelState,
         bundle: &'a BundleState,
-        yolo_mode: bool,
+        permission_mode: shell::util::config::PermissionMode,
     ) -> CommandExecCtx<'a> {
         CommandExecCtx {
             models,
@@ -56,7 +56,7 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: PagerLocalSnapshot {
                 multiline_mode: false,
-                yolo_mode,
+                permission_mode,
                 ..PagerLocalSnapshot::default()
             },
         }
@@ -66,7 +66,7 @@ mod tests {
     fn off_turns_always_approve_on() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        let mut ctx = make_ctx(&models, &bundle, false);
+        let mut ctx = make_ctx(&models, &bundle, shell::util::config::PermissionMode::Ask);
         assert!(matches!(
             AlwaysApproveCommand.run(&mut ctx, ""),
             CommandResult::Action(Action::SetPermissionMode(
@@ -79,7 +79,11 @@ mod tests {
     fn on_selects_always_approve_idempotently() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        let mut ctx = make_ctx(&models, &bundle, true);
+        let mut ctx = make_ctx(
+            &models,
+            &bundle,
+            shell::util::config::PermissionMode::AlwaysApprove,
+        );
         assert!(matches!(
             AlwaysApproveCommand.run(&mut ctx, ""),
             CommandResult::Action(Action::SetPermissionMode(
@@ -92,7 +96,7 @@ mod tests {
     fn ignores_args() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        let mut ctx = make_ctx(&models, &bundle, false);
+        let mut ctx = make_ctx(&models, &bundle, shell::util::config::PermissionMode::Ask);
         assert!(matches!(
             AlwaysApproveCommand.run(&mut ctx, "extra"),
             CommandResult::Action(Action::SetPermissionMode(

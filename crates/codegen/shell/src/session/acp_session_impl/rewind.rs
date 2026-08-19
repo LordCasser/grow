@@ -156,10 +156,8 @@ impl SessionActor {
 
         // Collect files that would be reverted and detect conflicts.
         // This is read-only — no mutations happen here.
-        let mut files_to_revert: std::collections::HashMap<
-            workspace::session::file_state::FlexiblePath,
-            Option<String>,
-        > = std::collections::HashMap::new();
+        let mut files_to_revert: std::collections::HashMap<paths::RelPathBuf, Option<String>> =
+            std::collections::HashMap::new();
 
         if wants_file_revert {
             let all_points = self.file_state_tracker.get_rewind_points().await;
@@ -278,29 +276,12 @@ impl SessionActor {
                 *pending = prompt_text.clone();
             }
 
-            let conversation = self
-                .chat_state_handle
-                .get_rewind_surface(target_index)
-                .await;
-
-            // Write the truncated conversation back via the actor
-            // only after the canonical Timeline replacement is durable.
+            // Timeline owns both branch selection and all derived prompt state.
+            // There is no intermediate Chat snapshot to install.
             self.chat_state_handle
-                .replace_conversation_for_rewind(conversation)
+                .rewind_durably(target_index)
                 .await
                 .map_err(|error| anyhow::anyhow!("failed to commit rewind Timeline: {error}"))?;
-            // Use a snapshot to set the correct prompt_index and truncated prompt_texts.
-            // The actor's TruncateToPromptIndex doesn't apply here because the
-            // conversation was already truncated locally. Instead, snapshot + restore
-            // with the corrected fields.
-            if let Some(mut snap) = self.chat_state_handle.snapshot().await {
-                snap.prompt_index = target_index;
-                snap.prompt_texts.truncate(target_index);
-                // Rewind materializes the uncompressed Timeline branch, so no
-                // compaction summary remains active in the selected Surface.
-                snap.last_compaction_prompt_index = None;
-                self.chat_state_handle.restore_snapshot(snap);
-            }
 
             // Conversation shrank — clear budget-based (size/schema) and stale
             // per-turn suppression so compaction can run against the smaller context.
@@ -360,8 +341,7 @@ impl SessionActor {
     ///
     /// Updates the in-memory tracker, then persists via a disk-authoritative
     /// merge so a lazily-unloaded or partial tracker can't truncate history off
-    /// disk. No normalize_to_relative needed: per-turn persistence already
-    /// normalized the on-disk points (turn.rs, before PersistenceMsg::RewindPoint).
+    /// disk. Per-turn persistence admits only relative paths.
     ///
     /// Shared by local `handle_rewind` (ConversationOnly) and the bridge-mode
     /// ConversationOnly path, whose conversation rewind lands server-side

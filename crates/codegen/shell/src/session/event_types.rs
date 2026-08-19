@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 /// Schema version for the event log format. Bumped on breaking changes.
-pub const EVENT_SCHEMA_VERSION: &str = "1.0";
+pub const EVENT_SCHEMA_VERSION: &str = "3.0";
 
 /// A single event in the per-turn event log.
 ///
@@ -13,12 +13,13 @@ pub enum Event {
     TurnStarted {
         session_id: String,
         turn_number: u64,
-        origin: String,
+        identity: chat_state::TurnIdentity,
         model_id: String,
-        yolo_mode: bool,
+        permission_mode: diagnostics::enums::PermissionMode,
         conversation_message_count: usize,
         prompt_index: Option<usize>,
         prompt_text: Option<String>,
+        input_kind: chat_state::TurnInputKind,
         session_relationship: SessionRelationship,
         schema_version: String,
         /// Set when this turn is the user's redirect after a Ctrl+C / Esc abort
@@ -46,13 +47,9 @@ pub enum Event {
         duration_ms: u64,
         outcome: ToolOutcome,
         /// Model/ACP tool call id; matches the conversation's `tool_result`.
-        /// Omitted on write when empty.
-        #[serde(skip_serializing_if = "String::is_empty")]
         tool_call_id: String,
-        /// Which emitter wrote this row. Shell (default) is omitted on the wire
-        /// and is what package joins should use; workspace rows time the
-        /// hub/proxy hop for the same call.
-        #[serde(skip_serializing_if = "ToolCompletedSource::is_shell")]
+        /// Which emitter wrote this row. Shell rows time dispatch; workspace
+        /// rows time the hub/proxy hop for the same call.
         source: ToolCompletedSource,
     },
     PermissionRequested {
@@ -84,8 +81,9 @@ pub enum Event {
         /// event (`interjected` + the next-turn-after-abort `turn_started`).
         redirect_kind: RedirectKind,
     },
-    YoloToggled {
-        enabled: bool,
+    PermissionModeChanged {
+        previous_mode: diagnostics::enums::PermissionMode,
+        mode: diagnostics::enums::PermissionMode,
     },
     /// Runtime TodoGate nudged the model because a content-only turn ended
     /// with pending or unbacked in_progress todos. `reason` is the
@@ -240,22 +238,13 @@ pub enum Event {
 
 /// Who emitted a [`Event::ToolCompleted`] row.
 ///
-/// Wire: shell is omitted (legacy empty/`source` absent); workspace is
-/// `"workspace"`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCompletedSource {
     /// Shell dispatch clock — join against these.
-    #[default]
     Shell,
     /// Workspace hub/proxy hop clock.
     Workspace,
-}
-
-impl ToolCompletedSource {
-    pub fn is_shell(&self) -> bool {
-        matches!(self, Self::Shell)
-    }
 }
 
 /// Where a mid-turn interjection originated. Drives the `source` field on
@@ -400,8 +389,17 @@ pub use ::hooks::event::CancellationCategory;
 mod tests {
     use super::*;
 
+    fn user_identity() -> chat_state::TurnIdentity {
+        chat_state::TurnIdentity {
+            origin: "user".into(),
+            turn_kind: "user".into(),
+            goal_id: None,
+            stage_id: None,
+        }
+    }
+
     #[test]
-    fn tool_completed_source_omits_shell_writes_workspace() {
+    fn tool_completed_source_is_always_explicit() {
         let shell = serde_json::to_value(Event::ToolCompleted {
             tool_name: "bash".into(),
             duration_ms: 10,
@@ -410,7 +408,7 @@ mod tests {
             source: ToolCompletedSource::Shell,
         })
         .unwrap();
-        assert!(shell.get("source").is_none());
+        assert_eq!(shell["source"], "shell");
 
         let workspace = serde_json::to_value(Event::ToolCompleted {
             tool_name: "bash".into(),
@@ -465,12 +463,13 @@ mod tests {
         let with_kind = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
             turn_number: 2,
-            origin: "user".into(),
+            identity: user_identity(),
             model_id: "grow-4".into(),
-            yolo_mode: false,
+            permission_mode: diagnostics::enums::PermissionMode::Ask,
             conversation_message_count: 3,
             prompt_index: Some(2),
             prompt_text: Some("prompt".into()),
+            input_kind: chat_state::TurnInputKind::Prompt,
             session_relationship: SessionRelationship::Primary,
             schema_version: EVENT_SCHEMA_VERSION.into(),
             redirect_kind: Some(RedirectKind::QueuedAfterCancel),
@@ -482,12 +481,13 @@ mod tests {
         let normal = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
             turn_number: 1,
-            origin: "user".into(),
+            identity: user_identity(),
             model_id: "grow-4".into(),
-            yolo_mode: false,
+            permission_mode: diagnostics::enums::PermissionMode::Ask,
             conversation_message_count: 0,
             prompt_index: Some(1),
             prompt_text: Some("prompt".into()),
+            input_kind: chat_state::TurnInputKind::Prompt,
             session_relationship: SessionRelationship::Primary,
             schema_version: EVENT_SCHEMA_VERSION.into(),
             redirect_kind: None,

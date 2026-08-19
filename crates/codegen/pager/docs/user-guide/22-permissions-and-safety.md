@@ -2,7 +2,7 @@
 
 Control what Grow can access and do: permission modes, allow/ask/deny rules, hooks, and the optional OS-level sandbox.
 
-- **Modes** set how often Grow asks for approval (always-approve, auto, ask, and related).
+- **Modes** set how often Grow asks for approval (`ask`, `auto`, or `always-approve`).
 - **Rules** set which tools are allowed, asked about, or blocked within that baseline.
 
 ---
@@ -21,25 +21,22 @@ Modes set a baseline. Allow, ask, and deny [rules](#configuring-permissions) sti
 | Scripts, SDKs, CI, agent servers | Always-approve; add [deny rules](#configuring-permissions) or hooks for hard limits |
 
 ```bash
-grow -p "Run the tests" --always-approve
-grow agent --always-approve stdio
-grow agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+grow -p "Run the tests" --permission-mode always-approve
+grow agent --permission-mode always-approve stdio
+grow agent --permission-mode always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
-ACP clients can set `"_meta": { "yoloMode": true }` on `session/new`. See [Agent mode](15-agent-mode.md#automation-and-sdks).
+ACP clients can set `"_meta": { "permissionMode": "always-approve" }` on `session/new`. See [Agent mode](15-agent-mode.md#automation-and-sdks).
 
 ### Available modes
 
 | Mode | What runs without asking | Best for |
 | ---- | ------------------------ | -------- |
-| `default` (**ask**) | Read-only tools and built-in read-only shell commands | Interactive day-to-day use |
-| `acceptEdits` | File edits without a prompt | Local coding while you review diffs later |
-| `plan` | Accepted for compatibility; use [plan mode](19-plan-mode.md) for gated planning | Claude-compatible settings |
+| `ask` | Read-only tools and built-in read-only shell commands | Interactive day-to-day use |
 | `auto` | Work the safety check allows; other calls are blocked or escalated | Interactive sessions that want fewer prompts |
-| `dontAsk` | Only pre-approved tools and built-in read-only handling | Strict CI allowlists |
-| `bypassPermissions` (**always-approve**) | Tool calls in general (`deny` rules, hooks, and some shell `ask` rules still apply) | Trusted automation and agent servers |
+| `always-approve` | Tool calls in general (`deny` rules, hooks, and some shell `ask` rules still apply) | Trusted automation and agent servers |
 
-**Always-approve** is the product name; config and Claude-compatible settings may use `bypassPermissions` for the same mode. Always-approve and auto are mutually exclusive (always-approve takes precedence when both are requested).
+The three modes are mutually exclusive and represented by one canonical value.
 
 ### How to set the mode
 
@@ -50,19 +47,19 @@ Permission prompts always have a response deadline so a disconnected pager, gate
 **CLI:**
 
 ```bash
-grow --always-approve -p "Run the test suite"
+grow --permission-mode always-approve -p "Run the test suite"
 grow --permission-mode auto
-grow agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+grow agent --permission-mode always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
 **Config:**
 
 ```toml
 [ui]
-permission_mode = "always-approve"   # or "auto", "ask", …
+permission_mode = "always-approve"   # or "auto", "ask"
 ```
 
-Claude-compatible `defaultMode` in `.claude/settings.json` is also supported (see [Claude-compatible settings](#3-claude-code-compatibility-claudesettingsjson)). CLI overrides config for that process.
+CLI overrides configuration for that process.
 
 ### Always-approve
 
@@ -70,10 +67,10 @@ Skips ordinary permission prompts so tools run without waiting for a click. `den
 
 | Mechanism | Example |
 | --------- | ------- |
-| CLI | `--always-approve` (alias `--yolo`), or `--permission-mode bypassPermissions` |
+| CLI | `--permission-mode always-approve` |
 | Config | `[ui] permission_mode = "always-approve"` |
 | Interactive | `/always-approve`, or select it through `/permission` / `Ctrl+X P` |
-| ACP | `_meta.yoloMode: true` on `session/new` |
+| ACP | `_meta.permissionMode: "always-approve"` on `session/new` |
 
 #### Always-approve with hard limits
 
@@ -92,7 +89,7 @@ deny = [
 ```
 
 ```bash
-grow -p "Deploy the service" --always-approve --deny 'Bash(rm -rf *)'
+grow -p "Deploy the service" --permission-mode always-approve --deny 'Bash(rm -rf *)'
 ```
 
 Deny always wins over allow and over always-approve’s normal pass-through. See [Configuring permissions](#configuring-permissions).
@@ -135,9 +132,7 @@ Organizations can prevent always-approve from being enabled via CLI, TUI, or `/a
 disable_bypass_permissions_mode = true
 ```
 
-Do not use `permission_mode` for this lock; that key is a switchable default. The legacy `[ui] yolo = false` key in `requirements.toml` also disables always-approve for compatibility.
-
-Grow can still load Claude-style permission **rules** from managed settings; always-approve is locked with `requirements.toml` as shown above.
+Do not use `permission_mode` for this lock; that key is a switchable default.
 
 ---
 
@@ -153,7 +148,7 @@ Hard eligibility comes from the registered host tools, the Agent's authored pres
 
 When the model requests a tool, the following checks happen in order:
 
-1. **`PreToolUse` hooks**. A hook can deny a tool call before any other check. A hook that allows a call does not skip the checks below; it only declines to deny. See [10-hooks.md](10-hooks.md).
+1. **`pre_tool_use` hooks**. A hook can deny a tool call before any other check. A hook that allows a call does not skip the checks below; it only declines to deny. See [10-hooks.md](10-hooks.md).
 
 2. **Permission rules** (from configuration files or `--allow`/`--deny` flags)
    - A matching `deny` rule rejects the call. `deny` wins over every other rule.
@@ -180,7 +175,7 @@ The operations below are treated as read-only and run without prompting, in ever
 - `list_dir`
 - `grep` (content search)
 - `todo_write`
-- `get_command_or_subagent_output` / `wait_commands_or_subagents` / `kill_command_or_subagent` (subagent control)
+- `get_command_or_subagent_output` / `kill_command_or_subagent` (background task and subagent control)
 - Invoking skills
 
 ### Read-Only Shell Commands
@@ -210,27 +205,25 @@ These checks apply per segment. In a command like `ls && rm -rf /`, the `ls` seg
 
 ## Configuring Permissions
 
-Grow reads permission rules from three compatible sources. Rules from all sources are merged into one set; a rule's effect depends on its action (`deny` > `ask` > `allow`), not on which file it came from.
+Grow reads permission rules from CLI arguments and canonical Grow configuration. Rules from all sources are merged into one set; a rule's effect depends on its action (`deny` > `ask` > `allow`), not on which file it came from.
 
 ### Where Permission Rules Live (Scopes)
 
-Permission rules can be global (all projects), project-scoped (one repository), or personal to you within a project:
+Permission rules can be global, project-scoped, or session-local:
 
 | Scope | File | Shared with teammates |
 |-------|------|-----------------------|
 | Global (all projects) | `~/.grow/config.toml` | No |
 | Project (committed) | `<project>/.grow/config.toml` | Yes (commit it) |
-| Project (personal) | `<project>/.claude/settings.local.json` | No (gitignore it) |
 | Interactive grants | Stored internally by Grow, per project | No |
 
 Notes on scoping:
 
 - Grow discovers a `.grow/config.toml` at every directory level from the repository root down to your working directory, so a subdirectory can add rules on top of the repo root's.
 - Rules from all scopes are merged into one rule set; `deny` > `ask` > `allow` applies across scopes, so a global `deny` cannot be overridden by a project `allow`.
-- Grow has no native `config.local.toml`. For personal, uncommitted rules in a project, use `.claude/settings.local.json`; Grow reads it directly (see [Claude Code Compatibility](#3-claude-code-compatibility-claudesettingsjson)).
 - Interactive "Always allow" decisions are stored outside the repository, scoped to the project (see [Interactive Approvals](#interactive-approvals-and-where-they-persist)).
 
-To stop prompts for a specific command in one project, add a narrow allow rule to that project's `.grow/config.toml` (or `.claude/settings.json`):
+To stop prompts for a specific command in one project, add a narrow allow rule to that project's `.grow/config.toml`:
 
 ```toml
 [permission]
@@ -279,15 +272,15 @@ rules = [
 
 The structured `tool` field accepts the lowercase names `bash`, `read`, `edit`, `grep`, `mcp`, `webfetch`, and `websearch`, corresponding to the tool classes in [Tool Names](#tool-names).
 
-Because `deny` always wins, you cannot combine these `allow` rules with a catch-all `deny` on `bash` to mean "only allow git/gh"; a `deny tool = "bash"` rule would block `git` and `gh` too. For deny-by-default, use `defaultMode: "dontAsk"` in `.claude/settings.json` or a `PreToolUse` hook (below).
+Because `deny` always wins, you cannot combine these `allow` rules with a catch-all `deny` on `bash` to mean "only allow git/gh"; a `deny tool = "bash"` rule would block `git` and `gh` too. For a procedural deny-by-default policy, use a `pre_tool_use` hook (below).
 
-Rules from the global `~/.grow/config.toml` and every project `.grow/config.toml` (from the repo root down to your working directory) are merged into one rule set, alongside any `.claude/settings.json` rules.
+Rules from the global `~/.grow/config.toml` and every project `.grow/config.toml` from the repo root down to the working directory are merged into one rule set.
 
 Managed configuration deployed by your organization also contributes `[permission]` rules: the system `/etc/grow/managed_config.toml`, and a user-level copy that Grow maintains automatically at `~/.grow/managed_config.toml`. Managed rules merge like rules from any other source, with two properties specific to managed `allow` rules: your own `deny` and `ask` rules win over a managed `allow` (severity ordering), and a catch-all managed `allow` is ignored when always-approve is locked off. For rules that users cannot edit away, use the root-owned system `/etc/grow/requirements.toml`.
 
 Permission rules from every source are read once, when a session starts. Changes apply to the next session.
 
-The native `[permission]` section also accepts the compact `allow` / `deny` / `ask` string-array form, using the same rule strings as the `--allow` / `--deny` flags and `.claude/settings.json`:
+The native `[permission]` section also accepts the compact `allow` / `deny` / `ask` string-array form, using the same rule strings as the CLI flags:
 
 ```toml
 [permission]
@@ -303,41 +296,6 @@ allow = [
 ```
 
 `deny` always wins over `allow` (evaluation is `deny` > `ask` > `allow`), regardless of order or source. To block reads of paths outside your project at the OS level as well, combine deny rules with the `strict` sandbox profile (see [18-sandbox.md](18-sandbox.md)).
-
-### 3. Claude Code Compatibility (`.claude/settings.json`)
-
-Grow reads `~/.claude/settings.json` and `~/.claude/settings.local.json`, plus the project-level `<project>/.claude/settings.json` and `settings.local.json` (walking up to the repo root). The native `.grow` source for permission rules is `config.toml`, described in the section above.
-
-Example:
-
-```json
-{
-  "permissions": {
-    "defaultMode": "dontAsk",
-    "allow": [
-      "Read",
-      "Grep",
-      "Bash(git *)",
-      "Bash(gh *)"
-    ],
-    "deny": [
-      "Bash(rm -rf *)"
-    ]
-  }
-}
-```
-
-Supported `defaultMode` values include `default`, `auto`, `acceptEdits`, `bypassPermissions`, `dontAsk`, and `plan`. Grow reads `defaultMode` from its canonical location under `permissions`; a top-level `defaultMode` is also accepted when the nested key is absent.
-
-`permissions.allow`, `permissions.deny`, and `permissions.ask` entries are translated into native rules and then matched with the semantics in the [Rule Matching Reference](#rule-matching-reference). Translation notes:
-
-- Rules for MCP tools must use the `MCPTool(server__tool)` form; the `mcp__server__tool` form never matches (see [MCP Rules](#mcp-rules)).
-- Rules naming an unrecognized tool, and parameter rules such as `Agent(model:opus)`, are skipped with a warning rather than failing the load.
-- `permissions.additionalDirectories` is parsed but not supported.
-
-You can import existing Claude settings interactively with **Ctrl+I** ("Import Claude settings").
-
----
 
 ## Rule Matching Reference
 
@@ -437,7 +395,7 @@ Interactive grants are personal, per-machine state. For an allowlist you can rev
 
 ## Restricting Bash to Specific Commands with a Hook
 
-A `PreToolUse` hook can enforce an allow list on the `Bash` tool that applies in every permission mode. Hooks are evaluated before the permission system; a hook deny stops the call, and a hook allow falls through to the normal permission checks (so your `deny` rules still apply).
+A `pre_tool_use` hook can enforce an allow list on the `Bash` tool that applies in every permission mode. Hooks are evaluated before the permission system; a hook deny stops the call, and a hook allow falls through to the normal permission checks (so your `deny` rules still apply).
 
 > **Note:** Hooks fail open. If a hook script crashes, times out, or is missing, the tool call proceeds as if the hook had allowed it, and the failure is reported in the UI. A hook used as a security boundary must handle its own errors, and must account for chained commands, as the example below does. See [10-hooks.md](10-hooks.md).
 
@@ -448,7 +406,7 @@ A `PreToolUse` hook can enforce an allow list on the `Bash` tool that applies in
 ```json
 {
   "hooks": {
-    "PreToolUse": [
+    "pre_tool_use": [
       {
         "matcher": "Bash",
         "hooks": [
@@ -522,7 +480,7 @@ grow -p "Implement the feature using only git and GitHub CLI" \
   --allow 'Bash(gh *)'
 ```
 
-Install the `git-gh-only` hook above to deny every other `Bash` command. For deny-by-default on all tools, also set `{"permissions": {"defaultMode": "dontAsk"}}` in `.claude/settings.json`.
+Install the `git-gh-only` hook above to deny every other `Bash` command. Use explicit native `deny` rules or another `pre_tool_use` hook for additional tool classes.
 
 ### Read-Only Code Reviewer
 
@@ -549,9 +507,9 @@ Permissions control what the model is allowed to request. The OS-level sandbox (
 
 Recommended combination for untrusted code:
 
-1. `dontAsk` plus narrow allow rules, or a restrictive hook
+1. `ask` mode plus narrow allow rules or a restrictive hook
 2. `--sandbox strict` or a custom profile
-3. Project trust plus review of any `SessionStart` hooks
+3. Project trust plus review of any `session_start` hooks
 
 ---
 
@@ -567,16 +525,16 @@ Recommended combination for untrusted code:
 ## Best Practices
 
 1. **Prefer narrow patterns.** `Bash(git *)` grants less access than a bare `Bash` allow rule.
-2. **Combine layers.** `dontAsk`, narrow allow rules, a restrictive hook, and the sandbox each restrict independently.
-3. **Review project configuration from unfamiliar sources.** Project permission rules in `.grow/config.toml` and `.claude/settings.json`, including `allow` rules, apply without a separate trust prompt. Review them, and any project hooks, before working in an unfamiliar checkout (see the security notes in [10-hooks.md](10-hooks.md)).
-4. **Test your policy.** With `defaultMode: "dontAsk"` set (or your `PreToolUse` hook installed), run representative commands and confirm what is blocked.
+2. **Combine layers.** Narrow allow rules, a restrictive hook, and the sandbox each restrict independently.
+3. **Review project configuration from unfamiliar sources.** Project permission rules in `.grow/config.toml`, including `allow` rules, apply within the trusted workspace. Review them and any project hooks before working in an unfamiliar checkout (see [10-hooks.md](10-hooks.md)).
+4. **Test your policy.** With your native rules and `pre_tool_use` hooks installed, run representative commands and confirm what is blocked.
 5. **Treat the read-only command list as a convenience, not a security boundary.**
 
 ---
 
 ## See also
 
-- [Hooks](10-hooks.md) — PreToolUse and other lifecycle scripts
+- [Hooks](10-hooks.md) — `pre_tool_use` and other lifecycle scripts
 - [Headless mode](14-headless-mode.md) — One-shot CLI and automation flags
 - [Agent mode](15-agent-mode.md) — ACP, stdio, and agent servers
 - [Sandbox](18-sandbox.md) — OS-level isolation profiles

@@ -31,14 +31,11 @@ const RECENCY_HALF_LIFE_SECS: f64 = 7.0 * 86_400.0;
 const RECENCY_FLOOR: f64 = 0.1;
 const MAX_ENTRIES: usize = 256;
 
-/// On-disk format. `by_command` is canonical; legacy `by_prefix` is migrated once.
+/// Canonical on-disk format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MruFile {
-    #[serde(default)]
     by_command: HashMap<String, u64>,
-    /// Legacy per-prefix schema (read-only migrate).
-    #[serde(default)]
-    by_prefix: HashMap<String, HashMap<String, u64>>,
 }
 
 #[derive(Debug)]
@@ -135,16 +132,6 @@ impl SlashMru {
             Ok(bytes) => match serde_json::from_slice::<MruFile>(&bytes) {
                 Ok(file) => {
                     self.by_command = file.by_command;
-                    if self.by_command.is_empty() && !file.by_prefix.is_empty() {
-                        // Collapse legacy per-prefix buckets: max timestamp per command.
-                        for bucket in file.by_prefix.values() {
-                            for (cmd, ts) in bucket {
-                                let e = self.by_command.entry(cmd.clone()).or_insert(0);
-                                *e = (*e).max(*ts);
-                            }
-                        }
-                        self.dirty = true;
-                    }
                     self.trim_to_cap();
                     self.loaded = true;
                 }
@@ -205,7 +192,6 @@ impl SlashMru {
         }
         let file = MruFile {
             by_command: self.by_command.clone(),
-            by_prefix: HashMap::new(),
         };
         let bytes = serde_json::to_vec(&file).ok()?;
         self.dirty = false;

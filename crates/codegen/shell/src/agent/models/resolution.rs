@@ -1,53 +1,15 @@
 use super::*;
 
-/// Map a model id (catalog key or routing slug) to its catalog key.
-pub(crate) fn resolve_catalog_key(
-    models: &IndexMap<String, ModelEntry>,
-    id: &acp::ModelId,
-) -> Option<acp::ModelId> {
-    let id_str = id.0.as_ref();
-    if models.contains_key(id_str) {
-        return Some(id.clone());
-    }
-    models
-        .iter()
-        .rev()
-        .find(|(_, entry)| entry.info.model == id_str)
-        .map(|(key, _)| acp::ModelId::new(key.clone()))
-}
-
 /// Restore a persisted session model by its stable catalog identity.
 ///
-/// Persisted sessions never guess by routing slug: two providers may expose
-/// the same upstream model name, while `provider/model` remains unambiguous.
-///
-/// Exception — unique slug recovery: sessions created before write-path
-/// normalization could persist a bare client slug (`_meta.modelId` passed
-/// through verbatim, e.g. `deepseek-v4-flash` instead of
-/// `deepseek/deepseek-v4-flash`). A bare slug is recovered only when
-/// **exactly one** catalog entry exposes it and that entry's key is in
-/// `available` — the same slug semantics as [`resolve_catalog_key`] but
-/// strictly unique, so an ambiguous slug (two providers exposing the same
-/// model name) still fails rather than guessing which provider was meant.
+/// The identity contract is exact: routing slugs are request payload, never
+/// catalog identity. Both maps must contain the same `provider/model` key.
 pub(crate) fn selectable_catalog_key_for_persisted(
     models: &IndexMap<String, ModelEntry>,
     available: &IndexMap<acp::ModelId, acp::ModelInfo>,
     id: &acp::ModelId,
 ) -> Option<acp::ModelId> {
-    if models.contains_key(id.0.as_ref()) && available.contains_key(id) {
-        return Some(id.clone());
-    }
-    let id_str = id.0.as_ref();
-    let mut slug_matches = models
-        .iter()
-        .filter(|(_, entry)| entry.info.model == id_str)
-        .map(|(key, _)| key.clone());
-    let unique_key = slug_matches.next()?;
-    if slug_matches.next().is_some() {
-        return None;
-    }
-    let key = acp::ModelId::new(unique_key);
-    available.contains_key(&key).then_some(key)
+    (models.contains_key(id.0.as_ref()) && available.contains_key(id)).then(|| id.clone())
 }
 
 /// Notice the caller must surface to the user when a requested session model
@@ -61,10 +23,9 @@ pub(crate) struct ModelFallbackNotice {
 /// Resolve the model id to persist for a brand-new session.
 ///
 /// A client-requested model (`_meta.modelId`, already gated by
-/// `resolve_model_id`) is normalized to its canonical `provider/model`
-/// catalog key so the persisted summary never stores a bare slug. When
-/// normalization fails (the catalog changed between validation and
-/// persistence), the default model is returned together with a
+/// `resolve_model_id`) is an exact `provider/model` catalog key. When it
+/// disappears between validation and persistence, the default model is
+/// returned together with a
 /// [`ModelFallbackNotice`] describing what was requested and why it fell back.
 pub(crate) fn resolve_new_session_model_id(
     models: &IndexMap<String, ModelEntry>,
@@ -75,9 +36,9 @@ pub(crate) fn resolve_new_session_model_id(
         return (current_default.clone(), None);
     };
     let requested_id = acp::ModelId::new(requested.to_string());
-    match resolve_catalog_key(models, &requested_id) {
-        Some(canonical) => (canonical, None),
-        None => (
+    match models.contains_key(requested) {
+        true => (requested_id, None),
+        false => (
             current_default.clone(),
             Some(ModelFallbackNotice {
                 requested: requested_id,
@@ -142,9 +103,7 @@ pub(crate) fn resolve_default_model(
             (key, first, config::ConfigSource::Default)
         }
         Some(pref) => {
-            let found = visible
-                .get_key_value(&pref.value)
-                .or_else(|| visible.iter().find(|(_, m)| m.model == pref.value));
+            let found = visible.get_key_value(&pref.value);
 
             if let Some((key, entry)) = found {
                 (key.clone(), entry.clone(), pref.source)
@@ -174,9 +133,7 @@ pub(crate) fn resolve_default_model(
                         .pre_campaign_default
                         .as_deref()
                         .filter(|s| !s.is_empty())
-                    && let Some((key, entry)) = visible
-                        .get_key_value(prev)
-                        .or_else(|| visible.iter().find(|(_, m)| m.model == prev))
+                    && let Some((key, entry)) = visible.get_key_value(prev)
                 {
                     tracing::info!(
                         unavailable = %pref.value, fallback = %prev,
@@ -203,7 +160,8 @@ pub fn available_models(
     config::to_acp_model_info(&visible)
 }
 
-/// Compiled glob matcher shared by `allowed_models`, `disabled_models`, and `hidden_models` (matched against catalog key or model id).
+/// Compiled glob matcher shared by `allowed_models`, `disabled_models`, and
+/// `hidden_models`. Patterns match canonical `provider/model` catalog keys.
 pub(crate) struct ModelGlobSet(GlobSet);
 
 impl ModelGlobSet {
@@ -232,8 +190,8 @@ impl ModelGlobSet {
             .map_err(|e| vec![e.to_string()])
     }
 
-    fn matches(&self, key: &str, model: &str) -> bool {
-        self.0.is_match(key) || self.0.is_match(model)
+    fn matches(&self, key: &str) -> bool {
+        self.0.is_match(key)
     }
 }
 
@@ -243,7 +201,7 @@ pub fn resolve_model_catalog(cfg: &config::Config) -> IndexMap<String, ModelEntr
 
     if let Ok(Some(disabled)) = ModelGlobSet::compile(cfg.models.disabled_models.as_ref()) {
         let before = catalog.len();
-        catalog.retain(|key, entry| !disabled.matches(key, &entry.model));
+        catalog.retain(|key, _| !disabled.matches(key));
         let removed = before - catalog.len();
         if removed > 0 {
             tracing::info!(count = removed, "disabled_models: removed from catalog");
@@ -258,7 +216,7 @@ pub fn resolve_model_catalog(cfg: &config::Config) -> IndexMap<String, ModelEntr
         }
         Ok(Some(allowed)) => {
             for (key, entry) in catalog.iter_mut() {
-                entry.info.user_selectable = allowed.matches(key, &entry.model);
+                entry.info.user_selectable = allowed.matches(key);
             }
         }
         Err(bad) => {
@@ -271,48 +229,34 @@ pub fn resolve_model_catalog(cfg: &config::Config) -> IndexMap<String, ModelEntr
 
     if let Ok(Some(hidden)) = ModelGlobSet::compile(cfg.models.hidden_models.as_ref()) {
         for (key, entry) in catalog.iter_mut() {
-            if hidden.matches(key, &entry.model) {
+            if hidden.matches(key) {
                 entry.info.hidden = true;
             }
         }
     }
 
     for entry in catalog.values_mut() {
-        if entry.info.supports_reasoning_effort && entry.info.reasoning_effort.is_none() {
-            entry.info.reasoning_effort = cfg
-                .models
+        let model_default = entry.info.default_reasoning_effort();
+        let configured_default = model_default.or_else(|| {
+            cfg.models
                 .default_reasoning_effort
-                .filter(|effort| model_offers_reasoning_effort(&entry.info, *effort));
-        }
-    }
-
-    if let Some(effort) = cfg.reasoning_effort_override {
-        for entry in catalog.values_mut() {
-            if model_offers_reasoning_effort(&entry.info, effort) {
-                entry.info.reasoning_effort = Some(effort);
-            }
-        }
+                .filter(|effort| model_offers_reasoning_effort(&entry.info, *effort))
+        });
+        let resolved_default = cfg
+            .reasoning_effort_override
+            .filter(|effort| model_offers_reasoning_effort(&entry.info, *effort))
+            .or(configured_default);
+        entry.info.set_default_reasoning_effort(resolved_default);
     }
 
     catalog
 }
 
-/// Whether `effort` is a value this model will accept on the wire.
+/// Whether `effort` is a value this model declares in its canonical menu.
 fn model_offers_reasoning_effort(info: &config::ModelInfo, effort: ReasoningEffort) -> bool {
-    if !info.supports_reasoning_effort {
-        return false;
-    }
-    if info.reasoning_efforts.is_empty() {
-        matches!(
-            effort,
-            ReasoningEffort::Low
-                | ReasoningEffort::Medium
-                | ReasoningEffort::High
-                | ReasoningEffort::Xhigh
-        )
-    } else {
-        info.reasoning_efforts.iter().any(|opt| opt.value == effort)
-    }
+    info.reasoning_efforts
+        .iter()
+        .any(|option| option.value == effort)
 }
 
 /// True when an active `allowed_models` allowlist leaves no selectable model.
@@ -347,9 +291,7 @@ pub(crate) fn validate_selectable(
         ("-m flag", cfg.default_model_override.as_deref()),
     ] {
         if let Some(id) = id
-            && let Some(entry) = catalog
-                .get(id)
-                .or_else(|| catalog.values().find(|e| e.model == id))
+            && let Some(entry) = catalog.get(id)
             && !entry.info.user_selectable
         {
             return Err(format!(
@@ -366,7 +308,7 @@ mod tests {
     use super::*;
 
     fn entry(slug: &str) -> ModelEntry {
-        config::ModelEntry::fallback(slug)
+        config::ModelEntry::baseline(slug)
     }
 
     /// `(catalog_key, routing_slug)` pairs -> catalog map.
@@ -419,53 +361,9 @@ mod tests {
     }
 
     #[test]
-    fn persisted_unique_slug_recovers_the_catalog_key() {
+    fn persisted_routing_slug_is_not_a_catalog_identity() {
         let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
         let available = available_for(&models, &["deepseek/deepseek-v4-flash"]);
-        assert_eq!(
-            selectable_catalog_key_for_persisted(
-                &models,
-                &available,
-                &acp::ModelId::new("deepseek-v4-flash"),
-            ),
-            Some(acp::ModelId::new("deepseek/deepseek-v4-flash"))
-        );
-    }
-
-    #[test]
-    fn persisted_ambiguous_slug_returns_none() {
-        let models = catalog(&[
-            ("provider-a/deepseek-v4-flash", "deepseek-v4-flash"),
-            ("provider-b/deepseek-v4-flash", "deepseek-v4-flash"),
-        ]);
-        let available = available_for(
-            &models,
-            &[
-                "provider-a/deepseek-v4-flash",
-                "provider-b/deepseek-v4-flash",
-            ],
-        );
-        assert_eq!(
-            selectable_catalog_key_for_persisted(
-                &models,
-                &available,
-                &acp::ModelId::new("deepseek-v4-flash"),
-            ),
-            None,
-            "an ambiguous slug must never be guessed, even though a unique \
-             slug is recoverable"
-        );
-    }
-
-    #[test]
-    fn persisted_slug_match_not_selectable_returns_none() {
-        let models = catalog(&[
-            ("deepseek/deepseek-v4-flash", "deepseek-v4-flash"),
-            ("other/other-model", "other-model"),
-        ]);
-        // The slug matches exactly one entry, but that key is absent from the
-        // selectable projection (e.g. `user_selectable = false`).
-        let available = available_for(&models, &["other/other-model"]);
         assert_eq!(
             selectable_catalog_key_for_persisted(
                 &models,
@@ -491,13 +389,13 @@ mod tests {
     }
 
     #[test]
-    fn new_session_model_normalizes_bare_slug_to_canonical_key() {
+    fn new_session_model_rejects_bare_routing_slug() {
         let models = catalog(&[("deepseek/deepseek-v4-flash", "deepseek-v4-flash")]);
         let default = acp::ModelId::new("deepseek/deepseek-v4-pro");
         let (model_id, notice) =
             resolve_new_session_model_id(&models, Some("deepseek-v4-flash"), &default);
-        assert_eq!(model_id, acp::ModelId::new("deepseek/deepseek-v4-flash"));
-        assert!(notice.is_none());
+        assert_eq!(model_id, default);
+        assert!(notice.is_some());
     }
 
     #[test]

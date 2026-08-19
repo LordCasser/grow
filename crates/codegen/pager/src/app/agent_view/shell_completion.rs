@@ -140,58 +140,39 @@ mod shell_suggestion_key_tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// Wire-shaped token item: `insert_text` is the compat whole line,
-    /// `token_text` the span replacement (what a new shell sends).
-    fn token_item(line: &str, token: &str, range: std::ops::Range<usize>) -> CompletionItemParsed {
+    fn token_item(_line: &str, token: &str, range: std::ops::Range<usize>) -> CompletionItemParsed {
         CompletionItemParsed {
             display: token.to_owned(),
             description: String::new(),
-            insert_text: line.to_owned(),
-            source: SuggestionSource::PathExecutable,
-            priority: 0,
-            replace_range: Some(range),
-            token_text: Some(token.to_owned()),
-            truncated: false,
-        }
-    }
-
-    fn item(insert: &str, range: Option<std::ops::Range<usize>>) -> CompletionItemParsed {
-        CompletionItemParsed {
-            display: insert.to_owned(),
-            description: String::new(),
-            insert_text: insert.to_owned(),
+            replacement: token.to_owned(),
             source: SuggestionSource::PathExecutable,
             priority: 0,
             replace_range: range,
-            token_text: None,
             truncated: false,
         }
     }
 
     /// Wire-shaped FILE token item (what the file provider sends).
-    fn file_item(line: &str, token: &str, range: std::ops::Range<usize>) -> CompletionItemParsed {
+    fn file_item(_line: &str, token: &str, range: std::ops::Range<usize>) -> CompletionItemParsed {
         CompletionItemParsed {
             display: token.to_owned(),
             description: String::new(),
-            insert_text: line.to_owned(),
+            replacement: token.to_owned(),
             source: SuggestionSource::FilePath,
             priority: 0,
-            replace_range: Some(range),
-            token_text: Some(token.to_owned()),
+            replace_range: range,
             truncated: false,
         }
     }
 
-    /// Whole-line history item (insert_text doubles as the span replacement).
     fn history_item(line: &str, range: std::ops::Range<usize>) -> CompletionItemParsed {
         CompletionItemParsed {
             display: line.to_owned(),
             description: String::new(),
-            insert_text: line.to_owned(),
+            replacement: line.to_owned(),
             source: SuggestionSource::History,
             priority: 10,
-            replace_range: Some(range),
-            token_text: None,
+            replace_range: range,
             truncated: false,
         }
     }
@@ -299,12 +280,13 @@ mod shell_suggestion_key_tests {
         assert!(!agent.prompt.completion_dropdown_open());
     }
 
-    /// Rangeless items (older shells) keep the whole-line behavior.
+    /// Whole-line items use the same atomic edit shape.
     #[test]
-    fn dropdown_accept_without_range_sets_whole_line() {
+    fn dropdown_accept_whole_line_edit() {
         let mut agent = bash_agent("git st");
         agent.prompt.suggestions.dropdown.open = true;
-        agent.prompt.suggestions.dropdown.items = vec![item("git status --porcelain", None)];
+        agent.prompt.suggestions.dropdown.items =
+            vec![history_item("git status --porcelain", 0..6)];
 
         let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
         assert_eq!(agent.prompt.text(), "git status --porcelain");
@@ -318,8 +300,10 @@ mod shell_suggestion_key_tests {
     #[test]
     fn tab_opens_dropdown_without_ghost() {
         let mut agent = bash_agent("ls | gr");
-        agent.prompt.suggestions.dropdown.items =
-            vec![item("grep", Some(5..7)), item("grip", Some(5..7))];
+        agent.prompt.suggestions.dropdown.items = vec![
+            token_item("ls | grep", "grep", 5..7),
+            token_item("ls | grip", "grip", 5..7),
+        ];
         assert!(!agent.prompt.has_ghost_text());
         assert!(!agent.prompt.completion_dropdown_open());
 
@@ -482,37 +466,6 @@ mod shell_suggestion_key_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.prompt.completion_dropdown_open());
         assert_eq!(agent.prompt.text(), "git st");
-    }
-
-    /// THE legacy-shell compatibility case: a rangeless `path` row (old
-    /// shells send `insertText: "grep"`, no range) must never insta-accept
-    /// — its whole-line fallback would replace `ls | gr` with `grep`. Tab
-    /// plain-opens instead, sole match or not.
-    #[test]
-    fn tab_sole_rangeless_path_row_opens_dropdown_never_accepts() {
-        let mut agent = bash_agent("ls | gr");
-        agent.prompt.suggestions.dropdown.items = vec![item("grep", None)];
-
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(agent.prompt.text(), "ls | gr", "draft must survive");
-        assert!(agent.prompt.completion_dropdown_open());
-    }
-
-    /// Any rangeless row in a MIXED set (legacy PATH row next to a ranged
-    /// file row) forces plain-open too — no insta-accept, no fill.
-    #[test]
-    fn tab_mixed_rangeless_and_ranged_rows_open_dropdown() {
-        let mut agent = bash_agent("ls | gr");
-        agent.prompt.suggestions.dropdown.items = vec![
-            item("grep", None),
-            file_item("ls | growfile", "growfile", 5..7),
-        ];
-
-        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(agent.prompt.completion_dropdown_open());
-        assert_eq!(agent.prompt.text(), "ls | gr", "no accept, no fill");
     }
 
     /// A MIXED set (any non-token item alongside file/path rows) disables

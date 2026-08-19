@@ -2,432 +2,45 @@
 //!
 //! This module contains all compaction-related methods: manual `/compact`,
 //! auto-compact threshold checks, inline auto-compact with auto-continue,
-//! error-recovery compaction, preflight overflow detection, and checkpoint
-//! persistence. These methods form a second `impl SessionActor` block that
+//! error-recovery compaction and preflight overflow detection. These methods form
+//! a second `impl SessionActor` block that
 //! lives alongside the primary one in `acp_session.rs`.
 use super::SessionActor;
-use super::is_project_instructions;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::compaction_config::{
-    AsyncCompactionCache, SUPPRESS_AUTH, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN,
-    SUPPRESS_UNTIL_SUCCESS,
+    SUPPRESS_AUTH, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS,
 };
 use crate::session::helpers::CompactionStateContext;
 use crate::session::helpers::compaction_context::CompactionInputs;
 use crate::session::helpers::compaction_context::to_system_reminder;
 use crate::session::helpers::session_compact::{
-    CompactOutput, CompactionOutcome, build_compaction_chat_history,
-    build_two_pass_compaction_prompt, generate_session_compact, is_context_length_error,
-};
-use crate::session::persistence::PersistenceMsg;
-use crate::session::two_pass::{
-    TWO_PASS_DEFAULT_SPLIT_FRACTION, build_two_pass_pass1_history, build_two_pass_pass2_history,
-    note_for_two_pass_pass2, split_conversation_for_two_pass,
+    CompactionOutcome, build_compaction_request_surface, is_context_length_error,
 };
 use agent_client_protocol as acp;
 use chat_state::compaction_utils::{
-    CompactedHistoryInput, CompactionAttempt, build_compacted_history, is_degenerate_summary,
-    prepare_conversation_for_verbatim_summarization, sanitize_compacted_history,
-    validate_compacted_history,
+    is_degenerate_summary, plan_compaction_range, prepare_conversation_for_verbatim_summarization,
 };
 use sampling_types::{ApiBackend, ConversationItem};
 use std::sync::Arc;
-/// Default percentage points below the auto-compact threshold at which prefire
-/// (background pass-1) starts, giving pass-1 runway to finish before the limit.
-/// Override with `GROW_PREFIRE_LEAD_PERCENT`.
-const DEFAULT_PREFIRE_LEAD_PERCENT: u64 = 10;
-fn prefire_lead_percent() -> u64 {
-    std::env::var("GROW_PREFIRE_LEAD_PERCENT")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_PREFIRE_LEAD_PERCENT)
-}
-/// Cheap fingerprint of a conversation prefix for prefire NOTE₁ validity. A
-/// mismatch means the prefix changed (edit / rewind / branch) since pass-1, so
-/// the cached NOTE₁ no longer summarizes the current prefix and must be dropped.
-fn fingerprint_prefix(items: &[ConversationItem]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    items.len().hash(&mut h);
-    for it in items {
-        let tag: u8 = match it {
-            ConversationItem::System(_) => 0,
-            ConversationItem::User(_) => 1,
-            ConversationItem::Assistant(_) => 2,
-            ConversationItem::ToolResult(_) => 3,
-            ConversationItem::BackendToolCall(_) => 4,
-            ConversationItem::Reasoning(_) => 5,
-        };
-        tag.hash(&mut h);
-        it.text_content().hash(&mut h);
-    }
-    h.finish()
-}
-/// Outcome of a background prefire pass-1 run, recorded on the
-/// `session.prefire_pass1` span as `compaction_prefire_outcome`.
-/// [`PrefireOutcome::as_str`] values are stable diagnostics keys
-/// (diagnostics/dashboards key off them) — don't rename the strings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PrefireOutcome {
-    Cached,
-    Disabled,
-    DebugFailPass1,
-    TooSmall,
-    EmptySplit,
-    SampleFailed,
-    EmptyNote1,
-}
-impl PrefireOutcome {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cached => "cached",
-            Self::Disabled => "disabled",
-            Self::DebugFailPass1 => "debug_fail_pass1",
-            Self::TooSmall => "too_small",
-            Self::EmptySplit => "empty_split",
-            Self::SampleFailed => "sample_failed",
-            Self::EmptyNote1 => "empty_note1",
-        }
-    }
-}
-/// Diagnostic from one prefire pass-1 run; recorded onto the
-/// `session.prefire_pass1` span by [`SessionActor::run_prefire_pass1`].
-/// `None` fields = the run exited before that stage.
-struct PrefirePass1Run {
-    outcome: PrefireOutcome,
-    prefix_len: Option<usize>,
-    prefix_est_tokens: Option<u64>,
-    pass1_latency_ms: Option<u64>,
-    note1_chars: Option<usize>,
-}
-impl From<PrefireOutcome> for PrefirePass1Run {
-    /// A run that exited before splitting/sampling — outcome only.
-    fn from(outcome: PrefireOutcome) -> Self {
-        Self {
-            outcome,
-            prefix_len: None,
-            prefix_est_tokens: None,
-            pass1_latency_ms: None,
-            note1_chars: None,
-        }
-    }
-}
-#[cfg(test)]
-mod two_pass_prefire_helper_tests {
-    use super::{fingerprint_prefix, prefire_lead_percent};
-    use sampling_types::ConversationItem;
-    #[test]
-    fn fingerprint_stable_for_same_prefix() {
-        let items = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("hello"),
-            ConversationItem::assistant("hi"),
-        ];
-        assert_eq!(fingerprint_prefix(&items), fingerprint_prefix(&items));
-    }
-    #[test]
-    fn fingerprint_changes_when_prefix_content_changes() {
-        let base = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("hello"),
-        ];
-        let edited = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("HELLO there"), // a real edit/rewind of the prefix
-        ];
-        assert_ne!(
-            fingerprint_prefix(&base),
-            fingerprint_prefix(&edited),
-            "a changed prefix must invalidate the cached NOTE1 fingerprint"
-        );
-    }
-    #[test]
-    fn fingerprint_changes_with_length() {
-        let short = vec![ConversationItem::user("a")];
-        let long = vec![
-            ConversationItem::user("a"),
-            ConversationItem::assistant("b"),
-        ];
-        assert_ne!(fingerprint_prefix(&short), fingerprint_prefix(&long));
-    }
-    #[test]
-    fn prefire_lead_percent_defaults_to_10() {
-        unsafe { std::env::remove_var("GROW_PREFIRE_LEAD_PERCENT") };
-        assert_eq!(prefire_lead_percent(), 10);
-    }
-}
-impl SessionActor {
-    /// Two-pass active for this session: flag resolved on at build AND not an
-    /// agent that keeps its single short self-summary.
-    pub(crate) fn two_pass_active(&self) -> bool {
-        let agent = self.agent.borrow();
-        agent.compaction_policy().two_pass_enabled
-    }
-    /// Run one summarization sample over a fully-built two-pass history (the
-    /// prompt is already embedded, so this bypasses the single-pass sampler and
-    /// calls `generate_session_compact` directly). Returns `None` on any error
-    /// so callers fall back to single-pass.
-    ///
-    /// Agent `RefCell` borrows are only taken for synchronous snapshots (never
-    /// held across `.await`). Prefire is `spawn_local` on the same LocalSet as
-    /// the turn loop; a long-lived borrow would race with turn/compact/cancel
-    /// and panic on double-borrow.
-    async fn two_pass_sample(&self, history: Vec<ConversationItem>) -> Option<CompactOutput> {
-        let sampling_config = self.reconstruct_full_config().await;
-        let client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "two_pass: failed to prepare sampling client");
-                return None;
-            }
-        };
-        let tool_defs = self.prepare_tool_definitions().await;
-        let tools = self.turn_base_tool_specs(&tool_defs);
-        let wall_clock_budget_secs = self
-            .agent
-            .borrow()
-            .compaction_policy()
-            .wall_clock_budget_secs;
-        let (cancel, _cancel_scope) = self.compaction.cancel.enter();
-        match generate_session_compact(
-            history,
-            tools,
-            client,
-            self.session_info.id.clone(),
-            &sampling_config,
-            self.inference_idle_timeout.get(),
-            wall_clock_budget_secs,
-            self.compaction.tool_choice,
-            &cancel,
-        )
-        .await
-        {
-            Ok(out) => Some(out),
-            Err(e) => {
-                tracing::warn!(error = ?e, "two_pass: summarization sample failed");
-                None
-            }
-        }
-    }
-    /// Per-turn prefire decision: usage has reached `threshold - lead` (so there
-    /// is still runway before the hard auto-compact line at `threshold`).
-    pub(crate) async fn should_prefire_two_pass(&self) -> bool {
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let Some(cw) = sampling_cfg.as_ref().map(|c| c.context_window.get()) else {
-            return false;
-        };
-        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
-        let threshold = self.compaction.threshold_percent.get() as u64;
-        let start_pct = threshold.saturating_sub(prefire_lead_percent());
-        token_estimation::exceeds_threshold(estimated_total, cw, start_pct as u8)
-    }
-    /// Background pass-1: summarize the ~95% prefix → NOTE₁ and cache it for a
-    /// later pass-2 apply. Always releases the in-flight guard. Spawned via
-    /// `spawn_local` from the turn loop; reads a conversation snapshot and does
-    /// not mutate session state. The span makes speculative pass-1 spend
-    /// measurable (hit rate, wasted input tokens) ahead of the fleet-wide ramp.
-    #[tracing::instrument(
-        name = "session.prefire_pass1",
-        skip_all,
-        fields(
-            session_id = %self.session_info.id.0,
-            compaction_prefire_outcome = tracing::field::Empty,
-            compaction_pass1_latency_ms = tracing::field::Empty,
-            compaction_prefire_prefix_len = tracing::field::Empty,
-            compaction_prefire_prefix_est_tokens = tracing::field::Empty,
-            compaction_prefire_note1_chars = tracing::field::Empty,
-        )
-    )]
-    pub(crate) async fn run_prefire_pass1(self: &Arc<Self>) {
-        struct InFlightGuard<'a>(&'a crate::session::compaction_config::PrefireState);
-        impl Drop for InFlightGuard<'_> {
-            fn drop(&mut self) {
-                self.0.finish();
-            }
-        }
-        let _guard = InFlightGuard(&self.compaction.prefire);
-        let run = self.run_prefire_pass1_inner().await;
-        let span = tracing::Span::current();
-        span.record("compaction_prefire_outcome", run.outcome.as_str());
-        if let Some(v) = run.prefix_len {
-            span.record("compaction_prefire_prefix_len", v as i64);
-        }
-        if let Some(v) = run.prefix_est_tokens {
-            span.record("compaction_prefire_prefix_est_tokens", v as i64);
-        }
-        if let Some(v) = run.pass1_latency_ms {
-            span.record("compaction_pass1_latency_ms", v as i64);
-        }
-        if let Some(v) = run.note1_chars {
-            span.record("compaction_prefire_note1_chars", v as i64);
-        }
-    }
-    async fn run_prefire_pass1_inner(self: &Arc<Self>) -> PrefirePass1Run {
-        if !self.two_pass_active() {
-            return PrefireOutcome::Disabled.into();
-        }
-        if std::env::var("GROW_DEBUG_TWO_PASS_FAIL_PASS1")
-            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-        {
-            tracing::info!(
-                target: "two_pass",
-                "two_pass: DEBUG GROW_DEBUG_TWO_PASS_FAIL_PASS1 — prefire pass1 produces no cache"
-            );
-            return PrefireOutcome::DebugFailPass1.into();
-        }
-        let conversation = self.chat_state_handle.get_conversation().await;
-        if conversation.len() < 4 {
-            return PrefireOutcome::TooSmall.into();
-        }
-        let split = split_conversation_for_two_pass(&conversation, TWO_PASS_DEFAULT_SPLIT_FRACTION);
-        if split.prefix.is_empty() || split.tail.is_empty() {
-            return PrefireOutcome::EmptySplit.into();
-        }
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let strips = sampling_cfg
-            .as_ref()
-            .map(|c| c.api_backend == ApiBackend::Messages)
-            .unwrap_or(false);
-        let model_slug = sampling_cfg
-            .as_ref()
-            .map(|c| c.model.to_string())
-            .unwrap_or_default();
-        let prefix_prepared =
-            prepare_conversation_for_verbatim_summarization(split.prefix.to_vec(), strips);
-        let prefix_est_tokens = prefix_prepared
-            .iter()
-            .map(chat_state::estimate_item_tokens)
-            .sum::<u64>();
-        let prompt = build_two_pass_compaction_prompt(None);
-        let pass1_history = build_two_pass_pass1_history(&prefix_prepared, &prompt);
-        let started = std::time::Instant::now();
-        let out = self.two_pass_sample(pass1_history).await;
-        let pass1_latency_ms = started.elapsed().as_millis() as u64;
-        let attempted = |outcome: PrefireOutcome, note1_chars: Option<usize>| PrefirePass1Run {
-            outcome,
-            prefix_len: Some(split.split_idx),
-            prefix_est_tokens: Some(prefix_est_tokens),
-            pass1_latency_ms: Some(pass1_latency_ms),
-            note1_chars,
-        };
-        let Some(out) = out else {
-            return attempted(PrefireOutcome::SampleFailed, None);
-        };
-        let note1 = note_for_two_pass_pass2(&out.content);
-        if note1.trim().is_empty() {
-            return attempted(PrefireOutcome::EmptyNote1, None);
-        }
-        let note1_chars = note1.chars().count();
-        let cache = AsyncCompactionCache {
-            note1,
-            prefix_len: split.split_idx,
-            fingerprint: fingerprint_prefix(&conversation[..split.split_idx]),
-            model_slug,
-            pass1_latency_ms,
-        };
-        tracing::info!(
-            target: "two_pass",
-            prefix_len = cache.prefix_len,
-            pass1_latency_ms = cache.pass1_latency_ms,
-            "two_pass: prefire pass1 cached NOTE1"
-        );
-        self.compaction.prefire.store(cache);
-        attempted(PrefireOutcome::Cached, Some(note1_chars))
-    }
-    /// Pass-2 apply: if a valid cached NOTE₁ exists for the current conversation,
-    /// summarize (NOTE₁ + recent tail + special prompt) → final summary and
-    /// return its `CompactOutput`. `None` → caller runs the single-pass path.
-    ///
-    /// **diagnostics / `session.compact_inner` latency:** the returned `CompactOutput`
-    /// stream timings are what land on `compaction_ttft_ms` /
-    /// `compaction_stream_ms`. Those reflect **user-visible sync wait only**:
-    /// - background pass-1 that already finished before compact is *not*
-    ///   included (prefire hid that cost);
-    /// - if pass-1 is still in flight we **do** add that await into
-    ///   `ttft_ms` (time until first token of the final summary), because the
-    ///   user is blocked on it;
-    /// - `stream_ms` / `delta_count` / `itl_max_ms` are always pass-2 only
-    ///   (the only sample that streams the successor-visible summary).
-    async fn try_two_pass_pass2_apply(
-        &self,
-        user_context: Option<&str>,
-        strips_reasoning: bool,
-    ) -> Option<CompactOutput> {
-        if !self.two_pass_active() {
-            return None;
-        }
-        let mut prefire_waited_ms = 0u64;
-        if let Some(handle) = self.compaction.prefire.take_handle() {
-            let was_in_flight = self.compaction.prefire.is_in_flight();
-            let waited = std::time::Instant::now();
-            let _ = handle.await;
-            if was_in_flight {
-                prefire_waited_ms = waited.elapsed().as_millis() as u64;
-                tracing::Span::current()
-                    .record("compaction_prefire_waited_ms", prefire_waited_ms as i64);
-                tracing::info!(
-                    target: "two_pass",
-                    wait_ms = prefire_waited_ms,
-                    "two_pass: waited for in-flight prefire pass1 before pass2"
-                );
-            }
-        }
-        let cache = self.compaction.prefire.take()?;
-        let live = self.chat_state_handle.get_conversation().await;
-        let model_slug = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model.to_string())
-            .unwrap_or_default();
-        if cache.prefix_len == 0
-            || cache.prefix_len > live.len()
-            || cache.model_slug != model_slug
-            || fingerprint_prefix(&live[..cache.prefix_len]) != cache.fingerprint
-        {
-            tracing::Span::current().record("compaction_prefire_stale", true);
-            tracing::info!(
-                target: "two_pass",
-                "two_pass: cached NOTE1 stale or model changed; falling back to single-pass"
-            );
-            return None;
-        }
-        let prefix = &live[..cache.prefix_len];
-        let tail = &live[cache.prefix_len..];
-        let prepared_tail =
-            prepare_conversation_for_verbatim_summarization(tail.to_vec(), strips_reasoning);
-        let prompt = build_two_pass_compaction_prompt(user_context);
-        let pass2_history =
-            build_two_pass_pass2_history(prefix, &prepared_tail, &cache.note1, &prompt);
-        let started = std::time::Instant::now();
-        let mut out = self.two_pass_sample(pass2_history).await?;
-        if is_degenerate_summary(&out.content) {
-            tracing::Span::current().record("compaction_prefire_stale", true);
-            tracing::info!(
-                target: "two_pass",
-                "two_pass: pass2 summary empty/degenerate; falling back to single-pass"
-            );
-            return None;
-        }
-        let pass2_latency_ms = started.elapsed().as_millis() as u64;
-        if prefire_waited_ms > 0 {
-            out.ttft_ms = Some(out.ttft_ms.unwrap_or(0).saturating_add(prefire_waited_ms));
-        }
-        let span = tracing::Span::current();
-        span.record("compaction_two_pass_used", true);
-        span.record("compaction_prefire_hit", true);
-        span.record("compaction_pass2_latency_ms", pass2_latency_ms as i64);
-        tracing::info!(
-            target: "two_pass",
-            prefix_len = cache.prefix_len,
-            tail_len = tail.len(),
-            prefire_waited_ms,
-            pass2_latency_ms,
-            pass1_bg_latency_ms = cache.pass1_latency_ms,
-            "two_pass: pass2 applied cached NOTE1 (prefire hit)"
-        );
-        Some(out)
-    }
+
+const COMPACTION_RETAIN_PERCENT: u64 = 16;
+const MIN_COMPACTION_SOURCE_TOKENS: u64 = 5_000;
+
+fn context_reprojection_hint(
+    tool_name: &str,
+    reference: &chat_state::TimelineRangeRef,
+) -> String {
+    let reference = serde_json::to_string_pretty(reference)
+        .expect("TimelineRangeRef contains only infallible JSON values");
+    format!(
+        "<context-reprojection>\n\
+         Earlier context was unloaded by compaction, not deleted. If a missing detail is relevant, \
+         recover only the needed page with `{tool_name}` and this immutable reference:\n\
+         ```json\n{reference}\n```\n\
+         Start with the default small page; follow the returned offset only when more context is needed. \
+         Reprojection is read-only and does not expand the current conversation.\n\
+         </context-reprojection>"
+    )
 }
 /// Trigger info for auto-compact decisions.
 pub(crate) struct AutoCompactTriggerInfo {
@@ -507,57 +120,17 @@ impl SuppressReason {
         }
     }
 }
-/// Splice the preserved prefix (`conversation[0..prefix_len]`) onto the compacted
-/// suffix, dropping the suffix's leading System and — if the prefix already has an
-/// AGENTS.md item — its re-injected AGENTS.md too (else the model sees it twice).
-/// Returns `Err(compacted_history)` unchanged when `prefix_len` is 0 or out of range.
-fn preserve_inherited_prefix(
-    conversation: &[ConversationItem],
-    compacted_history: Vec<ConversationItem>,
-    prefix_len: usize,
-) -> Result<Vec<ConversationItem>, Vec<ConversationItem>> {
-    if prefix_len == 0 || prefix_len > conversation.len() {
-        return Err(compacted_history);
-    }
-    let inherited = &conversation[..prefix_len];
-    let drop_reinjected_agents_md = inherited.iter().any(is_project_instructions);
-    let mut preserved = inherited.to_vec();
-    let child_items = compacted_history
-        .into_iter()
-        .skip_while(|i| matches!(i, ConversationItem::System(_)))
-        .filter(|i| !(drop_reinjected_agents_md && is_project_instructions(i)));
-    preserved.extend(child_items);
-    Ok(preserved)
-}
-/// Project the token count a re-pinned (preserved) history would reseed to, so the
-/// release decision compares against the same threshold the auto-compact trigger
-/// applies next turn. This only APPROXIMATES the compaction reseed
-/// (`chat-state` `replace_conversation`, the authority): it matches the reseed's
-/// round-and-cap but divides by the current conversation estimate, not the reseed's
-/// frozen `estimate_at_last_response`. The conversation only grows, so the current
-/// estimate is >= that frozen value; this therefore under-estimates the reseed (a
-/// lower bound) and can lean toward preserve. That never re-loops: the post-replace
-/// `exceeds_threshold` check on the real reseeded total still sets sticky Size
-/// suppression if a preserve leaves the fork over budget.
-fn project_preserved_reseed_tokens(
-    preserved_estimate: u64,
-    tokens_before: u64,
-    full_conv_estimate: u64,
-) -> u64 {
-    let ratio = tokens_before as f64 / full_conv_estimate.max(1) as f64;
-    ((preserved_estimate as f64 * ratio).round() as u64).min(tokens_before)
-}
 impl SessionActor {
-    /// Path to the raw `updates.jsonl` transcript if it exists, else `None`.
-    /// `pub(crate)` so the `Transcript`-mode dispatch in `compaction_segments`
-    /// and transcript-location pointers can both reuse it.
+    /// Path to the canonical `timeline.jsonl` ledger if it exists, else `None`.
+    /// Hook envelopes use this to expose the durable audit source.
     ///
     /// The `path.exists()` guard keeps the pointer safe when a session (e.g. a
     /// nested sub-agent) never wrote one -- the hint is simply omitted rather
     /// than dangling.
     pub(crate) fn get_transcript_path(&self) -> Option<String> {
-        let path =
-            crate::session::persistence::session_dir(&self.session_info).join("updates.jsonl");
+        let path = self
+            .session_dir
+            .join(crate::session::storage::TIMELINE_FILE);
         if path.exists() {
             Some(path.to_string_lossy().into_owned())
         } else {
@@ -594,7 +167,10 @@ impl SessionActor {
             last_flush,
             compaction_count,
         ) {
-            let snapshot = self.snapshot_memory_flush_state().await;
+            let Some(snapshot) = self.snapshot_memory_flush_state().await else {
+                tracing::warn!("pre-compaction memory flush could not freeze Timeline input");
+                return;
+            };
             tokio::task::spawn_local({
                 let session = self.clone();
                 async move {
@@ -606,16 +182,6 @@ impl SessionActor {
                     }
                 }
             });
-        }
-    }
-    /// Tag the current `session.compact` span with `mode` (and `detail`, for
-    /// `segments`) — the A/B variant key for grouping outcomes in diagnostics.
-    fn record_compaction_variant(&self) {
-        let mode = self.compaction.compaction_mode;
-        let span = tracing::Span::current();
-        span.record("mode", tracing::field::display(mode));
-        if let Some(detail) = mode.segment_detail() {
-            span.record("detail", tracing::field::display(detail));
         }
     }
     /// Runs the compact operation over here which compresses the current conversation
@@ -646,7 +212,6 @@ impl SessionActor {
             return Err(acp::Error::internal_error().data("compaction already in progress"));
         };
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
-        self.record_compaction_variant();
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("pre_tokens", total_tokens as i64);
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
@@ -657,7 +222,10 @@ impl SessionActor {
         self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
             .await;
         if let Err(e) = self
-            .run_compact_inner(user_context, ::diagnostics::events::CompactionTrigger::Manual)
+            .run_compact_inner(
+                user_context,
+                ::diagnostics::events::CompactionTrigger::Manual,
+            )
             .await
         {
             let span = tracing::Span::current();
@@ -671,7 +239,7 @@ impl SessionActor {
         span.record("post_tokens", tokens_after as i64);
         span.record("success", true);
         self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
-            tokens_before: Some(total_tokens),
+            tokens_before: total_tokens,
             tokens_after,
             elapsed_ms: None,
             summary_preview: None,
@@ -853,69 +421,6 @@ impl SessionActor {
             SUPPRESS_UNTIL_SUCCESS | SUPPRESS_AUTH
         )
     }
-    /// Choose the post-compaction history for a forked session: re-pin the inherited
-    /// prefix, or release it (fall back to the self-contained summary the summarizer
-    /// already built from the whole conversation) when re-pinning would leave the fork
-    /// at/over the auto-compact threshold. On release, sets the sticky flag and records
-    /// the release span field (this runs within the `run_compact_inner` span).
-    ///
-    /// This runtime release compensates for a verbatim mirror-fork that pinned its whole
-    /// parent transcript; bounding the inherited prefix at fork admission is the
-    /// structural alternative that would remove this path.
-    async fn resolve_forked_compacted_history(
-        &self,
-        compacted_history: Vec<ConversationItem>,
-        prefix_len: usize,
-        tokens_before: u64,
-        context_window: u64,
-    ) -> Vec<ConversationItem> {
-        let full_conv = self.chat_state_handle.get_conversation().await;
-        let compacted_len = compacted_history.len();
-        let release_candidate = compacted_history.clone();
-        match preserve_inherited_prefix(&full_conv, compacted_history, prefix_len) {
-            Ok(preserved) => {
-                let projected_preserved = project_preserved_reseed_tokens(
-                    chat_state::estimate_conversation_tokens(&preserved),
-                    tokens_before,
-                    chat_state::estimate_conversation_tokens(&full_conv),
-                );
-                if token_estimation::exceeds_threshold(
-                    projected_preserved,
-                    context_window,
-                    self.compaction.threshold_percent.get(),
-                ) {
-                    self.compaction
-                        .prefix_released
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    tracing::Span::current().record("compaction_prefix_released", true);
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        prefix_len,
-                        projected_preserved,
-                        "compaction: releasing inherited prefix under pressure"
-                    );
-                    release_candidate
-                } else {
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        prefix_len,
-                        compacted_len,
-                        "Preserving inherited prefix across compaction"
-                    );
-                    preserved
-                }
-            }
-            Err(original) => {
-                tracing::warn!(
-                    session_id = %self.session_info.id.0,
-                    prefix_len,
-                    conversation_len = full_conv.len(),
-                    "Inherited prefix invalid, using compacted history as-is"
-                );
-                original
-            }
-        }
-    }
     /// Inner implementation of one causally recorded compaction transaction.
     #[tracing::instrument(
         name = "session.compact_inner",
@@ -939,12 +444,6 @@ impl SessionActor {
             compaction_stream_ms = tracing::field::Empty,
             compaction_delta_count = tracing::field::Empty,
             compaction_itl_max_ms = tracing::field::Empty,
-            compaction_two_pass_used = tracing::field::Empty,
-            compaction_prefire_hit = tracing::field::Empty,
-            compaction_pass2_latency_ms = tracing::field::Empty,
-            compaction_prefire_waited_ms = tracing::field::Empty,
-            compaction_prefire_stale = tracing::field::Empty,
-            compaction_prefix_released = tracing::field::Empty,
         )
     )]
     async fn run_compact_inner(
@@ -970,19 +469,27 @@ impl SessionActor {
                 ))
             })?;
         let started = std::time::Instant::now();
-        let result = self.run_compact_attempt(user_context, trigger).await;
-        let terminal = match &result {
-            Ok(()) => chat_state::CompactionEvent::Completed {
+        let result = self.run_compact_attempt(&id, user_context, trigger).await;
+        let replacement_committed = result
+            .as_ref()
+            .err()
+            .is_some_and(is_compact_converged_over_window);
+        let terminal = if result.is_ok() || replacement_committed {
+            chat_state::CompactionEvent::Completed {
                 id,
                 source_items,
                 result_items: self.chat_state_handle.get_conversation_len().await,
                 duration_ms: started.elapsed().as_millis() as u64,
-            },
-            Err(error) => chat_state::CompactionEvent::Failed {
+            }
+        } else {
+            let error = result
+                .as_ref()
+                .expect_err("non-committed compaction must fail");
+            chat_state::CompactionEvent::Failed {
                 id,
                 duration_ms: started.elapsed().as_millis() as u64,
                 error: crate::util::truncate(&error.to_string(), 500).to_string(),
-            },
+            }
         };
         self.chat_state_handle
             .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(terminal))
@@ -997,6 +504,7 @@ impl SessionActor {
 
     async fn run_compact_attempt(
         &self,
+        transaction_id: &str,
         user_context: Option<String>,
         trigger: ::diagnostics::events::CompactionTrigger,
     ) -> Result<(), acp::Error> {
@@ -1051,27 +559,52 @@ impl SessionActor {
         .await;
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
-        let (conv_len, system_message, full_conversation) = tokio::join!(
-            self.chat_state_handle.get_conversation_len(),
-            self.chat_state_handle.get_system_message(),
-            self.chat_state_handle.get_conversation(),
-        );
-        let segment_messages = if self.compaction.compaction_mode.writes_segments() {
-            chat_state::compaction_utils::prepare_conversation_for_segment(
-                full_conversation.clone(),
-            )
-        } else {
-            Vec::new()
+        let Some(materialized) = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await
+        else {
+            return Err(acp::Error::internal_error()
+                .data("Compaction failed: chat-state actor is unavailable"));
         };
+        let source_surface_revision = materialized.surface_revision;
+        let compaction_input_ref = materialized.input_ref;
+        let full_conversation = materialized.surface;
+        let system_message = full_conversation
+            .iter()
+            .find(|item| matches!(item, ConversationItem::System(_)))
+            .cloned();
+        let source_surface = full_conversation.clone();
+        let conv_len = source_surface.len();
+        let retain_tokens = context_window.saturating_mul(COMPACTION_RETAIN_PERCENT) / 100;
+        let range_plan = plan_compaction_range(
+            &source_surface,
+            &materialized.surface_ids,
+            retain_tokens,
+            MIN_COMPACTION_SOURCE_TOKENS,
+        )
+        .ok_or_else(|| {
+            acp::Error::internal_error().data(
+                "Compaction skipped: no closed Surface range is large enough to summarize while preserving the recent verbatim tail",
+            )
+        })?;
+        let target_source = source_surface[range_plan.start_index..=range_plan.end_index].to_vec();
         const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
         let verbatim_input_enabled = self.compaction.verbatim_input;
+        let mut summary_source = vec![system_message.clone().ok_or_else(|| {
+            acp::Error::internal_error()
+                .data("Compaction failed: no system message in conversation history")
+        })?];
+        summary_source.extend(target_source);
         let simplified_messages = if verbatim_input_enabled {
             chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
-                full_conversation,
+                summary_source.clone(),
                 summary_strips_reasoning,
             )
         } else {
-            chat_state::compaction_utils::prepare_conversation_for_summarization(full_conversation)
+            chat_state::compaction_utils::prepare_conversation_for_summarization(
+                summary_source.clone(),
+            )
         };
         if conv_len == 0 {
             tracing::error!(
@@ -1082,18 +615,6 @@ impl SessionActor {
                 acp::Error::internal_error().data("Compaction failed: conversation is empty")
             );
         }
-        let system_message = match system_message {
-            Some(msg) => msg,
-            None => {
-                tracing::error!(
-                    session_id = %self.session_info.id.0,
-                    conversation_len = conv_len,
-                    "Compaction failed: no system message in conversation history"
-                );
-                return Err(acp::Error::internal_error()
-                    .data("Compaction failed: no system message in conversation history"));
-            }
-        };
         if simplified_messages.is_empty() {
             tracing::error!(
                 session_id = %self.session_info.id.0,
@@ -1133,6 +654,32 @@ impl SessionActor {
             &sampling_config.model,
             &sampling_config.model
         );
+        let sideband_prompt =
+            build_compaction_request_surface(simplified_messages.clone(), user_context.as_deref())
+                .last()
+                .map(|item| serde_json::to_string(item).unwrap_or_else(|_| item.text_content()))
+                .unwrap_or_else(|| "summarize the referenced Timeline range".into());
+        let compaction_sideband = std::sync::Arc::new(tokio::sync::Mutex::new(
+            self.begin_sideband(
+                chat_state::SidebandPurpose::CompactionSummary,
+                sideband_prompt,
+                crate::session::sideband::SidebandInput::Frozen(vec![compaction_input_ref.clone()]),
+                chat_state::SidebandRoute {
+                    model: sampling_config.model.clone(),
+                    backend: crate::session::sideband::sideband_backend(
+                        sampling_client.api_backend(),
+                    )
+                    .into(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("compaction sideband could not start: {error}"))
+            })?,
+        ));
+        let sideband_feedback = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let mut last_error: Option<acp::Error> = None;
         let mut last_failure_outcome = CompactionOutcome::Failed;
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1155,8 +702,6 @@ impl SessionActor {
         } else {
             InputStage::Lossy
         };
-        let use_short_prompt = false;
-        let started_at = chrono::Utc::now().to_rfc3339();
         let estimated_input_tokens = chat_state::estimate_conversation_tokens(&simplified_messages);
         let auto_trigger = matches!(trigger, ::diagnostics::events::CompactionTrigger::Auto);
         let wall_clock_budget_secs = self
@@ -1164,10 +709,9 @@ impl SessionActor {
             .borrow()
             .compaction_policy()
             .wall_clock_budget_secs;
-        let sampler = crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
-            use_short_prompt,
+        let sampler = crate::session::helpers::summary_compaction::ShellCompactionSampler::new(
             user_context.clone(),
-            compaction_tools.clone(),
+            compaction_tools,
             sampling_client,
             self.session_info.id.clone(),
             sampling_config.clone(),
@@ -1175,34 +719,32 @@ impl SessionActor {
             wall_clock_budget_secs,
             self.compaction.tool_choice,
             cancel.clone(),
+            compaction_sideband.clone(),
+            sideband_feedback.clone(),
         );
-        let observer =
-            crate::session::helpers::full_replace_compaction::ShellFullReplaceObserver::new(
-                trigger,
-                context_window,
-                compaction.compaction_id.clone(),
-                self.session_info.id.0.to_string(),
-                estimated_input_tokens,
-                retry_delay_secs,
-            );
-        let fr_config = compaction::FullReplaceConfig {
+        let observer = crate::session::helpers::summary_compaction::ShellSummaryObserver::new(
+            trigger,
+            context_window,
+            compaction.compaction_id.clone(),
+            self.session_info.id.0.to_string(),
+            estimated_input_tokens,
+            retry_delay_secs,
+            sideband_feedback,
+        );
+        let summary_config = compaction::SummaryConfig {
             max_attempts: max_retries,
             retry_delay_secs,
             sampling_timeout_secs: 0,
         };
         let mut request_turns = simplified_messages.clone();
         let mut input_overflow_rejections: u32 = 0;
-        let two_pass_output = self
-            .try_two_pass_pass2_apply(user_context.as_deref(), summary_strips_reasoning)
-            .await;
-        let mut compact_summary: Option<String> =
-            two_pass_output.as_ref().map(|o| o.content.clone());
+        let mut compact_summary: Option<String> = None;
         while compact_summary.is_none() {
-            match compaction::sample_full_replace_summary(
+            match compaction::generate_summary(
                 &sampler,
                 &request_turns,
                 user_context.as_deref(),
-                &fr_config,
+                &summary_config,
                 &observer,
             )
             .await
@@ -1211,13 +753,13 @@ impl SessionActor {
                     compact_summary = Some(summary.summary);
                     break;
                 }
-                Err(compaction::FullReplaceError::NothingToCompact) => {
+                Err(compaction::SummaryError::NothingToCompact) => {
                     last_error = Some(
                         acp::Error::internal_error().data("compact failed: nothing to compact"),
                     );
                     break;
                 }
-                Err(compaction::FullReplaceError::EmptyResponse) => {
+                Err(compaction::SummaryError::EmptyResponse) => {
                     last_failure_outcome = if observer.degenerate_seen() {
                         CompactionOutcome::Degenerate
                     } else {
@@ -1230,7 +772,7 @@ impl SessionActor {
                     ));
                     break;
                 }
-                Err(compaction::FullReplaceError::Sampler {
+                Err(compaction::SummaryError::Sampler {
                     message,
                     deterministic,
                     context_overflow,
@@ -1240,6 +782,19 @@ impl SessionActor {
                             crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
                         )
                     {
+                        compaction_sideband
+                            .lock()
+                            .await
+                            .fail(
+                                chat_state::SidebandOutcome::Cancelled,
+                                "compaction was cancelled",
+                            )
+                            .await
+                            .map_err(|error| {
+                                acp::Error::internal_error().data(format!(
+                                    "compaction cancellation sideband terminal could not commit: {error}"
+                                ))
+                            })?;
                         return self.emit_compact_cancelled(auto_trigger).await;
                     }
                     if context_overflow {
@@ -1268,14 +823,13 @@ impl SessionActor {
                                 error = %message,
                                 "Compaction input overflowed deterministically; stepping down the input ladder to avoid an incompactable state"
                             );
-                            let conv = self.chat_state_handle.get_conversation().await;
                             request_turns = match stage {
                                 InputStage::VerbatimFitted => {
                                     let budget = context_window
                                         .saturating_sub(SUMMARY_BUDGET_RESERVE_TOKENS)
                                         .saturating_sub(compaction_tool_tokens);
                                     let verbatim = chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
-                                        conv,
+                                        summary_source.clone(),
                                         summary_strips_reasoning,
                                     );
                                     chat_state::compaction_utils::fit_conversation_to_budget(
@@ -1287,7 +841,7 @@ impl SessionActor {
                                         .saturating_sub(compaction_tool_tokens);
                                     chat_state::compaction_utils::fit_conversation_to_budget(
                                         chat_state::compaction_utils::prepare_conversation_for_summarization(
-                                            conv,
+                                            summary_source.clone(),
                                         ),
                                         lossy_budget,
                                     )
@@ -1332,35 +886,10 @@ impl SessionActor {
             }
         }
         let diagnostics = observer.into_diagnostics();
-        if two_pass_output.is_none() {
-            let request_chat_history = build_compaction_chat_history(
-                request_turns,
-                user_context.as_deref(),
-                use_short_prompt,
-            );
-            self.persist_compaction_request_artifact(
-                request_chat_history,
-                compaction_tools,
-                user_context.as_deref(),
-                use_short_prompt,
-                &sampling_config.model,
-                trigger,
-                compact_summary
-                    .as_deref()
-                    .or(diagnostics.last_rejected_summary.as_deref()),
-                last_error.as_ref(),
-                diagnostics.attempts,
-                diagnostics.attempt_details,
-                started_at,
-            );
-        }
         let compact_output = match compact_summary {
-            Some(_) => match two_pass_output {
-                Some(tp) => tp,
-                None => sampler
-                    .take_last_success()
-                    .expect("a successful full-replace sample stashes its CompactOutput"),
-            },
+            Some(_) => sampler
+                .take_last_success()
+                .expect("a successful range-summary sample stashes its CompactOutput"),
             None => {
                 let span = tracing::Span::current();
                 span.record("compaction_attempts", diagnostics.attempts as i64);
@@ -1381,159 +910,217 @@ impl SessionActor {
                     diagnostics.transient_rejections as i64,
                 );
                 span.record("compaction_outcome", last_failure_outcome.as_str());
-                return Err(last_error.unwrap_or_else(|| {
+                let error = last_error.unwrap_or_else(|| {
                     acp::Error::internal_error().data("compaction failed: unknown error")
-                }));
+                });
+                compaction_sideband
+                    .lock()
+                    .await
+                    .fail(
+                        chat_state::SidebandOutcome::Failed,
+                        error
+                            .data
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "compaction failed".into()),
+                    )
+                    .await
+                    .map_err(|record_error| {
+                        acp::Error::internal_error().data(format!(
+                            "compaction failed and its sideband terminal could not commit: {record_error}"
+                        ))
+                    })?;
+                return Err(error);
             }
         };
+        let sideband_result_ref = compaction_sideband
+            .lock()
+            .await
+            .complete(
+                compact_output.content.clone(),
+                None,
+                compact_output.usage.clone(),
+                compact_output
+                    .stop_reason
+                    .clone()
+                    .unwrap_or_else(|| "unknown".into()),
+            )
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "compaction sideband result could not commit: {error}"
+                ))
+            })?;
+        let summary_event = self
+            .chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                chat_state::CompactionEvent::Summary {
+                    id: transaction_id.to_owned(),
+                    input_ref: compaction_input_ref,
+                    result_ref: sideband_result_ref,
+                    target: range_plan.target.clone(),
+                    source_tokens: range_plan.source_tokens,
+                    summary_chars: compact_output.content.chars().count(),
+                },
+            ))
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "compaction summary link was not durably recorded: {error}"
+                ))
+            })?;
+        let context_reference = chat_state::TimelineRangeRef {
+            timeline_id: self.session_info.id.0.to_string(),
+            first_seq: summary_event.seq.get(),
+            last_seq: summary_event.seq.get(),
+        };
+        let context_fetch_tool_name = {
+            let agent_ref = self.agent.borrow();
+            agent_ref
+                .tool_bridge()
+                .render_prompt("${{ tools.by_kind.context_fetch }}", &serde_json::json!({}))
+                .await
+                .filter(|name| !name.is_empty() && !name.contains("by_kind"))
+        };
         let generate_session_compact = compact_output.content.clone();
-        let user_message_prefix = self.build_user_message_prefix().await;
-        let conversation = self.chat_state_handle.get_conversation().await;
-        let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) =
-            if use_short_prompt {
-                let empty_edited: std::collections::BTreeSet<String> = Default::default();
-                let ctx =
-                    CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
-                (Vec::<std::path::PathBuf>::new(), vec![], empty_edited, ctx)
-            } else {
-                let agents_md: Vec<std::path::PathBuf> = self
+        let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) = {
+            let agents_md: Vec<std::path::PathBuf> = self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .agents_md_reminded_paths()
+                .await
+                .into_iter()
+                .collect();
+            let skills = self.slash_skills_for_resolve().await;
+            let edited_paths = self.chat_state_handle.get_agent_edited_paths().await;
+            let ctx = {
+                let bridge_tasks = self
                     .agent
                     .borrow()
                     .tool_bridge()
-                    .agents_md_reminded_paths()
-                    .await
+                    .list_background_tasks()
+                    .await;
+                let pending_tasks: Vec<_> =
+                    bridge_tasks.into_iter().filter(|t| !t.completed).collect();
+                let (execute_tool_name, monitor_tool_name) = if pending_tasks.is_empty() {
+                    (None, None)
+                } else {
+                    let agent_ref = self.agent.borrow();
+                    let bridge = agent_ref.tool_bridge();
+                    let empty = serde_json::json!({});
+                    let execute = bridge
+                        .render_prompt("${{ tools.by_kind.execute }}", &empty)
+                        .await
+                        .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                    let monitor = bridge
+                        .render_prompt("${{ tools.by_kind.monitor }}", &empty)
+                        .await
+                        .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                    (execute, monitor)
+                };
+                let running_tasks: Vec<_> = pending_tasks
                     .into_iter()
-                    .collect();
-                let skills = self.slash_skills_for_resolve().await;
-                let edited_paths = self.chat_state_handle.get_agent_edited_paths().await;
-                let ctx = {
-                    let bridge_tasks = self
-                        .agent
-                        .borrow()
-                        .tool_bridge()
-                        .list_background_tasks()
-                        .await;
-                    let pending_tasks: Vec<_> =
-                        bridge_tasks.into_iter().filter(|t| !t.completed).collect();
-                    let (execute_tool_name, monitor_tool_name) = if pending_tasks.is_empty() {
-                        (None, None)
-                    } else {
-                        let agent_ref = self.agent.borrow();
-                        let bridge = agent_ref.tool_bridge();
-                        let empty = serde_json::json!({});
-                        let execute = bridge
-                            .render_prompt("${{ tools.by_kind.execute }}", &empty)
-                            .await
-                            .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                        let monitor = bridge
-                            .render_prompt("${{ tools.by_kind.monitor }}", &empty)
-                            .await
-                            .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                        (execute, monitor)
-                    };
-                    let running_tasks: Vec<_> = pending_tasks
-                        .into_iter()
-                        .map(|t| {
-                            let tool_name = match t.kind {
-                                tools::computer::types::TaskKind::Monitor => {
-                                    monitor_tool_name.clone()
-                                }
-                                tools::computer::types::TaskKind::Bash => execute_tool_name.clone(),
-                            };
-                            CompactionStateContext::task_summary(
-                                t.task_id, t.command, "running", tool_name,
-                            )
-                        })
-                        .collect();
-                    let running_subagents = if let Some(ref event_tx) =
-                        self.tool_context.subagent_event_tx
-                    {
-                        let (tx, rx) = tokio::sync::oneshot::channel();
-                        use tools::implementations::grow_build::task::types::{
-                            SubagentEvent, SubagentListActiveRequest,
+                    .map(|t| {
+                        let tool_name = match t.kind {
+                            tools::computer::types::TaskKind::Monitor => monitor_tool_name.clone(),
+                            tools::computer::types::TaskKind::Bash => execute_tool_name.clone(),
                         };
-                        let _ =
-                            event_tx.send(SubagentEvent::ListActive(SubagentListActiveRequest {
-                                parent_session_id: self.session_id_string(),
-                                respond_to: tx,
-                            }));
-                        rx.await
+                        CompactionStateContext::task_summary(
+                            t.task_id, t.command, "running", tool_name,
+                        )
+                    })
+                    .collect();
+                let running_subagents = if let Some(ref event_tx) =
+                    self.tool_context.subagent_event_tx
+                {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    use tools::implementations::grow_build::task::types::{
+                        SubagentEvent, SubagentListActiveRequest,
+                    };
+                    let _ = event_tx.send(SubagentEvent::ListActive(SubagentListActiveRequest {
+                        parent_session_id: self.session_id_string(),
+                        respond_to: tx,
+                    }));
+                    rx.await
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|s| crate::session::helpers::compaction_context::RunningSubagentSummary {
-                            subagent_id: s.subagent_id,
-                            subagent_type: s.subagent_type,
-                            description: s.description,
-                            elapsed_ms: s.elapsed_ms,
+                        .map(|s| {
+                            crate::session::helpers::compaction_context::RunningSubagentSummary {
+                                subagent_id: s.subagent_id,
+                                subagent_type: s.subagent_type,
+                                description: s.description,
+                                elapsed_ms: s.elapsed_ms,
+                            }
                         })
                         .collect()
-                    } else {
-                        vec![]
-                    };
-                    let connected_mcp_servers = {
-                        use crate::session::helpers::compaction_context::CompactionServerSummary;
-                        use tools::implementations::search_tool::{
-                            sanitize_description, truncate_description,
-                        };
-                        self.connected_server_summaries()
-                            .into_iter()
-                            .map(|s| {
-                                let desc = s
-                                    .description
-                                    .map(|d| truncate_description(&sanitize_description(&d)))
-                                    .filter(|d| !d.is_empty());
-                                CompactionServerSummary {
-                                    name: s.name,
-                                    tool_count: s.tool_count,
-                                    description: desc,
-                                }
-                            })
-                            .collect()
-                    };
-                    let todos = {
-                        use crate::session::helpers::compaction_context::{
-                            TodoSummary, TodoSummaryStatus,
-                        };
-                        use crate::tools::todo::{TodoState, TodoStatus};
-                        use tools::types::resources::State;
-                        let bridge = self.agent.borrow().tool_bridge().clone();
-                        bridge
-                            .read_resource::<State<TodoState>>()
-                            .await
-                            .map(|s| {
-                                s.0.todo_items_with_ids()
-                                    .map(|(id, item)| TodoSummary {
-                                        id: id.clone(),
-                                        content: item.content.clone(),
-                                        status: match item.status {
-                                            TodoStatus::Pending => TodoSummaryStatus::Pending,
-                                            TodoStatus::InProgress => TodoSummaryStatus::InProgress,
-                                            TodoStatus::Completed => TodoSummaryStatus::Completed,
-                                            TodoStatus::Cancelled => TodoSummaryStatus::Cancelled,
-                                        },
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    };
-                    CompactionStateContext::build(
-                        &conversation,
-                        CompactionInputs {
-                            running_tasks,
-                            running_subagents,
-                            agent_edited_paths: edited_paths.clone(),
-                            connected_mcp_servers,
-                            todos,
-                            ..Default::default()
-                        },
-                    )
-                    .await
+                } else {
+                    vec![]
                 };
-                (agents_md, skills, edited_paths, ctx)
+                let connected_mcp_servers = {
+                    use crate::session::helpers::compaction_context::CompactionServerSummary;
+                    use tools::implementations::search_tool::{
+                        sanitize_description, truncate_description,
+                    };
+                    self.connected_server_summaries()
+                        .into_iter()
+                        .map(|s| {
+                            let desc = s
+                                .description
+                                .map(|d| truncate_description(&sanitize_description(&d)))
+                                .filter(|d| !d.is_empty());
+                            CompactionServerSummary {
+                                name: s.name,
+                                tool_count: s.tool_count,
+                                description: desc,
+                            }
+                        })
+                        .collect()
+                };
+                let todos = {
+                    use crate::session::helpers::compaction_context::{
+                        TodoSummary, TodoSummaryStatus,
+                    };
+                    use crate::tools::todo::{TodoState, TodoStatus};
+                    use tools::types::resources::State;
+                    let bridge = self.agent.borrow().tool_bridge().clone();
+                    bridge
+                        .read_resource::<State<TodoState>>()
+                        .await
+                        .map(|s| {
+                            s.0.todo_items_with_ids()
+                                .map(|(id, item)| TodoSummary {
+                                    id: id.clone(),
+                                    content: item.content.clone(),
+                                    status: match item.status {
+                                        TodoStatus::Pending => TodoSummaryStatus::Pending,
+                                        TodoStatus::InProgress => TodoSummaryStatus::InProgress,
+                                        TodoStatus::Completed => TodoSummaryStatus::Completed,
+                                        TodoStatus::Cancelled => TodoSummaryStatus::Cancelled,
+                                    },
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                CompactionStateContext::build(
+                    &source_surface,
+                    CompactionInputs {
+                        running_tasks,
+                        running_subagents,
+                        agent_edited_paths: edited_paths.clone(),
+                        connected_mcp_servers,
+                        todos,
+                        ..Default::default()
+                    },
+                )
+                .await
             };
+            (agents_md, skills, edited_paths, ctx)
+        };
         use crate::session::helpers::compaction_context::SubagentToolNames;
         let subagent_tool_names: Option<SubagentToolNames> =
-            if use_short_prompt || state_context.running_subagents.is_empty() {
+            if state_context.running_subagents.is_empty() {
                 None
             } else {
                 let agent_ref = self.agent.borrow();
@@ -1562,63 +1149,53 @@ impl SessionActor {
                 }
             };
         use crate::session::helpers::compaction_context::McpToolNames;
-        let mcp_tool_names: Option<McpToolNames> =
-            if use_short_prompt || state_context.connected_mcp_servers.is_empty() {
-                None
-            } else {
-                let agent_ref = self.agent.borrow();
-                let bridge = agent_ref.tool_bridge();
-                let empty = serde_json::json!({});
-                let search_name = bridge
-                    .render_prompt("${{ tools.by_kind.search_tool }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                let call_name = bridge
-                    .render_prompt("${{ tools.by_kind.use_tool }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                match (search_name, call_name) {
-                    (Some(search), Some(call)) => Some(McpToolNames { search, call }),
-                    _ => None,
-                }
-            };
+        let mcp_tool_names: Option<McpToolNames> = if state_context.connected_mcp_servers.is_empty()
+        {
+            None
+        } else {
+            let agent_ref = self.agent.borrow();
+            let bridge = agent_ref.tool_bridge();
+            let empty = serde_json::json!({});
+            let search_name = bridge
+                .render_prompt("${{ tools.by_kind.search_tool }}", &empty)
+                .await
+                .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+            let call_name = bridge
+                .render_prompt("${{ tools.by_kind.use_tool }}", &empty)
+                .await
+                .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+            match (search_name, call_name) {
+                (Some(search), Some(call)) => Some(McpToolNames { search, call }),
+                _ => None,
+            }
+        };
         let memory_backend_impl = {
             let g = self.memory.storage.borrow();
             g.as_ref()
                 .zip(self.memory.backend_params.as_ref())
                 .map(|(storage, params)| {
-                    crate::session::memory::MemoryBackendImpl::from_session_params(
+                    memory::MemoryBackendImpl::from_session_params(
                         storage.clone(),
-                        &crate::session::memory::MemoryBackendParams {
+                        &memory::MemoryBackendParams {
                             search_source: "compaction_recovery",
                             ..params.clone()
                         },
                     )
                 })
         };
-        let memory_opt_out = false;
-        let memory_ref: Option<&dyn tools::types::memory_backend::MemoryBackend> = if memory_opt_out
-        {
-            None
-        } else {
+        let memory_ref: Option<&dyn tools::types::memory_backend::MemoryBackend> =
             memory_backend_impl
                 .as_ref()
-                .map(|b| b as &dyn tools::types::memory_backend::MemoryBackend)
-        };
-        let suppress_state_reminder = false;
-        let system_reminder = if suppress_state_reminder {
-            None
-        } else {
-            to_system_reminder(
-                &state_context,
-                &discovered_agents_md,
-                &all_skills_for_compaction,
-                memory_ref,
-                subagent_tool_names.as_ref(),
-                mcp_tool_names.as_ref(),
-            )
-            .await
-        };
+                .map(|b| b as &dyn tools::types::memory_backend::MemoryBackend);
+        let system_reminder = to_system_reminder(
+            &state_context,
+            &discovered_agents_md,
+            &all_skills_for_compaction,
+            memory_ref,
+            subagent_tool_names.as_ref(),
+            mcp_tool_names.as_ref(),
+        )
+        .await;
         let system_reminder = {
             let plan = {
                 use crate::session::behavior::{BehaviorState, PlanPhase};
@@ -1685,124 +1262,36 @@ impl SessionActor {
                 );
             }
         }
-        let agents_md_reminder = self.agent.borrow().agents_md_user_reminder();
-        let compaction_context = state_context.for_compaction();
-        let compaction_state_context: &CompactionStateContext = &compaction_context;
-        let transcript_hint = self.transcript_hint();
-        let summary_count = self
-            .compaction
-            .count
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let raw_compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: system_message.clone(),
-            user_message_prefix: user_message_prefix.clone(),
-            agents_md_reminder: agents_md_reminder.clone(),
-            state_context: compaction_state_context,
-            compaction_summary: generate_session_compact.clone(),
-            system_reminder: system_reminder.clone(),
-            summary_before_recent: use_short_prompt,
-            transcript_hint: transcript_hint.clone(),
-            summary_count,
-        });
-        let sanitize_result = sanitize_compacted_history(raw_compacted);
-        let compacted_history = if sanitize_result.stripped_tool_call_ids.is_empty() {
-            sanitize_result.items
-        } else {
-            tracing::warn!(
-                session_id = %self.session_info.id,
-                stripped_count = sanitize_result.stripped_tool_call_ids.len(),
-                stripped_ids = ?sanitize_result.stripped_tool_call_ids,
-                "compaction: stripped orphaned ToolResults from compacted history"
-            );
-            sanitize_result.items
-        };
-        let remaining_violations = validate_compacted_history(&compacted_history);
-        let compacted_history = if remaining_violations.is_empty() {
-            compacted_history
-        } else {
-            tracing::error!(
-                session_id = %self.session_info.id,
-                violation_count = remaining_violations.len(),
-                violation_ids = ?remaining_violations,
-                "compaction: sanitized history still has invalid ToolResults -- \
-                 falling back to minimal compacted history (no recent_messages)"
-            );
-            build_compacted_history(CompactedHistoryInput {
-                system_message,
-                user_message_prefix,
-                agents_md_reminder,
-                state_context: &state_context.for_compaction(),
-                compaction_summary: generate_session_compact.clone(),
-                system_reminder,
-                summary_before_recent: use_short_prompt,
-                transcript_hint,
-                summary_count,
-            })
-        };
-        let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
+        let mut replacement_content =
+            compaction::format_compact_summary_content(&generate_session_compact);
+        if let Some(tool_name) = context_fetch_tool_name {
+            replacement_content.push_str("\n\n");
+            replacement_content.push_str(&context_reprojection_hint(
+                &tool_name,
+                &context_reference,
+            ));
+        }
+        if let Some(reminder) = system_reminder {
+            replacement_content.push_str("\n\n");
+            replacement_content.push_str(&reminder);
+        }
+        let replacement = vec![ConversationItem::user_meta(replacement_content)];
         if cancel.is_cancelled() {
             return self.emit_compact_cancelled(auto_trigger).await;
         }
-        self.persist_compaction_segment(&segment_messages, &generate_session_compact);
         self.chat_state_handle
-            .record_compaction_at(prompt_index_at_compaction);
-        let prefix_len = if self
-            .compaction
-            .prefix_released
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0
-        } else {
-            self.startup_hints.inherited_prefix_len.unwrap_or(0)
-        };
-        let compacted_history = if prefix_len == 0 {
-            compacted_history
-        } else {
-            self.resolve_forked_compacted_history(
-                compacted_history,
-                prefix_len,
-                tokens_before,
-                context_window,
-            )
+            .replace_compaction_range(range_plan.target, replacement, source_surface_revision)
             .await
-        };
-        let new_len = compacted_history.len();
-        self.chat_state_handle
-            .replace_conversation_for_compaction(compacted_history);
-        // `get_total_tokens()` (not `get_estimated_total_tokens()`) is the
-        // right measure here: `replace_conversation_for_compaction` re-bases
-        // `total_tokens` to the compacted history and zeroes
-        // `estimated_tokens_since_model`, so both queries agree at this exact
-        // point, and `total_tokens` is the value the fork-scenario threshold
-        // check below already compares against.
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "compaction replacement was not durably recorded: {error}"
+                ))
+            })?;
+        let new_len = self.chat_state_handle.get_conversation_len().await;
         let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
-        // Fork scenario threshold check (unchanged): sticky-suppress AUTO when
-        // a released inherited prefix still lands over the trigger threshold.
-        if self.startup_hints.inherited_prefix_len.is_some() {
-            if token_estimation::exceeds_threshold(
-                post_replace_tokens,
-                context_window,
-                self.compaction.threshold_percent.get(),
-            ) {
-                self.compaction
-                    .auto_compact_suppressed
-                    .store(SUPPRESS_STICKY, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!(
-                    session_id = %self.session_info.id.0,
-                    post_replace_tokens,
-                    context_window,
-                    "compaction: released history still over threshold; suppressing AUTO to avoid a re-loop"
-                );
-            } else {
-                self.compaction
-                    .auto_compact_suppressed
-                    .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
-            }
-        } else {
-            self.compaction
-                .auto_compact_suppressed
-                .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.compaction
+            .auto_compact_suppressed
+            .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
         // Unified convergence check (all paths): if the compacted history
         // still exceeds the context window itself, the next sample would
         // overflow again. Fail-safe: sticky-suppress AUTO and report
@@ -1831,12 +1320,6 @@ impl SessionActor {
         if self.memory.is_enabled() {
             tracing::info!(target: ::diagnostics::memory_log::TARGET, "MEMORY_COMPACT: post-compaction reset, next turn re-checks injection (search only if no block persisted)");
         }
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::PlanState(
-                crate::tools::todo::TodoState::default(),
-            ));
         self.agent
             .borrow()
             .tool_bridge()
@@ -1849,7 +1332,7 @@ impl SessionActor {
             .await;
         self.persist_announcement_state().await;
         self.behavior.lock().reset_after_compaction();
-        self.persist_behavior_state();
+        self.record_control_snapshot();
         self.dispatch_hook(
             ::hooks::event::HookEventName::PostCompact,
             ::hooks::event::HookPayload::PostCompact {
@@ -2185,51 +1668,12 @@ impl SessionActor {
         // `exceeds_threshold`, so `cw * pct / 100` is the matching absolute).
         let target = context_window.saturating_mul(threshold_percent as u64) / 100;
         let conversation = self.chat_state_handle.get_conversation().await;
-        // Fork prefix protection: while the inherited parent transcript is
-        // still pinned (`prefix_released == false`), compaction preserves
-        // `conversation[..inherited_prefix_len]` verbatim
-        // (`preserve_inherited_prefix`), so pre-prune must never touch items
-        // inside that region. Plan over the suffix only, then re-base the
-        // plan's item indexes onto the full conversation before applying.
-        // `target`/`item_budget` keep their full-conversation derivation: the
-        // planner counts tokens over the slice it receives, so its stop
-        // condition compares the slice's own total against that absolute
-        // target — the strict post-prune gate below still re-checks the full
-        // estimate before the summary is skipped, so this can only lean
-        // conservative.
-        let excluded = if self
-            .compaction
-            .prefix_released
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0
-        } else {
-            self.startup_hints.inherited_prefix_len.unwrap_or(0)
-        };
-        // Clamp so an out-of-range hint degrades to an empty slice (and thus
-        // an empty plan → `false`) instead of panicking.
-        let excluded = excluded.min(conversation.len());
-        let slice: &[ConversationItem] = if excluded == 0 {
-            &conversation[..]
-        } else {
-            &conversation[excluded..]
-        };
         let plan = compaction::plan_tool_result_pruning(
-            slice,
+            &conversation,
             &chat_state::actor::state::EstimatedItemTokenCounter,
             item_budget.min(u32::MAX as u64) as u32,
             target.min(u32::MAX as u64) as u32,
         );
-        let plan = compaction::PrunePlan {
-            items: plan
-                .items
-                .into_iter()
-                .map(|item| compaction::PruneItem {
-                    index: item.index + excluded,
-                    ..item
-                })
-                .collect(),
-        };
         if plan.is_empty() {
             return Ok(false);
         }
@@ -2299,7 +1743,7 @@ impl SessionActor {
         // instead of a summary snippet.
         self.send_grow_notification(
             crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
-                tokens_before: Some(trigger_info.tokens_used),
+                tokens_before: trigger_info.tokens_used,
                 tokens_after,
                 elapsed_ms: Some(elapsed_ms),
                 summary_preview: Some(format!(
@@ -2356,7 +1800,6 @@ impl SessionActor {
             return Ok(());
         };
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
-        self.record_compaction_variant();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("pre_tokens", tokens_before as i64);
         ::diagnostics::session_ctx::log_event(::diagnostics::events::AutoCompactFired {
@@ -2410,7 +1853,7 @@ impl SessionActor {
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);
                 self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
-                    tokens_before: Some(trigger_info.tokens_used),
+                    tokens_before: trigger_info.tokens_used,
                     tokens_after,
                     elapsed_ms: Some(elapsed_ms),
                     summary_preview: None,
@@ -2442,78 +1885,25 @@ impl SessionActor {
             }
         }
     }
-    /// Persist a compaction request artifact for offline prompt iteration.
-    ///
-    /// Writes `{session_dir}/compaction_requests/{request_id}.json` containing
-    /// the exact ConversationItem list sent to the compaction model plus the
-    /// summary (or final error) it produced. The artifact remains local under
-    /// the session directory.
-    ///
-    /// `created_at` is taken from the caller-supplied `started_at` (captured
-    /// before the retry loop) rather than `Utc::now()` here, so transient
-    /// retries don't skew the timestamp away from when the call actually
-    /// started.
-    ///
-    /// Best-effort: send-failures are logged at `warn` and never surfaced to
-    /// the user, because the artifact is purely for offline analysis.
-    #[allow(clippy::too_many_arguments)]
-    fn persist_compaction_request_artifact(
-        &self,
-        chat_history: Vec<ConversationItem>,
-        tools: Vec<sampling_types::ToolSpec>,
-        user_context: Option<&str>,
-        use_short_prompt: bool,
-        model: &str,
-        trigger: ::diagnostics::events::CompactionTrigger,
-        summary: Option<&str>,
-        error: Option<&acp::Error>,
-        attempts: u32,
-        attempt_details: Vec<CompactionAttempt>,
-        started_at: String,
-    ) {
-        use crate::extensions::notification::CompactionRequestFile;
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let trigger_str = match trigger {
-            ::diagnostics::events::CompactionTrigger::Manual => "manual",
-            ::diagnostics::events::CompactionTrigger::Auto => "auto",
+}
+
+#[cfg(test)]
+mod context_reprojection_tests {
+    use super::*;
+
+    #[test]
+    fn hint_explains_unloading_and_carries_the_exact_summary_reference() {
+        let reference = chat_state::TimelineRangeRef {
+            timeline_id: "session-1".into(),
+            first_seq: 41,
+            last_seq: 41,
         };
-        let prompt_variant = if use_short_prompt {
-            "short"
-        } else {
-            "detailed"
-        };
-        let error_str = error.map(|e| {
-            e.data
-                .as_ref()
-                .and_then(|d| d.as_str())
-                .unwrap_or("<no error data>")
-                .to_owned()
-        });
-        let artifact = CompactionRequestFile {
-            schema_version: 2,
-            request_id,
-            created_at: started_at,
-            trigger: trigger_str.to_owned(),
-            prompt_variant: prompt_variant.to_owned(),
-            model: model.to_owned(),
-            user_context: user_context.map(str::to_owned),
-            chat_history,
-            tools,
-            summary: summary.map(str::to_owned),
-            error: error_str,
-            attempts,
-            attempt_details,
-        };
-        if self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::CompactionRequest(artifact))
-            .is_err()
-        {
-            tracing::warn!(
-                session_id = %self.session_info.id.0,
-                "Failed to send compaction request artifact to persistence channel"
-            );
-        }
+        let hint = context_reprojection_hint("renamed_context_fetch", &reference);
+
+        assert!(hint.contains("unloaded by compaction, not deleted"));
+        assert!(hint.contains("`renamed_context_fetch`"));
+        assert!(hint.contains("\"first_seq\": 41"));
+        assert!(hint.contains("\"last_seq\": 41"));
+        assert!(hint.contains("read-only"));
     }
 }

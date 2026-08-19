@@ -1,7 +1,5 @@
 //! HTTP client for deployment-key backend resources.
 
-use crate::bundle::SubagentBundle;
-
 async fn parse_json_response<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
 ) -> Result<T, BackendError> {
@@ -29,39 +27,11 @@ fn apply_deployment_key(
         )
 }
 
-/// Fetch the legacy JSON bundle using only an explicit deployment key.
-pub async fn fetch_subagent_bundle(
-    cli_chat_proxy_base_url: &str,
-    deployment_key: Option<&str>,
-) -> Result<SubagentBundle, BackendError> {
-    let url = format!("{cli_chat_proxy_base_url}/subagents/bundle");
-    let response = apply_deployment_key(
-        crate::http::shared_client()
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10)),
-        deployment_key,
-    )
-    .send()
-    .await?;
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
-        return Err(BackendError::RequestFailed { status, body });
-    }
-    parse_json_response(response).await
-}
-
-#[derive(Debug)]
-pub enum FetchedBundle {
-    Archive(Vec<u8>),
-    Legacy(SubagentBundle),
-}
-
-/// Fetch a bundle archive, falling back to the legacy JSON endpoint.
+/// Fetch the canonical bundle archive.
 pub async fn fetch_bundle(
     cli_chat_proxy_base_url: &str,
     deployment_key: Option<&str>,
-) -> Result<FetchedBundle, BackendError> {
+) -> Result<Vec<u8>, BackendError> {
     let archive_url = format!("{cli_chat_proxy_base_url}/bundle/archive");
     let response = apply_deployment_key(
         crate::http::shared_client()
@@ -71,20 +41,12 @@ pub async fn fetch_bundle(
     )
     .send()
     .await?;
-    if response.status().is_success() {
-        return Ok(FetchedBundle::Archive(response.bytes().await?.to_vec()));
-    }
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
-        return Err(BackendError::RequestFailed { status: 401, body });
+        return Err(BackendError::RequestFailed { status, body });
     }
-    tracing::debug!(
-        status = %response.status(),
-        "bundle archive unavailable, falling back to legacy JSON"
-    );
-    fetch_subagent_bundle(cli_chat_proxy_base_url, deployment_key)
-        .await
-        .map(FetchedBundle::Legacy)
+    Ok(response.bytes().await?.to_vec())
 }
 
 #[derive(Debug, thiserror::Error)]

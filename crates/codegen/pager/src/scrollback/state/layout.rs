@@ -236,13 +236,6 @@ impl ScrollbackState {
             .collect()
     }
 
-    /// Get entries in range (deprecated, use entries_in_range instead).
-    /// This allocates a Vec to maintain compatibility.
-    #[deprecated(note = "Use entries_in_range() instead")]
-    pub fn entries_slice(&self, range: Range<usize>) -> Vec<&ScrollbackEntry> {
-        self.entries_in_range(range)
-    }
-
     /// Map a screen row to an entry index.
     ///
     /// Given a screen Y coordinate and the scrollback area rect, determines

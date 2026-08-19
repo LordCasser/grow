@@ -67,10 +67,8 @@ pub struct SystemItem {
 /// replay, analytics) can distinguish synthetic injections from real input
 /// without parsing message text.
 ///
-/// Serialized as a lowercase string (e.g. `"auto_continue"`).
-/// Unknown variants (from future clients or removed historical tags such as
-/// `"doom_loop_warning"`) deserialize as [`SyntheticReason::Unknown`]
-/// so old clients can still read sessions written by newer versions.
+/// Serialized as a lowercase string (e.g. `"auto_continue"`). Unknown tags are
+/// rejected so Timeline never silently loses synthetic-message semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyntheticReason {
@@ -79,7 +77,7 @@ pub enum SyntheticReason {
     CompactionMeta,
     /// Runtime-injected `<system-reminder>` message. Not real user input.
     SystemReminder,
-    /// Project-level instruction message (AGENTS.md / CLAUDE.md) injected at
+    /// Project-level instruction message (`AGENTS.md` or `.grow/rules`) injected at
     /// session spawn. Invariant: once placed, never replaced (would bust the
     /// KV-cache prefix).
     ProjectInstructions,
@@ -116,10 +114,6 @@ pub enum SyntheticReason {
     /// Working-directory switch context appended after a session relocation.
     /// Carries a generation marker so recovery can detect an existing append.
     WorkingDirectorySwitch,
-    /// Catch-all for unknown/future variants.  Preserves forward compatibility
-    /// so older clients can deserialize sessions written by newer versions.
-    #[serde(other)]
-    Unknown,
 }
 
 /// Semantic role of a Goal-scoped synthetic directive.
@@ -183,8 +177,7 @@ impl SyntheticReason {
             | Self::TruncationContinue
             | Self::Interjection
             | Self::StopHookFeedback
-            | Self::WorkingDirectorySwitch
-            | Self::Unknown => false,
+            | Self::WorkingDirectorySwitch => false,
         }
     }
 }
@@ -203,8 +196,7 @@ impl SyntheticReason {
 /// Automatic terminations (hook-denied, max-turns) are not user interrupts
 /// and never set this.
 ///
-/// Serialized as a lowercase string. Unknown variants from future writers
-/// deserialize as [`PriorTurnInterrupt::Unknown`] for forward compatibility.
+/// Serialized as a lowercase string. Unknown values are rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PriorTurnInterrupt {
@@ -215,9 +207,6 @@ pub enum PriorTurnInterrupt {
     PermissionRejected,
     /// User cancelled a permission prompt (Cmd+C), ending the previous turn.
     PermissionCancelled,
-    /// Forward-compat catch-all for variants written by newer clients.
-    #[serde(other)]
-    Unknown,
 }
 
 /// Explicit first-party authority carried by a user-role conversation item.
@@ -273,9 +262,9 @@ pub struct UserItem {
     /// truncation prefers a present value over counting
     /// ([`conversation_truncate_for_prompt`]).
     ///
-    /// Caveat: session resume recounts `prompt_index` from `updates.jsonl`,
-    /// which can drift from this coordinate (interjection echoes, image-only
-    /// prompts), so markers stamped before and after a restart may disagree.
+    /// Session resume derives the next coordinate from the canonical Timeline
+    /// turn starts, so this marker remains in one coordinate space across
+    /// restarts, image-only prompts, and interjections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_index: Option<usize>,
 }
@@ -352,7 +341,6 @@ pub struct AssistantItem {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        alias = "system_fingerprint",
         deserialize_with = "crate::serde_helpers::empty_string_as_none"
     )]
     pub model_fingerprint: Option<String>,
@@ -1231,7 +1219,7 @@ impl ConversationItem {
         }
     }
 
-    /// User message containing project instructions (AGENTS.md / CLAUDE.md),
+    /// User message containing project instructions (`AGENTS.md` or `.grow/rules`),
     /// tagged [`SyntheticReason::ProjectInstructions`] for spawn-time
     /// idempotence. Once in the conversation, MUST NOT be replaced or
     /// re-inserted — see the variant docstring.
@@ -1523,83 +1511,10 @@ impl ConversationItem {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared-compaction L1 bridge: `CompactionItem` / `CompactionItemFactory`
-// for `ConversationItem`
-// ---------------------------------------------------------------------------
-//
-// Part of the Grow Compaction unification. Lets the shared, transport-agnostic
-// engine in `crates/common/compaction` operate over grow-build's
-// `ConversationItem` without depending on this crate — the orphan rule forces
-// the impls to live here, next to the type. Mirrors the harness's
-// `impl CompactionItem` for its own turn type.
-//
-// `CompactionItem` is the read seam (role/text/tool classification);
-// `CompactionItemFactory` is the write seam the full-replace assembler
-// (`apply_full_replace_compaction` / `assemble_compacted_history`) uses to
-// rebuild the compacted history. Each factory constructor maps to the matching
-// `ConversationItem` constructor so the `SyntheticReason` tags that the
-// replay / spawn-time idempotence guards rely on are preserved.
-impl compaction::CompactionItem for ConversationItem {
-    fn role(&self) -> compaction::CompactionRole {
-        use compaction::CompactionRole;
-        // grow-build has no distinct `Developer` role; everything maps onto
-        // the four `Role` variants `ConversationItem::role()` already returns.
-        match self.role() {
-            Role::System => CompactionRole::System,
-            Role::User => CompactionRole::User,
-            Role::Assistant => CompactionRole::Assistant,
-            Role::Tool => CompactionRole::Tool,
-        }
-    }
-
-    fn text(&self) -> Option<String> {
-        // Tool results and tool-only assistant turns can be textless; the
-        // shared algorithms expect `None` rather than an empty string there.
-        let text = self.text_content();
-        if text.is_empty() { None } else { Some(text) }
-    }
-
-    fn has_tool_requests(&self) -> bool {
-        matches!(self, Self::Assistant(a) if !a.tool_calls.is_empty())
-    }
-
-    fn is_compaction_summary(&self) -> bool {
-        // grow-build has no structural marker that uniquely identifies a prior
-        // compaction summary: the carrier is a `user_meta` item whose
-        // `SyntheticReason::CompactionMeta` is also used for re-injected file
-        // contents. Returning `false` is safe for the full-replace path, which
-        // does not consult this (it summarizes the whole conversation). Revisit
-        // (add a dedicated marker) before routing grow-build history through
-        // the shared `history`/`inter` filter.
-        false
-    }
-
-    fn attachment_refs(&self) -> Vec<compaction::CompactionFileRef> {
-        // grow-build `UserItem`s carry only `Text`/`Image { url }` content
-        // parts — there is no id+name attachment-ref concept like the chat harness's
-        // `GrowTurn`. The full-replace path does not read this; revisit if
-        // image attachments need to survive into the `<grow_user_queries>`
-        // preamble.
-        Vec::new()
-    }
-}
-
-impl compaction::CompactionItemFactory for ConversationItem {
-    fn new_user(text: String) -> Self {
-        Self::user(text)
-    }
-
-    fn new_user_meta(text: String) -> Self {
-        Self::user_meta(text)
-    }
-
-    fn new_project_instructions(text: String) -> Self {
-        Self::project_instructions(text)
-    }
-
-    fn new_system_reminder(text: String) -> Self {
-        Self::system_reminder(text)
+// Shared model-free tool-result pruning bridge.
+impl compaction::ToolResultItem for ConversationItem {
+    fn is_tool_result(&self) -> bool {
+        matches!(self, Self::ToolResult(_))
     }
 }
 
@@ -1697,7 +1612,6 @@ pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, te
         ConversationItem::Reasoning(synthesized_reasoning_item(text)),
     );
 }
-
 
 impl UserItem {
     /// Add an image to this user message
@@ -3542,118 +3456,12 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
 #[cfg(test)]
 mod compaction_item_bridge_tests {
     use super::*;
-    use compaction::{CompactionItem, CompactionItemFactory, CompactionRole};
+    use compaction::ToolResultItem;
 
     #[test]
-    fn role_maps_every_variant() {
-        assert_eq!(
-            CompactionItem::role(&ConversationItem::system("s")),
-            CompactionRole::System
-        );
-        assert_eq!(
-            CompactionItem::role(&ConversationItem::user("u")),
-            CompactionRole::User
-        );
-        assert_eq!(
-            CompactionItem::role(&ConversationItem::assistant("a")),
-            CompactionRole::Assistant
-        );
-        assert_eq!(
-            CompactionItem::role(&ConversationItem::tool_result("tc1", "r")),
-            CompactionRole::Tool
-        );
-        // BackendToolCall / Reasoning are semantically part of the assistant
-        // turn — they must map to Assistant, never Tool.
-        assert_eq!(
-            CompactionItem::role(&ConversationItem::Reasoning(synthesized_reasoning_item(
-                "t"
-            ))),
-            CompactionRole::Assistant
-        );
-    }
-
-    #[test]
-    fn text_is_none_when_empty_some_otherwise() {
-        assert_eq!(
-            CompactionItem::text(&ConversationItem::user("hello")),
-            Some("hello".to_string())
-        );
-        // An assistant tool-only turn has empty text content -> None.
-        let tool_only = ConversationItem::assistant_tool_calls(vec![ToolCall {
-            id: "tc1".into(),
-            name: "read_file".into(),
-            arguments: "{}".into(),
-        }]);
-        assert_eq!(CompactionItem::text(&tool_only), None);
-    }
-
-    #[test]
-    fn has_tool_requests_only_for_assistant_with_tool_calls() {
-        let with_tools = ConversationItem::assistant_tool_calls(vec![ToolCall {
-            id: "tc1".into(),
-            name: "read_file".into(),
-            arguments: "{}".into(),
-        }]);
-        assert!(CompactionItem::has_tool_requests(&with_tools));
-        assert!(!CompactionItem::has_tool_requests(
-            &ConversationItem::assistant("no tools")
-        ));
-        assert!(!CompactionItem::has_tool_requests(&ConversationItem::user(
-            "u"
-        )));
-        assert!(!CompactionItem::has_tool_requests(
-            &ConversationItem::tool_result("tc1", "r")
-        ));
-    }
-
-    #[test]
-    fn is_tool_result_default_tracks_role() {
-        assert!(CompactionItem::is_tool_result(
-            &ConversationItem::tool_result("tc1", "r")
-        ));
-        assert!(!CompactionItem::is_tool_result(&ConversationItem::user(
-            "u"
-        )));
-    }
-
-    #[test]
-    fn metadata_accessors_are_conservative() {
-        // grow-build has no structural compaction-summary marker, and no
-        // id+name attachment refs, so both return empty/false.
-        assert!(!CompactionItem::is_compaction_summary(
-            &ConversationItem::user("u")
-        ));
-        assert!(!CompactionItem::is_compaction_summary(
-            &ConversationItem::user_meta("summary")
-        ));
-        assert!(CompactionItem::attachment_refs(&ConversationItem::user("u")).is_empty());
-    }
-
-    /// The write seam must map each constructor to the matching
-    /// `ConversationItem` with the `SyntheticReason` tag the replay /
-    /// spawn-time idempotence guards rely on, so a compacted history rebuilt
-    /// through the shared assembler is indistinguishable from the in-shell one.
-    #[test]
-    fn factory_constructors_preserve_synthetic_reason_tags() {
-        let plain = <ConversationItem as CompactionItemFactory>::new_user("q".into());
-        assert_matches_user_reason(&plain, None);
-
-        let meta = <ConversationItem as CompactionItemFactory>::new_user_meta("m".into());
-        assert_matches_user_reason(&meta, Some(SyntheticReason::CompactionMeta));
-
-        let proj =
-            <ConversationItem as CompactionItemFactory>::new_project_instructions("p".into());
-        assert_matches_user_reason(&proj, Some(SyntheticReason::ProjectInstructions));
-
-        let reminder = <ConversationItem as CompactionItemFactory>::new_system_reminder("r".into());
-        assert_matches_user_reason(&reminder, Some(SyntheticReason::SystemReminder));
-    }
-
-    fn assert_matches_user_reason(item: &ConversationItem, expected: Option<SyntheticReason>) {
-        let ConversationItem::User(parts) = item else {
-            panic!("factory must produce a User item, got {item:?}");
-        };
-        assert_eq!(parts.synthetic_reason, expected);
+    fn pruning_bridge_identifies_only_tool_results() {
+        assert!(ConversationItem::tool_result("tc1", "r").is_tool_result());
+        assert!(!ConversationItem::user("u").is_tool_result());
     }
 }
 
@@ -3726,7 +3534,7 @@ mod tests {
     }
 
     #[test]
-    fn prior_turn_interrupt_serde_round_trip_and_unknown_fallback() {
+    fn prior_turn_interrupt_serde_round_trip_and_unknown_rejection() {
         for (variant, wire) in [
             (PriorTurnInterrupt::MidTurnAbort, "\"mid_turn_abort\""),
             (
@@ -3742,9 +3550,7 @@ mod tests {
             let back: PriorTurnInterrupt = serde_json::from_str(wire).unwrap();
             assert_eq!(back, variant);
         }
-        // Forward-compat: an unknown wire string decodes to `Unknown`.
-        let unknown: PriorTurnInterrupt = serde_json::from_str("\"some_future_cause\"").unwrap();
-        assert_eq!(unknown, PriorTurnInterrupt::Unknown);
+        assert!(serde_json::from_str::<PriorTurnInterrupt>("\"some_future_cause\"").is_err());
     }
 
     #[test]
@@ -8308,20 +8114,14 @@ mod tests {
         }
     }
 
-    /// Historical `doom_loop_warning` tags deserialize as Unknown after removal.
     #[test]
-    fn historical_doom_loop_warning_deserializes_as_unknown() {
+    fn removed_synthetic_reason_is_rejected() {
         let json = serde_json::json!({
             "type": "user",
             "content": [{"type": "text", "text": "legacy"}],
             "synthetic_reason": "doom_loop_warning"
         });
-        let item: ConversationItem = serde_json::from_value(json).expect("deserialize");
-        if let ConversationItem::User(u) = item {
-            assert_eq!(u.synthetic_reason, Some(SyntheticReason::Unknown));
-        } else {
-            panic!("expected User variant");
-        }
+        assert!(serde_json::from_value::<ConversationItem>(json).is_err());
     }
 
     #[test]
@@ -8562,28 +8362,14 @@ mod tests {
         }
     }
 
-    /// Forward-compat regression guard for the `#[serde(other)]` arm:
-    /// payloads from newer clients with an unknown `synthetic_reason` value
-    /// must deserialize as `Some(SyntheticReason::Unknown)` rather than
-    /// failing.
     #[test]
-    fn unknown_synthetic_reason_deserializes_for_forward_compat() {
+    fn unknown_synthetic_reason_is_rejected() {
         let payload = serde_json::json!({
             "type": "user",
             "content": [{"type": "text", "text": "hello"}],
             "synthetic_reason": "some_future_variant"
         });
-        let item: ConversationItem =
-            serde_json::from_value(payload).expect("deserialize forward-compat payload");
-        if let ConversationItem::User(u) = item {
-            assert_eq!(
-                u.synthetic_reason,
-                Some(SyntheticReason::Unknown),
-                "unknown variants must round-trip through the #[serde(other)] arm"
-            );
-        } else {
-            panic!("expected User variant");
-        }
+        assert!(serde_json::from_value::<ConversationItem>(payload).is_err());
     }
 
     #[test]

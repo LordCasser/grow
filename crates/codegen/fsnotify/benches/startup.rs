@@ -27,7 +27,24 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use fsnotify::{FsConfig, FsEventSource};
 use tempfile::TempDir;
 
-const TOTAL_DIRS: usize = 12_000;
+const BENCH_TOTAL_DIRS: usize = 12_000;
+const SMOKE_TOTAL_DIRS: usize = 1_200;
+
+fn is_benchmark_run() -> bool {
+    std::env::args_os().any(|arg| arg == "--bench")
+}
+
+/// Criterion receives `--bench` only for a real `cargo bench` run. A target
+/// launched without it by `cargo test --all-targets` is a correctness smoke
+/// test, so preserve each tree's shape without spending the watcher's
+/// production startup timeout on the full fixture.
+fn total_dirs() -> usize {
+    if is_benchmark_run() {
+        BENCH_TOTAL_DIRS
+    } else {
+        SMOKE_TOTAL_DIRS
+    }
+}
 
 /// Create `count` nested directories under `base`, grouped 100 per parent so
 /// the tree has realistic fan-out and depth rather than one flat directory.
@@ -45,8 +62,9 @@ fn build_favorable_tree() -> TempDir {
     let root = temp.path();
     fs::create_dir_all(root.join(".git")).unwrap();
     fs::write(root.join(".gitignore"), "target/\n").unwrap();
-    let target = TOTAL_DIRS * 2 / 3;
-    let per = (TOTAL_DIRS - target) / 3;
+    let total_dirs = total_dirs();
+    let target = total_dirs * 2 / 3;
+    let per = (total_dirs - target) / 3;
     make_dirs(&root.join("src"), per);
     make_dirs(&root.join("crates"), per);
     make_dirs(&root.join("tests"), per);
@@ -61,10 +79,11 @@ fn build_wide_tree(width: usize, with_target: bool) -> TempDir {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     fs::create_dir_all(root.join(".git")).unwrap();
+    let total_dirs = total_dirs();
     let child_total = if with_target {
-        TOTAL_DIRS / 2
+        total_dirs / 2
     } else {
-        TOTAL_DIRS
+        total_dirs
     };
     let per_child = child_total / width;
     for i in 0..width {
@@ -72,7 +91,7 @@ fn build_wide_tree(width: usize, with_target: bool) -> TempDir {
     }
     if with_target {
         fs::write(root.join(".gitignore"), "target/\n").unwrap();
-        make_dirs(&root.join("target"), TOTAL_DIRS / 2);
+        make_dirs(&root.join("target"), total_dirs / 2);
     }
     temp
 }
@@ -86,8 +105,9 @@ fn build_nested_ignored_tree() -> TempDir {
     let root = temp.path();
     fs::create_dir_all(root.join(".git")).unwrap();
     fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
-    let src = TOTAL_DIRS / 6;
-    let ignored = TOTAL_DIRS - 2 * src;
+    let total_dirs = total_dirs();
+    let src = total_dirs / 6;
+    let ignored = total_dirs - 2 * src;
     for i in 0..4 {
         make_dirs(&root.join(format!("packages/pkg{i}/src")), src / 4);
         make_dirs(
@@ -128,13 +148,15 @@ fn bench_startup(c: &mut Criterion) {
     let favorable = build_favorable_tree();
     run("favorable", &favorable);
 
-    let moderate = build_wide_tree(48, true);
+    let moderate = build_wide_tree(if is_benchmark_run() { 48 } else { 12 }, true);
     run("fanout_w48_with_target", &moderate);
 
-    let worst = build_wide_tree(64, false);
+    let worst = build_wide_tree(if is_benchmark_run() { 64 } else { 16 }, false);
     run("fanout_w64_no_ignored", &worst);
 
-    let wide = build_wide_tree(400, false);
+    // Keep the smoke width above the production fan-out cap so it still
+    // exercises the recursive-root fallback.
+    let wide = build_wide_tree(if is_benchmark_run() { 400 } else { 65 }, false);
     run("wide_w400", &wide);
 
     let nested = build_nested_ignored_tree();

@@ -39,9 +39,8 @@ pub struct ForkSessionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ForkSessionResponse {
     pub new_session_id: String,
-    pub chat_messages_copied: usize,
+    pub surface_items_copied: usize,
     pub updates_copied: usize,
-    pub plan_state_copied: bool,
     /// The working directory of the new forked session
     pub new_cwd: String,
     /// The parent session ID (source session that was forked)
@@ -93,9 +92,6 @@ pub async fn fork_session(request: ForkSessionRequest) -> io::Result<ForkSession
         target_prompt_index: request.target_prompt_index,
         session_kind: request.session_kind.clone(),
         source_workspace_dir: request.source_workspace_dir.clone(),
-        // Carry the parent's compaction segment archive for offline inspection;
-        // the fork's live Surface is materialized into its new Timeline.
-        copy_compaction_segments: true,
         ..Default::default()
     };
 
@@ -114,16 +110,16 @@ pub async fn fork_session(request: ForkSessionRequest) -> io::Result<ForkSession
         source_session = %request.source_session_id,
         copy_ms,
         total_ms,
-        chat_copied = result.chat_messages_copied,
+        surface_items_copied = result.surface_items_copied,
         updates_copied = result.updates_copied,
+        prompt_blobs_copied = result.prompt_blobs_copied,
         "FORK_COPY: local session data copied"
     );
 
     Ok(ForkSessionResponse {
         new_session_id,
-        chat_messages_copied: result.chat_messages_copied,
+        surface_items_copied: result.surface_items_copied,
         updates_copied: result.updates_copied,
-        plan_state_copied: result.plan_state_copied,
         new_cwd: request.new_cwd,
         parent_session_id: request.source_session_id,
         new_model_id: request.new_model_id,
@@ -217,9 +213,8 @@ mod tests {
     fn test_fork_session_response_serialization() {
         let response = ForkSessionResponse {
             new_session_id: "fork-abc123-12345678".to_string(),
-            chat_messages_copied: 42,
+            surface_items_copied: 42,
             updates_copied: 156,
-            plan_state_copied: true,
             new_cwd: "/new/project".to_string(),
             parent_session_id: "abc123".to_string(),
             new_model_id: Some("grow-3".to_string()),
@@ -229,9 +224,8 @@ mod tests {
         let deserialized: ForkSessionResponse = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.new_session_id, "fork-abc123-12345678");
-        assert_eq!(deserialized.chat_messages_copied, 42);
+        assert_eq!(deserialized.surface_items_copied, 42);
         assert_eq!(deserialized.updates_copied, 156);
-        assert!(deserialized.plan_state_copied);
         assert_eq!(deserialized.new_cwd, "/new/project");
         assert_eq!(deserialized.parent_session_id, "abc123");
         assert_eq!(deserialized.new_model_id, Some("grow-3".to_string()));
@@ -241,9 +235,8 @@ mod tests {
     fn test_fork_session_response_without_model_override() {
         let response = ForkSessionResponse {
             new_session_id: "fork-abc123-12345678".to_string(),
-            chat_messages_copied: 42,
+            surface_items_copied: 42,
             updates_copied: 156,
-            plan_state_copied: true,
             new_cwd: "/new/project".to_string(),
             parent_session_id: "abc123".to_string(),
             new_model_id: None,

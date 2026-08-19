@@ -27,7 +27,7 @@ use super::coordinator_state::{
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentEvent,
     SubagentOutstandingReply, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
-    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentValidateTypeOutcome,
+    SubagentResult, SubagentValidateTypeOutcome,
 };
 
 pub use super::coordinator_state::{
@@ -444,7 +444,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         child_session_id: child.child_session_id.clone(),
                         subagent_type: child.request.subagent_type.clone(),
                         description: child.request.description.clone(),
-                        persona: child.persona.clone(),
                         resumed_from: child.resumed_from.clone(),
                     })
                     .chain(
@@ -460,7 +459,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                                 child_session_id: child.child_session_id.clone(),
                                 subagent_type: child.request.subagent_type.clone(),
                                 description: child.request.description.clone(),
-                                persona: child.persona.clone(),
                                 resumed_from: child.resumed_from.clone(),
                             }),
                     )
@@ -518,17 +516,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         definition_background: child.definition_background,
                         explicitly_killed: pending.explicitly_killed,
                         child_session_id: child.child_session_id,
-                        persona: child.persona,
                         resumed_from: child.resumed_from,
-                        child_cwd: child.child_cwd,
-                        worktree_path: child.worktree_path,
-                        effective_model_id: child.effective_model_id,
                         control: child.control,
                     },
                 );
                 let _ = respond_to.send(true);
             }
-            InternalEvent::ResumeSource {
+            InternalEvent::SourceIsActive {
                 source_id,
                 parent_session_id,
                 respond_to,
@@ -540,25 +534,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         || self.active.get(&source_id).is_some_and(|child| {
                             child.request.parent_session_id == parent_session_id
                         });
-                let lookup = if source_is_active {
-                    SubagentResumeLookup::Active
-                } else if let Some(child) = self.completed.get(&source_id)
-                    && child.request.parent_session_id == parent_session_id
-                {
-                    SubagentResumeLookup::Completed(SubagentResumeSource {
-                        subagent_id: child.request.id.clone(),
-                        child_session_id: child.child_session_id.clone(),
-                        child_cwd: child.child_cwd.clone(),
-                        worktree_path: child.worktree_path.clone(),
-                        snapshot_ref: child.snapshot_ref.clone(),
-                        subagent_type: child.request.subagent_type.clone(),
-                        persona: child.persona.clone(),
-                        model_id: Some(child.effective_model_id.clone()),
-                    })
-                } else {
-                    SubagentResumeLookup::Missing
-                };
-                let _ = respond_to.send(lookup);
+                let _ = respond_to.send(source_is_active);
             }
         }
     }
@@ -574,53 +550,31 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
         let request = record.request().clone();
         let explicitly_killed = record.explicitly_killed();
-        let (
-            started_at,
-            child_session_id,
-            persona,
-            resumed_from,
-            child_cwd,
-            worktree_path,
-            effective_model_id,
-            mut spawn_reply,
-            mut handle_only,
-        ) = match record {
-            ChildRecord::Pending(child) => (
-                child.started_at,
-                output.result.child_session_id.clone(),
-                child.request.runtime_overrides.persona.clone(),
-                child.request.resume_from.clone(),
-                child.request.cwd.clone().unwrap_or_default(),
-                output.result.worktree_path.clone(),
-                String::new(),
-                child.spawn_reply,
-                child.handle_only,
-            ),
-            ChildRecord::Active(child) => (
-                child.started_at,
-                child.child_session_id,
-                child.persona,
-                child.resumed_from,
-                child.child_cwd,
-                child.worktree_path,
-                child.effective_model_id,
-                child.spawn_reply,
-                child.handle_only,
-            ),
-        };
+        let (started_at, child_session_id, resumed_from, mut spawn_reply, mut handle_only) =
+            match record {
+                ChildRecord::Pending(child) => (
+                    child.started_at,
+                    output.result.child_session_id.clone(),
+                    child.request.resume_from.clone(),
+                    child.spawn_reply,
+                    child.handle_only,
+                ),
+                ChildRecord::Active(child) => (
+                    child.started_at,
+                    child.child_session_id,
+                    child.resumed_from,
+                    child.spawn_reply,
+                    child.handle_only,
+                ),
+            };
 
         let persisted_output_ref = self.runner.persisted_output_ref(&output.completion_data);
         let mut completed = CompletedChild {
             request: request.clone(),
             started_at,
             child_session_id,
-            persona,
             resumed_from,
-            child_cwd,
-            worktree_path,
-            snapshot_ref: output.snapshot_ref,
             persisted_output_ref,
-            effective_model_id,
             result: output.result.clone(),
         };
         let snapshot = completed_snapshot(&completed, None);
@@ -713,7 +667,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     ..Default::default()
                 },
                 completion_data: R::CompletionData::default(),
-                snapshot_ref: None,
             },
         );
     }

@@ -140,10 +140,6 @@ pub struct FileContent {
     /// content here is the model friendly output which will always be present since even
     /// on failures we want to present the model with some information
     pub content: String,
-    /// Concise version of content (arrow separator, no padding) for models
-    /// that use the concise output format
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_concise: Option<String>,
     pub absolute_path: PathBuf,
     pub offset: Option<usize>,
     /// The line limit used for this read. `None` means no limit was applied.
@@ -699,10 +695,7 @@ impl ToolOutput {
                 text
             }
             ToolOutput::PlanControl(output) => output.message.clone(),
-            ToolOutput::AskUserQuestion(
-                AskUserQuestionOutput::QuestionsSent { message, .. }
-                | AskUserQuestionOutput::UserAnswered { message },
-            ) => message.clone(),
+            ToolOutput::AskUserQuestion(AskUserQuestionOutput { message }) => message.clone(),
             ToolOutput::Monitor(o) => {
                 if o.persistent {
                     format!(
@@ -775,34 +768,12 @@ pub enum TodoWriteOutput {
 }
 /// Output from the `AskUserQuestion` tool.
 ///
-/// This is a thin signal — the tool sends the questions to the client via
-/// a notification and returns a confirmation. The actual answers come back
-/// from the client as the tool result (handled by the orchestration layer).
-///
-/// Because the answers are provided by the client asynchronously (the user
-/// interacts with a UI), the tool output here just confirms the questions
-/// were dispatched. The orchestration layer is responsible for blocking
-/// until the user responds and injecting the answers into the conversation.
+/// The tool blocks until the typed client response arrives, then returns the
+/// fully formatted model-facing result.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub enum AskUserQuestionOutput {
-    /// Questions were successfully dispatched to the client for user input.
-    /// Used during migration fallback when `UserQuestionSender` is not yet
-    /// injected by the shell.
-    QuestionsSent {
-        /// Confirmation message for the model.
-        message: String,
-        /// Number of questions sent.
-        question_count: usize,
-    },
-    /// The user has responded (or cancelled). The `message` is the
-    /// fully-formatted tool result string produced by the format module.
-    ///
-    /// All four user paths (accepted, chat about this, skip interview,
-    /// cancel) return this variant with `ToolCall` status `Completed`.
-    UserAnswered {
-        /// Pre-formatted tool result string for the model.
-        message: String,
-    },
+pub struct AskUserQuestionOutput {
+    /// Pre-formatted tool result string for the model.
+    pub message: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlanControlOutput {
@@ -930,7 +901,6 @@ mod tests {
     fn empty_file_content(offset: Option<usize>, total_lines: usize) -> FileContent {
         FileContent {
             content: String::new(),
-            content_concise: None,
             absolute_path: PathBuf::from("/tmp/f.txt"),
             offset,
             limit: None,
@@ -1489,9 +1459,6 @@ mod tests {
             turns: 2,
             duration_ms: 3000,
             worktree_path: None,
-            persona: None,
-            resume_from_hint: "019e0000-0000-7000-8000-0000000000bb".into(),
-            persona_hint: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -1514,38 +1481,6 @@ mod tests {
             rendered.contains("<subagent_result>"),
             "wrapped in subagent_result tag"
         );
-        assert!(
-            !rendered.contains("persona"),
-            "no persona hint when persona is None"
-        );
-    }
-    #[test]
-    fn subagent_completed_prompt_format_includes_persona_hint() {
-        let output = ToolOutput::SubagentCompleted(SubagentCompletedOutput {
-            output: "Done implementing.".into(),
-            subagent_id: "abc-123".into(),
-            subagent_type: "general-purpose".into(),
-            tool_calls: 10,
-            turns: 3,
-            duration_ms: 5000,
-            worktree_path: None,
-            persona: Some("implementer".into()),
-            resume_from_hint: "abc-123".into(),
-            persona_hint: Some("implementer".into()),
-        });
-        let rendered = output.to_prompt_format();
-        assert!(
-            rendered.contains("resume_from=\"abc-123\""),
-            "resume hint present"
-        );
-        assert!(
-            rendered.contains("persona=\"implementer\""),
-            "persona hint present"
-        );
-        assert!(
-            rendered.contains("Pass the same persona when resuming"),
-            "persona instruction present"
-        );
     }
     #[test]
     fn subagent_completed_prompt_format_with_worktree() {
@@ -1557,9 +1492,6 @@ mod tests {
             turns: 1,
             duration_ms: 2000,
             worktree_path: Some("/tmp/grow-worktree/wt-agent".into()),
-            persona: None,
-            resume_from_hint: "wt-agent".into(),
-            persona_hint: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -1572,51 +1504,11 @@ mod tests {
         );
     }
     #[test]
-    fn subagent_completed_structured_hints_serialize() {
-        let output = SubagentCompletedOutput {
-            output: "done".into(),
-            subagent_id: "sub-abc-123".into(),
-            subagent_type: "general-purpose".into(),
-            tool_calls: 5,
-            turns: 2,
-            duration_ms: 3000,
-            worktree_path: None,
-            persona: Some("implementer".into()),
-            resume_from_hint: "sub-abc-123".into(),
-            persona_hint: Some("implementer".into()),
-        };
-        let json = serde_json::to_value(&output).unwrap();
-        assert_eq!(json["resume_from_hint"], "sub-abc-123");
-        assert_eq!(json["persona_hint"], "implementer");
-        assert_eq!(json["subagent_id"], json["resume_from_hint"]);
-    }
-    #[test]
     fn plan_control_prompt_format_is_the_shell_validated_result() {
         let output = ToolOutput::PlanControl(PlanControlOutput {
             message: "approved".into(),
         });
         assert_eq!(output.to_prompt_format(), "approved");
-    }
-    #[test]
-    fn subagent_completed_hints_absent_when_no_persona() {
-        let output = SubagentCompletedOutput {
-            output: "done".into(),
-            subagent_id: "sub-xyz".into(),
-            subagent_type: "explore".into(),
-            tool_calls: 1,
-            turns: 1,
-            duration_ms: 500,
-            worktree_path: None,
-            persona: None,
-            resume_from_hint: "sub-xyz".into(),
-            persona_hint: None,
-        };
-        let json = serde_json::to_value(&output).unwrap();
-        assert_eq!(json["resume_from_hint"], "sub-xyz");
-        assert!(
-            json.get("persona_hint").is_none(),
-            "persona_hint should be absent when None"
-        );
     }
     fn sample_bash(exit_code: i32, output: &[u8], timed_out: bool) -> BashOutput {
         BashOutput {

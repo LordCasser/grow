@@ -32,7 +32,7 @@ use crate::events::HunkEvent;
 use crate::handle::HunkTrackerHandle;
 use crate::types::{
     FileContentEntry, FileContentView, FileHunkStateSnapshot, HunkId, HunkTrackerSnapshot,
-    HunkTurnDelta, SessionStats, TrackingMode,
+    SessionStats, TrackingMode,
 };
 
 use state::{FileHunkState, GitRepoState, RepoSyncState};
@@ -498,15 +498,6 @@ impl HunkTrackerActor {
                     debug!("SnapshotState reply channel dropped");
                 }
             }
-            HunkTrackerCommand::SnapshotTurnDelta {
-                prompt_index,
-                reply,
-            } => {
-                let delta = self.take_turn_delta(prompt_index);
-                if reply.send(delta).is_err() {
-                    debug!("SnapshotTurnDelta reply channel dropped");
-                }
-            }
             HunkTrackerCommand::RestoreState(snapshot) => {
                 self.restore_snapshot(snapshot);
             }
@@ -515,8 +506,6 @@ impl HunkTrackerActor {
     }
 
     /// Snapshot one file's state (full FileContentState incl. Binary/TooLarge).
-    /// Shared by [`take_snapshot`](Self::take_snapshot) and
-    /// [`take_turn_delta`](Self::take_turn_delta) so they can't diverge.
     fn snapshot_file_state(state: &FileHunkState) -> FileHunkStateSnapshot {
         FileHunkStateSnapshot {
             baseline: state.baseline.clone(),
@@ -542,28 +531,6 @@ impl HunkTrackerActor {
             file_states,
             turn_index: self.turn_index.clone(),
             session_stats: self.session_stats.clone(),
-        }
-    }
-
-    /// Incremental single-turn delta for `prompt_index`: snapshots of the files
-    /// owning this turn's hunks plus the hunk-id set. Unlike
-    /// [`take_snapshot`](Self::take_snapshot), never copies the whole tracker.
-    fn take_turn_delta(&self, prompt_index: usize) -> HunkTurnDelta {
-        let hunk_ids = self
-            .turn_index
-            .get(&prompt_index)
-            .cloned()
-            .unwrap_or_default();
-        let file_states = self
-            .file_states
-            .iter()
-            .filter(|(_, state)| state.hunks.iter().any(|h| hunk_ids.contains(&h.id)))
-            .map(|(path, state)| (path.clone(), Self::snapshot_file_state(state)))
-            .collect();
-        HunkTurnDelta {
-            prompt_index,
-            file_states,
-            hunk_ids,
         }
     }
 

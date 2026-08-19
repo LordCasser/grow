@@ -1,27 +1,21 @@
 use ::diagnostics::events::SessionHarness;
 use workspace::permission::Decision;
 
-/// Permission-mode label for the `session.permission_mode_changed` span.
-pub(crate) fn permission_mode_label(is_yolo: bool) -> &'static str {
-    if is_yolo {
-        "bypassPermissions"
-    } else {
-        "default"
-    }
-}
-
 /// Diagnostic `source` label for a permission [`Decision`] on the `tool.decision`
-/// span. `is_yolo` collapses auto-approvals to `config`. `Decision::Allow`/`Ask`
+/// span. `is_always_approve` collapses auto-approvals to `config`. `Decision::Allow`/`Ask`
 /// carry no provenance, so a config/policy allow is indistinguishable from a
 /// user click — report neutral `allowed` rather than guessing `user_temporary`.
-pub(crate) fn permission_decision_source(decision: &Decision, is_yolo: bool) -> &'static str {
+pub(crate) fn permission_decision_source(
+    decision: &Decision,
+    is_always_approve: bool,
+) -> &'static str {
     match decision {
         Decision::PolicyDeny(_) => "config",
         Decision::Reject(_) => "user_reject",
         Decision::Cancelled => "user_abort",
         Decision::TimedOut => "timeout",
         Decision::FollowupMessage(_) => "user_followup",
-        Decision::Allow | Decision::Ask if is_yolo => "config",
+        Decision::Allow | Decision::Ask if is_always_approve => "config",
         Decision::Allow | Decision::Ask => "allowed",
     }
 }
@@ -137,9 +131,6 @@ pub(crate) struct SessionHarnessMetrics {
     pub auto_update: Option<bool>,
     pub cwd: String,
     pub skills_config: agent::prompt::skills::SkillsConfig,
-    /// Resolved vendor-compat config, so recorded skill / AGENTS.md names match
-    /// what the session actually discovers.
-    pub compat: tools::types::compat::CompatConfig,
     pub plugin_registry: Option<std::sync::Arc<agent::plugins::PluginRegistry>>,
     pub plugin_names: Vec<String>,
 }
@@ -178,7 +169,7 @@ impl SessionHarnessMetrics {
         let hook_names: Vec<String> = hooks.into_iter().map(|h| h.name).collect();
 
         let agents_md_dir_names =
-            agent::prompt::agents_md::read_agents_config_with_paths(&self.cwd, self.compat)
+            agent::prompt::agents_md::read_agents_config_with_paths(&self.cwd)
                 .await
                 .iter()
                 .filter_map(|f| {
@@ -192,7 +183,6 @@ impl SessionHarnessMetrics {
             Some(&self.cwd),
             &self.skills_config,
             self.plugin_registry.as_deref(),
-            self.compat,
         )
         .await
         .into_iter()

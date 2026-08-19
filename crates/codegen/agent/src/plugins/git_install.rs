@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::install_registry::{
     InstallError, InstallKind, InstallRegistry, InstalledRepo, RepoPlugin,
 };
-use super::manifest::{ManifestLoadResult, load_manifest, name_from_dirname};
+use super::manifest::load_manifest;
 
 /// Source of a plugin installation.
 #[derive(Debug, Clone)]
@@ -333,8 +333,7 @@ pub fn install_from_source_with_label(
         // Clean up — no valid plugins found
         let _ = remove_repo_path(&repo_path);
         return Err(InstallError::InstallFailed {
-            detail: "no plugins found in the source (no plugin.json or convention components)"
-                .to_string(),
+            detail: "no plugins found in the source (missing required plugin.json)".to_string(),
         });
     }
 
@@ -556,7 +555,7 @@ pub fn cleanup_plugin_data(repo: &InstalledRepo, scope: super::discovery::Plugin
 ///
 /// Discovery logic:
 /// 1. If `subdir` is specified, only look in that subdirectory
-/// 2. If root has plugin.json or convention components, it's a single plugin
+/// 2. If the root has `plugin.json`, it is a single plugin
 /// 3. Otherwise, scan immediate subdirectories for plugins
 pub(super) fn discover_plugins_in_dir(
     root: &Path,
@@ -618,37 +617,14 @@ pub(super) fn discover_plugins_in_dir(
 
 /// Try to load a plugin from a directory.
 ///
-/// Returns `Some` if the directory contains a plugin.json or convention components.
+/// Returns `Some` only when the directory contains a valid `plugin.json`.
 fn try_load_plugin(dir: &Path, subdir: Option<&str>) -> Option<DiscoveredPlugin> {
-    // Try loading manifest
-    match load_manifest(dir) {
-        Ok(ManifestLoadResult::Found(manifest)) => {
-            return Some(DiscoveredPlugin {
-                name: manifest.name.clone(),
-                subdir: subdir.map(|s| s.to_string()),
-                version: manifest.version.clone(),
-            });
-        }
-        Ok(ManifestLoadResult::NotFound) => {}
-        Err(_) => {}
-    }
-
-    // Check convention components
-    let has_skills = dir.join("skills").is_dir();
-    let has_agents = dir.join("agents").is_dir();
-    let has_mcp = dir.join(".mcp.json").is_file();
-    let has_hooks = dir.join("hooks").join("hooks.json").is_file();
-
-    if has_skills || has_agents || has_mcp || has_hooks {
-        let name = name_from_dirname(dir)?;
-        Some(DiscoveredPlugin {
-            name,
-            subdir: subdir.map(|s| s.to_string()),
-            version: None,
-        })
-    } else {
-        None
-    }
+    let manifest = load_manifest(dir).ok()?;
+    Some(DiscoveredPlugin {
+        name: manifest.name.clone(),
+        subdir: subdir.map(str::to_owned),
+        version: manifest.version.clone(),
+    })
 }
 
 /// Build an `InstalledRepo` from the normalized install result.
@@ -1063,9 +1039,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path();
         std::fs::create_dir_all(plugin_dir.join("skills")).unwrap();
+        std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"root-plugin"}"#).unwrap();
 
         let plugins = discover_plugins_in_dir(plugin_dir, None).unwrap();
         assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "root-plugin");
     }
 
     #[test]
@@ -1076,6 +1054,12 @@ mod tests {
         // Create two plugin subdirectories
         std::fs::create_dir_all(root.join("linter/skills")).unwrap();
         std::fs::create_dir_all(root.join("formatter/agents")).unwrap();
+        std::fs::write(root.join("linter/plugin.json"), r#"{"name":"linter"}"#).unwrap();
+        std::fs::write(
+            root.join("formatter/plugin.json"),
+            r#"{"name":"formatter"}"#,
+        )
+        .unwrap();
         // Non-plugin dir (should be ignored)
         std::fs::create_dir_all(root.join("docs")).unwrap();
 
@@ -1094,6 +1078,16 @@ mod tests {
 
         std::fs::create_dir_all(root.join("packages/plugin-a/skills")).unwrap();
         std::fs::create_dir_all(root.join("packages/plugin-b/skills")).unwrap();
+        std::fs::write(
+            root.join("packages/plugin-a/plugin.json"),
+            r#"{"name":"plugin-a"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/plugin-b/plugin.json"),
+            r#"{"name":"plugin-b"}"#,
+        )
+        .unwrap();
 
         // Only discover plugin-a
         let plugins = discover_plugins_in_dir(root, Some("packages/plugin-a")).unwrap();

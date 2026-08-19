@@ -8,8 +8,7 @@
 //! - `grow/session/delete`                  delete a local session
 //! - `grow/session/update_mcp_servers`      mid-session MCP server swap
 //! - `grow/session/fork`                    fork a session into a new one
-//! - `grow/internal/reload_all_mcp_servers` config hot-reload, all sessions
-//! - `grow/internal/reload_project_mcp_servers` config hot-reload, cwd-scoped
+//! - `grow/internal/reload_mcp_catalog`     config hot-reload, explicitly scoped
 //! - `grow/internal/reload_skills`          skills file watcher fan-out
 //! - `grow/internal/reload_models`          model list hot-reload from config.toml
 //! - `grow/internal/reload_announcements`   local announcement hot-reload
@@ -27,7 +26,6 @@ use serde::Deserialize;
 use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::MvpAgent;
 use crate::session::persistence::list_summaries;
-use crate::session::storage::StorageAdapter;
 use crate::session::storage::jsonl::JsonlStorageAdapter;
 use crate::session::{ExtMethodResult, SessionCommand};
 
@@ -38,10 +36,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/session/delete" => handle_session_delete(agent, args).await,
         "grow/session/update_mcp_servers" => handle_update_mcp_servers(agent, args).await,
         "grow/session/fork" => handle_session_fork(agent, args).await,
-        "grow/internal/reload_all_mcp_servers" => handle_reload_all_mcp_servers(agent).await,
-        "grow/internal/reload_project_mcp_servers" => {
-            handle_reload_project_mcp_servers(agent, args).await
-        }
+        "grow/internal/reload_mcp_catalog" => handle_reload_mcp_catalog(agent, args).await,
         "grow/internal/reload_skills" => handle_reload_skills(agent),
         "grow/internal/reload_workflows" => handle_reload_workflows(agent),
         "grow/internal/reload_models" => handle_reload_models(agent),
@@ -111,11 +106,14 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     }
 
     let mut req: RenameRequest = parse_params(args)?;
-    // Manual titles must be non-blank: `Summary.title_is_manual` binds to a
-    // real `generated_title`, so reject whitespace-only input at the boundary.
+    // Timeline title validation is repeated at this protocol boundary so the
+    // caller receives a precise request error before any storage work begins.
     req.title = req.title.trim().to_string();
     if req.title.is_empty() {
         return Err(acp::Error::invalid_request().data("title must not be blank"));
+    }
+    if req.title.chars().count() > 160 {
+        return Err(acp::Error::invalid_request().data("title must be at most 160 characters"));
     }
 
     let session_id = acp::SessionId::new(Arc::from(req.session_id.as_str()));
@@ -134,45 +132,47 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
     let info = summary.info.clone();
 
-    // Update the session title in local storage
-    let storage = JsonlStorageAdapter::default();
-    storage
-        .update_session_title(&info, req.title.clone())
-        .await
-        .map_err(|e| {
-            acp::Error::internal_error().data(format!("failed to update session title: {e}"))
-        })?;
+    let live_handle = agent.session_handle_waiting_for_load(&session_id).await;
+    let event = if let Some(handle) = live_handle {
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        handle
+            .cmd_tx
+            .send(crate::session::commands::SessionCommand::SetSessionTitle {
+                title: req.title.clone(),
+                respond_to,
+            })
+            .map_err(|_| acp::Error::internal_error().data("session actor unavailable"))?;
+        response
+            .await
+            .map_err(|_| {
+                acp::Error::internal_error().data("session actor dropped title acknowledgement")
+            })?
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("failed to commit session/title event: {error}"))
+            })?
+    } else {
+        let storage = JsonlStorageAdapter::default();
+        let event = storage
+            .append_session_title_durable(&info, req.title.clone())
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("failed to commit session/title event: {error}"))
+            })?;
+        event
+    };
 
     // Update session search index with new title
     crate::session::storage::search::notify_session_updated(&info.id.to_string(), &info.cwd);
 
-    // Send a SessionSummaryGenerated notification so the TUI updates its title
-    notify_session_title(agent, session_id, &req.title).await;
-
     tracing::info!(session_id = %req.session_id, title = %req.title, "Session renamed");
 
-    to_raw_response(&serde_json::json!({ "success": true }))
-}
-
-/// Notify connected clients of a session's new title via
-/// `SessionSummaryGenerated`.
-async fn notify_session_title(agent: &MvpAgent, session_id: acp::SessionId, title: &str) {
-    use crate::extensions::notification::{SessionNotification, SessionUpdate};
-
-    let notification = SessionNotification {
-        session_id: session_id.clone(),
-        update: SessionUpdate::SessionSummaryGenerated {
-            session_summary: title.to_owned(),
-        },
-        meta: None,
-    };
-    if let Ok(params) = serde_json::value::to_raw_value(&notification) {
-        let ext_notification =
-            acp::ExtNotification::new("grow/session_notification", params.into());
-        let _ = agent.gateway.ext_notification(ext_notification).await;
-    }
-
-    agent.notify_session_info_update(&session_id, title);
+    to_raw_response(&serde_json::json!({
+        "success": true,
+        "title": req.title,
+        "eventSeq": event.seq.get(),
+    }))
 }
 
 // session/delete
@@ -231,13 +231,10 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
         (h, cwd)
     };
 
-    let managed = agent.get_managed_mcp_configs().await;
-    let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
+    let merged = crate::session::mcp_catalog::merge_mcp_servers(
         params.mcp_servers.clone(),
         &cwd,
-        &managed,
         agent.plugin_registry_handle().snapshot().as_deref(),
-        &agent.cfg.borrow().compat_resolved,
     );
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -255,7 +252,7 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
     // Persist the new client set on the handle so config hot-reloads
-    // (`reload_all_mcp_servers` / `reload_project_mcp_servers`) re-merge from
+    // (`reload_mcp_catalog`) re-merges from
     // the client's latest intent rather than the `session/new` snapshot —
     // otherwise a reload would resurrect servers the client just removed
     // (or drop ones it just added).
@@ -285,77 +282,25 @@ fn handle_reload_workflows(agent: &MvpAgent) -> ExtResult {
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
-// internal/reload_all_mcp_servers
+// internal/reload_mcp_catalog
 
-/// Reload MCP servers for ALL active sessions. Called by the config
-/// hot-reload watcher when `[mcp_servers]` changes in config.toml.
-async fn handle_reload_all_mcp_servers(agent: &MvpAgent) -> ExtResult {
-    let session_ids: Vec<acp::SessionId> = agent.sessions.borrow().keys().cloned().collect();
-
-    if session_ids.is_empty() {
-        return ExtMethodResult::success(serde_json::json!({ "updated": 0 }))
-            .to_ext_response()
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()));
-    }
-
-    let managed = agent.get_managed_mcp_configs().await;
-    let mut updated = 0u32;
-    for session_id in &session_ids {
-        let Some(handle) = agent.sessions.borrow().get(session_id).cloned() else {
-            continue;
-        };
-        let cwd = std::path::PathBuf::from(&handle.info.cwd);
-        let compat = agent.cfg.borrow().compat_resolved;
-        // Re-seed the merge with the session's original client-provided MCP
-        // servers (e.g. a managed connector injected at `session/new` by a
-        // client session binding). `merge_managed_mcp_servers` already
-        // re-reads every disk source (config.toml, plugins, ~/.claude.json,
-        // ~/.cursor/mcp.json, .mcp.json) internally, so passing
-        // `load_mcp_servers()` output here was redundant — and silently
-        // dropped client servers that exist in no on-disk config, tearing
-        // them down on every config hot-reload.
-        if crate::session::managed_mcp::merge_and_send_managed_mcp_update(
-            &handle.cmd_tx,
-            &cwd,
-            handle.initial_client_mcp_servers.clone(),
-            &managed,
-            agent.plugin_registry_handle().snapshot().as_deref(),
-            &compat,
-        ) {
-            updated += 1;
-        }
-    }
-
-    tracing::info!(
-        updated,
-        total = session_ids.len(),
-        "reloaded MCP servers for active sessions"
-    );
-    ExtMethodResult::success(serde_json::json!({ "updated": updated }))
-        .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
-}
-
-// internal/reload_project_mcp_servers
-
-/// Reload MCP servers for sessions whose `cwd` matches (or sits beneath)
-/// the project root passed in `params.cwd`. Called by the config
-/// hot-reload watcher when `<cwd>/.grow/config.toml`,
-/// `<cwd>/.mcp.json`, or `<cwd>/.claude.json` changes.
-///
-/// Sessions in unrelated cwds are intentionally NOT touched — that is
-/// the whole point of [`crate::config::reloader::ConfigUpdate::
-/// ProjectMcpServersChanged`] being a per-cwd variant. The legacy
-/// [`handle_reload_all_mcp_servers`] is still the fan-out for global
-/// `~/.grow/config.toml` edits.
-async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+/// Reload the canonical MCP catalog. `project_root = None` targets every
+/// active session; `Some(root)` targets sessions at or beneath that root.
+async fn handle_reload_mcp_catalog(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Params {
-        cwd: String,
+        project_root: serde_json::Value,
     }
 
     let params: Params = parse_params(args)?;
-    let target_cwd = std::path::PathBuf::from(&params.cwd);
+    let project_root = match params.project_root {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(root) => Some(std::path::PathBuf::from(root)),
+        _ => {
+            return Err(acp::Error::invalid_params().data("projectRoot must be a string or null"));
+        }
+    };
 
     // Collect (session_id, cwd) pairs once so we don't hold the
     // `sessions` RefCell borrow across `.await` points.
@@ -364,7 +309,11 @@ async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequ
         .borrow()
         .iter()
         .map(|(sid, h)| (sid.clone(), std::path::PathBuf::from(&h.info.cwd)))
-        .filter(|(_, cwd)| cwd_matches(cwd, &target_cwd))
+        .filter(|(_, cwd)| {
+            project_root
+                .as_deref()
+                .is_none_or(|root| cwd_matches(cwd, root))
+        })
         .collect();
 
     if session_ids.is_empty() {
@@ -373,33 +322,17 @@ async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequ
             .map_err(|e| acp::Error::internal_error().data(e.to_string()));
     }
 
-    let managed = agent.get_managed_mcp_configs().await;
     let mut updated = 0u32;
     for (session_id, cwd) in &session_ids {
         let Some(handle) = agent.sessions.borrow().get(session_id).cloned() else {
             continue;
         };
-        // See `handle_reload_all_mcp_servers`: seed with the session's
-        // client-provided servers, not `load_mcp_servers()` — the merge
-        // re-reads all disk sources itself, and client-provided servers
-        // (session bindings) must survive config hot-reloads.
-        let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
-            handle.initial_client_mcp_servers.clone(),
+        if crate::session::mcp_catalog::merge_and_send_mcp_update(
+            &handle.cmd_tx,
             cwd,
-            &managed,
+            handle.initial_client_mcp_servers.clone(),
             agent.plugin_registry_handle().snapshot().as_deref(),
-            &agent.cfg.borrow().compat_resolved,
-        );
-
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        if handle
-            .cmd_tx
-            .send(SessionCommand::UpdateMcpServers {
-                mcp_servers: merged,
-                respond_to: tx,
-            })
-            .is_ok()
-        {
+        ) {
             updated += 1;
         }
     }
@@ -407,8 +340,8 @@ async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequ
     tracing::info!(
         updated,
         total = session_ids.len(),
-        cwd = %target_cwd.display(),
-        "reloaded project MCP servers for matching sessions"
+        project_root = ?project_root,
+        "reloaded MCP catalog for matching sessions"
     );
     ExtMethodResult::success(serde_json::json!({ "updated": updated }))
         .to_ext_response()
@@ -452,16 +385,15 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     // changed until the catalog validates as one atomic snapshot.
     let mut merged_config = agent.cfg.borrow().clone();
     let overrides = crate::config::ModelOverrideConfig::resolve(
-        merged_config.session_summary_model_override.as_deref(),
+        merged_config.session_title_model_override.as_deref(),
         &disk_config,
         merged_config.remote_settings.as_ref(),
     );
     merged_config.models = toml_config.models;
     merged_config.config_models = toml_config.config_models;
-    merged_config.model_providers = toml_config.model_providers;
     merged_config.auth_providers = toml_config.auth_providers;
     merged_config.config_warnings = toml_config.config_warnings;
-    merged_config.session_summary_model = overrides.session_summary;
+    merged_config.session_title_model = overrides.session_title;
     merged_config.image_description_model = overrides.image_description;
     merged_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
     crate::util::config::sync_campaign_fields(&mut merged_config);
@@ -494,7 +426,7 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         };
         let inference_idle_timeout = {
             let per_model =
-                crate::agent::config::find_model_by_id(&live_catalog, selected.0.as_ref())
+                crate::agent::config::find_model_by_catalog_id(&live_catalog, selected.0.as_ref())
                     .and_then(|entry| entry.info.inference_idle_timeout_secs);
             let remote = merged_config
                 .remote_settings
@@ -507,7 +439,7 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
             crate::util::config::resolve_auto_compact_threshold_percent(
                 &merged_config,
                 selected.0.as_ref(),
-                crate::agent::config::find_model_by_id(&live_catalog, selected.0.as_ref())
+                crate::agent::config::find_model_by_catalog_id(&live_catalog, selected.0.as_ref())
                     .map(|entry| &entry.info),
             );
         if handle.reasoning_effort.is_some() {
@@ -543,7 +475,6 @@ async fn handle_plugins_reload(agent: &MvpAgent) -> ExtResult {
         .next()
         .map(|h| std::path::PathBuf::from(&h.info.cwd));
     let mut plugins = agent.cfg.borrow().plugins.clone();
-    plugins.merge_claude_enabled_plugins(session_cwd.as_deref());
     let disk_cfg = plugins.to_discovery_config();
     // Folder-trust gates repo-local project plugins (hooks/MCP). Resolve and
     // record the verdict for this cwd (honoring the real remote), then gate
@@ -593,7 +524,6 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 
     let availability = agent.command_availability();
     let skills_config = agent.cfg.borrow().skills.clone();
-    let compat = agent.cfg.borrow().compat_resolved;
 
     // Chat product catalog never uses cwd plugin discovery / folder-trust.
     // Prefer kind=chat even when sessionId is set so the pull matches ACU.
@@ -603,7 +533,6 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
             &skills_config,
             None,
             availability,
-            compat,
             false,
             Some("chat"),
         )
@@ -627,7 +556,7 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 
     // For a given cwd, compute the plugin registry the same way a session would
     // at spawn time (via build_for_cwd) and the same way reload_plugins_impl does
-    // (ancestor project config walk + vendor compat merge). This is required so
+    // (ancestor project config walk). This is required so
     // that `grow/commands/list` (the pull used by embedding clients after session
     // start) returns plugin-provided slash commands for the target cwd.
     //
@@ -649,8 +578,8 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         let project_trusted =
             crate::agent::folder_trust::resolve_and_record(cwd, remote_settings.as_ref(), false);
 
-        // Effective [plugins] config (global + ancestor project configs +
-        // vendor compat merge), shared with reload_plugins_impl and the eager
+        // Effective [plugins] config (global + ancestor project configs),
+        // shared with reload_plugins_impl and the eager
         // fan-out so the menu agrees with each session's registry for this cwd.
         let disk_cfg = crate::config::resolve_effective_plugins_config(cwd).to_discovery_config();
 
@@ -669,7 +598,6 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         &skills_config,
         plugin_reg.as_deref(),
         availability,
-        compat,
         false,
         req.kind.as_deref(),
     )

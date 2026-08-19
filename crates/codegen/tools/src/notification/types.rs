@@ -142,8 +142,7 @@ pub struct BashExecutionBackgrounded {
     /// Human-readable description from the tool call (e.g. model-supplied
     /// `description` on `run_terminal_command`). Used by the pager for
     /// "Task started: …" / tasks-pane labels instead of the raw command.
-    /// `None` only on legacy paths that never had a model description
-    /// (e.g. reparented monitors).
+    /// `None` when the caller intentionally provides no display label.
     #[cfg_attr(
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")
@@ -270,6 +269,7 @@ pub struct LspServerFailed {
 /// Sent by the `SchedulerActor` when a recurring or one-shot task's interval elapses.
 #[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ScheduledTaskFired {
     /// The scheduled task's unique ID.
     pub task_id: String,
@@ -279,27 +279,25 @@ pub struct ScheduledTaskFired {
     pub human_schedule: String,
     /// RFC3339 timestamp of next fire (for live countdown viz).
     pub next_fire_at: Option<String>,
-    pub subagent_id: Option<String>,
-    #[cfg_attr(feature = "serde", serde(default))]
+    pub subagent_id: String,
     pub generation: String,
-    #[cfg_attr(feature = "serde", serde(default))]
     pub revision: u64,
 }
 
 /// Notification that a scheduled task was removed (deleted, expired, or one-shot completed).
 #[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ScheduledTaskRemoved {
     pub task_id: String,
-    #[cfg_attr(feature = "serde", serde(default))]
     pub generation: String,
-    #[cfg_attr(feature = "serde", serde(default))]
     pub revision: u64,
 }
 
 /// Notification that a scheduled task was created and should appear in the tasks pane.
 #[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ScheduledTaskCreated {
     /// The scheduled task's unique ID.
     pub task_id: String,
@@ -309,9 +307,7 @@ pub struct ScheduledTaskCreated {
     pub human_schedule: String,
     /// RFC3339 timestamp of next fire (for live countdown viz).
     pub next_fire_at: Option<String>,
-    #[cfg_attr(feature = "serde", serde(default))]
     pub generation: String,
-    #[cfg_attr(feature = "serde", serde(default))]
     pub revision: u64,
 }
 
@@ -330,23 +326,8 @@ pub struct MonitorEvent {
     pub event_text: String,
     /// Raw event text without XML wrapping. Used by the pager for stdout display.
     pub raw_text: String,
-    /// Session that owns the monitor task (from the task snapshot). `None` for
-    /// legacy backends. The bridge drops events whose owner isn't its session.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub owner_session_id: Option<String>,
-}
-
-/// A background subagent reached a terminal state while the parent held a handle.
-#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct SubagentCompleted {
-    pub subagent_id: String,
-    pub subagent_type: String,
-    pub description: String,
-    pub status: String,
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub error: Option<String>,
-    pub duration_ms: u64,
+    /// Session that owns the monitor task (from the task snapshot). Standalone
+    /// terminal backends may leave it unset; session bridges reject such events.
     #[cfg_attr(feature = "serde", serde(default))]
     pub owner_session_id: Option<String>,
 }
@@ -380,9 +361,6 @@ pub enum ToolNotification {
     /// Task completed notification which sends the exit code as well and notifies any client
     /// about the task being finished status
     TaskCompleted(TaskSnapshot),
-
-    /// A background subagent reached a terminal state.
-    SubagentCompleted(SubagentCompleted),
 
     /// The agent is asking the user a structured question.
     /// Consumers (gateway, TUI) use this to present the question UI
@@ -455,7 +433,6 @@ notification_variants! {
     BashExecutionFailed => BashExecutionFailed,
     FileWritten => FileWritten,
     TaskCompleted => TaskSnapshot,
-    SubagentCompleted => SubagentCompleted,
     UserQuestionAsked => UserQuestionAsked,
     LspServerStarting => LspServerStarting,
     LspServerReady => LspServerReady,
@@ -535,8 +512,8 @@ mod tests {
     }
 
     #[test]
-    fn base_output_reads_legacy_integer_array() {
-        let legacy = serde_json::json!({
+    fn base_output_rejects_integer_array() {
+        let array = serde_json::json!({
             "tool_call_id": "tc-1",
             "command": "echo hi",
             "output": [104, 101, 108, 108, 111],
@@ -544,14 +521,12 @@ mod tests {
             "truncated": false,
             "cwd": "/"
         });
-        let base: BashNotificationBase = serde_json::from_value(legacy).unwrap();
-        assert_eq!(base.output, b"hello".to_vec());
+        assert!(serde_json::from_value::<BashNotificationBase>(array).is_err());
     }
 
-    // Production path: legacy int-array through the tagged + flattened enum.
     #[test]
-    fn tool_notification_reads_legacy_integer_array() {
-        let legacy = serde_json::json!({
+    fn tool_notification_rejects_integer_array() {
+        let array = serde_json::json!({
             "type": "BashOutputChunk",
             "tool_call_id": "tc-1",
             "command": "echo hi",
@@ -560,13 +535,7 @@ mod tests {
             "truncated": false,
             "cwd": "/"
         });
-        let note: ToolNotification = serde_json::from_value(legacy).unwrap();
-        match note {
-            ToolNotification::BashOutputChunk(chunk) => {
-                assert_eq!(chunk.base.output, b"hello".to_vec());
-            }
-            other => panic!("expected BashOutputChunk, got {other:?}"),
-        }
+        assert!(serde_json::from_value::<ToolNotification>(array).is_err());
     }
 
     // Production path: base64 round-trip through the tagged + flattened enum.
@@ -593,12 +562,22 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_lifecycle_versions_default_for_legacy_json_and_round_trip() {
-        let legacy: ScheduledTaskRemoved =
-            serde_json::from_value(serde_json::json!({ "task_id": "loop-1" })).unwrap();
-        assert_eq!(legacy.generation, "");
-        assert_eq!(legacy.revision, 0);
-
+    fn scheduler_lifecycle_versions_are_required_and_round_trip() {
+        assert!(
+            serde_json::from_value::<ScheduledTaskRemoved>(serde_json::json!({
+                "task_id": "loop-1"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ScheduledTaskRemoved>(serde_json::json!({
+                "task_id": "loop-1",
+                "generation": "019b0000-0000-7000-8000-000000000000",
+                "revision": 7,
+                "obsolete": true
+            }))
+            .is_err()
+        );
         let current = ScheduledTaskRemoved {
             task_id: "loop-1".into(),
             generation: "019b0000-0000-7000-8000-000000000000".into(),

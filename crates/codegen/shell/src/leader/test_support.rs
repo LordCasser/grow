@@ -6,8 +6,7 @@
 //! timer-based, so `#[tokio::test(start_paused = true)]` auto-advance jumps
 //! the client-side timeouts under test without waking the fake.
 use super::protocol::{
-    ClientMessage, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ServerMessage, read_message,
-    write_message,
+    ClientMessage, LEADER_PROTOCOL_VERSION, ServerMessage, read_message, write_message,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -15,27 +14,17 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 /// Version metadata a fake leader reports in `Registered`.
 pub(crate) struct FakeVersions {
-    pub(crate) protocol_version: Option<u32>,
-    pub(crate) binary_version: Option<String>,
+    pub(crate) protocol_version: u32,
+    pub(crate) binary_version: String,
 }
 impl FakeVersions {
     /// The versions a same-build real leader would report (`run_leader` stamps
     /// `version::VERSION` into its metadata).
     pub(crate) fn current() -> Self {
         Self {
-            protocol_version: Some(LEADER_PROTOCOL_VERSION),
-            binary_version: Some(version::VERSION.to_string()),
+            protocol_version: LEADER_PROTOCOL_VERSION,
+            binary_version: version::VERSION.to_string(),
         }
-    }
-}
-/// `LeaderCapabilities` has no `Default` (serde-only defaults), so fakes build
-/// their capability shape through this helper.
-pub(crate) fn fake_caps(control_v1: bool, relaunch_v1: bool) -> LeaderCapabilities {
-    LeaderCapabilities {
-        control_v1,
-        runtime_cpu_profile: false,
-        profile_formats: Vec::new(),
-        relaunch_v1,
     }
 }
 /// Wire behavior of a [`spawn_fake_leader`] instance.
@@ -46,7 +35,7 @@ pub(crate) enum FakeLeaderBehavior {
     /// binary version) via an explicit [`FakeVersions`] — no sugar variants.
     Normal {
         versions: FakeVersions,
-        caps: LeaderCapabilities,
+        runtime_cpu_profile: bool,
     },
     /// Accepts the connection but never sends anything (hung pre-`Registered`).
     SilentAfterAccept,
@@ -114,14 +103,14 @@ async fn serve_client(
     fn registered(
         ready: bool,
         versions: &FakeVersions,
-        caps: &LeaderCapabilities,
+        runtime_cpu_profile: bool,
     ) -> ServerMessage {
         ServerMessage::Registered {
             client_id: 1,
             ready,
             leader_protocol_version: versions.protocol_version,
             leader_binary_version: versions.binary_version.clone(),
-            leader_capabilities: Some(caps.clone()),
+            runtime_cpu_profile,
         }
     }
     match behavior {
@@ -142,12 +131,19 @@ async fn serve_client(
             let _ = writer.flush().await;
             cancel.cancelled().await;
         }
-        FakeLeaderBehavior::Normal { versions, caps } => {
+        FakeLeaderBehavior::Normal {
+            versions,
+            runtime_cpu_profile,
+        } => {
             let register: Result<ClientMessage, _> = read_message(&mut reader).await;
             if register.is_err() {
                 return;
             }
-            let _ = write_message(&mut writer, &registered(true, versions, caps)).await;
+            let _ = write_message(
+                &mut writer,
+                &registered(true, versions, *runtime_cpu_profile),
+            )
+            .await;
             cancel.cancelled().await;
         }
         FakeLeaderBehavior::ReadyFalseForever => {
@@ -157,7 +153,7 @@ async fn serve_client(
             }
             let _ = write_message(
                 &mut writer,
-                &registered(false, &FakeVersions::current(), &fake_caps(true, false)),
+                &registered(false, &FakeVersions::current(), false),
             )
             .await;
             cancel.cancelled().await;
@@ -169,7 +165,7 @@ async fn serve_client(
             }
             let _ = write_message(
                 &mut writer,
-                &registered(true, &FakeVersions::current(), &fake_caps(true, false)),
+                &registered(true, &FakeVersions::current(), false),
             )
             .await;
         }

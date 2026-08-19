@@ -5,7 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use agent_client_protocol::{self as acp};
-use workspace::session::file_state::{FileSnapshot, FlexiblePath, RewindPoint};
+use paths::RelPathBuf;
+use workspace::session::file_state::{FileSnapshot, RewindPoint};
 
 use crate::session::info::Info;
 use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
@@ -176,14 +177,14 @@ pub fn write_rewind_jsonl(path: &Path, spec: &SessionSpec) {
     for p in 0..spec.rewind_points {
         let mut rp = RewindPoint::new(p);
         for f in 0..spec.files_per_rewind {
-            let fp =
-                FlexiblePath::Absolute(PathBuf::from(format!("/repo/src/module_{p}/file_{f}.rs")));
-            rp.add_snapshot(FileSnapshot::new_flexible(
-                fp.clone(),
+            let path = RelPathBuf::new(format!("src/module_{p}/file_{f}.rs"))
+                .expect("generated path is relative");
+            rp.add_snapshot(FileSnapshot::new(
+                path.clone(),
                 Some(filler(spec.file_content_len)),
             ));
-            rp.set_after_snapshot(FileSnapshot::new_flexible(
-                fp,
+            rp.set_after_snapshot(FileSnapshot::new(
+                path,
                 Some(filler(spec.file_content_len + 64)),
             ));
         }

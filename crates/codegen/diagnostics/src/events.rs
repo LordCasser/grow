@@ -71,7 +71,7 @@ pub enum PromptSuggestionAction {
 
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-pub enum YoloTrigger {
+pub enum PermissionModeTrigger {
     SlashCommand,
     ClientMeta,
     Pager,
@@ -134,8 +134,8 @@ pub enum HookOutcome {
     Blocked,
 }
 
-/// Outcome of one `PreToolUse` gate callback. Only `Denied` blocks the tool; the rest
-/// (including the `TimedOut`/`TransportError`/`Malformed`/`UnknownDecision` fail-open paths) let it run.
+/// Outcome of one `PreToolUse` gate callback. Only `Denied` blocks the tool; the
+/// timeout, transport, and malformed fail-open paths let it run.
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientHookGateOutcome {
@@ -144,7 +144,6 @@ pub enum ClientHookGateOutcome {
     TimedOut,
     TransportError,
     Malformed,
-    UnknownDecision,
 }
 
 #[derive(Serialize, Clone, Copy)]
@@ -297,10 +296,10 @@ pub struct PromptSuggestion {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-pub struct YoloToggled {
-    pub enabled: bool,
-    pub previous_state: bool,
-    pub trigger: YoloTrigger,
+pub struct PermissionModeChanged {
+    pub mode: PermissionMode,
+    pub previous_mode: PermissionMode,
+    pub trigger: PermissionModeTrigger,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -491,8 +490,6 @@ pub struct SubagentLaunched {
     pub subagent_id: String,
     pub parent_session_id: String,
     pub subagent_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub persona: Option<String>,
     pub fork_context: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_from: Option<String>,
@@ -1286,7 +1283,7 @@ pub struct InternalError {
 diagnostics_event!(PlanModeToggled, "plan_mode_toggled");
 diagnostics_event!(ContextualTip, "contextual_tip");
 diagnostics_event!(PromptSuggestion, "prompt_suggestion");
-diagnostics_event!(YoloToggled, "yolo_toggled");
+diagnostics_event!(PermissionModeChanged, "permission_mode_changed");
 diagnostics_event!(SlashCommandUsed, "slash_command_used");
 diagnostics_event!(PermissionPrompted, "permission_prompted");
 diagnostics_event!(PermissionDecisionPayload, "permission_decision");

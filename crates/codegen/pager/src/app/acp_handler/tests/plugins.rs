@@ -12,7 +12,7 @@
         modal.plugins_groups_seeded = true;
         modal
             .plugins_collapsed_groups
-            .insert("origin:user-claude".into());
+            .insert("origin:config".into());
         app.agents.get_mut(&AgentId(0)).unwrap().extensions_modal = Some(modal);
 
         let handled = handle(
@@ -21,7 +21,7 @@
                 GrowSessionUpdate::PluginsChanged {
                     plugins: vec![crate::views::extensions_modal::test_plugin_info(
                         "user-tool",
-                        Some(extension_types::PluginOrigin::UserGrow),
+                        extension_types::PluginOrigin::UserGrow,
                     )],
                 },
             ),
@@ -39,7 +39,7 @@
         }
         assert_eq!(
             modal.plugins_collapsed_groups,
-            std::collections::HashSet::from(["origin:user-claude".to_string()]),
+            std::collections::HashSet::from(["origin:config".to_string()]),
             "live PluginsChanged refresh must not touch collapse state"
         );
     }
@@ -60,11 +60,11 @@
                     plugins: vec![
                         crate::views::extensions_modal::test_plugin_info(
                             "user-tool",
-                            Some(extension_types::PluginOrigin::UserGrow),
+                            extension_types::PluginOrigin::UserGrow,
                         ),
                         crate::views::extensions_modal::test_plugin_info(
-                            "claude-tool",
-                            Some(extension_types::PluginOrigin::UserClaude),
+                            "custom-tool",
+                            extension_types::PluginOrigin::ConfigPath,
                         ),
                     ],
                 },
@@ -78,7 +78,7 @@
             modal.plugins_collapsed_groups,
             std::collections::HashSet::from([
                 "origin:user".to_string(),
-                "origin:user-claude".to_string()
+                "origin:config".to_string()
             ]),
             "push winning the first-load race must seed the collapsed default"
         );
@@ -103,7 +103,7 @@
                 GrowSessionUpdate::PluginsChanged {
                     plugins: vec![crate::views::extensions_modal::test_plugin_info(
                         "user-tool",
-                        Some(extension_types::PluginOrigin::UserGrow),
+                        extension_types::PluginOrigin::UserGrow,
                     )],
                 },
             ),
@@ -113,8 +113,7 @@
         let modal = app.agents[&AgentId(0)].extensions_modal.as_ref().unwrap();
         assert_eq!(
             modal.plugins_collapsed_groups,
-            std::collections::HashSet::from(["origin:user-claude".to_string()]),
+            std::collections::HashSet::from(["origin:config".to_string()]),
             "deliveries after the push-seed must preserve expand state"
         );
     }
-

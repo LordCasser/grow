@@ -109,12 +109,8 @@ mod tests {
         crate::app::bundle::BundleState {
             has_cache: false,
             version: String::new(),
-            personas: Vec::new(),
-            roles: Vec::new(),
             agents: Vec::new(),
             skills: Vec::new(),
-            persona_details: Vec::new(),
-            role_details: Vec::new(),
         };
 
     fn make_ctx<'a>(models: &'a ModelState) -> CommandExecCtx<'a> {
@@ -125,7 +121,7 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
-                yolo_mode: false,
+                permission_mode: shell::util::config::PermissionMode::Ask,
                 ..crate::settings::PagerLocalSnapshot::default()
             },
         }

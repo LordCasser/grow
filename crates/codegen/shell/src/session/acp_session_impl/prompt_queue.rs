@@ -25,7 +25,6 @@ impl SessionActor {
         task_wake_fallback: Option<TaskWakeFallback>,
         respond_to: oneshot::Sender<PromptTurnResult>,
         persist_ack: Option<oneshot::Sender<()>>,
-        parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     ) {
         tracing::info!("queueing prompt: {prompt_id}");
         let queue_depth = { self.state.lock().await.pending_inputs.len() };
@@ -38,41 +37,10 @@ impl SessionActor {
             })),
         );
 
-        // Log prompt to per-CWD fast history file immediately when queued
-        // (not in handle_prompt, because prompt might be cancelled before processing)
-        // Extract raw text from prompt_blocks (without <user_query> tags)
-        let raw_prompt_text: String = prompt_blocks
-            .iter()
-            .filter_map(|block| {
-                if let acp::ContentBlock::Text(t) = block {
-                    Some(t.text.trim())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
         // Bump before any await so a LocalSet recap cannot commit/emit after
         // this Prompt was accepted but before handle_prompt runs.
         if !origin.is_synthetic() {
             self.cancel_pending_recap_for_new_prompt();
-        }
-
-        // Don't write synthetic auto-wake prompts to prompt history.
-        if !origin.is_synthetic() && !raw_prompt_text.is_empty() && !self.startup_hints.is_subagent
-        {
-            let cwd = self.session_info.cwd.clone();
-            let session_id = self.session_info.id.to_string();
-            let is_bash = Self::extract_bash_command(&prompt_blocks).is_some();
-            // Await inline so the append is durable before quit drops the agent runtime's detached tasks.
-            let entry = crate::session::prompt_history::PromptEntry {
-                timestamp: chrono::Utc::now(),
-                session_id,
-                prompt: raw_prompt_text,
-                is_bash,
-            };
-            crate::session::prompt_history::append_prompt_async(cwd, entry).await;
         }
 
         if let crate::session::PromptOrigin::SubagentCompleted { subagent_id } = &origin {
@@ -194,7 +162,6 @@ impl SessionActor {
             task_wake_fallback,
             respond_to,
             persist_ack,
-            parsed_prompt_tx,
             queue_meta,
         };
         state.pending_inputs.push_back(item);

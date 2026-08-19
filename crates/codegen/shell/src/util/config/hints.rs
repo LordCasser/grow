@@ -24,7 +24,7 @@ impl WorktreeHintMode {
             other => {
                 tracing::debug!(
                     value = other,
-                    "unrecognised worktree_mode, defaulting to never"
+                    "unrecognised worktree hint mode, defaulting to never"
                 );
                 Self::Never
             }
@@ -41,8 +41,8 @@ impl WorktreeHintMode {
 
     /// Returns `(new_session_worktree_mode, fork_worktree_mode)`.
     ///
-    /// - `/new`: `new_session_worktree_mode`, else legacy `worktree_mode`, else `Never`.
-    /// - `/fork`: `fork_worktree_mode`, else legacy `worktree_mode`, else `Ask`.
+    /// - `/new`: `new_session_worktree_mode`, else `Never`.
+    /// - `/fork`: `fork_worktree_mode`, else `Ask`.
     pub fn resolve_pair(hints: Option<&TomlValue>) -> (Self, Self) {
         let get_str = |key: &str| -> Option<Self> {
             hints
@@ -50,13 +50,8 @@ impl WorktreeHintMode {
                 .and_then(|v| v.as_str())
                 .map(Self::from_config_str)
         };
-        let legacy = get_str("worktree_mode");
-        let new_session = get_str("new_session_worktree_mode")
-            .or(legacy)
-            .unwrap_or(Self::Never);
-        let fork = get_str("fork_worktree_mode")
-            .or(legacy)
-            .unwrap_or(Self::Ask);
+        let new_session = get_str("new_session_worktree_mode").unwrap_or(Self::Never);
+        let fork = get_str("fork_worktree_mode").unwrap_or(Self::Ask);
         (new_session, fork)
     }
 }

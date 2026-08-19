@@ -5,7 +5,7 @@
     fn follow_ups_render_chips_on_active_agent() {
         let mut app = make_app_with_agent("sess-1");
         let affected = handle_ext_notification(
-            &follow_ups_ext("resp-1", &["Tell me more", "Summarize"]),
+            &follow_ups_ext("sess-1", "p1", "resp-1", &["Tell me more", "Summarize"]),
             &mut app,
         );
         assert!(affected, "fresh chips on the active agent warrant a redraw");
@@ -15,6 +15,28 @@
             .expect("chips set on the active agent");
         assert_eq!(fu.response_id, "resp-1");
         assert_eq!(fu.suggestions, vec!["Tell me more", "Summarize"]);
+    }
+
+    #[test]
+    fn follow_ups_route_by_session_without_redrawing_foreground() {
+        let mut app = make_app_with_agent("sess-front");
+        insert_agent(&mut app, AgentId(1), Some("sess-background"));
+
+        let affected = handle_ext_notification(
+            &follow_ups_ext("sess-background", "p-bg", "resp-bg", &["Inspect"]),
+            &mut app,
+        );
+
+        assert!(!affected, "a background mutation does not redraw the foreground");
+        assert!(app.agents[&AgentId(0)].follow_ups.is_none());
+        assert_eq!(
+            app.agents[&AgentId(1)]
+                .follow_ups
+                .as_ref()
+                .expect("notification must land on the addressed session")
+                .response_id,
+            "resp-bg"
+        );
     }
 
     /// End-to-end through the wire: the stamped `promptId` flows from the
@@ -32,7 +54,7 @@
 
         // Active turn (p1) chips applied via the wire.
         assert!(handle_ext_notification(
-            &follow_ups_ext_with_prompt("resp-1", "p1", &["a"]),
+            &follow_ups_ext("sess-1", "p1", "resp-1", &["a"]),
             &mut app
         ));
         // Turn-boundary clear (keeps the seen ring).
@@ -42,7 +64,7 @@
         // (a) Re-delivery of the active turn re-renders.
         assert!(
             handle_ext_notification(
-                &follow_ups_ext_with_prompt("resp-1", "p1", &["a"]),
+                &follow_ups_ext("sess-1", "p1", "resp-1", &["a"]),
                 &mut app
             ),
             "active-turn re-delivery must re-render via promptId match"
@@ -67,7 +89,7 @@
         // (b) Prior turn (p1) replay must NOT revive.
         assert!(
             !handle_ext_notification(
-                &follow_ups_ext_with_prompt("resp-1", "p1", &["a"]),
+                &follow_ups_ext("sess-1", "p1", "resp-1", &["a"]),
                 &mut app
             ),
             "prior-turn replay must be rejected"
@@ -79,7 +101,9 @@
     fn follow_ups_replayed_meta_suppresses_chips() {
         let mut app = make_app_with_agent("sess-1");
         let params = serde_json::json!({
+            "sessionId": "sess-1",
             "response_id": "resp-1",
+            "promptId": "p1",
             "suggestions": [{ "label": "x" }],
             "_meta": { "grow/replayed": true },
         });
@@ -118,7 +142,7 @@
         // A label carrying an ESC-based SGR sequence and a newline: control
         // characters are stripped so a chip cannot inject terminal escapes.
         handle_ext_notification(
-            &follow_ups_ext("resp-1", &["safe\u{1b}[31mred\nmore"]),
+            &follow_ups_ext("sess-1", "p1", "resp-1", &["safe\u{1b}[31mred\nmore"]),
             &mut app,
         );
         let fu = app.agents[&AgentId(0)].follow_ups.as_ref().unwrap();
@@ -130,7 +154,7 @@
     #[test]
     fn follow_ups_empty_response_id_is_ignored() {
         let mut app = make_app_with_agent("sess-1");
-        let affected = handle_ext_notification(&follow_ups_ext("", &["x"]), &mut app);
+        let affected = handle_ext_notification(&follow_ups_ext("sess-1", "p1", "", &["x"]), &mut app);
         assert!(
             !affected,
             "without a response_id there is no newest-wins key"
@@ -141,7 +165,7 @@
     #[test]
     fn follow_ups_blank_labels_yield_no_chips() {
         let mut app = make_app_with_agent("sess-1");
-        let affected = handle_ext_notification(&follow_ups_ext("resp-1", &["   ", ""]), &mut app);
+        let affected = handle_ext_notification(&follow_ups_ext("sess-1", "p1", "resp-1", &["   ", ""]), &mut app);
         assert!(!affected);
         assert!(app.agents[&AgentId(0)].follow_ups.is_none());
     }
@@ -152,7 +176,7 @@
         // U+202E RIGHT-TO-LEFT OVERRIDE + U+200B ZERO WIDTH SPACE: stripped so
         // server text cannot visually disguise a leading `/` (Trojan Source).
         handle_ext_notification(
-            &follow_ups_ext("resp-1", &["\u{202e}/rm\u{200b}-rf"]),
+            &follow_ups_ext("sess-1", "p1", "resp-1", &["\u{202e}/rm\u{200b}-rf"]),
             &mut app,
         );
         let fu = app.agents[&AgentId(0)].follow_ups.as_ref().unwrap();
@@ -166,7 +190,7 @@
         let mut app = make_app_with_agent("sess-1");
         let labels: Vec<String> = (0..20).map(|i| format!("s{i}")).collect();
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        handle_ext_notification(&follow_ups_ext("resp-1", &refs), &mut app);
+        handle_ext_notification(&follow_ups_ext("sess-1", "p1", "resp-1", &refs), &mut app);
         assert_eq!(
             app.agents[&AgentId(0)]
                 .follow_ups
@@ -178,7 +202,7 @@
             "suggestion count capped at ingestion"
         );
         let long = "x".repeat(10_000);
-        handle_ext_notification(&follow_ups_ext("resp-2", &[&long]), &mut app);
+        handle_ext_notification(&follow_ups_ext("sess-1", "p1", "resp-2", &[&long]), &mut app);
         let label = &app.agents[&AgentId(0)]
             .follow_ups
             .as_ref()
@@ -196,13 +220,13 @@
         // could collide ids) so it can't bloat the retained seen ring.
         let mut app = make_app_with_agent("sess-1");
         let big = "r".repeat(super::MAX_RESPONSE_ID_LEN + 1);
-        let affected = handle_ext_notification(&follow_ups_ext(&big, &["x"]), &mut app);
+        let affected = handle_ext_notification(&follow_ups_ext("sess-1", "p1", &big, &["x"]), &mut app);
         assert!(!affected, "an oversized response_id must be rejected");
         assert!(app.agents[&AgentId(0)].follow_ups.is_none());
         // A sane-length id still works.
         let ok = "r".repeat(super::MAX_RESPONSE_ID_LEN);
         assert!(handle_ext_notification(
-            &follow_ups_ext(&ok, &["x"]),
+            &follow_ups_ext("sess-1", "p1", &ok, &["x"]),
             &mut app
         ));
         assert!(app.agents[&AgentId(0)].follow_ups.is_some());
@@ -212,7 +236,9 @@
     fn follow_ups_replayed_meta_false_renders() {
         let mut app = make_app_with_agent("sess-1");
         let params = serde_json::json!({
+            "sessionId": "sess-1",
             "response_id": "resp-1",
+            "promptId": "p1",
             "suggestions": [{ "label": "x" }],
             "_meta": { "grow/replayed": false },
         });
@@ -231,8 +257,8 @@
     fn follow_ups_per_element_malformed_is_ignored() {
         let mut app = make_app_with_agent("sess-1");
         for bad in [
-            serde_json::json!({ "response_id": "r", "suggestions": [{ "label": 7 }] }),
-            serde_json::json!({ "response_id": "r", "suggestions": [null] }),
+            serde_json::json!({ "sessionId": "sess-1", "promptId": "p1", "response_id": "r", "suggestions": [{ "label": 7 }] }),
+            serde_json::json!({ "sessionId": "sess-1", "promptId": "p1", "response_id": "r", "suggestions": [null] }),
         ] {
             let notif = acp::ExtNotification::new(
                 "grow/follow_ups",
@@ -249,7 +275,7 @@
     #[test]
     fn follow_ups_empty_array_renders_no_chips() {
         let mut app = make_app_with_agent("sess-1");
-        let affected = handle_ext_notification(&follow_ups_ext("resp-1", &[]), &mut app);
+        let affected = handle_ext_notification(&follow_ups_ext("sess-1", "p1", "resp-1", &[]), &mut app);
         assert!(!affected);
         assert!(app.agents[&AgentId(0)].follow_ups.is_none());
     }
@@ -257,9 +283,9 @@
     #[test]
     fn follow_ups_empty_for_current_response_clears_chips() {
         let mut app = make_app_with_agent("sess-1");
-        handle_ext_notification(&follow_ups_ext("resp-1", &["a"]), &mut app);
+        handle_ext_notification(&follow_ups_ext("sess-1", "p1", "resp-1", &["a"]), &mut app);
         assert!(app.agents[&AgentId(0)].follow_ups.is_some());
-        let affected = handle_ext_notification(&follow_ups_ext("resp-1", &[]), &mut app);
+        let affected = handle_ext_notification(&follow_ups_ext("sess-1", "p1", "resp-1", &[]), &mut app);
         assert!(affected, "empty for the shown response clears the chips");
         assert!(app.agents[&AgentId(0)].follow_ups.is_none());
     }
@@ -275,7 +301,7 @@
             let agent = app.agents.get_mut(&id).unwrap();
             agent.attached_as_viewer = true;
             agent.session.current_prompt_id = Some("p1".into());
-            agent.apply_follow_ups("resp-1".into(), vec!["old".into()]);
+            agent.apply_follow_ups("resp-1".into(), "p1", vec!["old".into()]);
         }
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = acp::SessionNotification::new(
@@ -300,10 +326,9 @@
             app.agents[&id].follow_ups.is_none(),
             "viewer adopting a new turn must clear the prior chips"
         );
-        let affected = handle_ext_notification(&follow_ups_ext("resp-2", &["new"]), &mut app);
+        let affected = handle_ext_notification(&follow_ups_ext("sess-1", "p2", "resp-2", &["new"]), &mut app);
         assert!(affected);
         let fu = app.agents[&id].follow_ups.as_ref().unwrap();
         assert_eq!(fu.response_id, "resp-2");
         assert_eq!(fu.suggestions, vec!["new"]);
     }
-

@@ -9,89 +9,52 @@ use crate::matcher::HookMatcher;
 
 pub use config::HookProvenance;
 
-/// Parsed `hooks` object. Unknown event names are skipped, not errors.
+/// Parsed `hooks` object. Event names and handler groups are exact.
 #[derive(Debug)]
 pub struct HooksMap {
     pub events: HashMap<HookEventName, Vec<MatcherGroup>>,
-    pub skipped_events: Vec<String>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GroupErrorPolicy {
-    Fail,
-    SkipEvent,
 }
 
 impl HooksMap {
     fn assemble<V>(
         entries: HashMap<String, V>,
         mut parse_groups: impl FnMut(V) -> Result<Vec<MatcherGroup>, String>,
-        group_errors: GroupErrorPolicy,
     ) -> Result<Self, String> {
         let mut events: HashMap<HookEventName, Vec<MatcherGroup>> = HashMap::new();
-        let mut skipped_events = Vec::new();
 
         for (key, val) in entries {
-            let event_name = match HookEventName::parse_key(&key) {
-                Some(name) => name,
-                None => {
-                    skipped_events.push(key);
-                    continue;
-                }
-            };
-
-            match parse_groups(val) {
-                Ok(groups) => events.entry(event_name).or_default().extend(groups),
-                Err(detail) => match group_errors {
-                    GroupErrorPolicy::Fail => {
-                        return Err(format!(
-                            "invalid matcher groups for event '{key}': {detail}"
-                        ));
-                    }
-                    GroupErrorPolicy::SkipEvent => {
-                        tracing::warn!(
-                            event = %key,
-                            error = %detail,
-                            "hooks: skipping malformed event in config layer (other events still load)"
-                        );
-                        skipped_events.push(key);
-                    }
-                },
-            }
+            let event_name = HookEventName::parse_key(&key)
+                .ok_or_else(|| format!("unrecognized hook event '{key}'"))?;
+            let groups = parse_groups(val)
+                .map_err(|detail| format!("invalid matcher groups for event '{key}': {detail}"))?;
+            events.entry(event_name).or_default().extend(groups);
         }
 
-        Ok(HooksMap {
-            events,
-            skipped_events,
-        })
+        Ok(HooksMap { events })
     }
 
     /// Parse a `hooks` object from JSON. A malformed event fails the whole parse.
     pub fn from_value(value: serde_json::Value) -> Result<Self, String> {
         let entries: HashMap<String, serde_json::Value> =
             serde_json::from_value(value).map_err(|e| format!("invalid hooks structure: {e}"))?;
-        Self::assemble(
-            entries,
-            |v| serde_json::from_value(v).map_err(|e| e.to_string()),
-            GroupErrorPolicy::Fail,
-        )
+        Self::assemble(entries, |v| {
+            serde_json::from_value(v).map_err(|e| e.to_string())
+        })
     }
 
-    /// Parse a `hooks` table from TOML. Unlike [`Self::from_value`], a malformed
-    /// event is skipped so one bad event can't drop the layer.
+    /// Parse a `hooks` table from TOML.
     pub fn from_toml_value(value: toml::Value) -> Result<Self, String> {
         let entries: HashMap<String, toml::Value> = value
             .try_into()
             .map_err(|e: toml::de::Error| format!("invalid hooks structure: {e}"))?;
-        Self::assemble(
-            entries,
-            |v| v.try_into().map_err(|e: toml::de::Error| e.to_string()),
-            GroupErrorPolicy::SkipEvent,
-        )
+        Self::assemble(entries, |v| {
+            v.try_into().map_err(|e: toml::de::Error| e.to_string())
+        })
     }
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatcherGroup {
     #[serde(default)]
     pub matcher: Option<String>,
@@ -99,6 +62,7 @@ pub struct MatcherGroup {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawHandler {
     #[serde(rename = "type")]
     pub handler_type: String,
@@ -170,6 +134,7 @@ impl std::str::FromStr for HandlerType {
 
 /// A validated hook specification, ready for the dispatcher.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpec {
     pub name: String,
     pub event: HookEventName,
@@ -196,9 +161,7 @@ pub struct HookSpec {
     /// plugin-injected < runner-injected at spawn (authentic identity always wins).
     pub extra_env: std::collections::HashMap<String, String>,
     /// The hook's origin and single source of truth for classification: `File`
-    /// (JSON files, agent frontmatter), a config tier, or `Plugin`. `#[serde(default)]`
-    /// reads pre-field wire specs as `File`.
-    #[serde(default)]
+    /// (JSON files, agent frontmatter), a config tier, or `Plugin`.
     pub layer: HookProvenance,
 }
 
@@ -232,7 +195,6 @@ pub fn hook_origin(spec: &HookSpec) -> HookOrigin {
         HookProvenance::Requirements => HookOrigin::Requirements,
         HookProvenance::User => HookOrigin::UserConfig,
         HookProvenance::Plugin => HookOrigin::Plugin,
-        HookProvenance::Unknown => HookOrigin::Unknown,
         HookProvenance::File => {
             let name = spec.name.as_str();
             if name.starts_with(GLOBAL_HOOK_PREFIX) {
@@ -282,14 +244,6 @@ pub fn parse_hooks_from_value_with_dir(
             );
         }
     };
-    if !hooks_map.skipped_events.is_empty() {
-        tracing::warn!(
-            source = %source_name,
-            skipped = ?hooks_map.skipped_events,
-            "hooks: skipped unrecognized event names (check for typos)"
-        );
-    }
-
     let name_prefix = error_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -335,13 +289,6 @@ pub fn parse_hooks_from_config_layers(
                 continue;
             }
         };
-        if !hooks_map.skipped_events.is_empty() {
-            tracing::warn!(
-                source = %source_name,
-                skipped = ?hooks_map.skipped_events,
-                "hooks: skipped unrecognized or malformed events in config layer"
-            );
-        }
         let (specs, errors) = build_specs(
             hooks_map,
             SpecContext {
@@ -373,10 +320,21 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
         }
     };
 
-    let hooks_value = match top_level.get("hooks") {
-        Some(v) => v.clone(),
-        None => return (specs, errors),
+    let Some(object) = top_level.as_object() else {
+        errors.push(HookError::ParseFile {
+            path: file_path.to_path_buf(),
+            detail: "hook file must be an object containing only 'hooks'".to_string(),
+        });
+        return (specs, errors);
     };
+    if object.len() != 1 || !object.contains_key("hooks") {
+        errors.push(HookError::ParseFile {
+            path: file_path.to_path_buf(),
+            detail: "hook file must contain exactly one top-level key: 'hooks'".to_string(),
+        });
+        return (specs, errors);
+    }
+    let hooks_value = object["hooks"].clone();
 
     let hooks_map: HooksMap = match HooksMap::from_value(hooks_value) {
         Ok(m) => m,
@@ -388,14 +346,6 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
             return (specs, errors);
         }
     };
-
-    if !hooks_map.skipped_events.is_empty() {
-        tracing::warn!(
-            file = %file_path.display(),
-            skipped = ?hooks_map.skipped_events,
-            "hooks: skipped unrecognized event names (check for typos)"
-        );
-    }
 
     let source_dir = file_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let file_stem = file_path
@@ -610,7 +560,7 @@ mod tests {
     fn config_layer_hook_parses_like_the_json_path() {
         let layer = config_layer(
             "managed",
-            "[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"bin/check.sh\"\ntimeout = 2\n",
+            "[[hooks.pre_tool_use]]\nmatcher = \"run_terminal_cmd\"\n[[hooks.pre_tool_use.hooks]]\ntype = \"command\"\ncommand = \"bin/check.sh\"\ntimeout = 2\n",
         );
         let (specs, errors) = parse_hooks_from_config_layers(std::slice::from_ref(&layer));
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
@@ -624,23 +574,21 @@ mod tests {
     }
 
     #[test]
-    fn config_layer_keeps_valid_events_when_one_is_malformed() {
-        // A config layer skips a malformed event and keeps the rest, unlike the
-        // JSON path which fails the whole file.
+    fn config_layer_rejects_all_events_when_one_is_malformed() {
         let layer = config_layer(
             "managed",
-            "hooks.PreToolUse = \"oops\"\n[[hooks.PostToolUse]]\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"ok.sh\"\n",
+            "hooks.pre_tool_use = \"oops\"\n[[hooks.post_tool_use]]\n[[hooks.post_tool_use.hooks]]\ntype = \"command\"\ncommand = \"ok.sh\"\n",
         );
-        let (specs, _errors) = parse_hooks_from_config_layers(std::slice::from_ref(&layer));
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].event, HookEventName::PostToolUse);
+        let (specs, errors) = parse_hooks_from_config_layers(std::slice::from_ref(&layer));
+        assert!(specs.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]
     fn config_layers_additive_and_dedup_keeps_higher_authority() {
         let mk = |src: &str, prov, cmd: &str| {
             let toml_src = format!(
-                "[[PreToolUse]]\n[[PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"{cmd}\"\n"
+                "[[pre_tool_use]]\n[[pre_tool_use.hooks]]\ntype = \"command\"\ncommand = \"{cmd}\"\n"
             );
             config::HookConfigLayer::new(
                 prov,
@@ -669,10 +617,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_claude_format_single_hook() {
+    fn parse_canonical_json_single_hook() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "matcher": "run_terminal_cmd",
                         "hooks": [
@@ -697,7 +645,7 @@ mod tests {
     fn parse_multiple_handlers_in_group() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "matcher": "Bash",
                         "hooks": [
@@ -719,7 +667,7 @@ mod tests {
     fn parse_empty_matcher_matches_all() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "matcher": "", "hooks": [{ "type": "command", "command": "a.sh" }] }
                 ]
             }
@@ -733,7 +681,7 @@ mod tests {
     fn parse_absent_matcher_matches_all() {
         let json = r#"{
             "hooks": {
-                "SessionStart": [
+                "session_start": [
                     { "hooks": [{ "type": "command", "command": "start.sh" }] }
                 ]
             }
@@ -747,13 +695,13 @@ mod tests {
     fn parse_default_timeout() {
         let json = r#"{
             "hooks": {
-                "SessionEnd": [
+                "session_end": [
                     { "hooks": [{ "type": "command", "command": "end.sh" }] }
                 ],
-                "Stop": [
+                "stop": [
                     { "hooks": [{ "type": "command", "command": "verify.sh" }] }
                 ],
-                "SubagentStop": [
+                "subagent_stop": [
                     { "hooks": [{ "type": "command", "command": "sub.sh" }] }
                 ]
             }
@@ -773,7 +721,7 @@ mod tests {
     fn session_start_matcher_compiles_and_tests_source() {
         let json = r#"{
             "hooks": {
-                "SessionStart": [
+                "session_start": [
                     { "matcher": "startup|resume", "hooks": [{ "type": "command", "command": "s.sh" }] }
                 ]
             }
@@ -787,30 +735,32 @@ mod tests {
     }
 
     #[test]
-    fn alias_event_keys_merge_groups() {
+    fn noncanonical_event_key_rejects_the_file() {
         let json = r#"{
             "hooks": {
                 "Stop": [
                     { "hooks": [{ "type": "command", "command": "a.sh" }] }
-                ],
-                "stop": [
-                    { "hooks": [{ "type": "command", "command": "b.sh" }] }
                 ]
             }
         }"#;
         let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
-        assert!(errors.is_empty());
-        assert_eq!(specs.len(), 2, "both groups must survive the key collision");
+        assert!(specs.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("unrecognized hook event 'Stop'")
+        );
     }
 
     #[test]
     fn stop_matcher_ignored_subagent_stop_matcher_kept() {
         let json = r#"{
             "hooks": {
-                "Stop": [
+                "stop": [
                     { "matcher": "*", "hooks": [{ "type": "command", "command": "s.sh" }] }
                 ],
-                "SubagentStop": [
+                "subagent_stop": [
                     { "matcher": "code-reviewer", "hooks": [{ "type": "command", "command": "r.sh" }] }
                 ]
             }
@@ -823,7 +773,7 @@ mod tests {
             .iter()
             .find(|s| s.command_raw.as_deref() == Some("s.sh"))
             .unwrap();
-        assert!(stop.matcher.is_none(), "Stop matcher must not compile");
+        assert!(stop.matcher.is_none(), "stop matcher must not compile");
         assert_eq!(
             stop.configured_matcher.as_deref(),
             Some("*"),
@@ -846,7 +796,7 @@ mod tests {
     fn reject_invalid_regex() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "matcher": "[invalid", "hooks": [{ "type": "command", "command": "c.sh" }] }
                 ]
             }
@@ -870,7 +820,7 @@ mod tests {
     fn reject_unsupported_handler_type() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "hooks": [{ "type": "prompt", "command": "test" }] }
                 ]
             }
@@ -888,7 +838,7 @@ mod tests {
     fn parse_http_handler_type() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "hooks": [{ "type": "http", "url": "https://hooks.example.com/check" }] }
                 ]
             }
@@ -908,7 +858,7 @@ mod tests {
     fn reject_http_handler_without_url() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "hooks": [{ "type": "http" }] }
                 ]
             }
@@ -922,7 +872,7 @@ mod tests {
     #[test]
     fn source_dir_from_file_path() {
         let json =
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x.sh"}]}]}}"#;
+            r#"{"hooks":{"session_start":[{"hooks":[{"type":"command","command":"x.sh"}]}]}}"#;
         let (specs, _) = parse_hook_file(json, Path::new("/home/user/.grow/hooks/safety.json"));
         assert_eq!(specs[0].source_dir, PathBuf::from("/home/user/.grow/hooks"));
     }
@@ -936,96 +886,48 @@ mod tests {
     }
 
     #[test]
-    fn no_hooks_key() {
+    fn hook_file_rejects_missing_hooks_key() {
         let json = r#"{"theme": "dark"}"#;
         let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
-        assert!(errors.is_empty());
         assert!(specs.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]
-    fn realistic_claude_settings_file() {
+    fn hook_file_rejects_foreign_top_level_fields() {
         let json = r#"{
-            "$schema": "https://json.schemastore.org/claude-code-settings.json",
-            "permissions": {
-                "allow": ["Bash(npm run build)", "Read(**/src/**)", "Edit(**/src/**)"],
-                "deny": ["Bash(rm -rf *)"]
-            },
-            "model": "claude-sonnet-4-20250514",
-            "apiKey": "sk-ant-REDACTED",
             "theme": "dark",
-            "customInstructions": "Always use TypeScript",
-            "mcpServers": {
-                "memory": {
-                    "command": "npx",
-                    "args": ["-y", "@anthropic/mcp-memory"]
-                }
-            },
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
-                        "matcher": "Bash",
+                        "matcher": "run_terminal_command",
                         "hooks": [
-                            {
-                                "type": "command",
-                                "command": ".claude/hooks/block-dangerous.sh",
-                                "timeout": 10
-                            }
-                        ]
-                    }
-                ],
-                "PostToolUse": [
-                    {
-                        "matcher": "Write|Edit",
-                        "hooks": [
-                            { "type": "command", "command": "bun run format || true" }
+                            { "type": "command", "command": "hooks/check.sh" }
                         ]
                     }
                 ]
-            },
-            "autoUpdates": true,
-            "diagnostics": { "enabled": false, "shareUsageData": false }
+            }
         }"#;
-        let (specs, errors) = parse_hook_file(json, Path::new("/home/user/.claude/settings.json"));
-        assert!(errors.is_empty(), "errors: {errors:?}");
-        assert_eq!(specs.len(), 2);
-        let has_pre = specs.iter().any(|s| s.event == HookEventName::PreToolUse);
-        let has_post = specs.iter().any(|s| s.event == HookEventName::PostToolUse);
-        assert!(has_pre, "expected PreToolUse hook");
-        assert!(has_post, "expected PostToolUse hook");
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/hooks.json"));
+        assert!(specs.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]
-    fn claude_settings_with_unknown_hook_events_skipped_leniently() {
+    fn hook_file_rejects_unknown_events() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     { "hooks": [{ "type": "command", "command": "check.sh" }] }
                 ],
-                "PermissionRequest": [
-                    { "matcher": "Bash", "hooks": [{ "type": "command", "command": "perm.sh" }] }
-                ],
-                "TaskCreated": [
-                    { "hooks": [{ "type": "command", "command": "task.sh" }] }
-                ],
-                "FileChanged": [
-                    { "matcher": ".envrc", "hooks": [{ "type": "command", "command": "env.sh" }] }
-                ],
-                "WorktreeCreate": [
-                    { "hooks": [{ "type": "command", "command": "wt.sh" }] }
-                ],
-                "PostToolUse": [
-                    { "hooks": [{ "type": "command", "command": "post.sh" }] }
+                "NotAnEvent": [
+                    { "hooks": [{ "type": "command", "command": "bad.sh" }] }
                 ]
             }
         }"#;
         let (specs, errors) = parse_hook_file(json, Path::new("/tmp/settings.json"));
-        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        assert_eq!(specs.len(), 2);
-        let has_pre = specs.iter().any(|s| s.event == HookEventName::PreToolUse);
-        let has_post = specs.iter().any(|s| s.event == HookEventName::PostToolUse);
-        assert!(has_pre, "expected PreToolUse hook");
-        assert!(has_post, "expected PostToolUse hook");
+        assert!(specs.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     /// A `command` referencing a process-env var must be expanded at load time,
@@ -1038,7 +940,7 @@ mod tests {
             let json = format!(
                 r#"{{
                     "hooks": {{
-                        "PreToolUse": [
+                        "pre_tool_use": [
                             {{ "hooks": [{{ "type": "command", "command": "${{{key}}}/check.sh" }}] }}
                         ]
                     }}
@@ -1064,7 +966,7 @@ mod tests {
             let json = format!(
                 r#"{{
                     "hooks": {{
-                        "PreToolUse": [
+                        "pre_tool_use": [
                             {{ "hooks": [{{ "type": "http", "url": "https://${{{key}}}/check" }}] }}
                         ]
                     }}
@@ -1090,7 +992,7 @@ mod tests {
     fn parse_hook_file_env_map_populates_extra_env() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "hooks": [
                             {
@@ -1123,7 +1025,7 @@ mod tests {
     fn parse_hook_file_env_map_feeds_command_expansion() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "hooks": [
                             {
@@ -1160,7 +1062,7 @@ mod tests {
             let json = format!(
                 r#"{{
                     "hooks": {{
-                        "PreToolUse": [
+                        "pre_tool_use": [
                             {{ "hooks": [{{ "type": "command", "command": "${{{key}}}/x.sh" }}] }}
                         ]
                     }}
@@ -1188,7 +1090,7 @@ mod tests {
             let json = format!(
                 r#"{{
                     "hooks": {{
-                        "PreToolUse": [
+                        "pre_tool_use": [
                             {{ "hooks": [{{ "type": "http", "url": "https://${{{key}}}/check" }}] }}
                         ]
                     }}
@@ -1208,7 +1110,7 @@ mod tests {
     fn parse_hook_file_env_null_treated_as_empty() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "hooks": [
                             { "type": "command", "command": "echo hi", "env": null }
@@ -1229,7 +1131,7 @@ mod tests {
     fn parse_hook_file_env_values_are_stored_verbatim() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "hooks": [
                             {
@@ -1259,7 +1161,7 @@ mod tests {
             let pattern = format!("foo{key}");
             let json = serde_json::json!({
                 "hooks": {
-                    "PreToolUse": [
+                    "pre_tool_use": [
                         {
                             "matcher": pattern,
                             "hooks": [
@@ -1291,7 +1193,7 @@ mod tests {
     fn parse_hook_file_env_value_must_be_string() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "hooks": [
                             {
@@ -1327,7 +1229,7 @@ mod tests {
     fn parse_hook_file_strips_runner_reserved_env_keys() {
         let json = r#"{
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {
                         "hooks": [
                             {
@@ -1338,7 +1240,6 @@ mod tests {
                                     "GROW_HOOK_NAME": "spoofed",
                                     "GROW_SESSION_ID": "spoofed",
                                     "GROW_WORKSPACE_ROOT": "/etc",
-                                    "CLAUDE_PROJECT_DIR": "/etc",
                                     "USER_KEY": "kept"
                                 }
                             }
@@ -1355,7 +1256,6 @@ mod tests {
             "GROW_HOOK_NAME",
             "GROW_SESSION_ID",
             "GROW_WORKSPACE_ROOT",
-            "CLAUDE_PROJECT_DIR",
         ] {
             assert!(
                 !specs[0].extra_env.contains_key(reserved),

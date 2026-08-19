@@ -1,11 +1,7 @@
 //! The shared bounded-retry summary-sampling loop.
 //!
-//! The canonical `sample → classify → retry` loop, used by **both** grow-build's
-//! full-replace pass ([`sample_full_replace_summary`](super::sample_full_replace_summary))
-//! and Grow chat's intra `Shared` summarizer
-//! ([`apply_intra_compaction`](crate::intra_compaction::apply_intra_compaction)).
-//! Centralising it here removes the two near-identical copies that previously
-//! lived in `code_compaction::compact` and `intra_compaction::compact`.
+//! The canonical `sample → classify → retry` loop used by a range-summary
+//! pass ([`generate_summary`](super::generate_summary)).
 //!
 //! Classification is uniform:
 //! - a usable, non-degenerate response wins immediately;
@@ -17,11 +13,8 @@
 //!   transient and retried.
 //!
 //! The loop is *content-neutral*: callers build the prompt, map the structured
-//! [`SampleRetryError`] onto their own error type, and decide whether to clean
-//! the winning summary (grow-build cleans in its assembler; intra cleans via
-//! [`format_compact_summary`](super::format_compact_summary)). Per-attempt
-//! diagnostics flows through the [`FullReplaceObserver`] seam; callers without
-//! per-attempt metrics (intra) pass `&()`.
+//! [`SampleRetryError`] onto their own error type. Per-attempt diagnostics flow
+//! through the [`SummaryObserver`] seam.
 
 use std::time::Duration;
 
@@ -31,7 +24,7 @@ use crate::prompt::CompactionPrompt;
 use crate::sampler::CompactionSampler;
 
 use super::failure::is_context_length_error;
-use super::observer::{FullReplaceAttemptOutcome, FullReplaceObserver};
+use super::observer::{SummaryAttemptOutcome, SummaryObserver};
 use super::summary::is_degenerate_summary;
 
 /// A successful retry-bounded sample: the **raw** winning summary (uncleaned)
@@ -89,7 +82,7 @@ pub async fn sample_summary_with_retries<T, S, O>(
 where
     T: Send + Sync,
     S: CompactionSampler<Item = T> + ?Sized,
-    O: FullReplaceObserver + ?Sized,
+    O: SummaryObserver + ?Sized,
 {
     let max_attempts = max_attempts.max(1);
     for attempt in 1..=max_attempts {
@@ -101,7 +94,7 @@ where
                 if is_degenerate_summary(&output.response) {
                     observer.on_attempt(
                         attempt,
-                        &FullReplaceAttemptOutcome::Degenerate {
+                        &SummaryAttemptOutcome::Degenerate {
                             summary: &output.response,
                             will_retry,
                         },
@@ -117,7 +110,7 @@ where
                 } else {
                     observer.on_attempt(
                         attempt,
-                        &FullReplaceAttemptOutcome::Success {
+                        &SummaryAttemptOutcome::Success {
                             summary: &output.response,
                         },
                     );
@@ -131,7 +124,7 @@ where
                 // Empty response is transient (sampling variance / mid-stream drop).
                 observer.on_attempt(
                     attempt,
-                    &FullReplaceAttemptOutcome::EmptyResponse { will_retry },
+                    &SummaryAttemptOutcome::EmptyResponse { will_retry },
                 );
                 if !will_retry {
                     return Err(SampleRetryError::Empty { attempts: attempt });
@@ -147,7 +140,7 @@ where
                 let retrying = will_retry && !deterministic;
                 observer.on_attempt(
                     attempt,
-                    &FullReplaceAttemptOutcome::Failure {
+                    &SummaryAttemptOutcome::Failure {
                         message: &message,
                         deterministic,
                         context_overflow,
@@ -221,12 +214,11 @@ mod tests {
             *self.calls.lock().unwrap() += 1;
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
-                return Err(CompactionSampleError::Other(anyhow::anyhow!("no more")));
+                return Err(CompactionSampleError::Transient("no more".into()));
             }
-            responses.remove(0).map(|response| LlmCompactionOutput {
-                response,
-                thinking: String::new(),
-            })
+            responses
+                .remove(0)
+                .map(|response| LlmCompactionOutput { response })
         }
     }
 
@@ -285,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn deterministic_error_short_circuits() {
         let sampler = MockSampler::scripted(vec![
-            Err(CompactionSampleError::Build("bad model".into())),
+            Err(CompactionSampleError::Deterministic("bad model".into())),
             Ok(healthy()),
         ]);
         let err = run(&sampler, 3).await.expect_err("should fail");
@@ -303,10 +295,9 @@ mod tests {
 
     #[tokio::test]
     async fn context_overflow_is_deterministic_and_flagged() {
-        let sampler =
-            MockSampler::scripted(vec![Err(CompactionSampleError::Other(anyhow::anyhow!(
-                "API error (status 400): prompt is too long for this model's context window"
-            )))]);
+        let sampler = MockSampler::scripted(vec![Err(CompactionSampleError::Deterministic(
+            "API error (status 400): prompt is too long for this model's context window".into(),
+        ))]);
         let err = run(&sampler, 3).await.expect_err("should fail");
         assert!(matches!(
             err,
@@ -321,12 +312,12 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_exceeds_budget_is_context_overflow() {
-        let sampler =
-            MockSampler::scripted(vec![Err(CompactionSampleError::Other(anyhow::anyhow!(
-                "API error (status 400 Bad Request): invalid-argument: \
-                 Failed to start sampling: [conversation] Current message \
-                 (1000000 tokens) exceeds budget (500000 tokens)"
-            )))]);
+        let sampler = MockSampler::scripted(vec![Err(CompactionSampleError::Deterministic(
+            "API error (status 400 Bad Request): invalid-argument: \
+             Failed to start sampling: [conversation] Current message \
+             (1000000 tokens) exceeds budget (500000 tokens)"
+                .into(),
+        ))]);
         let err = run(&sampler, 3).await.expect_err("should fail");
         assert!(matches!(
             err,

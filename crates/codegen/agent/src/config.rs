@@ -1,7 +1,6 @@
 //! Agent definition types — parsed from `.grow/agents/*.md` files.
 use crate::error::AgentBuildError;
 use crate::prompt::context::TemplateOverride;
-use crate::prompt::user_message::UserMessageTemplate;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -108,10 +107,6 @@ fn task_tool_config() -> ToolConfig {
 fn task_output_tool_config() -> ToolConfig {
     ToolConfig::from(&grow_build::TaskOutputTool).with_name("get_command_or_subagent_output")
 }
-/// `wait_tasks` → `wait_commands_or_subagents`.
-fn wait_tasks_tool_config() -> ToolConfig {
-    ToolConfig::from(&grow_build::WaitTasksTool).with_name("wait_commands_or_subagents")
-}
 /// `kill_task` → `kill_command_or_subagent`.
 fn kill_task_tool_config() -> ToolConfig {
     ToolConfig::from(&grow_build::KillTaskTool).with_name("kill_command_or_subagent")
@@ -130,10 +125,7 @@ pub fn workspace_grow_build_toolset() -> ToolServerConfig {
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
     tools.push((&grow_build::LspTool).into());
-    ToolServerConfig {
-        tools,
-        behavior_preset: None,
-    }
+    ToolServerConfig { tools }
 }
 /// Toolset for the `grow-computer` (workspace/sandbox) preset.
 fn grow_computer_toolset() -> ToolServerConfig {
@@ -148,10 +140,7 @@ fn grow_computer_toolset() -> ToolServerConfig {
         (&grow_build::KillTerminalCommandTool).into(),
         (&grow_build::GetTerminalCommandOutputTool).into(),
     ];
-    ToolServerConfig {
-        tools,
-        behavior_preset: None,
-    }
+    ToolServerConfig { tools }
 }
 /// Every named toolset preset, as `(normalized_name, config)` pairs.
 ///
@@ -217,12 +206,12 @@ fn default_grow_build_toolset() -> ToolServerConfig {
             kill_task_tool_config(),
             (&grow_build::TodoWriteTool).into(),
             task_output_tool_config(),
-            wait_tasks_tool_config(),
             task_tool_config(),
             (&grow_build::SchedulerCreateTool).into(),
             (&grow_build::SchedulerDeleteTool).into(),
             (&grow_build::SchedulerListTool).into(),
             (&grow_build::MonitorTool).into(),
+            (&tools::implementations::context_fetch::ContextFetchImpl).into(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
             (&grow_build::GetGoalTool).into(),
@@ -231,7 +220,6 @@ fn default_grow_build_toolset() -> ToolServerConfig {
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
         ],
-        behavior_preset: None,
     }
 }
 fn grow_build_concise_toolset() -> ToolServerConfig {
@@ -249,13 +237,13 @@ fn grow_build_concise_toolset() -> ToolServerConfig {
             (&grow_build::SchedulerDeleteTool).into(),
             (&grow_build::SchedulerListTool).into(),
             (&grow_build::MonitorTool).into(),
+            (&tools::implementations::context_fetch::ContextFetchImpl).into(),
             (&grow_build::GetGoalTool).into(),
             (&grow_build::UpdateGoalProgressTool).into(),
             (&grow_build::RequestGoalReplanTool).into(),
             (&grow_build::UpdateGoalTool).into(),
             (&grow_build::WorkflowTool).into(),
         ],
-        behavior_preset: None,
     }
 }
 /// Hashline toolset: anchor-based read/edit/search + standard utilities.
@@ -273,12 +261,12 @@ pub fn grow_build_hashline_toolset(
         kill_task_tool_config(),
         (&grow_build::TodoWriteTool).into(),
         task_output_tool_config(),
-        wait_tasks_tool_config(),
         task_tool_config(),
         (&grow_build::SchedulerCreateTool).into(),
         (&grow_build::SchedulerDeleteTool).into(),
         (&grow_build::SchedulerListTool).into(),
         (&grow_build::MonitorTool).into(),
+        (&tools::implementations::context_fetch::ContextFetchImpl).into(),
         (&search_tool::SearchTool).into(),
         (&use_tool::UseTool).into(),
         (&grow_build::GetGoalTool).into(),
@@ -287,10 +275,7 @@ pub fn grow_build_hashline_toolset(
         (&grow_build::UpdateGoalTool).into(),
         (&grow_build::WorkflowTool).into(),
     ]);
-    ToolServerConfig {
-        tools,
-        behavior_preset: None,
-    }
+    ToolServerConfig { tools }
 }
 /// Tool eligibility ceiling for the **explore** subagent.
 ///
@@ -306,10 +291,10 @@ fn explore_toolset() -> ToolServerConfig {
             (&grow_build::ReadFileTool).into(),
             (&grow_build::ListDirTool).into(),
             (&grow_build::GrepTool).into(),
+            (&tools::implementations::context_fetch::ContextFetchImpl).into(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
         ],
-        behavior_preset: None,
     }
 }
 
@@ -323,11 +308,11 @@ fn goal_planner_toolset() -> ToolServerConfig {
             (&grow_build::ReadFileTool).into(),
             (&grow_build::ListDirTool).into(),
             (&grow_build::GrepTool).into(),
+            (&tools::implementations::context_fetch::ContextFetchImpl).into(),
             (&grow_build::GetGoalTool).into(),
             (&grow_build::SubmitGoalPlanSectionTool).into(),
             (&grow_build::FinalizeGoalPlanTool).into(),
         ],
-        behavior_preset: None,
     }
 }
 
@@ -341,9 +326,9 @@ fn goal_verifier_toolset() -> ToolServerConfig {
             (&grow_build::ReadFileTool).into(),
             (&grow_build::ListDirTool).into(),
             (&grow_build::GrepTool).into(),
+            (&tools::implementations::context_fetch::ContextFetchImpl).into(),
             (&grow_build::GetGoalTool).into(),
         ],
-        behavior_preset: None,
     }
 }
 /// Per-Agent restriction on which peer definitions may be launched through
@@ -510,8 +495,6 @@ pub struct AgentDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_mode: Option<tool_types::SubagentCapabilityMode>,
     #[serde(default)]
-    pub permission_mode: PermissionMode,
-    #[serde(default)]
     pub skills: Vec<String>,
     /// When true (the default), the AgentBuilder discovers skills from CWD
     /// at build time and seeds mid-session skill discovery. When false,
@@ -552,10 +535,6 @@ pub struct AgentDefinition {
     pub isolation: Option<IsolationMode>,
     #[serde(default)]
     pub background: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_agent_color")]
-    pub color: Option<AgentColor>,
-    #[serde(default)]
-    pub initial_prompt: Option<String>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerRef>,
     #[serde(default)]
@@ -582,11 +561,6 @@ pub struct AgentDefinition {
     pub prompt_body: Option<String>,
     #[serde(skip)]
     pub system_prompt: TemplateOverride,
-    /// First-user-message template selector. `Default` (the default) lets
-    /// the shell layer build the legacy `<user_info>` + `<git_status>`
-    /// prefix; `Custom` uses a caller-supplied template string.
-    #[serde(default)]
-    pub user_message_template: UserMessageTemplate,
     /// Where this definition was loaded from, optional if built in agent definition
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -639,7 +613,8 @@ pub enum PromptComposition {
     #[default]
     Extend,
     /// Skip optional standard guidance and use the body as the complete role
-    /// layer. Mandatory foundation, audience, and runtime context still apply.
+    /// layer. Mandatory foundation, audience, active Behavior, and session
+    /// extensions still apply.
     Full,
 }
 fn default_prompt_composition() -> PromptComposition {
@@ -750,30 +725,6 @@ impl<'de> Deserialize<'de> for McpInheritance {
         deserializer.deserialize_any(McpInheritanceVisitor)
     }
 }
-/// Permission mode. Only `BypassPermissions` is wired at spawn; others are forward-compat.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize, strum::EnumCount)]
-#[serde(rename_all = "camelCase")]
-pub enum PermissionMode {
-    #[default]
-    Default,
-    AcceptEdits,
-    /// Background classifier reviews tool calls.
-    Auto,
-    /// Silently deny non-pre-approved tools.
-    DontAsk,
-    BypassPermissions,
-}
-impl PermissionMode {
-    pub const VALID_VALUES: &[&str] = &[
-        "default",
-        "acceptEdits",
-        "auto",
-        "dontAsk",
-        "bypassPermissions",
-    ];
-}
-const _: () =
-    assert!(PermissionMode::VALID_VALUES.len() == <PermissionMode as strum::EnumCount>::COUNT);
 #[derive(
     Debug,
     Clone,
@@ -822,66 +773,6 @@ impl IsolationMode {
 }
 const _: () =
     assert!(IsolationMode::VALID_VALUES.len() == <IsolationMode as strum::EnumCount>::COUNT);
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Deserialize,
-    serde::Serialize,
-    AsRefStr,
-    EnumString,
-    IntoStaticStr,
-    strum::EnumCount,
-)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
-pub enum AgentColor {
-    Red,
-    Blue,
-    Green,
-    Yellow,
-    Purple,
-    Orange,
-    Pink,
-    Cyan,
-}
-impl AgentColor {
-    pub const VALID_VALUES: &[&str] = &[
-        "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
-    ];
-}
-const _: () = assert!(AgentColor::VALID_VALUES.len() == <AgentColor as strum::EnumCount>::COUNT);
-/// Never fails: `color` is decorative, but a rejected value fails the whole
-/// frontmatter parse, and discovery skips agents that fail to parse — so a
-/// typo'd or hex color would silently make the agent unspawnable.
-///
-/// Frontmatter is only ever decoded by `serde_yaml`, so the intermediate value
-/// is captured as `serde_yaml::Value` (total for YAML — tagged scalars and
-/// maps with non-string keys included, which have no `serde_json::Value`
-/// form). Unrecognized values are dropped to `None` with a warning rather
-/// than mapped to a stand-in color the author never wrote.
-fn deserialize_agent_color<'de, D>(deserializer: D) -> Result<Option<AgentColor>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use std::str::FromStr;
-    let Some(value) = Option::<serde_yaml::Value>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
-    let parsed = value
-        .as_str()
-        .and_then(|name| AgentColor::from_str(name.trim()).ok());
-    if parsed.is_none() {
-        tracing::warn!(
-            color = ?value,
-            valid = ?AgentColor::VALID_VALUES,
-            "unrecognized agent color, ignoring"
-        );
-    }
-    Ok(parsed)
-}
 /// Agent memory scope. Distinct from `storage::MemoryScope` (global-vs-workspace write target).
 #[derive(
     Debug,
@@ -1140,7 +1031,6 @@ impl AgentDefinition {
             .map_err(|e| AgentBuildError::ParseError(e.to_string()))?;
         def.resolve_declared_toolset()?;
         def.name = file_stem_agent_id(path)?;
-        def.permission_mode = PermissionMode::Default;
         def.prompt_body = None;
         def.system_prompt = TemplateOverride::None;
         def.source_path = Some(path.to_path_buf());
@@ -1173,9 +1063,7 @@ impl AgentDefinition {
             .map_err(|e| AgentBuildError::ParseError(e.to_string()))?;
         def.resolve_declared_toolset()?;
         // File definitions are prompt profiles. Models and permissions remain
-        // session/workspace state even when compatibility frontmatter carries
-        // similarly named fields.
-        def.permission_mode = PermissionMode::Default;
+        // session/workspace state and are rejected by this schema.
         def.prompt_body = prompt_body;
         def.plugin_name = None;
         Ok(def)
@@ -1271,23 +1159,8 @@ impl AgentDefinition {
         tools.retain(|tool| !tool_config_matches(&self.disallowed_tools, tool));
 
         if !self.tools.is_empty() {
-            let present_kinds: HashSet<_> = tools.iter().filter_map(|tool| tool.kind).collect();
-            let mut allowed_kinds = HashSet::new();
-            for entry in &self.tools {
-                if tools.iter().any(|tool| tool_config_eq(entry, tool)) {
-                    continue;
-                }
-                match tools::types::kind_for(entry) {
-                    Some(kind) if present_kinds.contains(&kind) => {
-                        allowed_kinds.insert(kind);
-                    }
-                    Some(_) => {}
-                    None => {}
-                }
-            }
             tools.retain(|tool| {
                 tool_config_matches(&self.tools, tool)
-                    || tool.kind.is_some_and(|kind| allowed_kinds.contains(&kind))
                     || matches!(
                         tool.kind,
                         Some(
@@ -1335,18 +1208,13 @@ impl AgentDefinition {
     }
     /// True iff this agent's wire format is non-interchangeable with the
     /// stock harness, so a client-supplied `_meta.agentProfile` must NOT
-    /// override it. Strict iff any of: bespoke `system_prompt` template,
-    /// bespoke `user_message_template`, or curated toolset
-    /// (`!inject_default_tools`). Stock `grow-build*` agents leave all
-    /// three at defaults and are non-strict.
+    /// override it. Strict iff either the system prompt is bespoke or the
+    /// toolset is curated (`!inject_default_tools`).
     pub fn is_strict_harness(&self) -> bool {
         use crate::prompt::context::TemplateOverride;
-        use crate::prompt::user_message::UserMessageTemplate;
         let prompt_is_custom = !matches!(self.system_prompt, TemplateOverride::None);
-        let user_template_is_custom =
-            !matches!(self.user_message_template, UserMessageTemplate::Default);
         let toolset_is_curated = !self.inject_default_tools;
-        prompt_is_custom || user_template_is_custom || toolset_is_curated
+        prompt_is_custom || toolset_is_curated
     }
     /// Swap the definition's file tools for the equivalents in `file_tools`
     /// (hashline vs standard), slot by slot — never granting a slot the
@@ -1382,7 +1250,6 @@ impl AgentDefinition {
             tool_config: default_grow_build_toolset(),
             authored_capability_tools: None,
             capability_mode: None,
-            permission_mode: PermissionMode::Default,
             skills: vec![],
             agents_md: true,
             discover_skills: true,
@@ -1395,8 +1262,6 @@ impl AgentDefinition {
             max_turns: None,
             isolation: None,
             background: None,
-            color: None,
-            initial_prompt: None,
             mcp_servers: vec![],
             mcp_inheritance: McpInheritance::All,
             hooks: None,
@@ -1407,7 +1272,6 @@ impl AgentDefinition {
             prompt_body: None,
             system_prompt: TemplateOverride::None,
             source_path: None,
-            user_message_template: UserMessageTemplate::Default,
             scope: AgentScope::BuiltIn,
         }
     }
@@ -1465,7 +1329,6 @@ impl AgentDefinition {
     ///   "name": "my-agent",
     ///   "description": "A custom agent profile.",
     ///   "promptComposition": "extend",
-    ///   "permissionMode": "dontAsk",
     ///   "promptBody": "You are a specialized coding assistant..."
     /// }
     /// ```
@@ -1488,7 +1351,6 @@ impl AgentDefinition {
             }
         }
         def.resolve_declared_toolset()?;
-        def.permission_mode = PermissionMode::Default;
         def.scope = AgentScope::BuiltIn;
         Ok(def)
     }
@@ -1683,7 +1545,6 @@ promptComposition: full
 tools:
   - read_file
   - grep
-permissionMode: dontAsk
 agentsMd: false
 subagentOnly: true
 ---
@@ -1694,7 +1555,6 @@ You are a test agent.
         assert_eq!(def.name, "test-agent");
         assert_eq!(def.description, "A test agent");
         assert_eq!(def.prompt_composition, PromptComposition::Full);
-        assert_eq!(def.permission_mode, PermissionMode::Default);
         assert!(!def.agents_md);
         assert!(def.subagent_only);
         assert_eq!(def.prompt_body.as_deref(), Some("You are a test agent."));
@@ -1719,8 +1579,6 @@ You are a test agent.
         assert_eq!(def.max_turns, Some(40));
         assert_eq!(def.isolation, Some(IsolationMode::Worktree));
         assert_eq!(def.background, Some(false));
-        assert_eq!(def.color, Some(AgentColor::Green));
-        assert!(def.initial_prompt.is_some());
         assert_eq!(def.skills, ["coding"]);
         assert!(def.discover_skills);
         assert!(def.inherit_skills);
@@ -1729,7 +1587,6 @@ You are a test agent.
         assert!(def.inject_default_tools);
         assert!(!def.tools.is_empty());
         assert_eq!(def.disallowed_tools, ["deploy_app"]);
-        assert!(def.tool_config.behavior_preset.is_none());
         assert_eq!(def.additional_tools.len(), 2);
         assert!(def.tool_config.tools.len() > def.additional_tools.len());
         assert_eq!(def.mcp_servers.len(), 2);
@@ -1747,15 +1604,6 @@ You are a test agent.
         assert_eq!(hook_specs.len(), 2);
         assert_eq!(def.memory, Some(MemoryScope::Project));
         assert!(def.completion_requirement.is_some());
-        assert!(matches!(
-            def.user_message_template,
-            UserMessageTemplate::Custom(_)
-        ));
-        assert_eq!(
-            def.permission_mode,
-            PermissionMode::Default,
-            "Agent files must not override session permission state"
-        );
     }
     #[test]
     fn primary_eligibility_uses_hard_tool_eligibility_not_subagent_startup_mode() {
@@ -1918,8 +1766,6 @@ Agent.
         assert!(def.max_turns.is_none());
         assert!(def.isolation.is_none());
         assert!(def.background.is_none());
-        assert!(def.color.is_none());
-        assert!(def.initial_prompt.is_none());
         assert!(def.memory.is_none());
         assert!(def.hooks.is_none());
     }
@@ -1932,8 +1778,6 @@ effort: high
 maxTurns: 10
 isolation: worktree
 background: true
-color: blue
-initialPrompt: "hello world"
 ---
 
 Agent body.
@@ -1943,8 +1787,6 @@ Agent body.
         assert_eq!(def.max_turns, Some(10));
         assert_eq!(def.isolation, Some(IsolationMode::Worktree));
         assert_eq!(def.background, Some(true));
-        assert_eq!(def.color, Some(AgentColor::Blue));
-        assert_eq!(def.initial_prompt.as_deref(), Some("hello world"));
     }
     #[test]
     fn test_parse_minimal_definition() {
@@ -2011,15 +1853,6 @@ description: Minimal agent
                 "isolation: {iso}"
             );
         }
-        for color in AgentColor::VALID_VALUES {
-            let c = format!("---\nname: t\ndescription: t\ncolor: {color}\n---\n");
-            let parsed = AgentDefinition::parse(&c).unwrap().color;
-            assert_eq!(
-                parsed.map(<&'static str>::from),
-                Some(*color),
-                "color: {color}"
-            );
-        }
         for memory in MemoryScope::VALID_VALUES {
             let c = format!("---\nname: t\ndescription: t\nmemory: {memory}\n---\n");
             assert!(
@@ -2036,33 +1869,6 @@ description: No name
 "#;
         let def = AgentDefinition::parse(content).unwrap();
         assert!(def.name.is_empty());
-    }
-    #[test]
-    fn unparseable_color_is_dropped_instead_of_dropping_the_agent() {
-        for (declared, expected) in [
-            ("Purple", Some(AgentColor::Purple)),
-            ("  CYAN  ", Some(AgentColor::Cyan)),
-            ("teal", None),
-            ("\"#ff0000\"", None),
-            ("chartreuse", None),
-            ("42", None),
-            ("[red, blue]", None),
-            ("!custom x", None),
-            ("{1: 2}", None),
-        ] {
-            let c = format!("---\nname: t\ndescription: t\ncolor: {declared}\n---\n");
-            let def = AgentDefinition::parse(&c)
-                .unwrap_or_else(|e| panic!("color {declared} must not fail the parse: {e}"));
-            assert_eq!(def.color, expected, "color: {declared}");
-            assert_eq!(def.name, "t");
-        }
-    }
-    #[test]
-    fn absent_or_null_color_stays_none() {
-        let def = AgentDefinition::parse("---\nname: t\ndescription: t\n---\n").unwrap();
-        assert!(def.color.is_none());
-        let def = AgentDefinition::parse("---\nname: t\ndescription: t\ncolor:\n---\n").unwrap();
-        assert!(def.color.is_none());
     }
     #[test]
     fn test_parse_missing_name() {
@@ -2105,12 +1911,16 @@ unknownField: value
     #[test]
     fn test_unsupported_frontmatter_fields_are_rejected() {
         for field in [
+            "color",
+            "initialPrompt",
             "mode",
             "model",
             "variant",
             "permission",
+            "permissionMode",
             "permissions",
             "request",
+            "userMessageTemplate",
         ] {
             let content = format!("---\nname: test\ndescription: Test\n{field}: value\n---\n");
             assert!(
@@ -2186,14 +1996,6 @@ description: Test default tool config
         );
     }
     #[test]
-    fn test_permission_mode_round_trips() {
-        for v in PermissionMode::VALID_VALUES {
-            let content = format!("---\nname: test\ndescription: Test\npermissionMode: {v}\n---\n");
-            AgentDefinition::parse(&content)
-                .unwrap_or_else(|e| panic!("PermissionMode '{v}' failed parse: {e}"));
-        }
-    }
-    #[test]
     fn test_prompt_composition_round_trips() {
         for (yaml_val, expected) in [
             ("extend", PromptComposition::Extend),
@@ -2238,7 +2040,6 @@ description: Test default tool config
             "name": "grow-build",
             "description": "Multi-surface coding agent.",
             "promptComposition": "extend",
-            "permissionMode": "dontAsk",
             "agentsMd": true,
             "promptBody": "You are a coding assistant."
         });
@@ -2270,16 +2071,14 @@ description: Test default tool config
         );
     }
     #[test]
-    fn test_from_json_ignores_permission_mode() {
+    fn test_from_json_rejects_permission_mode() {
         let json = serde_json::json!({
             "name": "auto-accept-agent",
             "description": "Agent with dontAsk permission mode",
             "permissionMode": "dontAsk",
             "promptBody": "## Auto-accept Mode"
         });
-        let def = AgentDefinition::from_json(&json).unwrap();
-        assert_eq!(def.permission_mode, PermissionMode::Default);
-        assert_eq!(def.prompt_body.as_deref(), Some("## Auto-accept Mode"));
+        assert!(AgentDefinition::from_json(&json).is_err());
     }
     #[test]
     fn test_from_json_empty_prompt_body_is_none() {
@@ -2315,9 +2114,9 @@ description: Test default tool config
     #[test]
     fn to_json_value_roundtrips_through_from_json() {
         let mut original = AgentDefinition::parse(
-                "---\nname: test-agent\ndescription: A test\npermissionMode: dontAsk\n---\nYou are a helper.",
-            )
-            .unwrap();
+            "---\nname: test-agent\ndescription: A test\n---\nYou are a helper.",
+        )
+        .unwrap();
         original.tools = vec!["read_file".to_string(), "grep".to_string()];
         original.disallowed_tools = vec!["custom_tool".to_string()];
         let json = original.to_json_value();
@@ -2325,7 +2124,6 @@ description: Test default tool config
         assert_eq!(recovered.name, "test-agent");
         assert_eq!(recovered.description, "A test");
         assert_eq!(recovered.prompt_body.as_deref(), Some("You are a helper."));
-        assert_eq!(recovered.permission_mode, PermissionMode::Default);
         assert_eq!(recovered.tools, vec!["read_file", "grep"]);
         assert_eq!(recovered.disallowed_tools, vec!["custom_tool"]);
     }

@@ -52,16 +52,13 @@ fn resolve_config(cfg: &AgentConfig) -> AgentConfig {
 
     // Unit tests must not inherit machine-global managed settings or
     // requirements (for example a developer's pinned default model).
-    let (managed_enforced, requirements_enforced) = if cfg!(test) {
-        (Vec::new(), Vec::new())
+    let requirements_enforced = if cfg!(test) {
+        Vec::new()
     } else {
-        (
-            crate::config::apply_managed_settings_features(&mut cfg),
-            crate::config::apply_requirements(&mut cfg),
-        )
+        crate::config::apply_requirements(&mut cfg)
     };
 
-    for e in managed_enforced.iter().chain(&requirements_enforced) {
+    for e in &requirements_enforced {
         tracing::info!(field = %e.path, value = %e.value, source = %e.source, "policy override");
     }
 
@@ -97,7 +94,5 @@ fn init_process(cfg: &AgentConfig) {
 
         let grow_home = crate::util::grow_home::grow_home();
         crate::builtin::extract_builtin_files(&grow_home);
-
-        crate::extensions::marketplace::purge_default_skills_installs(&grow_home);
     });
 }

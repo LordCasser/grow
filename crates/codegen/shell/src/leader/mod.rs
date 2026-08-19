@@ -39,7 +39,7 @@
 //!
 //! // Connect to existing leader or spawn a new one
 //! let caps = ClientCapabilities {
-//!     yolo_mode: true,
+//!     permission_mode: diagnostics::enums::PermissionMode::AlwaysApprove,
 //!     default_model: Some("grow-3-fast".to_string()),
 //! };
 //! let conn = connect_or_spawn("my-client", ClientMode::Stdio, caps).await?;
@@ -65,7 +65,7 @@ pub use lock::{
 };
 pub use protocol::{
     ClientCapabilities, ClientId, ClientMode, ControlCommand, ControlPayload,
-    LEADER_PROTOCOL_VERSION, LeaderCapabilities, ShutdownReason,
+    LEADER_PROTOCOL_VERSION, ShutdownReason,
 };
 use serde::{Deserialize, Serialize};
 pub use server::{
@@ -82,8 +82,6 @@ use tracing::{debug, info, warn};
 pub use transport::listener_is_ready;
 const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// Same source the leader reports, so adoption compares versions like-for-like.
-const CLIENT_LEADER_VERSION: &str = version::VERSION;
 /// Max wait for an evicted leader to exit before force-killing (relaunch drain ~5s).
 const EVICT_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the SAME live grow flock-holder may stay unconnectable before
@@ -99,12 +97,6 @@ pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {
         (Ok(leader), Ok(baseline)) => leader < baseline,
         _ => false,
     }
-}
-/// Evict a discovered leader only if it runs a strictly-older parseable version
-/// than this client — newer client replaces older leader, never the reverse
-/// (anti-thrash, converges to newest). No/unparseable version → keep.
-fn should_evict(leader_version: Option<&str>, client_version: &str) -> bool {
-    leader_version.is_some_and(|v| leader_is_older_than(v, client_version))
 }
 /// Base delay between reconnection attempts.
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
@@ -236,35 +228,14 @@ async fn fetch_live_leader_info(socket_path: &Path) -> Result<LiveLeaderInfo, Le
     })?;
     let result = async {
         let registration = client.registration();
-        let protocol_version = registration.leader_protocol_version.ok_or_else(|| {
-            LeaderTargetError::new(
-                LeaderTargetErrorCode::UnsupportedProtocol,
-                format!(
-                    "leader at {} did not advertise a control protocol version",
-                    socket_path.display()
-                ),
-            )
-        })?;
-        if protocol_version < LEADER_PROTOCOL_VERSION {
+        let protocol_version = registration.leader_protocol_version;
+        if protocol_version != LEADER_PROTOCOL_VERSION {
             return Err(LeaderTargetError::new(
                 LeaderTargetErrorCode::UnsupportedProtocol,
                 format!(
                     "leader at {} uses unsupported protocol version {}",
                     socket_path.display(),
                     protocol_version
-                ),
-            ));
-        }
-        let control_v1 = registration
-            .leader_capabilities
-            .as_ref()
-            .is_some_and(|capabilities| capabilities.control_v1);
-        if !control_v1 {
-            return Err(LeaderTargetError::new(
-                LeaderTargetErrorCode::UnsupportedProtocol,
-                format!(
-                    "leader at {} does not advertise control_v1 support",
-                    socket_path.display()
                 ),
             ));
         }
@@ -916,102 +887,6 @@ async fn wait_for_pid_exit(pid: u32, timeout: Duration) {
         "Evicted leader still alive after grace; reclaiming socket anyway"
     );
 }
-/// Whether the leader on `conn` is below this client's version floor (see
-/// [`should_evict`]).
-fn should_evict_conn(conn: &LeaderConnection) -> bool {
-    should_evict(
-        conn.registration().leader_binary_version.as_deref(),
-        CLIENT_LEADER_VERSION,
-    )
-}
-/// Ask a stale leader to vacate so it releases the flock: graceful
-/// `RelaunchForUpdate` if relaunch-capable (the leader dedupes concurrent
-/// requests and re-checks the directional guard, so this is idempotent and never
-/// downgrades), else SIGTERM its pid. Best-effort and non-waiting — the caller
-/// retries the spawn loop, where the replacement is created under the flock.
-async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
-    let leader_version = conn.registration().leader_binary_version.clone();
-    let (method, outcome) = if conn.registration().supports_relaunch() {
-        let outcome = match conn
-            .send_control(ControlCommand::RelaunchForUpdate {
-                to_version: CLIENT_LEADER_VERSION.to_string(),
-            })
-            .await
-        {
-            Ok(Ok(ControlPayload::Relaunching { .. })) => "accepted",
-            Ok(Ok(ControlPayload::RelaunchDeclined { .. })) => "declined",
-            Ok(Ok(_)) | Ok(Err(_)) => "send_failed",
-            Err(e) => {
-                debug!(error = %e, "Relaunch request to stale leader failed");
-                "send_failed"
-            }
-        };
-        ("relaunch", outcome)
-    } else {
-        let outcome = match pid {
-            Some(pid) => match crate::util::kill_process_by_pid(pid) {
-                Ok(()) => "signaled",
-                Err(e) => {
-                    warn!(error = %e, pid, "Failed to signal stale leader to exit");
-                    "signal_failed"
-                }
-            },
-            None => "signal_failed",
-        };
-        ("sigterm", outcome)
-    };
-    ::diagnostics::unified_log::warn(
-        "leader.evict.vacate_requested",
-        None,
-        Some(serde_json::json!({
-            "method": method,
-            "outcome": outcome,
-            "leader_pid": pid,
-            "leader_version": leader_version,
-            "client_version": CLIENT_LEADER_VERSION,
-        })),
-    );
-}
-/// Evict a below-floor leader that holds the socket but NOT the flock (the caller
-/// MUST hold the flock, so this teardown is serialized against other clients).
-/// Signals it to vacate, waits for the pid to exit, then re-sends SIGTERM if it
-/// overran the grace window, so the caller can reclaim the socket and respawn.
-async fn evict_leader(conn: LeaderConnection, lock: &LeaderLock) {
-    let pid = lock.read_pid();
-    let leader_version = conn.registration().leader_binary_version.clone();
-    request_leader_vacate(&conn, pid).await;
-    drop(conn);
-    let wait_start = std::time::Instant::now();
-    let outcome = if let Some(pid) = pid {
-        wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
-        if !crate::util::is_process_alive(pid) {
-            "exited"
-        } else if let Err(e) = crate::util::kill_process_by_pid(pid) {
-            warn!(error = %e, pid, "Failed to re-signal (SIGTERM) stale leader");
-            "timed_out"
-        } else {
-            wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
-            if crate::util::is_process_alive(pid) {
-                "timed_out"
-            } else {
-                "resignaled_sigterm"
-            }
-        }
-    } else {
-        "exited"
-    };
-    ::diagnostics::unified_log::warn(
-        "leader.evict.completed",
-        None,
-        Some(serde_json::json!({
-            "outcome": outcome,
-            "leader_pid": pid,
-            "leader_version": leader_version,
-            "client_version": CLIENT_LEADER_VERSION,
-            "waited_ms": wait_start.elapsed().as_millis() as u64,
-        })),
-    );
-}
 /// PID-keyed timer state: the holder PID being timed and when we first saw it
 /// live-but-unconnectable.
 type ZombieTimer = Option<(u32, Instant)>;
@@ -1064,8 +939,15 @@ fn zombie_evict_decision(
 /// so the holder is unconfirmable and this returns `None` (eviction skipped),
 /// accepting that a genuine zombie there is not auto-killed.
 fn live_grow_lock_holder(lock: &LeaderLock) -> Option<u32> {
-    let file_pid = lock.read_pid()?;
+    let file_pid = live_grow_pid_from_lock(lock)?;
     let pid = evictable_holder(file_pid, confirmed_flock_holder(lock.lock_path()))?;
+    Some(pid)
+}
+/// Read a live grow PID from a contended leader lock. This is used only after
+/// the caller failed to acquire that exact lock and completed a socket handshake
+/// proving the current generation speaks an incompatible protocol.
+fn live_grow_pid_from_lock(lock: &LeaderLock) -> Option<u32> {
+    let pid = lock.read_pid()?;
     (crate::util::is_process_alive(pid) && crate::util::is_grow_process_strict(pid)).then_some(pid)
 }
 /// Safety gate: a file PID is evictable only when the confirmed flock `holder` is
@@ -1148,14 +1030,13 @@ fn parse_flock_holder(proc_locks: &str, major: u64, minor: u64, inode: u64) -> O
     }
     None
 }
-/// Max zombie-eviction attempts against the SAME PID before `connect_or_spawn`
-/// surfaces an error instead of looping forever.
-const MAX_ZOMBIE_EVICT_ATTEMPTS: u32 = 3;
+/// Max eviction attempts against the same unusable leader PID before
+/// `connect_or_spawn` surfaces an error instead of looping forever.
+const MAX_UNUSABLE_EVICT_ATTEMPTS: u32 = 3;
 /// Max times `connect_or_spawn` will self-spawn a leader that fails to become
 /// connectable before surfacing an error. Bounds a persistent spawn/bind failure
 /// (bad socket-dir perms, exec fault in `run_leader`) that would otherwise
-/// re-fork every `SPAWN_WAIT_TIMEOUT` forever; still allows the intended
-/// single-retry after a transient same-version sibling race.
+/// re-fork every `SPAWN_WAIT_TIMEOUT` forever.
 const MAX_SELF_SPAWN_ATTEMPTS: u32 = 3;
 /// Records an eviction attempt against `pid`; returns `false` once the per-PID
 /// budget is exhausted. Attempts reset when the target PID changes.
@@ -1177,27 +1058,34 @@ fn is_connect_level_failure(error: &ConnectionError) -> bool {
         ConnectionError::Timeout | ConnectionError::Client(ClientError::Connect(_, _))
     )
 }
+fn is_incompatible_protocol_failure(error: &ConnectionError) -> bool {
+    matches!(
+        error,
+        ConnectionError::Client(ClientError::IncompatibleProtocol(_))
+    )
+}
 /// Policy refusals that can never succeed on reconnect retry (not zombie-evictable).
 fn is_terminal_refusal(error: &ConnectionError) -> bool {
     matches!(error, ConnectionError::SandboxConfinement(_))
 }
-/// Evict a suspected zombie leader (holds the flock but is not connectable).
+/// Evict a verified grow process that owns an unusable leader generation.
 /// SIGTERM, wait, then escalate to SIGKILL if it overran the grace window.
-async fn evict_zombie_leader(pid: u32, sock_path: &Path, waited: Duration) {
+async fn evict_unusable_leader(pid: u32, sock_path: &Path, reason: &str, waited: Duration) {
     use crate::util::KillSignal;
     warn!(
         pid,
         socket = %sock_path.display(),
-        "Suspected zombie leader (holds lock, not connectable past deadline); evicting"
+        reason,
+        "Evicting unusable leader"
     );
     if let Err(e) = crate::util::kill_process_with_signal(pid, KillSignal::Term) {
-        warn!(error = %e, pid, "Failed to SIGTERM suspected zombie leader");
+        warn!(error = %e, pid, reason, "Failed to SIGTERM unusable leader");
     }
     wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
     let outcome = if !crate::util::is_process_alive(pid) {
         "exited"
     } else if let Err(e) = crate::util::kill_process_with_signal(pid, KillSignal::Kill) {
-        warn!(error = %e, pid, "Failed to SIGKILL suspected zombie leader");
+        warn!(error = %e, pid, reason, "Failed to SIGKILL unusable leader");
         "sigkill_failed"
     } else {
         wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
@@ -1208,13 +1096,14 @@ async fn evict_zombie_leader(pid: u32, sock_path: &Path, waited: Duration) {
         }
     };
     ::diagnostics::unified_log::warn(
-        "leader.zombie.evicted",
+        "leader.unusable.evicted",
         None,
         Some(serde_json::json!({
-            "zombie_pid": pid,
+            "leader_pid": pid,
             "socket_path": sock_path.display().to_string(),
+            "reason": reason,
             "outcome": outcome,
-            "client_version": CLIENT_LEADER_VERSION,
+            "client_version": version::VERSION,
             "waited_ms": waited.as_millis() as u64,
         })),
     );
@@ -1231,7 +1120,7 @@ async fn evict_zombie_leader(pid: u32, sock_path: &Path, waited: Duration) {
 ///
 /// * `client_type` - Identifier for the client type (e.g., "grow-tui", "vscode")
 /// * `mode` - Communication mode (Stdio or Headless)
-/// * `capabilities` - Client capabilities (e.g., yolo_mode) to register with the leader
+/// * `capabilities` - Client capabilities (e.g., always_approve_mode) to register with the leader
 pub async fn connect_or_spawn(
     client_type: &str,
     mode: ClientMode,
@@ -1260,15 +1149,11 @@ pub async fn connect_or_spawn(
         if !skip_connect {
             match connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await {
                 Ok(conn) => {
-                    if !should_evict_conn(&conn) {
-                        info!(
-                            elapsed_ms = start.elapsed().as_millis() as u64,
-                            "Adopted leader"
-                        );
-                        return Ok(conn);
-                    }
-                    drop(conn);
-                    replacing_stale = true;
+                    info!(
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "Adopted leader"
+                    );
+                    return Ok(conn);
                 }
                 Err(e) => {
                     debug!(error = %e, "Connection to existing socket failed");
@@ -1282,37 +1167,8 @@ pub async fn connect_or_spawn(
     loop {
         match lock.try_acquire() {
             Ok(true) => {
-                if crate::leader::transport::listener_is_ready(&sock_path)
-                    && lock.read_pid().is_some_and(crate::util::is_process_alive)
-                    && let Ok(conn) =
-                        connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await
-                {
-                    if !should_evict_conn(&conn) {
-                        if let Err(e) = lock.release() {
-                            warn!(error = %e, "Failed to release lock after adopting leader");
-                        }
-                        let elapsed_ms = start.elapsed().as_millis() as u64;
-                        info!(
-                            elapsed_ms,
-                            "Adopted sibling-spawned leader after eviction race"
-                        );
-                        ::diagnostics::unified_log::info(
-                            "leader.spawn.sibling_adopted",
-                            None,
-                            Some(serde_json::json!({
-                                "leader_pid": lock.read_pid(),
-                                "leader_version": conn
-                                    .registration()
-                                    .leader_binary_version
-                                    .as_deref(),
-                                "client_version": CLIENT_LEADER_VERSION,
-                                "elapsed_ms": elapsed_ms,
-                            })),
-                        );
-                        return Ok(conn);
-                    }
-                    evict_leader(conn, &lock).await;
-                    replacing_stale = true;
+                if let Err(error) = lock.cleanup_socket() {
+                    warn!(error = %error, "Failed to remove stale leader socket");
                 }
                 info!("Acquired lock, spawning leader subprocess");
                 if let Err(e) = lock.release() {
@@ -1351,8 +1207,8 @@ pub async fn connect_or_spawn(
                         "leader.spawn.replacement",
                         None,
                         Some(serde_json::json!({
-                            "reason": "version_floor",
-                            "client_version": CLIENT_LEADER_VERSION,
+                            "reason": "incompatible_protocol",
+                            "client_version": version::VERSION,
                             "elapsed_ms": elapsed_ms,
                         })),
                     );
@@ -1369,18 +1225,25 @@ pub async fn connect_or_spawn(
         match wait_for_socket_connectable(&sock_path, client_type, mode, capabilities.clone()).await
         {
             Ok(conn) => {
-                zombie_timer = None;
-                if !should_evict_conn(&conn) {
-                    info!(
-                        elapsed_ms = start.elapsed().as_millis() as u64,
-                        "Adopted leader"
-                    );
-                    return Ok(conn);
+                info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Adopted leader"
+                );
+                return Ok(conn);
+            }
+            Err(e) if is_incompatible_protocol_failure(&e) => {
+                let Some(pid) = live_grow_pid_from_lock(&lock) else {
+                    return Err(e);
+                };
+                if !register_evict_attempt(&mut evict_attempts, pid, MAX_UNUSABLE_EVICT_ATTEMPTS) {
+                    return Err(ConnectionError::SpawnFailed(format!(
+                        "incompatible leader pid {pid} could not be evicted after \
+                         {MAX_UNUSABLE_EVICT_ATTEMPTS} attempts"
+                    )));
                 }
-                request_leader_vacate(&conn, lock.read_pid()).await;
-                drop(conn);
+                evict_unusable_leader(pid, &sock_path, "incompatible_protocol", Duration::ZERO)
+                    .await;
                 replacing_stale = true;
-                tokio::time::sleep(SPAWN_POLL_INTERVAL).await;
                 continue;
             }
             Err(e) if is_connect_level_failure(&e) => {
@@ -1395,14 +1258,14 @@ pub async fn connect_or_spawn(
                         if !register_evict_attempt(
                             &mut evict_attempts,
                             pid,
-                            MAX_ZOMBIE_EVICT_ATTEMPTS,
+                            MAX_UNUSABLE_EVICT_ATTEMPTS,
                         ) {
                             return Err(ConnectionError::SpawnFailed(format!(
                                 "zombie leader pid {pid} could not be evicted after \
-                                 {MAX_ZOMBIE_EVICT_ATTEMPTS} attempts"
+                                 {MAX_UNUSABLE_EVICT_ATTEMPTS} attempts"
                             )));
                         }
-                        evict_zombie_leader(pid, &sock_path, waited).await;
+                        evict_unusable_leader(pid, &sock_path, "unreachable", waited).await;
                         continue;
                     }
                     ZombieAction::Wait => {
@@ -1562,6 +1425,7 @@ pub(crate) async fn wait_for_socket_connectable(
         if crate::leader::transport::listener_is_ready(sock_path) {
             match connect_to_leader(sock_path, client_type, mode, capabilities.clone()).await {
                 Ok(conn) => return Ok(conn),
+                Err(error) if is_incompatible_protocol_failure(&error) => return Err(error),
                 Err(e) => {
                     debug!(error = %e, "Connection attempt failed, retrying");
                     last_error = Some(e);
@@ -1578,9 +1442,7 @@ pub(crate) async fn wait_for_socket_connectable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::leader::test_support::{
-        FakeLeaderBehavior, FakeVersions, fake_caps, spawn_fake_leader,
-    };
+    use crate::leader::test_support::{FakeLeaderBehavior, spawn_fake_leader};
     use std::fs;
     use tempfile::TempDir;
     const TEST_DEADLINE: Duration = Duration::from_secs(30);
@@ -1717,6 +1579,11 @@ mod tests {
         assert!(!is_connect_level_failure(
             &ConnectionError::SandboxConfinement("strict")
         ));
+        let incompatible = ConnectionError::Client(ClientError::IncompatibleProtocol(
+            "protocol mismatch".into(),
+        ));
+        assert!(!is_connect_level_failure(&incompatible));
+        assert!(is_incompatible_protocol_failure(&incompatible));
     }
     #[test]
     fn terminal_refusal_classification() {
@@ -1794,32 +1661,6 @@ mod tests {
         assert!(!leader_is_older_than("0.2.0", "0.2.0"));
         assert!(!leader_is_older_than("unknown", "0.2.0"));
         assert!(!leader_is_older_than("0.1.0", "not-a-version"));
-    }
-    /// Evicted only when strictly older than the client (anti-thrash).
-    #[test]
-    fn should_evict_only_strictly_older_leaders() {
-        let client = "0.1.220";
-        assert!(!should_evict(None, client));
-        assert!(should_evict(Some("0.1.219"), client));
-        assert!(should_evict(Some("0.1.9"), "0.1.10"));
-        assert!(!should_evict(Some("0.1.220"), client));
-        assert!(!should_evict(Some("0.1.221"), client));
-        assert!(!should_evict(Some("0.1.219"), "0.1.218"));
-        assert!(should_evict(Some("0.1.218"), "0.1.219"));
-        assert!(!should_evict(Some("unknown"), client));
-    }
-    /// Under-lock eviction decision for the concurrent-clients race: against one
-    /// stale leader, only clients strictly newer than it evict; same-or-older
-    /// clients keep it. With flock mutual exclusion (lock.rs
-    /// `try_acquire_fails_when_held`) and eviction running only under the flock,
-    /// this yields exactly one evictor+spawner — no split-brain.
-    #[test]
-    fn concurrent_clients_only_newer_evict_same_stale_leader() {
-        let stale_leader = "0.1.219";
-        assert!(should_evict(Some(stale_leader), "0.1.220"));
-        assert!(should_evict(Some(stale_leader), "0.2.0"));
-        assert!(!should_evict(Some(stale_leader), stale_leader));
-        assert!(!should_evict(Some(stale_leader), "0.1.200"));
     }
     #[tokio::test]
     async fn wait_for_pid_exit_returns_immediately_for_dead_pid() {
@@ -1901,88 +1742,8 @@ mod tests {
         );
         fake.cancel();
     }
-    /// Version-floor decision against a live registration: only a strictly
-    /// older parseable leader version trips eviction; dev/`unknown` and
-    /// missing versions are kept (anti-thrash, both directions).
-    ///
-    /// Fake versions are derived RELATIVE to the runtime
-    /// `CLIENT_LEADER_VERSION` (cargo builds see the crate version, bazel
-    /// fastbuild sees the unstamped `0.0.0`), with each expectation following
-    /// structurally from how the case was constructed — never from re-running
-    /// the comparison under test.
-    #[tokio::test]
-    async fn should_evict_conn_decides_from_live_fake_registrations() {
-        let client: semver::Version = CLIENT_LEADER_VERSION
-            .parse()
-            .expect("CLIENT_LEADER_VERSION parses as semver");
-        let newer = format!("{}.{}.{}", client.major, client.minor, client.patch + 1);
-        let older = if client.patch > 0 {
-            Some(format!(
-                "{}.{}.{}",
-                client.major,
-                client.minor,
-                client.patch - 1
-            ))
-        } else if client.minor > 0 {
-            Some(format!("{}.{}.0", client.major, client.minor - 1))
-        } else if client.major > 0 {
-            Some(format!("{}.0.0", client.major - 1))
-        } else if client.pre.is_empty() {
-            Some(format!(
-                "{}.{}.{}-0",
-                client.major, client.minor, client.patch
-            ))
-        } else {
-            None
-        };
-        let mut cases: Vec<(Option<String>, bool)> = vec![
-            // Same version as this client → keep.
-            (Some(CLIENT_LEADER_VERSION.to_string()), false),
-            // Newer than this client → keep (never downgrade).
-            (Some(newer), false),
-            // Dev build reports "unknown" → keep (unparseable is left alone).
-            (Some("unknown".to_string()), false),
-            // Legacy leader without version metadata → keep (safe fallback).
-            (None, false),
-        ];
-        if let Some(older) = older {
-            cases.push((Some(older), true));
-        }
-        for (i, (binary_version, expect_evict)) in cases.into_iter().enumerate() {
-            let temp = TempDir::new().unwrap();
-            let sock_path = temp.path().join(format!("evict-{i}.sock"));
-            let versions = FakeVersions {
-                protocol_version: Some(LEADER_PROTOCOL_VERSION),
-                binary_version: binary_version.clone(),
-            };
-            let fake = spawn_fake_leader(
-                sock_path.clone(),
-                FakeLeaderBehavior::Normal {
-                    versions,
-                    caps: fake_caps(true, false),
-                },
-            )
-            .await;
-            let conn = connect_to_leader(
-                &sock_path,
-                "test",
-                ClientMode::Stdio,
-                ClientCapabilities::default(),
-            )
-            .await
-            .unwrap();
-            assert_eq!(
-                should_evict_conn(&conn),
-                expect_evict,
-                "leader version {binary_version:?} vs client {CLIENT_LEADER_VERSION}"
-            );
-            drop(conn);
-            fake.cancel();
-        }
-    }
     /// A leader that closes right after `Registered` still yields a usable
-    /// registration (version metadata for the eviction decision) — the
-    /// disconnect is observed afterwards, not during connect.
+    /// registration; disconnect is observed after the handshake.
     #[tokio::test]
     async fn close_after_register_still_exposes_registration_metadata() {
         let temp = TempDir::new().unwrap();
@@ -1997,11 +1758,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            conn.registration().leader_binary_version.as_deref(),
-            Some(CLIENT_LEADER_VERSION)
-        );
-        assert!(!should_evict_conn(&conn));
+        assert_eq!(conn.registration().leader_binary_version, version::VERSION);
         fake.cancel();
     }
     #[tokio::test]

@@ -76,7 +76,7 @@ async fn minimal_flush_left_no_hpad() {
     harness.inject_keys(b"\x1b").expect("esc closes dropdown");
     harness.update(Duration::from_millis(100));
 
-    // Permission modal: a scripted `run_terminal_command` tool call (no --yolo)
+    // Permission modal: a scripted `run_terminal_command` tool call (no --permission-mode always-approve)
     // opens the prompt-replacing permission modal. Its rows must be flush-left
     // too — previously the whole modal sat at the layout hpad (2 columns in).
     // The accent `┃` paints the modal's first column, so a correct row has zero

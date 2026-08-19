@@ -1,6 +1,6 @@
 //! Project plugin trust management.
 //!
-//! Plugins from project directories (`.grow/plugins/`, `.claude/plugins/`)
+//! Plugins from project directories (`.grow/plugins/`)
 //! are an execution surface.  A cloned repository could contain plugins with
 //! hook scripts or MCP server commands that run arbitrary code.
 //!
@@ -201,8 +201,7 @@ impl TrustStore {
                 if trimmed.is_empty() || trimmed.starts_with('#') {
                     return None;
                 }
-                // Entries may predate dunce (Windows \\?\ verbatim form); simplify so lookups match.
-                Some(dunce::simplified(Path::new(trimmed)).to_path_buf())
+                Some(PathBuf::from(trimmed))
             })
             .collect()
     }
@@ -281,27 +280,6 @@ mod tests {
 
         let store = TrustStore::load_from(trust_file);
         assert!(store.is_trusted(&plugin_dir));
-    }
-
-    /// Legacy entries written under std canonicalize use the verbatim `\\?\`
-    /// form; `read_trust_file` must normalize them so lookups keep matching.
-    #[cfg(windows)]
-    #[test]
-    fn legacy_verbatim_entry_is_trusted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let trust_file = tmp.path().join("trusted-plugins");
-
-        let plugin_dir = tmp.path().join("legacy-plugin");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        let canonical = dunce::canonicalize(&plugin_dir).unwrap();
-        std::fs::write(&trust_file, format!("\\\\?\\{}\n", canonical.display())).unwrap();
-
-        let mut store = TrustStore::load_from(trust_file.clone());
-        assert!(store.is_trusted(&plugin_dir));
-
-        // Revoke rewrites the file in simplified form, dropping the legacy line.
-        store.revoke_trust(&plugin_dir).unwrap();
-        assert!(!TrustStore::load_from(trust_file).is_trusted(&plugin_dir));
     }
 
     #[test]

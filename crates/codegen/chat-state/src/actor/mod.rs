@@ -19,7 +19,7 @@ use tracing::debug;
 use crate::commands::ChatStateCommand;
 use crate::events::ChatStateEvent;
 use crate::handle::ChatStateHandle;
-use crate::persistence::ChatPersistence;
+use crate::persistence::TimelinePersistence;
 use crate::types::{PruningConfig, TurnCapture};
 use crate::{Timeline, TimelineEvent};
 
@@ -34,7 +34,7 @@ pub struct ChatStateActor {
     /// Pruning configuration for tool-result trimming.
     pruning_config: PruningConfig,
     /// Persistence implementation — owned exclusively, called with `&mut self`.
-    persistence: Box<dyn ChatPersistence>,
+    persistence: Box<dyn TimelinePersistence>,
     /// Channel to receive commands from handles.
     cmd_rx: mpsc::UnboundedReceiver<ChatStateCommand>,
     /// Channel to send events to the session main loop.
@@ -46,21 +46,32 @@ pub struct ChatStateActor {
 impl ChatStateActor {
     /// Commit an already validated event before admitting it to actor state.
     /// The exact event bytes, including seq and timestamp, cross the durable
-    /// boundary so a lost acknowledgement can be retried idempotently by the
-    /// storage layer.
+    /// boundary. If the acknowledgement channel itself disappears, retry the
+    /// same immutable event once so sequence-idempotent storage can resolve an
+    /// otherwise ambiguous commit outcome.
     async fn commit_timeline_event(
         &mut self,
         event: TimelineEvent,
-    ) -> Result<(), crate::commands::TimelineWriteError> {
-        self.persistence
-            .persist_timeline_event_and_ack(&event)
-            .await
-            .map_err(|_| crate::commands::TimelineWriteError::AcknowledgementLost)?
-            .map_err(crate::commands::TimelineWriteError::Persistence)?;
+    ) -> Result<TimelineEvent, crate::commands::TimelineWriteError> {
+        persist_timeline_event_durably(self.persistence.as_mut(), &event).await?;
+        let committed = event.clone();
+        let previous_prompt_index = self.state.timeline.next_prompt_index();
         self.state
             .timeline
             .accept(event)
-            .map_err(crate::commands::TimelineWriteError::Invalid)
+            .map_err(crate::commands::TimelineWriteError::Invalid)?;
+        self.refresh_prompt_projection(previous_prompt_index);
+        Ok(committed)
+    }
+
+    fn refresh_prompt_projection(&mut self, previous_prompt_index: usize) {
+        let next_prompt_index = self.state.timeline.next_prompt_index();
+        if next_prompt_index != previous_prompt_index {
+            self.state.prompt_usage = None;
+            self.send_event(ChatStateEvent::PromptIndexChanged {
+                new_index: next_prompt_index,
+            });
+        }
     }
 
     /// Send an event to subscribers, logging if the channel is closed.
@@ -74,7 +85,7 @@ impl ChatStateActor {
     pub fn spawn(
         initial_conversation: Vec<ConversationItem>,
         sampling_config: SamplingConfig,
-        persistence: Box<dyn ChatPersistence>,
+        persistence: Box<dyn TimelinePersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
@@ -93,7 +104,7 @@ impl ChatStateActor {
         initial_conversation: Vec<ConversationItem>,
         sampling_config: SamplingConfig,
         pruning_config: PruningConfig,
-        mut persistence: Box<dyn ChatPersistence>,
+        mut persistence: Box<dyn TimelinePersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
@@ -115,20 +126,38 @@ impl ChatStateActor {
         timeline_events: Vec<TimelineEvent>,
         sampling_config: SamplingConfig,
         pruning_config: PruningConfig,
-        persistence: Box<dyn ChatPersistence>,
+        persistence: Box<dyn TimelinePersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Result<ChatStateHandle, crate::commands::TimelineWriteError> {
-        let mut timeline = Timeline::from_events(timeline_events)?;
+        let timeline = Timeline::from_events(timeline_events)?;
+        Self::spawn_from_validated_timeline_with_pruning(
+            timeline,
+            sampling_config,
+            pruning_config,
+            persistence,
+            event_tx,
+            cancellation_token,
+        )
+        .await
+    }
+
+    /// Restore an actor from an already validated Timeline. This is the
+    /// canonical handoff for callers that need the Surface during bootstrap:
+    /// validation/materialization happens once, then ownership moves here.
+    pub async fn spawn_from_validated_timeline_with_pruning(
+        mut timeline: Timeline,
+        sampling_config: SamplingConfig,
+        pruning_config: PruningConfig,
+        persistence: Box<dyn TimelinePersistence>,
+        event_tx: mpsc::UnboundedSender<ChatStateEvent>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Result<ChatStateHandle, crate::commands::TimelineWriteError> {
         let mut recovery_events = timeline.recover_interrupted()?;
         recovery_events.extend(timeline.recover_surface_integrity()?);
         let mut persistence = persistence;
         for event in recovery_events {
-            persistence
-                .persist_timeline_event_and_ack(&event)
-                .await
-                .map_err(|_| crate::commands::TimelineWriteError::AcknowledgementLost)?
-                .map_err(crate::commands::TimelineWriteError::Persistence)?;
+            persist_timeline_event_durably(persistence.as_mut(), &event).await?;
         }
         let state = ChatState::from_timeline(timeline, sampling_config);
         Ok(Self::launch(
@@ -143,7 +172,7 @@ impl ChatStateActor {
     fn launch(
         state: ChatState,
         pruning_config: PruningConfig,
-        persistence: Box<dyn ChatPersistence>,
+        persistence: Box<dyn TimelinePersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
@@ -191,8 +220,12 @@ impl ChatStateActor {
                 self.push_user_message(item);
             }
             ChatStateCommand::RecordTimelineEvent { kind } => {
+                let previous_prompt_index = self.state.timeline.next_prompt_index();
                 match self.state.timeline.record(kind) {
-                    Ok(event) => self.persistence.persist_timeline_event(&event),
+                    Ok(event) => {
+                        self.persistence.persist_timeline_event(&event);
+                        self.refresh_prompt_projection(previous_prompt_index);
+                    }
                     Err(error) => tracing::error!(%error, "rejected invalid timeline event"),
                 }
             }
@@ -247,9 +280,6 @@ impl ChatStateActor {
                 self.mark_usage_incomplete(prompt, session);
                 let _ = reply.send(());
             }
-            ChatStateCommand::IncrementPromptIndex => {
-                self.increment_prompt_index();
-            }
             ChatStateCommand::UpdateSamplingConfig { config } => {
                 self.state.sampling_config = config;
             }
@@ -262,19 +292,56 @@ impl ChatStateActor {
             ChatStateCommand::RecordTurnStart { timestamp_ms } => {
                 self.state.turn_start_ms = Some(timestamp_ms);
             }
-            ChatStateCommand::ReplaceConversation { items, cause } => {
-                self.replace_conversation(items, cause);
-            }
-            ChatStateCommand::ReplaceConversationDurably {
+            ChatStateCommand::ReplaceSurfaceDurably {
                 items,
                 cause,
+                expected_surface_revision,
                 reply,
             } => {
-                let result = self.replace_conversation_durably(items, cause).await;
+                let actual = self.state.timeline.surface_revision();
+                let result = if actual != expected_surface_revision {
+                    Err(crate::commands::TimelineWriteError::SurfaceChanged {
+                        expected: expected_surface_revision,
+                        actual,
+                    })
+                } else {
+                    self.replace_conversation_durably(items, cause).await
+                };
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::ReplaceCompactionRangeDurably {
+                target,
+                items,
+                expected_surface_revision,
+                reply,
+            } => {
+                let actual = self.state.timeline.surface_revision();
+                let result = if actual != expected_surface_revision {
+                    Err(crate::commands::TimelineWriteError::SurfaceChanged {
+                        expected: expected_surface_revision,
+                        actual,
+                    })
+                } else {
+                    self.replace_compaction_range_durably(target, items).await
+                };
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::SeedTokenAccounting {
+                total_tokens,
+                reply,
+            } => {
+                self.seed_token_accounting(total_tokens);
+                let _ = reply.send(());
+            }
+            ChatStateCommand::RewindDurably {
+                target_prompt_index,
+                reply,
+            } => {
+                let result = self.rewind_durably(target_prompt_index).await;
                 let _ = reply.send(result);
             }
             ChatStateCommand::PruneToolResults { plan, reply } => {
-                let report = self.prune_tool_results(plan);
+                let report = self.prune_tool_results(plan).await;
                 let _ = reply.send(report);
             }
             ChatStateCommand::RewriteImagesAndAck {
@@ -307,23 +374,14 @@ impl ChatStateActor {
                 let _ = reply.send(result);
             }
             ChatStateCommand::ReplaceSystemHead { prompt, reply } => {
-                let changed = self.replace_system_head(&prompt);
-                let _ = reply.send(changed);
-            }
-            ChatStateCommand::CachePromptText { text } => {
-                self.state.prompt_texts.push(text);
-            }
-            ChatStateCommand::RecordCompactionAt { prompt_index } => {
-                self.state.last_compaction_prompt_index = Some(prompt_index);
+                let result = self.replace_system_head(&prompt).await;
+                let _ = reply.send(result);
             }
             ChatStateCommand::Flush => {
                 self.persistence.flush();
             }
             ChatStateCommand::UpdateCredentials { credentials } => {
                 self.state.credentials = credentials;
-            }
-            ChatStateCommand::RestoreSnapshot(snapshot) => {
-                self.restore_snapshot(*snapshot);
             }
             ChatStateCommand::BeginTurnCapture => {
                 self.state.turn_capture = Some(state::TurnCaptureState {
@@ -347,13 +405,14 @@ impl ChatStateActor {
                 persist_memory_reminder,
                 reply,
             } => {
-                self.ensure_conversation_integrity();
-                let request = self.build_conversation_request(
-                    tool_definitions,
-                    memory_reminder,
-                    persist_memory_reminder,
-                );
-                let _ = reply.send(request);
+                let result = self
+                    .build_conversation_request(
+                        tool_definitions,
+                        memory_reminder,
+                        persist_memory_reminder,
+                    )
+                    .await;
+                let _ = reply.send(result);
             }
             ChatStateCommand::GetConversation { reply } => {
                 tracing::debug!(
@@ -362,20 +421,48 @@ impl ChatStateActor {
                 );
                 let _ = reply.send(self.state.timeline.surface().to_vec());
             }
+            ChatStateCommand::GetConversationWithRevision { reply } => {
+                let _ = reply.send((
+                    self.state.timeline.surface().to_vec(),
+                    self.state.timeline.surface_revision(),
+                ));
+            }
             ChatStateCommand::GetTrajectory { reply } => {
                 let _ = reply.send(self.state.timeline.trajectory());
             }
-            ChatStateCommand::GetRewindSurface {
-                target_prompt_index,
+            ChatStateCommand::MaterializeTimeline { timeline_id, reply } => {
+                let materialized = self.state.timeline.events().last().map(|event| {
+                    crate::TimelineMaterialization {
+                        input_ref: crate::TimelineRangeRef {
+                            timeline_id,
+                            first_seq: 0,
+                            last_seq: event.seq.get(),
+                        },
+                        surface_revision: self.state.timeline.surface_revision(),
+                        surface: self.state.timeline.surface().to_vec(),
+                        surface_ids: self.state.timeline.surface_ids().to_vec(),
+                    }
+                });
+                let _ = reply.send(materialized);
+            }
+            ChatStateCommand::FetchCompactedContext {
+                summary_seq,
+                offset,
+                limit,
                 reply,
             } => {
-                let _ = reply.send(self.state.timeline.rewind_surface(target_prompt_index));
+                let result = self.state.timeline.compacted_context(summary_seq).map(|items| {
+                    let total = items.len();
+                    let page = items.into_iter().skip(offset).take(limit).collect();
+                    (page, total)
+                });
+                let _ = reply.send(result);
             }
             ChatStateCommand::GetPromptIndex { reply } => {
-                let _ = reply.send(self.state.prompt_index);
+                let _ = reply.send(self.state.timeline.next_prompt_index());
             }
             ChatStateCommand::GetLastCompactionPromptIndex { reply } => {
-                let _ = reply.send(self.state.last_compaction_prompt_index);
+                let _ = reply.send(self.state.timeline.last_completed_compaction_prompt_index());
             }
             ChatStateCommand::GetTotalTokens { reply } => {
                 let _ = reply.send(self.state.total_tokens);
@@ -408,15 +495,6 @@ impl ChatStateActor {
                     "ChatState: cloning full state for Snapshot"
                 );
                 let _ = reply.send(self.snapshot());
-            }
-            ChatStateCommand::TruncateToPromptIndex {
-                target_prompt_index,
-                reply,
-            } => {
-                self.truncate_to_prompt_index(target_prompt_index);
-                self.state.turn_capture = None;
-                self.state.prompt_usage = None;
-                let _ = reply.send(());
             }
             ChatStateCommand::CheckAutoCompactNeeded {
                 threshold_percent,
@@ -472,4 +550,25 @@ impl ChatStateActor {
             }
         }
     }
+}
+
+async fn persist_timeline_event_durably(
+    persistence: &mut dyn TimelinePersistence,
+    event: &TimelineEvent,
+) -> Result<(), crate::commands::TimelineWriteError> {
+    for attempt in 0..2 {
+        match persistence.persist_timeline_event_and_ack(event).await {
+            Ok(result) => {
+                return result.map_err(crate::commands::TimelineWriteError::Persistence);
+            }
+            Err(_) if attempt == 0 => {
+                tracing::warn!(
+                    seq = event.seq.get(),
+                    "Timeline acknowledgement channel was lost; retrying the exact event"
+                );
+            }
+            Err(_) => return Err(crate::commands::TimelineWriteError::AcknowledgementLost),
+        }
+    }
+    unreachable!("bounded Timeline acknowledgement loop always returns")
 }

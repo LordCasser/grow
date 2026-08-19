@@ -83,7 +83,7 @@ async fn basename_path_demo_pty() {
         rows,
         cols,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

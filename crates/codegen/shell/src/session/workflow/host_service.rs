@@ -360,13 +360,6 @@ impl HostService {
             ));
         }
 
-        if opts.max_output_tokens.is_some() {
-            tracing::debug!(
-                run_id = %self.params.run_id,
-                "agent max_output_tokens is deprecated and ignored; workflows budget logical agent calls"
-            );
-        }
-
         let id = uuid::Uuid::now_v7().to_string();
         let explicit_label = opts.label.clone();
         let capability_mode = match opts.capability_mode.as_deref() {

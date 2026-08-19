@@ -24,33 +24,11 @@ use tool_types::{KillTaskOutput, KillTaskResult, KillTaskToolInput};
 #[derive(Debug, Default)]
 pub struct KillTaskTool;
 
-// ── Legacy message helpers ───────────────────────────────────────────────
-//
-// Historical fixture captured from an earlier (0.4.10) revision of this tool.
-//
-// In 0.4.10, kill_task returned:
-//   Err(ToolError::ProcessManagerError(format!("Task {} not found", input.task_id)))
-//
-// The meaningful customer-facing message content is the inner string.
-// Subagent wording is out of scope — subagents didn't exist in 0.4.10.
-
-/// Exact historical not-found message for `kill_task` in legacy-0.4.10.
-fn render_legacy_kill_task_not_found(task_id: &str) -> String {
-    format!("Task {} not found", task_id)
-}
-
 /// Format a "not found" response for kill_task.
 async fn not_found_response(
     task_id: &str,
     terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
-    is_legacy: bool,
 ) -> KillTaskOutput {
-    if is_legacy {
-        // Legacy: simple error without task ID enumeration.
-        // Subagent wording is out of scope — subagents didn't exist in 0.4.10.
-        return KillTaskOutput::TaskNotFound(render_legacy_kill_task_not_found(task_id));
-    }
-    // Current: include known task IDs for discoverability.
     let known = terminal.list_tasks().await;
     let msg = if known.is_empty() {
         format!(
@@ -76,7 +54,7 @@ impl crate::types::tool_metadata::ToolMetadata for KillTaskTool {
     }
 
     fn description_template(&self) -> &str {
-        // Canonical wording lives in the shared builder; `versioned_definition`
+        // Canonical wording lives in the shared builder; `finalized_definition`
         // renders it context-aware from the finalized toolset. This static
         // fallback mirrors the default grow-build toolset on the current OS.
         static DESC: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -91,9 +69,8 @@ impl crate::types::tool_metadata::ToolMetadata for KillTaskTool {
         &DESC
     }
 
-    fn versioned_definition(
+    fn finalized_definition(
         &self,
-        _contract_version: Option<&str>,
         client_name: &str,
         description_override: Option<&str>,
         renderer: &TemplateRenderer,
@@ -189,9 +166,6 @@ impl tool_runtime::Tool for KillTaskTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let is_legacy = crate::versions::is_legacy_contract(
-            crate::types::tool_metadata::behavior_version(&ctx).as_deref(),
-        );
         let terminal;
         {
             let res = resources.lock().await;
@@ -236,12 +210,12 @@ impl tool_runtime::Tool for KillTaskTool {
                             })
                         }
                         SubagentCancelOutcome::NotFound => {
-                            not_found_response(&input.task_id, &terminal, is_legacy).await
+                            not_found_response(&input.task_id, &terminal).await
                         }
                     });
                 }
 
-                Ok(not_found_response(&input.task_id, &terminal, is_legacy).await)
+                Ok(not_found_response(&input.task_id, &terminal).await)
             }
         }
     }
@@ -264,21 +238,10 @@ mod tests {
     use crate::implementations::grow_build::task::types::{
         SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
     };
-    use crate::types::resources::{Resources, SharedResources};
+    use crate::types::resources::Resources;
     use crate::types::tool_metadata::test_ctx_with_call_id;
     use std::sync::Arc;
     use std::time::Duration;
-
-    fn make_ctx_with_version(
-        call_id: &str,
-        resources: SharedResources,
-        version: &str,
-    ) -> tool_runtime::ToolCallContext {
-        let mut ctx = test_ctx_with_call_id(resources, call_id);
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion(version.to_owned()));
-        ctx
-    }
 
     /// Minimal mock backend for testing kill_task.
     struct MockTerminal {
@@ -354,7 +317,7 @@ mod tests {
     }
 
     /// No dead references: `monitor` / `subagent` appear only when their tool is
-    /// present. The context-aware `versioned_definition` path drives this via
+    /// present. The context-aware `finalized_definition` path drives this via
     /// `kill_task_description`; render every subset (including none) and check.
     #[test]
     fn description_context_aware_for_tool_subsets() {
@@ -588,36 +551,8 @@ mod tests {
         );
     }
 
-    // ── MP-3: Legacy message parity fixture tests ────────────────────────
-
     #[tokio::test]
-    async fn legacy_kill_task_not_found_exact_historical_message() {
-        let resources = resources_with_terminal(KO::NotFound);
-        let tool = KillTaskTool;
-
-        let result = tool_runtime::Tool::run(
-            &tool,
-            make_ctx_with_version("test-call", resources.into_shared(), "legacy-0.4.10"),
-            KillTaskToolInput {
-                task_id: "task-abc".into(),
-            },
-        )
-        .await
-        .unwrap();
-
-        match result {
-            KillTaskOutput::TaskNotFound(msg) => {
-                // Exact historical fixture — no trailing period.
-                assert_eq!(msg, "Task task-abc not found");
-            }
-            other => panic!("Expected TaskNotFound, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn current_kill_task_not_found_includes_discoverability() {
-        // Current (non-legacy) path must still include known task IDs
-        // or "No background tasks or subagents exist" text.
+    async fn kill_task_not_found_includes_discoverability() {
         let resources = resources_with_terminal(KO::NotFound);
         let tool = KillTaskTool;
 

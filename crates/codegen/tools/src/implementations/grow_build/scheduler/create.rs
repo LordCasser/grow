@@ -6,10 +6,11 @@ use super::interval::{interval_to_human, parse_interval};
 use super::types::{ScheduledTask, SchedulerCommand, SchedulerHandle, scheduler_tool_error};
 
 pub use crate::slash_commands::{
-    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
+    SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SchedulerCreateInput {
     #[serde(default)]
     #[schemars(
@@ -31,42 +32,18 @@ pub struct SchedulerCreateInput {
                        Required to create; optional with task_id")]
     pub prompt: Option<String>,
 
-    #[serde(
-        default = "default_true",
-        deserialize_with = "crate::types::schema::deserialize_lenient_bool"
-    )]
-    #[schemars(skip)]
-    pub recurring: bool,
-
     /// Whether the task persists across sessions. Default false (session-only).
-    #[serde(
-        default,
-        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
-    )]
+    #[serde(default)]
     #[schemars(
         description = "Whether the task persists across sessions. Default: false. \
                        Create-only: ignored with task_id"
     )]
     pub durable: Option<bool>,
 
-    #[serde(
-        default,
-        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
-    )]
-    #[schemars(
-        description = "Run each fire as a main-conversation turn instead of a background \
-                       subagent; set true only when runs need the conversation's context. \
-                       Default: false. Create-only: ignored with task_id"
-    )]
-    pub foreground: Option<bool>,
-
     /// Whether to fire immediately on creation. Default false (wait for the
     /// first interval — a "scheduled" task should not run on creation unless
     /// explicitly asked to).
-    #[serde(
-        default,
-        deserialize_with = "crate::types::schema::deserialize_lenient_bool"
-    )]
+    #[serde(default)]
     #[schemars(
         description = "Whether to fire immediately on creation (true) or wait for the first \
                        interval (false). Default: false. Create-only: ignored with task_id"
@@ -74,16 +51,12 @@ pub struct SchedulerCreateInput {
     pub fire_immediately: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct SchedulerCreateOutput {
     pub id: String,
     pub human_schedule: String,
-    #[serde(default)]
     pub updated: bool,
 }
 
@@ -222,13 +195,6 @@ impl tool_runtime::Tool for SchedulerCreateTool {
             });
         }
 
-        if !input.recurring {
-            return Err(tool_runtime::ToolError::invalid_arguments(
-                "one-shot tasks are not supported; run a background terminal command instead \
-                 (`sleep <secs> && <command>`, background: true) or do the work now",
-            ));
-        }
-
         let interval_secs = interval_secs.ok_or_else(|| {
             tool_runtime::ToolError::invalid_arguments("interval is required when creating a task")
         })?;
@@ -237,15 +203,13 @@ impl tool_runtime::Tool for SchedulerCreateTool {
         })?;
 
         let durable = input.durable.unwrap_or(false);
-        let mut task = ScheduledTask::with_fire_immediately(
+        let task = ScheduledTask::with_fire_immediately(
             interval_secs,
             prompt,
             true,
             durable,
             input.fire_immediately,
         );
-        task.foreground = input.foreground.unwrap_or(false);
-
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let created = send_and_wait(
             SchedulerCommand::Create {
@@ -332,22 +296,16 @@ mod tests {
         cancel.cancel();
     }
 
-    #[tokio::test]
-    async fn recurring_false_errors_with_sleep_guidance() {
-        let (resources, cancel) = scheduler_resources();
-
-        let err = SchedulerCreateTool
-            .run(
-                test_ctx(resources.clone()),
-                input(serde_json::json!({
-                    "interval": "5m", "prompt": "check", "recurring": false
-                })),
-            )
-            .await
-            .expect_err("one-shot must be rejected");
-        assert!(err.to_string().contains("sleep"), "steers to sleep: {err}");
-        assert_eq!(task_count(&resources).await, 0);
-        cancel.cancel();
+    #[test]
+    fn removed_recurring_input_is_rejected() {
+        assert!(
+            serde_json::from_value::<SchedulerCreateInput>(serde_json::json!({
+                "interval": "5m",
+                "prompt": "check",
+                "recurring": false
+            }))
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -369,32 +327,6 @@ mod tests {
             0,
             "strict update must not fall back to create"
         );
-        cancel.cancel();
-    }
-
-    #[tokio::test]
-    async fn update_ignores_legacy_recurring_flag() {
-        let (resources, cancel) = scheduler_resources();
-
-        let created = SchedulerCreateTool
-            .run(
-                test_ctx(resources.clone()),
-                input(serde_json::json!({"interval": "5m", "prompt": "check deploy"})),
-            )
-            .await
-            .expect("create succeeds");
-
-        let updated = SchedulerCreateTool
-            .run(
-                test_ctx(resources.clone()),
-                input(serde_json::json!({
-                    "task_id": created.id, "interval": "10m", "recurring": false
-                })),
-            )
-            .await
-            .expect("update succeeds despite legacy flag");
-        assert!(updated.updated);
-        assert_eq!(updated.human_schedule, "every 10 minutes");
         cancel.cancel();
     }
 
@@ -442,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_hides_recurring_and_advertises_task_id() {
+    fn schema_advertises_task_id_and_has_no_recurring_input() {
         let schema = schemars::schema_for!(SchedulerCreateInput);
         let json = serde_json::to_string(&schema).unwrap();
         assert!(
@@ -465,7 +397,7 @@ mod tests {
     #[test]
     fn loop_schedule_instruction_holds_invariants() {
         let args = "every 30 minutes do x";
-        let instr = loop_schedule_instruction(args, LoopFireMode::Detached);
+        let instr = loop_schedule_instruction(args);
         assert!(
             !instr.contains("10m"),
             "instruction must not default: {instr}"

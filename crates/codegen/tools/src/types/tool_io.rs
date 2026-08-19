@@ -11,6 +11,7 @@
 //! - `ToolOutput` — one variant per built-in tool + `Dynamic(Value)`.
 //!   `From` derive generates `From<TypedOutput>` for each inner type.
 use crate::implementations::BashToolInput;
+use crate::implementations::context_fetch::ContextFetchInput;
 use crate::implementations::grow_build::ask_user_question::AskUserQuestionInput;
 use crate::implementations::grow_build::grep::GrepSearchInput;
 use crate::implementations::grow_build::list_dir::ListDirInput;
@@ -30,7 +31,6 @@ use serde::{Deserialize, Serialize};
 use tool_types::KillTaskToolInput;
 use tool_types::TaskOutputToolInput;
 use tool_types::TaskToolInput;
-use tool_types::WaitTasksToolInput;
 /// Raw input for an MCP (Model Context Protocol) tool call.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MCPToolInput {
@@ -58,7 +58,6 @@ pub enum ToolInput {
     Skill(SkillInput),
     MCPTool(MCPToolInput),
     TaskOutput(TaskOutputToolInput),
-    WaitTasks(WaitTasksToolInput),
     KillTask(KillTaskToolInput),
     Task(TaskToolInput),
     WebFetch(WebFetchInput),
@@ -66,6 +65,7 @@ pub enum ToolInput {
     HashlineEdit(crate::implementations::grow_build_hashline::edit::types::HashlineEditInput),
     MemorySearch(MemorySearchInput),
     MemoryGet(MemoryGetInput),
+    ContextFetch(ContextFetchInput),
     SearchTool(SearchToolInput),
     UseTool(UseToolInput),
     PlanControl(PlanControlInput),

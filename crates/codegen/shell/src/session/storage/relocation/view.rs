@@ -73,9 +73,6 @@ impl RelocationView {
     pub(crate) fn find_persisted_session_dir(&self, session_id: &str) -> Result<Option<PathBuf>> {
         self.find_session_dir(session_id, &self.persisted_candidates)
     }
-    pub(crate) fn find_any_session_dir(&self, session_id: &str) -> Result<Option<PathBuf>> {
-        self.find_session_dir(session_id, &self.all_candidates)
-    }
     fn find_session_dir(
         &self,
         session_id: &str,

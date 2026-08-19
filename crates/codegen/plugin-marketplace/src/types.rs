@@ -170,14 +170,6 @@ pub struct MarketplaceEntry {
     pub homepage: Option<String>,
     /// Relative path within marketplace (e.g., "plugins/grow-code-review").
     pub relative_path: String,
-    /// Number of skills discovered.
-    pub skill_count: usize,
-    /// Whether the plugin has hooks.
-    pub has_hooks: bool,
-    /// Whether the plugin has agents.
-    pub has_agents: bool,
-    /// Whether the plugin has MCP configuration.
-    pub has_mcp: bool,
     /// Remote git URL for URL-sourced plugins (not present for local plugins).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
@@ -188,8 +180,8 @@ pub struct MarketplaceEntry {
     pub remote_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_subdir: Option<String>,
-    /// Structured inventory from the marketplace catalog (`plugin-index.json`).
-    /// `None` = no catalog data for this plugin.
+    /// Canonical component inventory. Local entries are scanned directly;
+    /// remote entries expose inventory only from a SHA-matched catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<extension_types::PluginComponents>,
 }
@@ -277,10 +269,6 @@ mod tests {
             domains: vec!["notion.so".into()],
             homepage: None,
             relative_path: "plugins/test-plugin".into(),
-            skill_count: 3,
-            has_hooks: true,
-            has_agents: false,
-            has_mcp: false,
             remote_url: None,
             remote_ref: None,
             remote_sha: None,

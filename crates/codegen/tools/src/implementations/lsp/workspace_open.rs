@@ -80,7 +80,7 @@ fn resolve(server_name: &str, workspace_root: &Path, raw: &str) -> Option<String
                 tracing::warn!(
                     server = %server_name,
                     path = %absolute.display(),
-                    "workspaceOpen path does not exist; the server will have nothing to load"
+                    "workspace_open path does not exist; the server will have nothing to load"
                 );
             }
             Some(uri.to_string())
@@ -89,7 +89,7 @@ fn resolve(server_name: &str, workspace_root: &Path, raw: &str) -> Option<String
             tracing::warn!(
                 server = %server_name,
                 path = %absolute.display(),
-                "workspaceOpen path is not a valid file URI"
+                "workspace_open path is not a valid file URI"
             );
             None
         }

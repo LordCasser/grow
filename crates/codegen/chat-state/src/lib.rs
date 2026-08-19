@@ -12,7 +12,7 @@
 //! └────────────────┘                  │  State (no locks needed):            │
 //!                                     │  - append-only Timeline              │
 //! ┌────────────────┐                  │  - sampling_config: SamplingConfig   │
-//! │   Query (e.g.  │ ── Cmd+Oneshot ─▶│  - prompt_index: usize              │
+//! │   Query (e.g.  │ ── Cmd+Oneshot ─▶│  - derived Timeline projections    │
 //! │  get_conv)     │ ◀── Response ────│  - total_tokens: u64                │
 //! └────────────────┘                  │                                      │
 //!                                     │         │ ChatStateEvent             │
@@ -25,13 +25,12 @@
 
 pub mod actor;
 pub mod commands;
-pub mod compaction_mode;
-pub mod compaction_transcript;
 pub mod compaction_utils;
 pub mod conversation_util;
 pub mod events;
 pub mod handle;
 pub mod persistence;
+pub mod sideband;
 pub mod timeline;
 pub mod trajectory;
 pub mod types;
@@ -48,19 +47,26 @@ pub use commands::{
     ImageRewrite, ImageRewriteReport, ModelMetadata, PruneError, PruneReport, RepairHistoryError,
     TimelineWriteError,
 };
-pub use compaction_mode::CompactionMode;
-pub use compaction_transcript::CompactionDetail;
 pub use events::ChatStateEvent;
 pub use handle::ChatStateHandle;
 pub use persistence::{
-    ChatPersistence, MockChatPersistence, MockPersistenceReceiver, NullChatPersistence,
-    PersistenceRecord,
+    MockPersistenceReceiver, MockTimelinePersistence, NullTimelinePersistence, PersistenceRecord,
+    TimelinePersistence,
+};
+pub use sideband::{
+    SIDEBAND_SCHEMA_VERSION, SidebandAttempt, SidebandEnd, SidebandError, SidebandEvent,
+    SidebandEventKind, SidebandOutcome, SidebandPurpose, SidebandRequest, SidebandResult,
+    SidebandRoute, SidebandSpawnEvent, SidebandTimeline, SidebandUsage, TimelineMaterialization,
+    TimelineRangeRef, validate_sideband_id,
 };
 pub use timeline::{
-    CompactionEvent, EventSeq, MessageCause, MessageEvent, ObservationEvent, RecoveryEvent,
-    RequestEvent, RequestUsage, StepEvent, StepId, SurfaceId, SurfaceOp, TIMELINE_SCHEMA_VERSION,
-    Timeline, TimelineError, TimelineEvent, TimelineEventKind, ToolEvent, TurnEvent, TurnId,
+    CompactionEvent, ControlEvent, EventSeq, MessageCause, MessageEvent, ObservationEvent,
+    PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, SessionTitleEvent, SessionTitleSource,
+    StepEvent, StepId, SubagentContextSource, SubagentEvent, SubagentOutcome, SubagentResultEvent,
+    SubagentSeedEvent, SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId, SurfaceOp,
+    SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent,
+    TimelineEventKind, ToolEvent, TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal,
 };
-pub use trajectory::{SurfaceVisibility, TrajectoryRow, TrajectorySnapshot};
+pub use trajectory::{SurfaceVisibility, TrajectoryProjector, TrajectoryRow, TrajectorySnapshot};
 pub use types::*;
 pub use usage::{UsageLedger, UsageTotals};

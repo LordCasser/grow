@@ -128,7 +128,6 @@ fn backfill_tool_kinds(
                 tool
             })
             .collect(),
-        behavior_preset: config.behavior_preset.clone(),
     }
 }
 /// Steps 2-3 of the resolution pipeline, without finalization:
@@ -186,16 +185,7 @@ pub(crate) fn merge_and_filter(
             None => matches!(mode, CapabilityMode::All),
         })
         .collect();
-    ToolServerConfig {
-        tools: kept,
-        behavior_preset: baseline.behavior_preset.clone(),
-    }
-}
-/// Whether per-session `tool_state.json` persistence and per-turn restoration are
-/// enabled (`GROW_WORKSPACE_TOOL_STATE_ENABLED=true`; any other value keeps
-/// legacy behavior).
-pub fn tool_state_enabled() -> bool {
-    std::env::var("GROW_WORKSPACE_TOOL_STATE_ENABLED").as_deref() == Ok("true")
+    ToolServerConfig { tools: kept }
 }
 /// Sanitize a `session_id` into a single safe filesystem path segment: chars
 /// outside `[A-Za-z0-9_-]` become `_`, empty becomes `anon`. When any
@@ -232,18 +222,12 @@ fn ensure_session_dir(root: &std::path::Path, session_id: &str) -> (PathBuf, std
     let created = std::fs::create_dir_all(&dir);
     (dir, created)
 }
-/// Serializes tests (across modules) that mutate the process-global
-/// `GROW_WORKSPACE_TOOL_STATE_ENABLED`. Aliased to the crate-wide
-/// [`crate::ENV_TEST_LOCK`] so ALL env-mutating tests share ONE lock (the
-/// hazard is the global `environ` array, not the variable's value).
-#[cfg(test)]
-pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 /// [`SessionContextFactory`] for local workspace sessions.
 ///
-/// When [`with_tool_state_home`](Self::with_tool_state_home) is set, each
-/// session's [`SessionContext::state_path`] is rooted at
-/// `<home>/sessions/<session_id>/`; left unset, `state_path` stays empty
-/// (legacy behavior).
+/// Workspace-only sessions do not own a durable Resources store, so
+/// [`SessionContext::state_path`] is empty and the tool runtime explicitly
+/// installs no-op persistence. Grow sessions provide their canonical session
+/// directory through `AgentBuilder` instead.
 ///
 /// [`SessionContext::session_folder`] is `/tmp/sessions/<sanitized_id>/`
 /// (terminal logs and other tool artifacts — not the project `cwd`).
@@ -255,12 +239,7 @@ pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 /// [`build_terminal_backend`]: crate::config::SessionContextFactory::build_terminal_backend
 /// [`build_session_context`]: crate::config::SessionContextFactory::build_session_context
 /// [`LocalTerminalBackend`]: tools::computer::local::LocalTerminalBackend
-pub struct WorkspaceSessionContextFactory {
-    /// Resolved `$GROW_WORKSPACE_HOME` when tool-state persistence is enabled;
-    /// `None` disables it. Resolved once by the caller so the factory performs
-    /// no per-build env reads.
-    tool_state_home: Option<PathBuf>,
-}
+pub struct WorkspaceSessionContextFactory;
 impl Default for WorkspaceSessionContextFactory {
     fn default() -> Self {
         Self::new()
@@ -268,39 +247,7 @@ impl Default for WorkspaceSessionContextFactory {
 }
 impl WorkspaceSessionContextFactory {
     pub fn new() -> Self {
-        Self {
-            tool_state_home: None,
-        }
-    }
-    /// Enable session-keyed tool-state persistence rooted at `home`
-    /// (`$GROW_WORKSPACE_HOME`). Callers should only invoke this when
-    /// [`tool_state_enabled`] is `true`.
-    pub fn with_tool_state_home(mut self, home: PathBuf) -> Self {
-        self.tool_state_home = Some(home);
-        self
-    }
-    /// `<tool_state_home>/sessions/<sanitized_id>/tool_state.json`, or empty
-    /// when persistence is disabled / dir creation fails.
-    fn resolve_state_path(&self, session_id: &str) -> PathBuf {
-        let Some(home) = self.tool_state_home.as_ref() else {
-            return PathBuf::new();
-        };
-        let (dir, created) = ensure_session_dir(home, session_id);
-        if let Err(e) = created {
-            tracing::warn!(
-                session = %session_id,
-                dir = %dir.display(),
-                error = %e,
-                "tool_state: failed to create session dir; persistence disabled for session"
-            );
-            return PathBuf::new();
-        }
-        tracing::debug!(
-            session = %session_id,
-            dir = %dir.display(),
-            "tool_state: persistence bound to session-keyed dir"
-        );
-        dir.join("tool_state.json")
+        Self
     }
     /// `/tmp/sessions/<sanitized_id>/` for terminal logs and other tool artifacts.
     fn resolve_session_folder(session_id: &str) -> PathBuf {
@@ -339,7 +286,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             subagent: None,
             parent_scheduler_handle: None,
             skills: vec![],
-            state_path: self.resolve_state_path(session_id),
+            state_path: PathBuf::new(),
             memory_backend: None,
             web_fetch_config: build_web_fetch_config(),
             lsp: None,
@@ -430,7 +377,7 @@ pub mod test_support {
                 subagent: None,
                 parent_scheduler_handle: None,
                 skills: vec![],
-                state_path: session_root.join("tool_state.json"),
+                state_path: session_root.join("resources_state.json"),
                 memory_backend: None,
                 web_fetch_config: Default::default(),
                 lsp: None,
@@ -453,7 +400,6 @@ pub mod test_support {
             name_override: None,
             params_name_overrides: None,
             description_override: None,
-            behavior_version: None,
             kind,
         }
     }
@@ -466,7 +412,6 @@ pub mod test_support {
                 tc("Grow:grep", Some(ToolKind::Search)),
                 tc("Grow:list_dir", Some(ToolKind::ListDir)),
             ],
-            behavior_preset: None,
         }
     }
 }
@@ -518,7 +463,6 @@ mod tests {
         let factory = factory_for_test();
         let baseline = ToolServerConfig {
             tools: vec![test_support::tc("Grow:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
         };
         let mut mcp_dup = test_support::tc("Grow:read_file", Some(ToolKind::Read));
         mcp_dup.name_override = Some("mcp_read".into());
@@ -561,7 +505,6 @@ mod tests {
                 // Pre-set kinds must never be overwritten by the registry.
                 test_support::tc("Grow:read_file", Some(ToolKind::Search)),
             ],
-            behavior_preset: Some("current".to_owned()),
         };
         let backfilled = backfill_tool_kinds(&config, &kinds);
         let kind_of = |id: &str| {
@@ -583,7 +526,6 @@ mod tests {
             Some(ToolKind::Search),
             "an explicit kind wins over the registry's"
         );
-        assert_eq!(backfilled.behavior_preset.as_deref(), Some("current"));
     }
     /// Regression: pinned server-bind toolsets arrive kind-less (the gRPC
     /// `ToolConfigEntry` has no kind field), which used to make every
@@ -601,7 +543,6 @@ mod tests {
                 test_support::tc("Grow:search_replace", None),
                 test_support::tc("Grow:run_terminal_cmd", None),
             ],
-            behavior_preset: None,
         };
         let (eff, ts, _backend) = resolve_session_toolset(
             baseline,
@@ -640,7 +581,6 @@ mod tests {
     fn resolve_session_toolset_mcp_edit_dropped_under_readonly() {
         let baseline = ToolServerConfig {
             tools: vec![test_support::tc("Grow:read_file", Some(ToolKind::Read))],
-            behavior_preset: None,
         };
         let mcp_edit = test_support::tc("mcp.editor", Some(ToolKind::Edit));
         let filtered = merge_and_filter(&baseline, &[mcp_edit], CapabilityMode::ReadOnly, "test");
@@ -654,7 +594,6 @@ mod tests {
                 test_support::tc("Grow:read_file", Some(ToolKind::Read)),
                 test_support::tc("baseline.opaque", None),
             ],
-            behavior_preset: None,
         };
         let mcp = vec![test_support::tc("mcp.opaque", None)];
         let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::ReadOnly, "test_session");
@@ -675,10 +614,7 @@ mod tests {
     }
     #[tokio::test]
     async fn resolve_session_toolset_mcp_kind_none_kept_under_all() {
-        let baseline = ToolServerConfig {
-            tools: vec![],
-            behavior_preset: None,
-        };
+        let baseline = ToolServerConfig { tools: vec![] };
         let mcp = vec![test_support::tc("mcp.opaque", None)];
         let filtered = merge_and_filter(&baseline, &mcp, CapabilityMode::All, "test_session");
         let kept_ids: Vec<&str> = filtered.tools.iter().map(|t| t.id.as_str()).collect();
@@ -689,10 +625,7 @@ mod tests {
     }
     #[tokio::test]
     async fn resolve_session_toolset_mcp_name_override_collision_skipped() {
-        let baseline = ToolServerConfig {
-            tools: vec![],
-            behavior_preset: None,
-        };
+        let baseline = ToolServerConfig { tools: vec![] };
         let mut mcp_a = test_support::tc("mcp.tool_a", Some(ToolKind::Read));
         mcp_a.name_override = Some("shared_name".into());
         let mut mcp_b = test_support::tc("mcp.tool_b", Some(ToolKind::Read));
@@ -705,48 +638,6 @@ mod tests {
             !ids.contains(&"mcp.tool_b"),
             "duplicate name dropped: {ids:?}"
         );
-    }
-    #[test]
-    fn tool_state_enabled_only_true_enables() {
-        let _guard = super::TOOL_STATE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let var = "GROW_WORKSPACE_TOOL_STATE_ENABLED";
-        unsafe { std::env::remove_var(var) };
-        assert!(!tool_state_enabled(), "unset → disabled");
-        unsafe { std::env::set_var(var, "false") };
-        assert!(!tool_state_enabled(), "false → disabled");
-        unsafe { std::env::set_var(var, "1") };
-        assert!(!tool_state_enabled(), "1 → disabled (only \"true\")");
-        unsafe { std::env::set_var(var, "true") };
-        assert!(tool_state_enabled(), "true → enabled");
-        unsafe { std::env::remove_var(var) };
-    }
-    /// With a tool-state home set, state is rooted at
-    /// `<home>/sessions/<session_id>/tool_state.json` and the dir is created.
-    #[test]
-    fn factory_resolves_session_keyed_state_path_when_home_set() {
-        let home = tempfile::TempDir::new().unwrap();
-        let factory =
-            WorkspaceSessionContextFactory::new().with_tool_state_home(home.path().to_path_buf());
-        let p = factory.resolve_state_path("sess-1");
-        assert_eq!(
-            p,
-            home.path()
-                .join("sessions")
-                .join("sess-1")
-                .join("tool_state.json")
-        );
-        assert!(
-            home.path().join("sessions").join("sess-1").is_dir(),
-            "the session dir must be created so the persistence writer can rename into it"
-        );
-    }
-    /// Without a tool-state home, `state_path` stays empty (legacy behavior).
-    #[test]
-    fn factory_state_path_empty_when_home_unset() {
-        let factory = WorkspaceSessionContextFactory::new();
-        assert_eq!(factory.resolve_state_path("sess-1"), PathBuf::new());
     }
     #[test]
     fn factory_session_folder_is_tmp_sessions_not_project_cwd() {
@@ -786,7 +677,7 @@ mod tests {
         );
     }
     #[test]
-    fn ensure_session_dir_shared_by_state_and_session_folder() {
+    fn ensure_session_dir_creates_scoped_direct_child() {
         let home = tempfile::TempDir::new().unwrap();
         let (under_home, ok) = ensure_session_dir(home.path(), "shared-id");
         assert!(ok.is_ok());
@@ -796,41 +687,6 @@ mod tests {
         assert!(ok.is_ok());
         assert_eq!(under_tmp, PathBuf::from("/tmp/sessions/shared-id"));
         assert!(under_tmp.is_dir());
-    }
-    /// A hostile `session_id` (`../../etc`) is sanitized to a single safe
-    /// segment and cannot traverse outside `<home>/sessions/`.
-    #[test]
-    fn factory_sanitizes_malicious_session_id_no_traversal() {
-        let home = tempfile::TempDir::new().unwrap();
-        let factory =
-            WorkspaceSessionContextFactory::new().with_tool_state_home(home.path().to_path_buf());
-        let sessions = home.path().join("sessions");
-        let p = factory.resolve_state_path("../../etc");
-        assert!(
-            p.starts_with(&sessions),
-            "state path escaped sessions/: {}",
-            p.display()
-        );
-        let session_dir = p.parent().expect("state path has a parent dir");
-        assert_eq!(
-            session_dir.parent(),
-            Some(sessions.as_path()),
-            "session dir must be a direct child of sessions/, got {}",
-            session_dir.display()
-        );
-        let seg = session_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .expect("segment is valid utf-8");
-        assert!(
-            seg.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-            "sanitized segment must contain no path separators or dots: {seg:?}"
-        );
-        assert!(
-            session_dir.is_dir(),
-            "the confined session dir must be the only thing created"
-        );
     }
     /// Sanitization is injective: distinct ids that substitute to the same
     /// base string still map to distinct directories (hash disambiguator),
@@ -849,10 +705,10 @@ mod tests {
         );
         assert!(super::sanitize_session_id("").starts_with("anon-"));
     }
-    /// A toolset rebuilt for the SAME session rehydrates persisted state from
+    /// A toolset rebuilt for the SAME session rehydrates Resources from
     /// disk; a DIFFERENT session_id cold-starts with no cross-contamination.
     #[tokio::test]
-    async fn tool_state_rehydrates_same_session_and_cold_starts_other() {
+    async fn resources_state_rehydrates_same_session_and_cold_starts_other() {
         use tools::types::resources::{State, WebCitationCounter};
         let factory = test_support::TestSessionContextFactory::new();
         let cwd = PathBuf::from("/tmp");

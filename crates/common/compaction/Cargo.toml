@@ -3,10 +3,9 @@ license = "Apache-2.0"
 name = "compaction"
 version.workspace = true
 edition.workspace = true
-description = "Shared, transport-agnostic compaction engine for Grow chat and Grow."
+description = "Transport-agnostic whole-session compaction engine for Grow."
 
 [dependencies]
-anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }

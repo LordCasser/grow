@@ -18,57 +18,19 @@ impl ChatStateActor {
         ChatStateSnapshot {
             conversation: self.state.timeline.surface().to_vec(),
             sampling_config: self.state.sampling_config.clone(),
-            prompt_index: self.state.prompt_index,
+            prompt_index: self.state.timeline.next_prompt_index(),
             total_tokens: self.state.total_tokens,
             estimate_at_last_response: self.state.estimate_at_last_response,
             agent_edited_paths: self.state.agent_edited_paths.clone(),
-            prompt_texts: self.state.prompt_texts.clone(),
+            prompt_texts: self.state.timeline.prompt_texts(),
             stream_start_ms: self.state.stream_start_ms,
             turn_start_ms: self.state.turn_start_ms,
-            last_compaction_prompt_index: self.state.last_compaction_prompt_index,
+            last_compaction_prompt_index: self
+                .state
+                .timeline
+                .last_completed_compaction_prompt_index(),
             credentials: self.state.credentials.clone(),
         }
-    }
-
-    /// Truncate conversation to a target prompt index (rewind).
-    ///
-    /// Walks the conversation to find the Nth `User` item (where N =
-    /// `target_prompt_index`), truncates everything from that point onward,
-    /// truncates `prompt_texts` to match, persists, and emits `ConversationReset`.
-    ///
-    /// Prompt index semantics:
-    /// - 0 = no user turns have started (only system message, if any)
-    /// - 1 = one user turn completed
-    /// - N = N user turns completed
-    ///
-    /// Truncating to `target_prompt_index = 1` keeps only items up to (but not
-    /// including) the 2nd `User` message.
-    pub(super) fn truncate_to_prompt_index(&mut self, target_prompt_index: usize) {
-        if target_prompt_index >= self.state.prompt_index {
-            // Nothing to truncate — already at or before the target.
-            return;
-        }
-
-        // Find the conversation position of the Nth User item.
-        // Items before that position are kept; from that position onward removed.
-        let mut user_count = 0;
-        let surface = self.state.timeline.surface();
-        let mut truncate_at = surface.len();
-
-        for (i, item) in surface.iter().enumerate() {
-            if matches!(item, sampling_types::ConversationItem::User(_)) {
-                if user_count == target_prompt_index {
-                    truncate_at = i;
-                    break;
-                }
-                user_count += 1;
-            }
-        }
-
-        let conversation = surface[..truncate_at].to_vec();
-        self.state.prompt_texts.truncate(target_prompt_index);
-        self.state.prompt_index = target_prompt_index;
-        self.install_conversation(conversation, false, crate::MessageCause::Rewind);
     }
 
     /// Check if auto-compact is needed based on token utilization.
@@ -216,25 +178,7 @@ impl ChatStateActor {
 
     /// Return conversation item counts by role without cloning any items.
     pub(super) fn get_conversation_counts(&self) -> ConversationCounts {
-        let mut counts = ConversationCounts {
-            total: self.state.timeline.surface_len(),
-            ..Default::default()
-        };
-        for item in self.state.timeline.surface() {
-            match item {
-                sampling_types::ConversationItem::User(_) => counts.user += 1,
-                sampling_types::ConversationItem::Assistant(_) => {
-                    counts.assistant += 1;
-                }
-                sampling_types::ConversationItem::ToolResult(_) => {
-                    counts.tool_result += 1;
-                }
-                sampling_types::ConversationItem::System(_) => {}
-                sampling_types::ConversationItem::BackendToolCall(_) => {}
-                sampling_types::ConversationItem::Reasoning(_) => {}
-            }
-        }
-        counts
+        ConversationCounts::from_items(self.state.timeline.surface())
     }
 
     /// Return the first `System` message in the conversation, or `None`.

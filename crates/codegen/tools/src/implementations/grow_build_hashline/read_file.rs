@@ -114,9 +114,8 @@ impl crate::types::tool_metadata::ToolMetadata for HashlineReadTool {
         DESCRIPTION
     }
 
-    fn versioned_definition(
+    fn finalized_definition(
         &self,
-        _contract_version: Option<&str>,
         client_name: &str,
         description_override: Option<&str>,
         renderer: &crate::types::template_renderer::TemplateRenderer,
@@ -187,21 +186,12 @@ impl tool_runtime::Tool for HashlineReadTool {
         // `None`: the hashline tool does not stream, so it needs no
         // text-path streamability signal (see `run_read_file`).
         let invoking = crate::types::tool_metadata::invoking_param_names(&ctx);
-        let result = run_read_file(
-            input,
-            cwd_override,
-            None,
-            resources.clone(),
-            None,
-            &invoking,
-        )
-        .await?;
+        let result = run_read_file(input, cwd_override, resources.clone(), None, &invoking).await?;
 
         match result {
             ReadFileOutput::FileContent(mut fc) => {
                 // Empty file: preserve the system-reminder from run_read_file.
                 if fc.raw_output.is_empty() && fc.total_lines == 0 {
-                    fc.content_concise = None;
                     return Ok(ReadFileOutput::FileContent(fc));
                 }
 
@@ -221,7 +211,6 @@ impl tool_runtime::Tool for HashlineReadTool {
                     Err(_) => false,
                 };
                 if is_converted_document {
-                    fc.content_concise = None;
                     return Ok(ReadFileOutput::FileContent(fc));
                 }
 
@@ -255,7 +244,6 @@ impl tool_runtime::Tool for HashlineReadTool {
                     format_hashline_content(&full_content, fc.offset, effective_limit, &*scheme);
 
                 fc.content = hashline_content;
-                fc.content_concise = None; // hashline has only one format
                 // Drop tool-layer captures: `hashline_content` keeps the
                 // original URIs intact, so session-layer extraction will
                 // catch them — clearing here avoids double-injection.
@@ -472,9 +460,6 @@ mod tests {
                     before_arrow.matches(':').count() >= 2,
                     "expected chunk anchors, got: {before_arrow}"
                 );
-
-                // concise should be None for hashline
-                assert!(fc.content_concise.is_none());
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }

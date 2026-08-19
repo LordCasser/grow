@@ -396,7 +396,6 @@ pub fn minimal_btw_surface_available(v: &AgentView) -> bool {
         && !(v.show_goal_detail && v.goal_state.is_some())
         && v.line_viewer.is_none()
         && v.extensions_modal.is_none()
-        && v.persona_detail.is_none()
         && v.agents_modal.is_none()
         && v.block_viewer.is_none()
         && v.active_modal.is_none()
@@ -845,16 +844,13 @@ pub fn prompt_suggestions_mut(pw: &mut PromptWidget) -> &mut SuggestionControlle
     &mut pw.suggestions
 }
 
-/// Test-only setter for `AgentSession`'s yolo mode.
+/// Test-only setter for `AgentSession`'s canonical permission mode.
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_yolo_mode_for_test(session: &mut AgentSession, on: bool) {
-    session.set_yolo_mode_for_test(on);
-}
-
-/// Test-only setter for `AgentSession`'s auto mode.
-#[cfg(any(test, feature = "test-support"))]
-pub fn set_auto_mode_for_test(session: &mut AgentSession, on: bool) {
-    session.set_auto_mode_for_test(on);
+pub fn set_permission_mode_for_test(
+    session: &mut AgentSession,
+    mode: shell::util::config::PermissionMode,
+) {
+    session.set_permission_mode_for_test(mode);
 }
 
 /// Test-only setter for the thread-local `show_thinking_blocks` appearance

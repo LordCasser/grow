@@ -795,7 +795,7 @@ fn dashboard_second_stash_does_not_overwrite_first() {
         "the stashed peek reply must reach the peeked agent with the image; effects = {effects:?}"
     );
 }
-/// The staged-mode write sits outside `set_yolo_mode_inner`; its own
+/// The staged-mode write sits outside `set_always_approve_mode_inner`; its own
 /// backstop must downgrade Always-Approve under the pin and stay the
 /// identity without one.
 #[test]
@@ -810,8 +810,8 @@ fn apply_pending_dispatch_config_always_approve_blocked_by_policy_pin() {
         Some(POLICY_WARNING),
     );
     assert!(
-        !agent.session.is_yolo(),
-        "staged Always-Approve must not enable yolo under the pin"
+        !agent.session.is_always_approve(),
+        "staged Always-Approve must not enable always-approve under the pin"
     );
     assert_eq!(
         agent.toast.as_ref().map(|(s, _)| s.as_str()),
@@ -824,7 +824,7 @@ fn apply_pending_dispatch_config_always_approve_blocked_by_policy_pin() {
         crate::app::actions::PermissionModeKind::AlwaysApprove,
         None,
     );
-    assert!(agent.session.is_yolo());
+    assert!(agent.session.is_always_approve());
 }
 /// Leader-mode independence: opening the dashboard works even when NOT in
 /// leader mode. The dashboard renders local sessions regardless; leader
@@ -855,7 +855,7 @@ fn idle_roster_entry(session_id: &str, title: &str) -> crate::app::roster::Roste
         cwd: "/repo".to_string(),
         is_worktree: false,
         model_id: None,
-        yolo: false,
+        permission_mode: diagnostics::enums::PermissionMode::Ask,
         activity: crate::app::roster::RosterActivity::Dormant,
         resident: false,
         last_change_unix_ms: 1,
@@ -1025,10 +1025,7 @@ fn dashboard_slash_effort_reports_next_session_staging() {
     let mut app = test_app();
     let model_id = acp::ModelId::new(std::sync::Arc::from("reasoning-model"));
     let mut meta = serde_json::Map::new();
-    meta.insert(
-        "supportsReasoningEffort".into(),
-        serde_json::Value::Bool(true),
-    );
+    meta.insert("reasoningEfforts".into(), serde_json::json!(["high"]));
     let info =
         acp::ModelInfo::new(model_id.clone(), "Reasoning Model".to_string()).meta(Some(meta));
     app.models.available.insert(model_id.clone(), info);
@@ -1144,7 +1141,7 @@ fn dashboard_behavior_and_permission_are_staged_independently() {
         spawned.deferred_session_mode,
         Some(tools::types::BehaviorId::Clarify)
     );
-    assert!(spawned.session.is_yolo());
+    assert!(spawned.session.is_always_approve());
 }
 
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
@@ -1408,7 +1405,7 @@ fn extract_response_type_tool_running_overrides_stale_response() {
 /// Always-Approve mode makes the next spawned agent auto-approve.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_dispatch_always_approve_sets_yolo() {
+fn dashboard_dispatch_always_approve_sets_always_approve() {
     let mut app = test_app();
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
@@ -1417,18 +1414,18 @@ fn dashboard_dispatch_always_approve_sets_yolo() {
     let _ = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
     assert!(
-        app.agents[&new_id].session.is_yolo(),
+        app.agents[&new_id].session.is_always_approve(),
         "Always-Approve must spawn the agent in auto-approve"
     );
 }
 /// Always-Approve staged but pinned off: plain-Send (stays on the
-/// dashboard) must clamp yolo off AND surface the warning on the
+/// dashboard) must clamp always-approve off AND surface the warning on the
 /// dashboard's OWN error slot — the new agent's toast is invisible here.
 #[serial_test::serial(GROW_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_always_approve_blocked_warns_on_dashboard() {
     let mut app = test_app();
-    app.yolo_policy_block = Some(POLICY_WARNING);
+    app.always_approve_policy_block = Some(POLICY_WARNING);
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_permission = crate::app::actions::PermissionModeKind::AlwaysApprove;
@@ -1436,7 +1433,7 @@ fn dashboard_dispatch_always_approve_blocked_warns_on_dashboard() {
     let _ = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
     assert!(
-        !app.agents[&new_id].session.is_yolo(),
+        !app.agents[&new_id].session.is_always_approve(),
         "pinned always-approve must spawn the agent in Normal"
     );
     assert_eq!(
@@ -1575,7 +1572,6 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
             agent_id: id,
             session_id: session_id.clone(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -2897,7 +2893,7 @@ fn dashboard_overlay_cycle_from_unopened_dashboard_configures_state() {
     agent2.generated_session_title = Some("Second".into());
     app.agents.insert(id2, agent2);
     app.active_view = ActiveView::Agent(id1);
-    app.default_yolo = true;
+    app.default_permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
     assert!(
         app.dashboard.is_none(),
         "precondition: dashboard never opened"
@@ -2917,7 +2913,7 @@ fn dashboard_overlay_cycle_from_unopened_dashboard_configures_state() {
             d.pending_permission,
             crate::app::actions::PermissionModeKind::AlwaysApprove
         ),
-        "pending_permission must reflect default_yolo, got {:?}",
+        "pending_permission must reflect default_always_approve, got {:?}",
         d.pending_permission,
     );
 }
@@ -5022,7 +5018,6 @@ fn dashboard_attach_roster_focuses_existing_local_agent() {
             agent_id: id,
             session_id: "local-owned".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );

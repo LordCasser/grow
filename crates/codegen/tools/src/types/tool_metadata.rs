@@ -32,7 +32,7 @@ use tool_protocol::ToolScope;
 /// all other methods have defaults.
 ///
 /// The `ToolRegistry` stores a type-erased handle to each tool's
-/// `ToolMetadata` impl so it can call `versioned_definition()`, etc.
+/// `ToolMetadata` impl so it can call `finalized_definition()`, etc.
 /// after dispatch.
 pub trait ToolMetadata: Send + Sync {
     /// High-level category (Read, Edit, Search, Execute, ...).
@@ -77,22 +77,21 @@ pub trait ToolMetadata: Send + Sync {
     /// implementations: the raw template with all `${{ … }}` / `${% … %}`
     /// markers stripped.
     ///
-    /// The registry path (`versioned_definition`) renders templates properly
+    /// The registry path (`finalized_definition`) renders templates properly
     /// with the finalized toolset context; this is only for consumers that
     /// bypass the registry, which must never see raw template syntax.
     fn sanitized_description_template(&self) -> String {
         crate::types::template_renderer::strip_template_markers(self.description_template())
     }
 
-    /// Build the tool definition for a given contract version.
+    /// Build the tool definition for the finalized tool configuration.
     ///
     /// Default: renders `description_template()` via the `TemplateRenderer`
     /// and remaps schema parameter names. Override for tools that need
     /// params-aware descriptions or schemas (e.g., BashTool removes
     /// `is_background` when disabled).
-    fn versioned_definition(
+    fn finalized_definition(
         &self,
-        _contract_version: Option<&str>,
         client_name: &str,
         description_override: Option<&str>,
         renderer: &TemplateRenderer,
@@ -181,13 +180,6 @@ pub fn test_ctx_with_call_id(
         stream_tool_progress: true,
     });
     ctx
-}
-
-/// Read the behavior version from the runtime context, if set.
-pub fn behavior_version(ctx: &tool_runtime::ToolCallContext) -> Option<String> {
-    ctx.extensions
-        .get::<tool_runtime::BehaviorVersion>()
-        .map(|v| v.0.clone())
 }
 
 /// This tool's own canonical→client param-name map, stamped on the dispatch

@@ -124,7 +124,7 @@ pub async fn list_terminals() -> Vec<TerminalInfo> {
 
 /// Returns environment variables that prevent CLI tools from launching any blocking/waiting programs.
 /// Delegates to the canonical implementation in `tools`.
-pub use tools::util::pager_env;
+pub use tty_utils::pager_env;
 
 /// Returns environment variables that encourage CLI tools to emit colored output
 /// and show progress bars/spinners even when running through pipes (non-TTY).

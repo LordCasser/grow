@@ -210,7 +210,7 @@ fn create_source(root: &Path, cwd: &str, id: &str, generation: u64) -> PathBuf {
     let summary_path = dir.join(super::super::SUMMARY_FILE);
     fs::write(&summary_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     fs::set_permissions(&summary_path, fs::Permissions::from_mode(0o640)).unwrap();
-    fs::write(dir.join("chat_history.jsonl"), b"historical bytes\n").unwrap();
+    fs::write(dir.join("opaque-sidecar.bin"), b"opaque sidecar bytes\n").unwrap();
     let executable = nested.join("tool");
     fs::write(&executable, b"opaque\0bytes").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o751)).unwrap();

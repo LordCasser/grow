@@ -128,6 +128,26 @@ pub struct ConversationCounts {
     pub tool_result: usize,
 }
 
+impl ConversationCounts {
+    pub fn from_items(items: &[sampling_types::ConversationItem]) -> Self {
+        let mut counts = Self {
+            total: items.len(),
+            ..Self::default()
+        };
+        for item in items {
+            match item {
+                sampling_types::ConversationItem::User(_) => counts.user += 1,
+                sampling_types::ConversationItem::Assistant(_) => counts.assistant += 1,
+                sampling_types::ConversationItem::ToolResult(_) => counts.tool_result += 1,
+                sampling_types::ConversationItem::System(_)
+                | sampling_types::ConversationItem::BackendToolCall(_)
+                | sampling_types::ConversationItem::Reasoning(_) => {}
+            }
+        }
+        counts
+    }
+}
+
 /// Info returned when auto-compact threshold is exceeded.
 #[derive(Debug, Clone)]
 pub struct AutoCompactTrigger {

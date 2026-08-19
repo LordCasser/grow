@@ -43,22 +43,6 @@ name = "Local Dev"
 path = "~/dev/my-plugins"
 ```
 
-### In settings.json
-
-Add sources under `extraKnownMarketplaces`, keyed by name. Each entry's `source` is one of `git` (with `url`), `github` (with `repo`), or `local` (with `path`):
-
-```json
-{
-  "extraKnownMarketplaces": {
-    "my-marketplace": {
-      "source": { "source": "git", "url": "git@github.com:my-org/plugins.git" }
-    }
-  }
-}
-```
-
-Place this file at `~/.grow/settings.json` or `~/.claude/settings.json`.
-
 ---
 
 ## Install and use a plugin
@@ -87,7 +71,7 @@ A plugin's skills appear in the slash menu. When a skill name is ambiguous, Grow
 
 ```bash
 grow plugin list [--json] [--available]   # installed plugins (--available requires --json)
-grow plugin uninstall <name> [--confirm] [--keep-data]   # aliases: rm, remove
+grow plugin uninstall <name> [--confirm] [--keep-data]
 grow plugin update [<name>]               # omit the name to update every plugin
 grow plugin enable <name>
 grow plugin disable <name>
@@ -149,7 +133,7 @@ Enabling a plugin loads its skills, commands, and agents. Trust is separate and 
 grow plugin install <source> --trust
 ```
 
-Trusted plugin `.mcp.json` servers attach to the session like other MCP config, and child agents inherit them. Plugin agents (`plugin-name:agent-name`) use the parent session's MCP servers by default, the same as user agents under `~/.grow/agents/`; restrict that with the `mcpInheritance` frontmatter (see [Subagents](16-subagents.md#mcp-inheritance)). For safety, plugin agent frontmatter cannot declare `mcpServers` or hooks, or set `permissionMode: bypassPermissions`.
+Trusted plugin `.mcp.json` servers attach to the session like other MCP config, and child agents inherit them. Plugin agents (`plugin-name:agent-name`) use the parent session's MCP servers by default, the same as user agents under `~/.grow/agents/`; restrict that with the `mcpInheritance` frontmatter (see [Subagents](16-subagents.md#mcp-inheritance)). For safety, plugin agent frontmatter cannot declare `mcpServers` or hooks. Permission mode is session-owned and is not an Agent field.
 
 ---
 
@@ -162,7 +146,7 @@ You need three things: a git repository, one folder per plugin, and a single ind
 ### Set up the repository
 
 1. **Create a git repository.** A private repository is fine; access uses each person's own git credentials.
-2. **Add each plugin as a folder.** A plugin folder holds any of `skills/`, `commands/`, `agents/`, `hooks/hooks.json`, `.mcp.json`, and an optional `plugin.json` manifest (see [What a plugin contains](#what-a-plugin-contains)).
+2. **Add each plugin as a folder.** Every plugin folder has a required `plugin.json` plus any of `skills/`, `commands/`, `agents/`, `hooks/hooks.json`, and `.mcp.json` (see [What a plugin contains](#what-a-plugin-contains)).
 3. **List the plugins in `.grow-plugin/marketplace.json`.** This is the index Grow reads.
 4. **Push the repository.**
 
@@ -175,12 +159,12 @@ my-org-plugins/
     plugin-index.json     # optional catalog for richer browsing
   plugins/
     gdrive/
-      plugin.json         # optional manifest
+      plugin.json         # required identity and component contract
       skills/gdrive/SKILL.md
       .mcp.json           # MCP servers this plugin adds
 ```
 
-Grow reads the index from `.grow-plugin/marketplace.json`. It also accepts `.grow-plugin/plugin.json` and the `.claude-plugin/` equivalents.
+Grow reads exactly one index: `.grow-plugin/marketplace.json`.
 
 ### Write the index
 
@@ -188,6 +172,7 @@ Grow reads the index from `.grow-plugin/marketplace.json`. It also accepts `.gro
 
 ```json
 {
+  "version": 1,
   "name": "My Org Plugins",
   "description": "Internal skills and tools",
   "owner": { "name": "Platform Team", "email": "platform@example.com" },
@@ -204,8 +189,8 @@ Grow reads the index from `.grow-plugin/marketplace.json`. It also accepts `.gro
 
 Each plugin's `source` points at its files, in one of two ways:
 
-- **In this repository**: `{ "type": "local", "path": "./plugins/gdrive" }`. The plain string `"./plugins/gdrive"` also works.
-- **In a separate repository**: `{ "source": "url", "url": "https://github.com/my-org/gdrive.git", "sha": "<full commit sha>" }`. Pin a `sha` so installs are reproducible (required when you [require pinned versions](#require-pinned-versions)).
+- **In this repository**: `{ "type": "local", "path": "plugins/gdrive" }`.
+- **In a separate repository**: `{ "type": "git", "url": "https://github.com/my-org/gdrive.git", "sha": "<full commit sha>" }`. Pin a `sha` so installs are reproducible (required when you [require pinned versions](#require-pinned-versions)).
 
 Optional per-plugin fields: `version`, `author`, `homepage`, `tags`, and `keywords`.
 
@@ -344,20 +329,20 @@ A plugin is a directory with any combination of:
 - **MCP servers**: a `.mcp.json` file
 - **LSP servers**: a `.lsp.json` file
 
-An optional `plugin.json` manifest can override paths or add metadata; without one, Grow discovers components from these standard directories. For example, a `team-tools` plugin might bundle a deploy skill, a code-review agent, pre-commit hooks, and a Linear MCP server, installed together in one step.
+The required `plugin.json` establishes plugin identity and can override component paths. Omitted component paths use the standard directories. For example, a `team-tools` plugin might bundle a deploy skill, a code-review agent, pre-commit hooks, and a Linear MCP server, installed together in one step.
 
 A skill or command may ship a **helper script** next to its SKILL.md (for example a Python file it calls). Put the script in the plugin and have the skill run it by relative path; it is copied to the machine with the plugin. The script's runtime and any packages it imports must already be present, plugins deliver files, not runtimes or native binaries (see [What this does not cover](#what-this-does-not-cover)).
 
 ### Where Grow looks for plugins
 
-Grow discovers plugins from these locations, in priority order. The `.claude/plugins/` equivalents also work, and when two plugins share a name the higher-priority one wins:
+Grow discovers plugins from these locations, in priority order. When two plugins share a name the higher-priority one wins:
 
 | Location | Scope | Trust |
 |----------|-------|-------|
 | `_meta.pluginDirs` (`session/new` / `session/load`) | Session, that session only | Trusted automatically |
 | `--plugin-dir` (the `grow agent … stdio` flag) | Process, that agent process only | Trusted automatically |
 | `.grow/plugins/` | Project, shared through version control | Requires trust |
-| `~/.grow/plugins/` | User, every project | Trusted automatically |
+| `$GROW_HOME/plugins/` | User, every project | Trusted automatically |
 | `[plugins].paths` (config) | Custom directories you add | Depends on location |
 
 The `_meta.pluginDirs` field on the `session/new` and `session/load` requests loads plugins for a single session; because the caller supplies the directory, those plugins are trusted automatically and do not persist after the session. `--plugin-dir` is the process-wide equivalent for a dedicated `grow agent … stdio` process, repeatable (`grow agent --no-leader --plugin-dir A --plugin-dir B stdio`), and ignored in leader mode, where the shared leader discovers its own plugins.
@@ -371,7 +356,7 @@ Plugin hooks receive two variables beyond the standard hook environment:
 | `GROW_PLUGIN_ROOT` | Absolute path to the plugin's installed directory. |
 | `GROW_PLUGIN_DATA` | Absolute path to the plugin's writable data directory, for state, caches, and logs. |
 
-Grow sets these and overrides any same-named value in the hook's `env` map (the `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` aliases are set too). See the [Hooks guide](10-hooks.md) for every variable passed to hooks.
+Grow sets these and overrides any same-named value in the hook's `env` map. See the [Hooks guide](10-hooks.md) for every variable passed to hooks.
 
 ### Keyboard shortcuts
 

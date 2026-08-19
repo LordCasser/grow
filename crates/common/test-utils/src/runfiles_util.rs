@@ -13,8 +13,27 @@ use std::path::PathBuf;
 pub fn try_resolve_runfiles(_path: &str) -> Option<PathBuf> {
     #[cfg(feature = "bazel")]
     {
-        let r = runfiles::Runfiles::create().ok()?;
-        runfiles::rlocation!(r, _path)
+        if let Some(root) =
+            std::env::var_os("RUNFILES_DIR").or_else(|| std::env::var_os("TEST_SRCDIR"))
+        {
+            let candidate = PathBuf::from(root).join(_path);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        if let Some(manifest) = std::env::var_os("RUNFILES_MANIFEST_FILE")
+            && let Ok(contents) = std::fs::read_to_string(manifest)
+        {
+            for line in contents.lines() {
+                let Some((logical, physical)) = line.split_once(' ') else {
+                    continue;
+                };
+                if logical == _path {
+                    return Some(PathBuf::from(physical));
+                }
+            }
+        }
+        None
     }
     #[cfg(not(feature = "bazel"))]
     {

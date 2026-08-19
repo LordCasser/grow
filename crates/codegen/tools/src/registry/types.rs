@@ -49,6 +49,7 @@ pub fn register_tool_pack(pack: ToolPack) {
     tool_packs().lock().push(pack);
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolConfig {
     pub id: String,
     /// tool params, keyed by fully qualified name.
@@ -64,10 +65,6 @@ pub struct ToolConfig {
     /// vs. the default host-shell description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description_override: Option<String>,
-    /// Per-tool behavior version override. Wins over `ToolServerConfig::behavior_preset`.
-    /// Only valid for version-managed tools (see `versions::MANAGED_TOOLS`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub behavior_version: Option<String>,
     /// The tool's capability category. Populated automatically by
     /// `for_tool::<T>()` / `From<&T: Tool>` and used by capability-mode
     /// enforcement to filter tools without a hardcoded ID mapping.
@@ -76,34 +73,10 @@ pub struct ToolConfig {
     /// created via `ToolConfig::from_id()`). Restricted Agent capability
     /// filters reject it; only an unrestricted primary toolset may retain it.
     ///
-    /// `ToolKind` is `#[serde(other)]`, so an unknown deserialized `kind` becomes
-    /// `Some(Other)` (dropped by restrictive modes) rather than an error — not a
-    /// live path today since `kind` is auto-populated and `from_id` leaves it
-    /// `None`. [`deserialize_config_kind`] warns on that sink so a config typo
-    /// doesn't silently demote the tool.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_config_kind"
-    )]
+    /// The vocabulary is strict so a typo cannot silently alter capability or
+    /// permission classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<ToolKind>,
-}
-/// Deserialize `ToolConfig::kind`, warning when an unknown string sinks into
-/// `ToolKind::Other` via `#[serde(other)]` — otherwise a config typo silently
-/// demotes the tool in restrictive capability modes.
-fn deserialize_config_kind<'de, D>(deserializer: D) -> Result<Option<ToolKind>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize as _;
-    let Some(raw) = Option::<String>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
-    let kind = ToolKind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&raw))?;
-    if kind == ToolKind::Other && raw != "other" {
-        tracing::warn!(kind = %raw, "unknown tool kind in config; treating as \"other\"");
-    }
-    Ok(Some(kind))
 }
 impl ToolConfig {
     /// Build a `ToolConfig` from a tool TYPE.
@@ -136,7 +109,6 @@ impl ToolConfig {
             name_override: None,
             params_name_overrides: None,
             description_override: None,
-            behavior_version: None,
             kind: None,
         }
     }
@@ -191,7 +163,6 @@ impl<T: crate::types::tool_metadata::ToolMetadata + tool_runtime::Tool> From<&T>
             name_override: None,
             params_name_overrides: None,
             description_override: None,
-            behavior_version: None,
             kind: Some(tool.kind()),
         }
     }
@@ -200,12 +171,9 @@ impl<T: crate::types::tool_metadata::ToolMetadata + tool_runtime::Tool> From<&T>
 /// how to rename tools/params for the client-facing API.
 /// TODO: This whole thing is a map from the tool_id to the per tool config
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolServerConfig {
     pub tools: Vec<ToolConfig>,
-    /// Behavior preset name (e.g. `"current"`, `"legacy-0.4.10"`).
-    /// Applied to all version-managed tools. Defaults to `"current"` when `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub behavior_preset: Option<String>,
 }
 #[derive(Clone)]
 pub struct SubagentSessionResources {
@@ -246,11 +214,11 @@ pub struct SessionContext {
         Option<crate::implementations::grow_build::scheduler::types::SchedulerHandle>,
     /// Available skills for the Skill tool and description templates.
     pub skills: Vec<SkillInfo>,
-    /// File path for persisting Resources state across restarts.
+    /// Exact `resources_state.json` path for persisting Resources across restarts.
     ///
     /// The toolset loads existing state on construction and auto-saves
     /// after every tool execution. The file stores serialized `State<T>`
-    /// values (e.g., `TodoState`).
+    /// values (e.g., `TodoState`). An empty path disables persistence.
     pub state_path: PathBuf,
     /// Optional memory backend for cross-session knowledge retrieval.
     /// When `Some`, injected into `Resources` so `memory_search` / `memory_get`
@@ -402,10 +370,6 @@ struct FinalizedTool {
     /// useful for parsing input to specific type
     parse_input:
         Arc<dyn Fn(serde_json::Value) -> Result<ToolInput, tool_runtime::ToolError> + Send + Sync>,
-    /// Resolved behavior contract version for this tool (e.g. `"current"`,
-    /// `"legacy-0.4.10"`). `None` for unmanaged tools and dynamically
-    /// registered (MCP) tools.
-    contract_version: Option<String>,
 }
 /// Toolset produced by `ToolRegistryBuilder::finalize()`.
 ///
@@ -628,7 +592,7 @@ impl ToolRegistryBuilder {
             system_reminders_enabled: true,
         };
         b.register_with_params::<grow_build::BashTool, grow_build::bash::BashParams>();
-        b.register_with_params::<grow_build::ReadFileTool, grow_build::read_file::ReadFileParams>();
+        b.register::<grow_build::ReadFileTool>();
         b.register_with_params::<
                 grow_build::SearchReplaceTool,
                 grow_build::search_replace::SearchReplaceParams,
@@ -648,7 +612,6 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::WorkflowTool>();
         b.register::<grow_build::TaskOutputTool>();
         b.register::<grow_build::GetTerminalCommandOutputTool>();
-        b.register::<grow_build::WaitTasksTool>();
         b.register::<grow_build::TaskTool>();
         b.register_with_params::<grow_build::WebFetchTool, grow_build::web_fetch::WebFetchParams>();
         b.register::<grow_build::LspTool>();
@@ -664,15 +627,13 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::SchedulerListTool>();
         b.register::<crate::implementations::memory::search_tool::MemorySearchImpl>();
         b.register::<crate::implementations::memory::get_tool::MemoryGetImpl>();
+        b.register::<crate::implementations::context_fetch::ContextFetchImpl>();
         b.register::<crate::implementations::search_tool::SearchTool>();
         b.register_with_params::<
                 crate::implementations::use_tool::UseTool,
                 crate::implementations::use_tool::UseToolParams,
             >();
-        b.register_with_params::<
-                grow_build_concise::ReadFileConciseTool,
-                grow_build::read_file::ReadFileParams,
-            >();
+        b.register::<grow_build_concise::ReadFileConciseTool>();
         b.register_with_params::<
                 grow_build_concise::SearchReplaceConciseTool,
                 grow_build::search_replace::SearchReplaceParams,
@@ -729,20 +690,6 @@ impl ToolRegistryBuilder {
     /// Validate a client-proposed configuration. Returns errors (empty = valid).
     pub fn validate_config(&self, config: &ToolServerConfig) -> Vec<RequirementError> {
         let mut errors = vec![];
-        let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
-        if crate::versions::lookup_preset(preset_name).is_none() {
-            errors.push(
-                RequirementError::new(
-                    "(global)",
-                    format!("unknown behavior_preset: \"{preset_name}\""),
-                )
-                .with_field_path("behavior_preset")
-                .with_expected("one of the registered behavior presets")
-                .with_bad_value(serde_json::Value::String(preset_name.to_owned()))
-                .with_category("behavior_preset"),
-            );
-            return errors;
-        }
         let mut resolved: Vec<(&ToolEntry, serde_json::Value)> = Vec::new();
         for tool_config in &config.tools {
             let Some(entry) = self.tools.get(tool_config.id.as_str()) else {
@@ -759,21 +706,6 @@ impl ToolRegistryBuilder {
                 );
                 continue;
             };
-            if let Err(message) = crate::versions::resolve_version(
-                preset_name,
-                &tool_config.id,
-                tool_config.behavior_version.as_deref(),
-            ) {
-                errors.push(
-                    RequirementError::new(tool_config.id.clone(), message)
-                        .with_field_path("behavior_version")
-                        .with_bad_value(serde_json::Value::String(
-                            tool_config.behavior_version.clone().unwrap_or_default(),
-                        ))
-                        .with_category("behavior_version"),
-                );
-                continue;
-            }
             let effective = match compute_effective_params(entry, tool_config) {
                 Ok(effective) => effective,
                 Err(e) => {
@@ -954,7 +886,7 @@ impl ToolRegistryBuilder {
         ));
         {
             let mut mgr = crate::types::skill_discovery_tracker::SkillManager::new();
-            mgr.seed(Some(cwd.clone()), None, startup_skills, None, None, None);
+            mgr.seed(Some(cwd.clone()), None, startup_skills, None, None);
             let _ = mgr.take_pending();
             resources.insert(mgr);
         }
@@ -990,42 +922,21 @@ impl ToolRegistryBuilder {
         resources.register_state::<crate::types::resources::WebCitationCounter>();
         resources.register_state::<crate::types::resources::ModelImageInputState>();
         resources
-            .register_state::<
-                crate::implementations::cursor_rules_on_read::CursorRulesOnReadTracker,
-            >();
-        resources
             .register_state::<crate::implementations::grow_build::scheduler::types::SchedulerState>(
             );
         for entry in self.tools.values() {
             (entry.register_params)(&mut resources);
         }
-        let resources_state_path = ctx
-            .state_path
-            .parent()
-            .unwrap_or(&ctx.state_path)
-            .join("resources_state.json");
-        let persistence = Arc::new(ResourcesPersistence::new(resources_state_path));
+        let persistence = if ctx.state_path.as_os_str().is_empty() {
+            Arc::new(ResourcesPersistence::noop())
+        } else {
+            Arc::new(ResourcesPersistence::new(ctx.state_path))
+        };
         persistence.load(&mut resources);
-        let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
         let local_registry = self.shared_local_registry.take().unwrap_or_default();
         for tool_config in &config.tools {
             let entry = self.tools.remove(&tool_config.id).unwrap();
             (entry.register_in_local)(&local_registry);
-            let contract_version = crate::versions::resolve_version(
-                preset_name,
-                &tool_config.id,
-                tool_config.behavior_version.as_deref(),
-            )
-            .map_err(|e| {
-                vec![
-                    RequirementError::new(tool_config.id.clone(), e)
-                        .with_field_path("behavior_version")
-                        .with_bad_value(serde_json::Value::String(
-                            tool_config.behavior_version.clone().unwrap_or_default(),
-                        ))
-                        .with_category("behavior_version"),
-                ]
-            })?;
             let client_name = tool_config.resolve_client_name(&entry.id);
             let param_map = tool_config
                 .params_name_overrides
@@ -1037,8 +948,7 @@ impl ToolRegistryBuilder {
                 .collect();
             let effective_params = compute_effective_params(&entry, tool_config)
                 .map_err(|e| vec![requirement_error_from_param_error(&tool_config.id, e)])?;
-            let mut definition = entry.metadata.versioned_definition(
-                contract_version.as_deref(),
+            let mut definition = entry.metadata.finalized_definition(
                 &client_name,
                 tool_config.description_override.as_deref(),
                 &renderer,
@@ -1074,7 +984,6 @@ impl ToolRegistryBuilder {
                 input_schema: entry.input_schema,
                 reverse_params,
                 parse_input: Arc::from(entry.parse_input),
-                contract_version,
             });
         }
         let native_tool_names: std::collections::HashSet<String> = tools
@@ -1284,18 +1193,6 @@ impl FinalizedToolset {
             .filter(|t| !t.client_name.contains("__"))
             .map(|t| t.definition.clone())
             .collect()
-    }
-    /// Get the resolved contract version for a tool by its client-facing name.
-    ///
-    /// Returns `None` if the tool is not found or is not version-managed.
-    /// Returns an owned `String` because the internal `RwLock` read guard
-    /// cannot outlive this call.
-    pub fn get_contract_version(&self, tool_name: &str) -> Option<String> {
-        self.tools
-            .read()
-            .iter()
-            .find(|t| t.client_name == tool_name)
-            .and_then(|t| t.contract_version.clone())
     }
     /// Look up a tool's metadata by its client-facing name. Returns `None` for unknown tools.
     pub fn get_tool_metadata(&self, tool_name: &str) -> Option<Arc<dyn ToolMetadata>> {
@@ -1572,7 +1469,6 @@ impl FinalizedToolset {
         } else {
             None
         };
-        let contract_version = self.get_contract_version(tool_name);
         let rt_call_id = tool_protocol::ToolCallId::new(tool_call_id)
             .unwrap_or_else(|_| tool_protocol::ToolCallId::new_v7());
         let mut ctx = tool_runtime::ToolCallContext::new(rt_call_id);
@@ -1587,10 +1483,6 @@ impl FinalizedToolset {
         if let Some(cancellation) = cancellation {
             ctx.extensions
                 .insert(tool_runtime::Cancellation(cancellation));
-        }
-        if let Some(ref version) = contract_version {
-            ctx.extensions
-                .insert(tool_runtime::BehaviorVersion(version.clone()));
         }
         ctx.extensions.insert(InnerDispatch(std::sync::Arc::new(
             InnerDispatchForToolset {
@@ -1751,7 +1643,6 @@ impl FinalizedToolset {
                     tool_input: json,
                 }))
             }),
-            contract_version: None,
         });
         Ok(())
     }
@@ -2013,19 +1904,13 @@ fn explain_requirement_failure(
                 )
                 .with_category("requirements")
         }
-        "Grow:search_replace" if !params
-            .get("skip_read_before_edit")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false) && !has_tool_kind(proposed, ToolKind::Read) => {
+        "Grow:search_replace" if !has_tool_kind(proposed, ToolKind::Read) => {
             RequirementError::new(
                     fq_tool_id,
-                    "skip_read_before_edit=false requires a Read tool in the toolset so files can be read before editing",
+                    "search_replace requires a Read tool in the toolset so files can be read before editing",
                 )
-                .with_field_path("params.skip_read_before_edit")
-                .with_expected(
-                    "set skip_read_before_edit=true or include a Read tool such as Grow:read_file",
-                )
-                .with_bad_value(serde_json::Value::Bool(false))
+                .with_field_path("tools")
+                .with_expected("include a Read tool such as Grow:read_file")
                 .with_category("requirements")
         }
         _ => {
@@ -2104,7 +1989,7 @@ mod tests {
             subagent: None,
             parent_scheduler_handle: None,
             skills: vec![],
-            state_path: tmp.path().join("state.json"),
+            state_path: tmp.path().join("resources_state.json"),
             memory_backend: None,
             web_fetch_config:
                 crate::implementations::grow_build::web_fetch::WebFetchConfig::default(),
@@ -2125,30 +2010,30 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
+                    id: "Grow:read_file".to_string(),
+                    params: None,
+                    name_override: None,
+                    params_name_overrides: None,
+                    description_override: None,
+                    kind: None,
+                },
+                ToolConfig {
                     id: "GrowConcise:search_replace".to_string(),
                     params: None,
                     name_override: Some("concise_search_replace".to_string()),
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
                     id: "Grow:search_replace".to_string(),
-                    params: Some(
-                        serde_json::json!({ "skip_read_before_edit": true })
-                            .as_object()
-                            .unwrap()
-                            .clone(),
-                    ),
+                    params: None,
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = Arc::new(
@@ -2199,7 +2084,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -2208,11 +2092,9 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let ctx = test_session_context(&tmp);
@@ -2273,7 +2155,6 @@ mod tests {
             .chain(std::iter::empty::<ToolConfig>())
             .chain(std::iter::empty::<ToolConfig>())
             .collect(),
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let ctx = test_session_context(&tmp);
@@ -2379,7 +2260,6 @@ mod tests {
                         ToolConfig::from_id("Grow:get_task_output".to_string()),
                         ToolConfig::from_id("Grow:kill_task".to_string()),
                     ],
-                    behavior_preset: None,
                 },
                 test_session_context(&tmp),
             )
@@ -2403,7 +2283,6 @@ mod tests {
                 ToolConfig::from_id("Grow:get_task_output".to_string()),
                 ToolConfig::from_id("Grow:kill_task".to_string()),
             ],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let toolset = ToolRegistryBuilder::new()
@@ -2446,7 +2325,6 @@ mod tests {
                 ToolConfig::from_id("Grow:get_task_output".to_string()),
                 ToolConfig::from_id("Grow:kill_task".to_string()),
             ],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let toolset = ToolRegistryBuilder::new()
@@ -2460,17 +2338,21 @@ mod tests {
             "get_task_output overrides its action kind with read scope"
         );
     }
-    /// `ToolConfig::kind` parsing: known kinds map, unknown strings sink into
-    /// `Other` (with a warn, not an error), absent stays `None`.
+    /// `ToolConfig::kind` parsing is strict; absent remains `None` for dynamic
+    /// tools whose kind is genuinely unknown.
     #[test]
-    fn tool_config_kind_sinks_unknown_to_other() {
+    fn tool_config_kind_rejects_unknown_values() {
         let parse = |v: serde_json::Value| -> ToolConfig {
             serde_json::from_value(v).expect("ToolConfig deserializes")
         };
         let known = parse(serde_json::json!({"id": "Grow:read_file", "kind": "read"}));
         assert_eq!(known.kind, Some(ToolKind::Read));
-        let typo = parse(serde_json::json!({"id": "Grow:read_file", "kind": "raed"}));
-        assert_eq!(typo.kind, Some(ToolKind::Other));
+        assert!(
+            serde_json::from_value::<ToolConfig>(
+                serde_json::json!({"id": "Grow:read_file", "kind": "raed"})
+            )
+            .is_err()
+        );
         let absent = parse(serde_json::json!({"id": "Grow:read_file"}));
         assert_eq!(absent.kind, None);
     }
@@ -2489,7 +2371,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -2501,11 +2382,9 @@ mod tests {
                         "find".to_string(),
                     )])),
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let ctx = test_session_context(&tmp);
@@ -2561,20 +2440,17 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
                     id: "Grow:search_replace".to_string(),
-                    params: None, // default: skip_read_before_edit = false
+                    params: None,
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = Arc::new(
@@ -2658,7 +2534,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -2667,7 +2542,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -2681,7 +2555,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig::for_tool::<grow_build::GrepTool>(),
@@ -2693,11 +2566,9 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = Arc::new(
@@ -2798,7 +2669,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -2807,11 +2677,9 @@ mod tests {
                     name_override: None, // both resolve to "read_file"
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(!errors.is_empty(), "Should reject duplicate client_name");
@@ -2837,10 +2705,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert_eq!(errors.len(), 1);
@@ -2868,10 +2734,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert_eq!(errors.len(), 1);
@@ -2894,7 +2758,6 @@ mod tests {
                     name_override: None, // client_name = "read_file"
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -2903,11 +2766,9 @@ mod tests {
                     name_override: Some("concise_read_file".to_string()), // disambiguated
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -2933,7 +2794,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -2942,11 +2802,9 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let result = builder.finalize(config, ctx);
@@ -3004,7 +2862,6 @@ mod tests {
             tools: vec![ToolConfig::for_tool::<
                 crate::implementations::use_tool::UseTool,
             >()],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = Arc::new(builder.finalize(config, ctx).unwrap());
@@ -3130,7 +2987,6 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig::for_tool::<grow_build::ReadFileTool>()],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = Arc::new(builder.finalize(config, ctx).unwrap());
@@ -3163,7 +3019,6 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig::for_tool::<grow_build::ReadFileTool>()],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = Arc::new(builder.finalize(config, ctx).unwrap());
@@ -3277,7 +3132,6 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig::for_tool::<grow_build::ReadFileTool>()],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = Arc::new(builder.finalize(config, ctx).unwrap());
@@ -3308,7 +3162,6 @@ mod tests {
                         ToolConfig::for_tool::<grow_build::TodoWriteTool>(),
                         ToolConfig::for_tool::<grow_build::WriteTool>(),
                     ],
-                    behavior_preset: None,
                 },
                 test_session_context(&tmp),
             )
@@ -3420,7 +3273,6 @@ mod tests {
                 ToolConfig::for_tool::<grow_build::ReadFileTool>(),
                 ToolConfig::for_tool::<grow_build::GrepTool>(),
             ],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = builder.finalize(config, ctx).unwrap();
@@ -3456,10 +3308,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -3486,7 +3336,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -3495,11 +3344,9 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -3522,7 +3369,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -3531,11 +3377,9 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -3559,7 +3403,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -3568,7 +3411,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -3577,11 +3419,9 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -3614,10 +3454,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let ctx = test_session_context(&tmp);
@@ -3665,7 +3503,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -3674,7 +3511,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -3683,11 +3519,9 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let ctx = test_session_context(&tmp);
@@ -3736,7 +3570,6 @@ mod tests {
             name_override: None,
             params_name_overrides: None,
             description_override: None,
-            behavior_version: None,
             kind: None,
         };
         let config = ToolServerConfig {
@@ -3744,10 +3577,8 @@ mod tests {
                 tool("Grow:run_terminal_cmd"),
                 tool("Grow:task"),
                 tool("Grow:get_task_output"),
-                tool("Grow:wait_tasks"),
                 tool("Grow:kill_task"),
             ],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let ctx = test_session_context(&tmp);
@@ -3778,7 +3609,7 @@ mod tests {
             desc_of("run_terminal_cmd").contains("is_background"),
             "bash description must resolve params.execute.is_background"
         );
-        for name in ["get_task_output", "wait_tasks"] {
+        for name in ["get_task_output"] {
             let desc = desc_of(name);
             assert!(
                 desc.contains("is_background"),
@@ -3821,10 +3652,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert_eq!(errors.len(), 1, "expected exactly one validation error");
@@ -3857,10 +3686,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: Some("custom bash description".to_string()),
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let ctx = test_session_context(&tmp);
@@ -3902,10 +3729,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -3923,10 +3748,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert_eq!(
@@ -3962,10 +3785,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert_eq!(
@@ -3989,10 +3810,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert_eq!(
@@ -4015,10 +3834,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -4030,10 +3847,7 @@ mod tests {
             .find(|error| error.tool == "Grow:search_replace")
             .expect("search_replace error should be present");
         assert!(error.message.contains("Read tool"));
-        assert_eq!(
-            error.field_path.as_deref(),
-            Some("params.skip_read_before_edit")
-        );
+        assert_eq!(error.field_path.as_deref(), Some("tools"));
     }
     /// AskUserQuestion validates without the plan-mode tools, matching
     /// the reference agent (its plan-mode prompt note is `${% if %}`-guarded).
@@ -4047,10 +3861,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -4069,7 +3881,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -4078,7 +3889,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -4087,7 +3897,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -4096,7 +3905,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -4105,7 +3913,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -4114,7 +3921,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -4123,7 +3929,6 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig {
@@ -4132,11 +3937,9 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
             ],
-            behavior_preset: None,
         };
         let tmp = TempDir::new().unwrap();
         let ctx = test_session_context(&tmp);
@@ -4166,7 +3969,6 @@ mod tests {
             name_override: None,
             params_name_overrides: None,
             description_override: None,
-            behavior_version: None,
             kind: None,
         }
     }
@@ -4196,7 +3998,6 @@ mod tests {
                 hashline_tool_config("GrowHashline:hashline_edit"),
                 hashline_tool_config("GrowHashline:hashline_grep"),
             ],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = builder
@@ -4221,7 +4022,6 @@ mod tests {
                 hashline_tool_config("Grow:search_replace"),
                 hashline_tool_config("Grow:grep"),
             ],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         builder
@@ -4234,7 +4034,6 @@ mod tests {
                 hashline_tool_config("GrowHashline:hashline_edit"),
                 hashline_tool_config("GrowHashline:hashline_grep"),
             ],
-            behavior_preset: None,
         };
         let ctx2 = test_session_context(&tmp);
         builder2
@@ -4251,7 +4050,6 @@ mod tests {
                 hashline_tool_config("GrowHashline:hashline_edit"),
                 hashline_tool_config("GrowHashline:hashline_grep"),
             ],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = builder.finalize(config, ctx).unwrap();
@@ -4273,7 +4071,6 @@ mod tests {
                 hashline_tool_config("GrowHashline:hashline_edit"),
                 hashline_tool_config("Grow:grep"),
             ],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -4288,7 +4085,6 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig::for_tool::<grow_build::PlanControlTool>()],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = builder
@@ -4314,7 +4110,6 @@ mod tests {
             .finalize(
                 ToolServerConfig {
                     tools: vec![ToolConfig::for_tool::<grow_build::PlanControlTool>()],
-                    behavior_preset: None,
                 },
                 test_session_context(&tmp),
             )
@@ -4346,14 +4141,12 @@ mod tests {
                     name_override: None,
                     params_name_overrides: None,
                     description_override: None,
-                    behavior_version: None,
                     kind: None,
                 },
                 ToolConfig::for_tool::<grow_build_hashline::HashlineEditTool>(),
                 ToolConfig::for_tool::<grow_build_hashline::HashlineGrepTool>(),
                 ToolConfig::for_tool::<grow_build::ListDirTool>(),
             ],
-            behavior_preset: None,
         };
         let errors = builder.validate_config(&config);
         assert!(
@@ -4385,7 +4178,6 @@ mod tests {
             name_override: None,
             params_name_overrides: None,
             description_override: None,
-            behavior_version: None,
             kind: None,
         }
     }
@@ -4402,7 +4194,6 @@ mod tests {
                 ToolConfig::for_tool::<grow_build::GrepTool>(),
                 ToolConfig::for_tool::<grow_build::TodoWriteTool>(),
             ],
-            behavior_preset: None,
         };
         crate::bridge::ToolBridge::finalize_builder(builder, config, test_session_context(tmp))
             .await
@@ -4450,7 +4241,6 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig::for_tool::<grow_build::ListDirTool>()],
-            behavior_preset: None,
         };
         let legacy_toolset = Arc::new(
             builder
@@ -4547,7 +4337,6 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig::for_tool::<grow_build::ListDirTool>()],
-            behavior_preset: None,
         };
         let toolset = builder
             .finalize(config, test_session_context(&tmp))
@@ -4583,7 +4372,6 @@ mod tests {
                 ToolConfig::for_tool::<grow_build::ListDirTool>(),
                 ToolConfig::for_tool::<grow_build::ReadFileTool>(),
             ],
-            behavior_preset: None,
         };
         let mut ctx = test_session_context(&tmp);
         ctx.skills = vec![boot_skill.clone()];
@@ -4728,10 +4516,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = builder
@@ -4805,10 +4591,8 @@ mod tests {
                 name_override: None,
                 params_name_overrides: None,
                 description_override: None,
-                behavior_version: None,
                 kind: None,
             }],
-            behavior_preset: None,
         };
         let ctx = test_session_context(&tmp);
         let toolset = Arc::new(

@@ -76,7 +76,6 @@ impl AgentTask {
         start_gate: Option<oneshot::Receiver<()>>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
         persist_ack: Option<oneshot::Sender<()>>,
-        parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     ) -> Self {
         let pid = prompt_id.clone();
         Self {
@@ -109,7 +108,6 @@ impl AgentTask {
                     turn_kind,
                     completion_tx,
                     persist_ack,
-                    parsed_prompt_tx,
                 )
                 .await
             })
@@ -177,7 +175,6 @@ async fn run_task(
     turn_kind: crate::session::TurnKind,
     completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     persist_ack: Option<oneshot::Sender<()>>,
-    parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
 ) {
     let result = session
         .handle_prompt(
@@ -191,7 +188,6 @@ async fn run_task(
             verbatim,
             json_schema,
             persist_ack,
-            parsed_prompt_tx,
         )
         .await;
     let _ = completion_tx.send((prompt_id, result));
@@ -589,22 +585,27 @@ impl SessionActor {
         self.set_goal_loop_active_resource(false).await;
 
         self.events.cancel_active_tool();
-        if rewound_input.is_none() {
-            // The trigger (esc / ctrl_c / …) rides in the Timeline terminal's
-            // details; the category stays `MidTurnAbort` for stable analysis.
-            let cancellation_context = trigger
-                .as_deref()
-                .map(|t| serde_json::json!({ "trigger": t }));
-            if let Err(error) = self
-                .emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Cancelled,
-                    Some(crate::session::events::CancellationCategory::MidTurnAbort),
-                    cancellation_context,
-                )
-                .await
-            {
-                tracing::error!(?error, "failed to durably close cancelled turn");
-            }
+        // A cancel is not complete until its turn terminal is durable. Pristine
+        // cancel then appends a Rewind selection, so the abandoned prompt is
+        // hidden from Surface while remaining visible in the causal ledger.
+        let cancellation_context = Some(serde_json::json!({
+            "trigger": trigger.as_deref(),
+            "pristine": rewound_input.is_some(),
+        }));
+        let terminal_error = self
+            .emit_turn_ended(
+                crate::session::events::TurnOutcomeLabel::Cancelled,
+                chat_state::TurnTerminal {
+                    stop_reason: "cancelled".into(),
+                    completion_kind: "cancelled".into(),
+                },
+                Some(crate::session::events::CancellationCategory::MidTurnAbort),
+                cancellation_context,
+            )
+            .await
+            .err()
+            .map(|error| error.to_string());
+        if terminal_error.is_none() && rewound_input.is_none() {
             // Mark the next real user prompt as following a mid-turn abort so
             // replay/analytics/the model can see the user stopped this turn.
             self.events.set_prior_interrupt_category(
@@ -668,6 +669,31 @@ impl SessionActor {
                 .expect("current_prompt_id mutex poisoned");
             *current_prompt_id = None;
         }
+        if let Some(error) = terminal_error {
+            tracing::error!(%error, "cancel stopped because its Timeline terminal was not durable");
+            let message = format!("cancel was not committed: {error}");
+            if let Some(input) = rewound_input {
+                let _ = input
+                    .respond_to
+                    .send(Err(acp::Error::internal_error().data(message.clone())));
+            }
+            for input in pending_inputs {
+                let _ = input
+                    .respond_to
+                    .send(Err(acp::Error::internal_error().data(message.clone())));
+            }
+            let queued = {
+                let mut state = self.state.lock().await;
+                std::mem::take(&mut state.pending_inputs)
+            };
+            for input in queued {
+                let _ = input
+                    .respond_to
+                    .send(Err(acp::Error::internal_error().data(message.clone())));
+            }
+            return;
+        }
+
         if rewound_input.is_none()
             && let Some(prompt_id) = cancelled_prompt_id
         {
@@ -686,22 +712,23 @@ impl SessionActor {
         }
 
         if let Some(input) = rewound_input {
-            if let Some(mut snapshot) = self.chat_state_handle.snapshot().await {
-                let target_prompt_index = snapshot.prompt_index.saturating_sub(1);
-                snapshot.prompt_index = target_prompt_index;
-                snapshot.prompt_texts.truncate(target_prompt_index);
-                // Cut at the rewound turn's user item (target 0 keeps only
-                // the preamble). Marker-first matters here: unlike
-                // handle_rewind, this path never replays, so post-compaction
-                // conversations rely on the marker for a correct cut.
-                let keep_count =
-                    conversation_truncate_for_prompt(&snapshot.conversation, target_prompt_index);
-                snapshot.conversation.truncate(keep_count);
-                self.chat_state_handle.restore_snapshot(snapshot);
-                self.file_state_tracker
-                    .truncate_from(target_prompt_index)
-                    .await;
+            let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
+            let target_prompt_index = current_prompt_index.saturating_sub(1);
+            if let Err(error) = self
+                .chat_state_handle
+                .rewind_durably(target_prompt_index)
+                .await
+            {
+                let _ = input
+                    .respond_to
+                    .send(Err(acp::Error::internal_error().data(format!(
+                        "cancel terminal was committed but rewind was not: {error}"
+                    ))));
+                return;
             }
+            self.file_state_tracker
+                .truncate_from(target_prompt_index)
+                .await;
             let _ = input.respond_to.send(Ok(PromptTurnOk {
                 stop_reason: acp::StopReason::Cancelled,
                 total_tokens,

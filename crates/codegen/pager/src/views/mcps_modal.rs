@@ -1,15 +1,8 @@
 //! MCP server data types, status enum, response conversion, and section
 //! presentation helpers.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpWireSource {
-    Managed,
-    Local,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpSectionId {
-    Managed,
     Plugin(String),
     Local,
 }
@@ -24,9 +17,6 @@ impl Ord for McpSectionId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (self, other) {
-            (Self::Managed, Self::Managed) => Ordering::Equal,
-            (Self::Managed, _) => Ordering::Less,
-            (_, Self::Managed) => Ordering::Greater,
             (Self::Plugin(a), Self::Plugin(b)) => a.cmp(b),
             (Self::Plugin(_), Self::Local) => Ordering::Less,
             (Self::Local, Self::Plugin(_)) => Ordering::Greater,
@@ -38,7 +28,6 @@ impl Ord for McpSectionId {
 /// Collapse/expand key for a section header row in the MCP servers tab.
 pub fn section_key(section: &McpSectionId) -> String {
     match section {
-        McpSectionId::Managed => "mcp-section:managed".into(),
         McpSectionId::Plugin(name) => format!("mcp-section:plugin:{name}"),
         McpSectionId::Local => "mcp-section:local".into(),
     }
@@ -47,29 +36,20 @@ pub fn section_key(section: &McpSectionId) -> String {
 /// Display label for a managed-service section header.
 pub fn section_label(section: &McpSectionId, count: usize) -> String {
     match section {
-        McpSectionId::Managed => format!("Managed service ({count})"),
         McpSectionId::Plugin(name) => format!("Plugin: {name} ({count})"),
         McpSectionId::Local => format!("Local ({count})"),
     }
 }
 
-/// Description lines shown under the Managed section header (when expanded).
 pub fn section_description_lines(section: &McpSectionId) -> Vec<String> {
     match section {
-        McpSectionId::Managed => vec!["Managed by the configured service backend.".into()],
-        McpSectionId::Plugin(_) | McpSectionId::Local => vec![],
+        McpSectionId::Plugin(_) | McpSectionId::Local => Vec::new(),
     }
 }
 
 /// Classify a server into a UI section.
-///
-/// Priority: `grow_managed_` prefix or managed wire source → Managed; else plugin
-/// label → Plugin; else Local. A managed server with a plugin display label
-/// still lands in Managed.
 pub fn section_for(server: &McpServerInfo) -> McpSectionId {
-    if server.name.starts_with("grow_managed_") || server.wire_source == McpWireSource::Managed {
-        McpSectionId::Managed
-    } else if let Some(ref name) = server.plugin_name {
+    if let Some(ref name) = server.plugin_name {
         McpSectionId::Plugin(name.clone())
     } else {
         McpSectionId::Local
@@ -78,14 +58,8 @@ pub fn section_for(server: &McpServerInfo) -> McpSectionId {
 
 /// Whether the user may delete this server from local config.
 pub fn is_removable(server: &McpServerInfo) -> bool {
-    server.wire_source == McpWireSource::Local && !server.name.starts_with("grow_managed_")
-}
-
-fn parse_wire_source(raw: Option<&str>) -> McpWireSource {
-    match raw {
-        Some("managed") => McpWireSource::Managed,
-        _ => McpWireSource::Local,
-    }
+    let _ = server;
+    true
 }
 
 fn parse_plugin_name(source_label: &str) -> Option<String> {
@@ -109,8 +83,6 @@ pub struct McpsServerEntry {
     pub name: String,
     #[serde(default)]
     pub display_name: Option<String>,
-    #[serde(default)]
-    pub source: Option<String>,
     #[serde(default)]
     pub source_label: Option<String>,
     #[serde(default, rename = "type")]
@@ -181,13 +153,10 @@ pub struct McpServerInfo {
     pub tools: Vec<McpToolDetail>,
     /// Whether the server is enabled in config.
     pub enabled: bool,
-    /// Display label from `source_label` or wire `source` (e.g. `"plugin: foo"`).
+    /// Display label from `source_label` (e.g. `"plugin: foo"`).
     pub source: String,
-    /// Wire `source` enum before display overlay.
-    pub wire_source: McpWireSource,
     /// Plugin name parsed from `source_label` (`"plugin: …"`).
     pub plugin_name: Option<String>,
-    pub is_managed_gateway: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -227,7 +196,6 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
         .map(|entry| {
             let (status, tool_count, tools, enabled) = if let Some(session) = &entry.session {
                 let enabled = session.enabled;
-                // Prefer setupRequired bool; status is a fallback for older shells.
                 if session.setup_required {
                     (McpServerDisplayStatus::SetupRequired, 0, vec![], enabled)
                 } else if !enabled {
@@ -236,7 +204,6 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                     let st = match session.status.as_deref() {
                         Some("ready") => McpServerDisplayStatus::Ready,
                         Some("initializing") => McpServerDisplayStatus::Initializing,
-                        Some("setuprequired") => McpServerDisplayStatus::SetupRequired,
                         _ => McpServerDisplayStatus::Unavailable,
                     };
                     let tools: Vec<McpToolDetail> = session
@@ -265,14 +232,8 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
             } else {
                 (McpServerDisplayStatus::Unavailable, 0, vec![], false)
             };
-            let wire_source = parse_wire_source(entry.source.as_deref());
             let plugin_name = entry.source_label.as_deref().and_then(parse_plugin_name);
-            let is_managed_gateway = entry.name.starts_with("managed_gateway:")
-                || entry.config_type.as_deref() == Some("managedGateway");
-            let source = entry
-                .source_label
-                .or(entry.source)
-                .unwrap_or_else(|| "local".to_string());
+            let source = entry.source_label.unwrap_or_else(|| "local".to_string());
             let setup_required = entry
                 .session
                 .as_ref()
@@ -289,19 +250,16 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                 tools,
                 enabled,
                 source,
-                wire_source,
                 plugin_name,
-                is_managed_gateway,
             }
         })
         .collect::<Vec<_>>();
 
-    // Stable sort: managed before plugin/local, then alphabetical by name.
+    // Stable sort: plugins before local entries, then alphabetical by name.
     servers.sort_by(|a, b| {
         let source_rank = |s: &McpServerInfo| match section_for(s) {
-            McpSectionId::Managed => 0,
-            McpSectionId::Plugin(_) => 1,
-            McpSectionId::Local => 2,
+            McpSectionId::Plugin(_) => 0,
+            McpSectionId::Local => 1,
         };
         source_rank(a)
             .cmp(&source_rank(b))
@@ -366,33 +324,17 @@ mod tests {
             tools: Vec::new(),
             enabled: true,
             source: "local".to_string(),
-            wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }
     }
 
-    fn server_from_wire(
-        name: &str,
-        source: Option<&str>,
-        source_label: Option<&str>,
-    ) -> McpServerInfo {
-        server_from_wire_with_type(name, source, source_label, None)
-    }
-
-    fn server_from_wire_with_type(
-        name: &str,
-        source: Option<&str>,
-        source_label: Option<&str>,
-        config_type: Option<&str>,
-    ) -> McpServerInfo {
+    fn server_from_wire(name: &str, source_label: Option<&str>) -> McpServerInfo {
         convert_list_response(McpsListResponse {
             servers: vec![McpsServerEntry {
                 name: name.to_string(),
                 display_name: None,
-                source: source.map(str::to_string),
                 source_label: source_label.map(str::to_string),
-                config_type: config_type.map(str::to_string),
+                config_type: None,
                 setup: None,
                 setup_values: None,
                 session: Some(McpsServerSession {
@@ -414,18 +356,8 @@ mod tests {
     }
 
     #[test]
-    fn section_for_grow_managed_with_plugin_label_is_managed() {
-        let server = server_from_wire(
-            "grow_managed_linear",
-            Some("managed"),
-            Some("plugin: my-plugin"),
-        );
-        assert_eq!(section_for(&server), McpSectionId::Managed);
-    }
-
-    #[test]
     fn section_for_plugin_labeled_local_is_plugin_section() {
-        let server = server_from_wire("my-mcp", Some("local"), Some("plugin: linter"));
+        let server = server_from_wire("my-mcp", Some("plugin: linter"));
         assert_eq!(
             section_for(&server),
             McpSectionId::Plugin("linter".to_string())
@@ -434,84 +366,15 @@ mod tests {
 
     #[test]
     fn is_removable_plugin_labeled_local_server() {
-        let server = server_from_wire("my-mcp", Some("local"), Some("plugin: linter"));
+        let server = server_from_wire("my-mcp", Some("plugin: linter"));
         assert!(is_removable(&server));
     }
 
     #[test]
-    fn is_removable_rejects_managed_wire_source() {
-        let server = server_from_wire("custom", Some("managed"), None);
-        assert!(!is_removable(&server));
-    }
-
-    #[test]
-    fn is_removable_rejects_grow_managed_prefix() {
-        let server = server_from_wire("grow_managed_slack", Some("local"), None);
-        assert!(!is_removable(&server));
-    }
-
-    #[test]
     fn convert_list_response_parses_plugin_name() {
-        let server = server_from_wire("srv", Some("local"), Some("plugin: example"));
-        assert_eq!(server.wire_source, McpWireSource::Local);
+        let server = server_from_wire("srv", Some("plugin: example"));
         assert_eq!(server.plugin_name.as_deref(), Some("example"));
         assert_eq!(server.source, "plugin: example");
-    }
-
-    #[test]
-    fn convert_list_response_classifies_managed_gateway_only_for_gateway_rows() {
-        let gateway = server_from_wire_with_type(
-            "managed_gateway:linear",
-            Some("managed"),
-            None,
-            Some("managedGateway"),
-        );
-        assert!(gateway.is_managed_gateway);
-
-        let legacy_managed = server_from_wire("grow_managed_slack", Some("managed"), None);
-        assert!(!legacy_managed.is_managed_gateway);
-    }
-
-    #[test]
-    fn gateway_row_uses_managed_section_not_local_uninstall() {
-        let gateway = server_from_wire_with_type(
-            "managed_gateway:linear",
-            Some("managed"),
-            None,
-            Some("managedGateway"),
-        );
-        assert_eq!(section_for(&gateway), McpSectionId::Managed);
-        assert!(!is_removable(&gateway));
-    }
-
-    #[test]
-    fn convert_list_response_orders_gateway_rows_by_display_name() {
-        fn gateway_entry(name: &str, display_name: &str) -> McpsServerEntry {
-            McpsServerEntry {
-                name: name.to_string(),
-                display_name: Some(display_name.to_string()),
-                source: Some("managed".to_string()),
-                source_label: None,
-                config_type: Some("managedGateway".to_string()),
-                setup: None,
-                setup_values: None,
-                session: Some(McpsServerSession {
-                    enabled: true,
-                    status: Some("ready".to_string()),
-                    tools: vec![],
-                    setup_required: false,
-                }),
-            }
-        }
-        let servers = convert_list_response(McpsListResponse {
-            servers: vec![
-                gateway_entry("managed_gateway:zeta", "Alpha"),
-                gateway_entry("managed_gateway:alpha", "Zeta"),
-            ],
-        });
-        assert_eq!(servers[0].display_name.as_deref(), Some("Alpha"));
-        assert_eq!(servers[0].name, "managed_gateway:zeta");
-        assert_eq!(servers[1].display_name.as_deref(), Some("Zeta"));
     }
 
     #[test]
@@ -520,7 +383,6 @@ mod tests {
             servers: vec![McpsServerEntry {
                 name: "acme".into(),
                 display_name: None,
-                source: Some("local".into()),
                 source_label: Some("plugin: acme".into()),
                 config_type: Some("http".into()),
                 setup: Some(McpSetupConfig {
@@ -619,9 +481,7 @@ mod tests {
             }],
             enabled: true,
             source: "local".into(),
-            wire_source: McpWireSource::Local,
             plugin_name: None,
-            is_managed_gateway: false,
         }];
         let mutated = patch_server_row(
             &mut servers,

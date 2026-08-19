@@ -28,7 +28,7 @@ pub mod field {
 pub const TOOL_META_KEY: &str = "grow/tool";
 /// Version of the canonical tool `_meta` contract. Bump on any breaking change
 /// to keys or value shapes so consumers can adapt.
-pub const TOOL_META_VERSION: u32 = 3;
+pub const TOOL_META_VERSION: u32 = 4;
 impl ToolKind {
     /// Unified, harness-independent display label for this semantic kind. A pure
     /// function of the kind, so equivalent tools across toolsets share it
@@ -50,11 +50,11 @@ impl ToolKind {
             ToolKind::Plan => "Plan",
             ToolKind::WebFetch => "Web Fetch",
             ToolKind::BackgroundTaskAction => "Background Task",
-            ToolKind::WaitTasksAction => "Wait for Tasks",
             ToolKind::KillTaskAction => "Kill Task",
             ToolKind::Skill => "Skill",
             ToolKind::MemorySearch => "Memory Search",
             ToolKind::MemoryGet => "Memory Read",
+            ToolKind::ContextFetch => "Restore Context",
             ToolKind::Task => "Subagent",
             ToolKind::PlanControl => "Plan Control",
             ToolKind::AskUser => "Ask User",
@@ -85,6 +85,7 @@ impl ToolKind {
             | ToolKind::List
             | ToolKind::MemorySearch
             | ToolKind::MemoryGet
+            | ToolKind::ContextFetch
             | ToolKind::GoalRead
             | ToolKind::WebFetch
             | ToolKind::GoalPlanSubmit
@@ -98,7 +99,6 @@ impl ToolKind {
             | ToolKind::Execute
             | ToolKind::Plan
             | ToolKind::BackgroundTaskAction
-            | ToolKind::WaitTasksAction
             | ToolKind::KillTaskAction
             | ToolKind::Skill
             | ToolKind::Task
@@ -112,27 +112,6 @@ impl ToolKind {
             | ToolKind::Workflow
             | ToolKind::Other => ToolScope::Write,
         }
-    }
-}
-impl schemars::JsonSchema for ToolKind {
-    fn schema_name() -> Cow<'static, str> {
-        "ToolKind".into()
-    }
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        use strum::IntoEnumIterator;
-        let known = Self::iter()
-            .filter_map(|k| serde_json::to_value(k).ok())
-            .filter_map(|v| v.as_str().map(|s| format!("`{s}`")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        schemars::json_schema!({
-            "type": "string",
-            "description": format!(
-                "Categorizes what a tool does at a high level. Open set — consumers must \
-                 tolerate unknown values (Rust deserializes them to `other` via \
-                 `#[serde(other)]`). Known values: {known}."
-            ),
-        })
     }
 }
 /// Canonical identity for a tool call, resolved from a tool's registered
@@ -166,7 +145,7 @@ pub struct ToolIdentity {
 ///   share it (grow `read_file` → `"Read"`).
 /// - **`kind`** is a finer discriminator (`metadata.kind()`), *not* guaranteed
 ///   equal for equivalent ops across harnesses (listing is `list` in one
-///   toolset, `list_dir` in another); prefer `label` to join, tolerate unknowns.
+///   toolset, `list_dir` in another); prefer `label` to join.
 /// - **`name`** is the harness-specific model-facing name; for diagnostics.
 ///   For harness-initiated events (e.g. the `bash_mode` marker), `raw_input`
 ///   is not guaranteed to match `name`'s schema.
@@ -181,15 +160,11 @@ pub struct ToolIdentity {
 ///   carry neither and rely on the merge below).
 /// - **Lifecycle:** updates for one call share a `tool_call_id` — merge across
 ///   them (last write wins); `input` may arrive on a later update.
-/// - **Versioning:** additive changes (new object fields, new `kind` / `label`
-///   values) don't bump `version`. Unknown `kind` degrades to `"other"`;
-///   `namespace` is a closed enum (no `other` sink), so a new toolset fails
-///   strict typed deserialization of the whole envelope — intentional, to force
-///   typed consumers with exhaustive matches to update. Out-of-tree consumers
-///   should read `namespace` loosely (as a string) and, on any `grow/tool`
-///   parse failure, treat it as absent and fall back to `raw_input` + the ACP
-///   `kind`. `version` bumps only on removal or meaning change.
+/// - **Versioning:** `kind`, `namespace`, and the envelope fields are closed.
+///   Any vocabulary or shape change bumps `version`, forcing typed consumers to
+///   update rather than silently reclassifying a tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CanonicalToolMeta {
     pub version: u32,
     pub name: String,
@@ -282,23 +257,14 @@ mod tests {
         }
     }
     #[test]
-    fn unknown_kind_degrades_to_other() {
-        let k: ToolKind = serde_json::from_value(serde_json::json!("teleport")).unwrap();
-        assert_eq!(k, ToolKind::Other);
+    fn unknown_kind_is_rejected() {
+        assert!(serde_json::from_value::<ToolKind>(serde_json::json!("teleport")).is_err());
     }
-    /// The published `kind` schema must stay an open string (codegen'd
-    /// consumers would otherwise hard-fail on new kinds, contradicting the
-    /// `#[serde(other)]` contract above). `namespace` stays intentionally
-    /// closed — see the versioning contract on [`CanonicalToolMeta`].
+    /// Both taxonomy dimensions are closed vocabularies.
     #[test]
-    fn kind_schema_is_open_string_namespace_stays_closed() {
+    fn kind_and_namespace_schemas_are_closed() {
         let kind = serde_json::to_value(schemars::schema_for!(ToolKind)).unwrap();
-        assert_eq!(kind["type"], "string");
-        assert!(kind.get("enum").is_none(), "kind must not be a closed enum");
-        assert!(
-            kind["description"].as_str().unwrap().contains("`read`"),
-            "known values must be listed in the description"
-        );
+        assert!(kind.get("enum").is_some(), "kind must be a closed enum");
         let ns = serde_json::to_value(schemars::schema_for!(ToolNamespace)).unwrap();
         assert!(ns.get("enum").is_some(), "namespace is a closed enum");
     }

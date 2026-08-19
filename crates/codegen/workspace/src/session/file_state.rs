@@ -5,10 +5,9 @@
 //! stores snapshots of all files that were read or modified during that prompt's
 //! processing.
 //!
-//! **Path Storage**: File paths in `FileSnapshot` and `RewindPoint` are stored as
-//! `FlexiblePath` which can be either a `RelPathBuf` (relative to session CWD) for
-//! portability across machines, or a `PathBuf` for backwards compatibility with older
-//! sessions that stored absolute paths.
+//! **Path Storage**: File paths in `FileSnapshot` and `RewindPoint` are always
+//! `RelPathBuf`, relative to the session CWD. Absolute or non-UTF-8 paths are
+//! rejected before they can enter durable rewind state.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -44,182 +43,15 @@ impl Default for ToolContext {
         }
     }
 }
-use paths::{RelPathBuf, ToAbsPath};
-
-/// A flexible path that can be either a relative path (preferred) or an absolute path
-/// (for backwards compatibility with older sessions that stored absolute paths).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum FlexiblePath {
-    Relative(RelPathBuf),
-    Absolute(PathBuf),
-}
-
-impl FlexiblePath {
-    /// Create a new FlexiblePath from a RelPathBuf
-    pub fn from_rel(path: RelPathBuf) -> Self {
-        Self::Relative(path)
-    }
-
-    /// Get the path as a Path reference
-    pub fn as_path(&self) -> &Path {
-        match self {
-            Self::Relative(p) => p.as_ref(),
-            Self::Absolute(p) => p.as_ref(),
-        }
-    }
-
-    /// Convert to an absolute path using the given root.
-    /// For relative paths, joins with root. For absolute paths, returns as-is.
-    pub fn to_absolute(&self, root: &Path) -> PathBuf {
-        match self {
-            Self::Relative(p) => p.to_absolute(root),
-            Self::Absolute(p) => p.clone(),
-        }
-    }
-
-    /// Try to convert this path to a relative path using the given root.
-    /// If this is already a relative path, returns a clone.
-    /// If this is an absolute path that starts with root, converts to relative.
-    /// If this is an absolute path that doesn't start with root, returns as-is.
-    pub fn try_to_relative(&self, root: &Path) -> FlexiblePath {
-        match self {
-            Self::Relative(p) => Self::Relative(p.clone()),
-            Self::Absolute(p) => {
-                // Try to convert absolute to relative
-                match RelPathBuf::from_absolute(root, p) {
-                    Ok(rel) => Self::Relative(rel),
-                    Err(_) => Self::Absolute(p.clone()),
-                }
-            }
-        }
-    }
-
-    /// Returns true if this is a relative path
-    pub fn is_relative(&self) -> bool {
-        matches!(self, Self::Relative(_))
-    }
-
-    /// Get the path as a string for serialization
-    fn as_str(&self) -> &str {
-        match self {
-            Self::Relative(p) => p.as_str(),
-            Self::Absolute(p) => p.to_str().unwrap_or(""),
-        }
-    }
-}
-
-impl From<RelPathBuf> for FlexiblePath {
-    fn from(path: RelPathBuf) -> Self {
-        Self::Relative(path)
-    }
-}
-
-impl AsRef<Path> for FlexiblePath {
-    fn as_ref(&self) -> &Path {
-        self.as_path()
-    }
-}
-
-impl std::fmt::Display for FlexiblePath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Relative(p) => write!(f, "{}", p.as_str()),
-            Self::Absolute(p) => write!(f, "{}", p.display()),
-        }
-    }
-}
-
-impl ToAbsPath for FlexiblePath {
-    fn to_abs_path(&self, root: &Path) -> std::borrow::Cow<'_, Path> {
-        match self {
-            Self::Relative(p) => std::borrow::Cow::Owned(p.to_absolute(root)),
-            Self::Absolute(p) => std::borrow::Cow::Borrowed(p.as_path()),
-        }
-    }
-}
-
-impl ToAbsPath for &FlexiblePath {
-    fn to_abs_path(&self, root: &Path) -> std::borrow::Cow<'_, Path> {
-        match self {
-            FlexiblePath::Relative(p) => std::borrow::Cow::Owned(p.to_absolute(root)),
-            FlexiblePath::Absolute(p) => std::borrow::Cow::Borrowed(p.as_path()),
-        }
-    }
-}
-
-mod flexible_path_serde {
-    use super::*;
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S>(path: &FlexiblePath, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(path.as_str())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<FlexiblePath, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        // Try to parse as RelPathBuf first (preferred)
-        match RelPathBuf::try_from(s.clone()) {
-            Ok(rel_path) => Ok(FlexiblePath::Relative(rel_path)),
-            // Fall back to PathBuf for absolute paths from older sessions
-            Err(_) => Ok(FlexiblePath::Absolute(PathBuf::from(s))),
-        }
-    }
-}
-
-mod flexible_path_map_serde {
-    use super::*;
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S>(
-        map: &HashMap<FlexiblePath, FileSnapshot>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        use serde::ser::SerializeMap;
-        let mut map_ser = serializer.serialize_map(Some(map.len()))?;
-        for (k, v) in map {
-            map_ser.serialize_entry(k.as_str(), v)?;
-        }
-        map_ser.end()
-    }
-
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<HashMap<FlexiblePath, FileSnapshot>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let map: HashMap<String, FileSnapshot> = HashMap::deserialize(deserializer)?;
-        let mut result = HashMap::with_capacity(map.len());
-        for (k, v) in map {
-            // Try RelPathBuf first, fall back to PathBuf
-            let path = match RelPathBuf::try_from(k.clone()) {
-                Ok(rel_path) => FlexiblePath::Relative(rel_path),
-                Err(_) => FlexiblePath::Absolute(PathBuf::from(k)),
-            };
-            result.insert(path, v);
-        }
-        Ok(result)
-    }
-}
+use paths::RelPathBuf;
 
 /// A snapshot of a single file's content at a specific point in time.
 ///
-/// `path` is stored as a `FlexiblePath` (preferably relative to session CWD for portability,
-/// but may be absolute for backwards compatibility with older sessions).
+/// `path` is relative to the session CWD.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileSnapshot {
-    /// Path to the file (relative to session CWD preferred, absolute for legacy sessions).
-    #[serde(with = "flexible_path_serde")]
-    pub path: FlexiblePath,
+    pub path: RelPathBuf,
     /// The content of the file at the time of snapshot (None if file didn't exist)
     pub content: Option<String>,
     /// When this snapshot was taken
@@ -230,15 +62,6 @@ impl FileSnapshot {
     /// Create a new file snapshot with a relative path.
     pub fn new(path: RelPathBuf, content: Option<String>) -> Self {
         Self {
-            path: FlexiblePath::Relative(path),
-            content,
-            captured_at: Utc::now(),
-        }
-    }
-
-    /// Create a new file snapshot with a flexible path.
-    pub fn new_flexible(path: FlexiblePath, content: Option<String>) -> Self {
-        Self {
             path,
             content,
             captured_at: Utc::now(),
@@ -247,29 +70,12 @@ impl FileSnapshot {
 
     /// Get the path as a Path reference.
     pub fn as_path(&self) -> &Path {
-        self.path.as_path()
+        self.path.as_ref()
     }
 
     /// Convert the path to an absolute path using the given root.
-    /// For relative paths, joins with root. For absolute paths, returns as-is.
     pub fn to_absolute_path(&self, root: &Path) -> PathBuf {
         self.path.to_absolute(root)
-    }
-
-    /// Normalize this snapshot's path to relative using the given root.
-    /// If the path is absolute and starts with root, it will be converted to relative.
-    /// Returns a new FileSnapshot with the normalized path.
-    pub fn normalize_to_relative(&self, root: &Path) -> FileSnapshot {
-        FileSnapshot {
-            path: self.path.try_to_relative(root),
-            content: self.content.clone(),
-            captured_at: self.captured_at,
-        }
-    }
-
-    /// Normalize this snapshot's path to relative in place.
-    pub fn normalize_to_relative_mut(&mut self, root: &Path) {
-        self.path = self.path.try_to_relative(root);
     }
 }
 
@@ -278,9 +84,8 @@ impl FileSnapshot {
 /// Contains snapshots of all files that were accessed (read or modified)
 /// during the processing of that prompt.
 ///
-/// File paths are stored as `FlexiblePath` (preferably relative for portability,
-/// but may be absolute for backwards compatibility with older sessions).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RewindPoint {
     /// Index of the user prompt in the session (0-based)
     pub prompt_index: usize,
@@ -288,12 +93,10 @@ pub struct RewindPoint {
     pub created_at: DateTime<Utc>,
     /// File snapshots captured BEFORE any operations for this prompt.
     /// Key is the path to the file.
-    #[serde(with = "flexible_path_map_serde")]
-    pub file_snapshots: HashMap<FlexiblePath, FileSnapshot>,
+    pub file_snapshots: HashMap<RelPathBuf, FileSnapshot>,
     /// File snapshots captured AFTER all operations for this prompt completed.
     /// Used to detect external modifications (if current file != after_snapshots, something else changed it).
-    #[serde(default, with = "flexible_path_map_serde")]
-    pub after_snapshots: HashMap<FlexiblePath, FileSnapshot>,
+    pub after_snapshots: HashMap<RelPathBuf, FileSnapshot>,
 }
 
 impl RewindPoint {
@@ -321,40 +124,13 @@ impl RewindPoint {
     }
 
     /// Get the snapshot for a specific file path
-    pub fn get_snapshot(&self, path: &FlexiblePath) -> Option<&FileSnapshot> {
+    pub fn get_snapshot(&self, path: &RelPathBuf) -> Option<&FileSnapshot> {
         self.file_snapshots.get(path)
     }
 
-    /// Get the snapshot for a specific relative file path
-    pub fn get_snapshot_by_rel(&self, path: &RelPathBuf) -> Option<&FileSnapshot> {
-        self.file_snapshots
-            .get(&FlexiblePath::Relative(path.clone()))
-    }
-
     /// List all file paths that have snapshots in this rewind point
-    pub fn snapshot_paths(&self) -> Vec<&FlexiblePath> {
+    pub fn snapshot_paths(&self) -> Vec<&RelPathBuf> {
         self.file_snapshots.keys().collect()
-    }
-
-    /// Normalize all paths in this rewind point to relative using the given root.
-    /// This converts any absolute paths that start with root to relative paths.
-    /// Useful for ensuring portability when saving sessions.
-    pub fn normalize_to_relative(&mut self, root: &Path) {
-        // Normalize file_snapshots
-        let old_snapshots = std::mem::take(&mut self.file_snapshots);
-        for (path, mut snapshot) in old_snapshots {
-            let new_path = path.try_to_relative(root);
-            snapshot.path = new_path.clone();
-            self.file_snapshots.insert(new_path, snapshot);
-        }
-
-        // Normalize after_snapshots
-        let old_after = std::mem::take(&mut self.after_snapshots);
-        for (path, mut snapshot) in old_after {
-            let new_path = path.try_to_relative(root);
-            snapshot.path = new_path.clone();
-            self.after_snapshots.insert(new_path, snapshot);
-        }
     }
 }
 
@@ -620,7 +396,7 @@ impl FileStateTracker {
         }
 
         // Capture after-snapshots for all files that were touched
-        let paths_to_capture: Vec<FlexiblePath> = {
+        let paths_to_capture: Vec<RelPathBuf> = {
             let points = self.rewind_points.lock().await;
             if let Some(point) = points.get(&prompt_index) {
                 point.file_snapshots.keys().cloned().collect()
@@ -629,19 +405,14 @@ impl FileStateTracker {
             }
         };
 
-        for flex_path in paths_to_capture {
-            let content = match &flex_path {
-                FlexiblePath::Relative(rel_path) => fs
-                    .try_read_file(rel_path)
-                    .await
-                    .and_then(|opt| opt.map(bytes_to_string).transpose())
-                    .unwrap_or(None),
-                FlexiblePath::Absolute(abs_path) => {
-                    fs.try_read_to_string(abs_path).await.unwrap_or(None)
-                }
-            };
+        for rel_path in paths_to_capture {
+            let content = fs
+                .try_read_file(&rel_path)
+                .await
+                .and_then(|opt| opt.map(bytes_to_string).transpose())
+                .unwrap_or(None);
 
-            let snapshot = FileSnapshot::new_flexible(flex_path, content);
+            let snapshot = FileSnapshot::new(rel_path, content);
 
             let mut points = self.rewind_points.lock().await;
             if let Some(point) = points.get_mut(&prompt_index) {
@@ -875,37 +646,36 @@ impl FileStateTracker {
         let points = self.rewind_points.lock().await;
         points.keys().max().copied()
     }
-
-    /// Normalize all paths in all rewind points to relative using the given root.
-    /// This should be called before saving/persisting the session to ensure portability.
-    pub async fn normalize_all_to_relative(&self, root: &Path) {
-        self.ensure_historical_loaded().await;
-        let mut points = self.rewind_points.lock().await;
-        for point in points.values_mut() {
-            point.normalize_to_relative(root);
-        }
-    }
-
-    /// Get all rewind points, normalized to relative paths.
-    /// This is useful when saving sessions to ensure all paths are portable.
-    pub async fn get_rewind_points_normalized(&self, root: &Path) -> Vec<RewindPoint> {
-        self.ensure_historical_loaded().await;
-        let points = self.rewind_points.lock().await;
-        let mut result: Vec<RewindPoint> = points
-            .values()
-            .map(|p| {
-                let mut normalized = p.clone();
-                normalized.normalize_to_relative(root);
-                normalized
-            })
-            .collect();
-        result.sort_by_key(|p| p.prompt_index);
-        result
-    }
 }
 
-// Canonical in workspace-types; re-exported for existing paths.
-pub use workspace_types::rpc::session::{ConflictType, FileRewindConflict, FileRewindResponse};
+/// Type of external modification detected while restoring a file checkpoint.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictType {
+    DeletedExternally,
+    CreatedExternally,
+    ModifiedExternally,
+}
+
+/// A file that could not be restored because it changed outside the tracked turn.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileRewindConflict {
+    pub path: String,
+    pub conflict_type: ConflictType,
+}
+
+/// Result of restoring the canonical shell-owned file checkpoints.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileRewindResponse {
+    pub success: bool,
+    pub target_prompt_index: usize,
+    pub reverted_files: Vec<String>,
+    pub clean_files: Vec<String>,
+    pub conflicts: Vec<FileRewindConflict>,
+    pub error: Option<String>,
+}
 
 /// Rewind files to the state before `target_prompt_index`.
 ///
@@ -929,7 +699,7 @@ pub async fn rewind_files(
     let mut had_errors = false;
 
     // Collect files to revert: gather earliest before-snapshot per file
-    let mut files_to_revert: HashMap<FlexiblePath, Option<String>> = HashMap::new();
+    let mut files_to_revert: HashMap<RelPathBuf, Option<String>> = HashMap::new();
 
     for point in all_points
         .iter()
@@ -973,7 +743,7 @@ pub async fn rewind_files(
             });
         }
 
-        // Perform the revert — AsyncFsWrapper resolves FlexiblePath via ToAbsPath
+        // Perform the revert — AsyncFsWrapper resolves RelPathBuf against its root.
         match content {
             Some(data) => {
                 if let Err(e) = fs.write_file(rel_path, data.as_bytes()).await {
@@ -1124,7 +894,6 @@ mod tests {
 
     #[test]
     fn test_file_snapshot() {
-        // FileSnapshot uses FlexiblePath (preferably relative) for paths
         let snapshot = FileSnapshot::new(
             RelPathBuf::new("src/file.txt").unwrap(),
             Some("content".into()),
@@ -1148,104 +917,43 @@ mod tests {
 
         // Should still have v1
         let retrieved = point
-            .get_snapshot_by_rel(&RelPathBuf::new("src/a.txt").unwrap())
+            .get_snapshot(&RelPathBuf::new("src/a.txt").unwrap())
             .unwrap();
         assert_eq!(retrieved.content, Some("v1".into()));
     }
 
     #[test]
-    fn test_flexible_path_try_to_relative() {
-        let root = Path::new("/home/user/project");
-
-        // Already relative - should stay relative
-        let rel = FlexiblePath::Relative(RelPathBuf::new("src/file.txt").unwrap());
-        let result = rel.try_to_relative(root);
-        assert!(result.is_relative());
-        assert_eq!(result.as_path(), Path::new("src/file.txt"));
-
-        // Absolute path under root - should become relative
-        let abs = FlexiblePath::Absolute(PathBuf::from("/home/user/project/src/file.txt"));
-        let result = abs.try_to_relative(root);
-        assert!(result.is_relative());
-        assert_eq!(result.as_path(), Path::new("src/file.txt"));
-
-        // Absolute path NOT under root - should stay absolute
-        let abs_other = FlexiblePath::Absolute(PathBuf::from("/other/path/file.txt"));
-        let result = abs_other.try_to_relative(root);
-        assert!(!result.is_relative());
-        assert_eq!(result.as_path(), Path::new("/other/path/file.txt"));
+    fn rel_path_rejects_absolute_input() {
+        assert!(RelPathBuf::new("/home/user/project/src/file.txt").is_err());
+        assert!(RelPathBuf::new("src/file.txt").is_ok());
     }
 
     #[test]
-    fn test_rewind_point_normalize_to_relative() {
-        let root = Path::new("/home/user/project");
+    fn rewind_point_uses_one_relative_path_identity() {
         let mut point = RewindPoint::new(0);
-
-        // Add a snapshot with an absolute path (simulating old session data)
-        let abs_snapshot = FileSnapshot::new_flexible(
-            FlexiblePath::Absolute(PathBuf::from("/home/user/project/src/main.rs")),
-            Some("fn main() {}".into()),
-        );
-        point.add_snapshot(abs_snapshot);
-
-        // Add a snapshot with a relative path
-        let rel_snapshot = FileSnapshot::new(
+        let snapshot = FileSnapshot::new(
             RelPathBuf::new("src/lib.rs").unwrap(),
             Some("pub mod foo;".into()),
         );
-        point.add_snapshot(rel_snapshot);
-
-        // Before normalization, we have mixed paths
-        assert_eq!(point.file_snapshots.len(), 2);
-
-        // Normalize
-        point.normalize_to_relative(root);
-
-        // After normalization, all paths should be relative
-        for (path, snapshot) in &point.file_snapshots {
-            assert!(path.is_relative(), "Path {:?} should be relative", path);
-            assert!(
-                snapshot.path.is_relative(),
-                "Snapshot path {:?} should be relative",
-                snapshot.path
-            );
-        }
-
-        // Verify we can still retrieve by relative path
-        let main_snapshot = point.get_snapshot_by_rel(&RelPathBuf::new("src/main.rs").unwrap());
-        assert!(main_snapshot.is_some());
-        assert_eq!(main_snapshot.unwrap().content, Some("fn main() {}".into()));
+        point.add_snapshot(snapshot);
+        let stored = point
+            .get_snapshot(&RelPathBuf::new("src/lib.rs").unwrap())
+            .unwrap();
+        assert_eq!(stored.path.as_str(), "src/lib.rs");
     }
 
     #[test]
-    fn test_deserialize_file_snapshot_with_absolute_path() {
-        // Simulate JSON from an older session that stored absolute paths
+    fn deserialize_file_snapshot_rejects_absolute_path() {
         let json = r#"{
             "path": "/home/user/project/src/main.rs",
             "content": "fn main() {}",
             "captured_at": "2024-01-01T00:00:00Z"
         }"#;
-
-        let snapshot: FileSnapshot = serde_json::from_str(json).unwrap();
-
-        // Should deserialize successfully with an absolute path
-        assert!(!snapshot.path.is_relative());
-        assert_eq!(
-            snapshot.path.as_path(),
-            Path::new("/home/user/project/src/main.rs")
-        );
-        assert_eq!(snapshot.content, Some("fn main() {}".into()));
-
-        // Should be able to normalize it to relative
-        let root = Path::new("/home/user/project");
-        let normalized = snapshot.normalize_to_relative(root);
-        assert!(normalized.path.is_relative());
-        assert_eq!(normalized.path.as_path(), Path::new("src/main.rs"));
+        assert!(serde_json::from_str::<FileSnapshot>(json).is_err());
     }
 
     #[test]
-    fn test_deserialize_file_snapshot_with_relative_path() {
-        // Simulate JSON from a newer session that stores relative paths
+    fn deserialize_file_snapshot_accepts_canonical_relative_path() {
         let json = r#"{
             "path": "src/main.rs",
             "content": "fn main() {}",
@@ -1254,14 +962,11 @@ mod tests {
 
         let snapshot: FileSnapshot = serde_json::from_str(json).unwrap();
 
-        // Should deserialize successfully with a relative path
-        assert!(snapshot.path.is_relative());
-        assert_eq!(snapshot.path.as_path(), Path::new("src/main.rs"));
+        assert_eq!(snapshot.path.as_str(), "src/main.rs");
     }
 
     #[test]
-    fn test_deserialize_rewind_point_with_absolute_paths() {
-        // Simulate JSON from an older session with absolute paths in the hashmap keys
+    fn deserialize_rewind_point_rejects_absolute_paths() {
         let json = r#"{
             "prompt_index": 0,
             "created_at": "2024-01-01T00:00:00Z",
@@ -1280,45 +985,11 @@ mod tests {
             "after_snapshots": {}
         }"#;
 
-        let point: RewindPoint = serde_json::from_str(json).unwrap();
-
-        // Should deserialize successfully
-        assert_eq!(point.prompt_index, 0);
-        assert_eq!(point.file_snapshots.len(), 2);
-
-        // Paths should be absolute (from old session)
-        for path in point.file_snapshots.keys() {
-            assert!(
-                !path.is_relative(),
-                "Expected absolute path, got {:?}",
-                path
-            );
-        }
-
-        // After normalization, paths should be relative
-        let root = Path::new("/home/user/project");
-        let mut normalized_point = point.clone();
-        normalized_point.normalize_to_relative(root);
-
-        for (path, snapshot) in &normalized_point.file_snapshots {
-            assert!(path.is_relative(), "Expected relative path, got {:?}", path);
-            assert!(
-                snapshot.path.is_relative(),
-                "Expected relative snapshot path, got {:?}",
-                snapshot.path
-            );
-        }
-
-        // Should be able to retrieve by relative path after normalization
-        let main_snapshot =
-            normalized_point.get_snapshot_by_rel(&RelPathBuf::new("src/main.rs").unwrap());
-        assert!(main_snapshot.is_some());
-        assert_eq!(main_snapshot.unwrap().content, Some("fn main() {}".into()));
+        assert!(serde_json::from_str::<RewindPoint>(json).is_err());
     }
 
     #[test]
-    fn test_deserialize_rewind_point_with_mixed_paths() {
-        // Simulate JSON with a mix of absolute and relative paths (edge case)
+    fn deserialize_rewind_point_rejects_mixed_paths() {
         let json = r#"{
             "prompt_index": 1,
             "created_at": "2024-01-01T00:00:00Z",
@@ -1337,36 +1008,11 @@ mod tests {
             "after_snapshots": {}
         }"#;
 
-        let point: RewindPoint = serde_json::from_str(json).unwrap();
-
-        assert_eq!(point.file_snapshots.len(), 2);
-
-        // Normalize
-        let root = Path::new("/home/user/project");
-        let mut normalized = point.clone();
-        normalized.normalize_to_relative(root);
-
-        // All should now be relative
-        for path in normalized.file_snapshots.keys() {
-            assert!(path.is_relative(), "Expected relative path, got {:?}", path);
-        }
-
-        // Both files should be retrievable
-        assert!(
-            normalized
-                .get_snapshot_by_rel(&RelPathBuf::new("src/old.rs").unwrap())
-                .is_some()
-        );
-        assert!(
-            normalized
-                .get_snapshot_by_rel(&RelPathBuf::new("src/new.rs").unwrap())
-                .is_some()
-        );
+        assert!(serde_json::from_str::<RewindPoint>(json).is_err());
     }
 
     #[test]
-    fn test_serialize_always_produces_string_paths() {
-        // Create a snapshot with relative path
+    fn serialize_produces_relative_string_paths() {
         let snapshot = FileSnapshot::new(
             RelPathBuf::new("src/file.txt").unwrap(),
             Some("content".into()),
@@ -1374,19 +1020,7 @@ mod tests {
 
         let json = serde_json::to_string(&snapshot).unwrap();
 
-        // The path should be serialized as a plain string
         assert!(json.contains("\"path\":\"src/file.txt\""));
-
-        // Create with absolute path
-        let abs_snapshot = FileSnapshot::new_flexible(
-            FlexiblePath::Absolute(PathBuf::from("/abs/path/file.txt")),
-            Some("content".into()),
-        );
-
-        let abs_json = serde_json::to_string(&abs_snapshot).unwrap();
-
-        // Absolute path should also be serialized as a string
-        assert!(abs_json.contains("\"path\":\"/abs/path/file.txt\""));
     }
 
     // ── Lazy historical rewind-point loading ──────────────────────────────────
@@ -1468,7 +1102,7 @@ mod tests {
         assert_eq!(points.len(), 3);
         assert_eq!(
             points[0]
-                .get_snapshot_by_rel(&RelPathBuf::new("a.rs").unwrap())
+                .get_snapshot(&RelPathBuf::new("a.rs").unwrap())
                 .and_then(|s| s.content.clone()),
             Some("v0".to_string())
         );
@@ -1508,7 +1142,7 @@ mod tests {
         assert_eq!(remaining[0].prompt_index, 0);
         assert_eq!(
             remaining[0]
-                .get_snapshot_by_rel(&RelPathBuf::new("a.rs").unwrap())
+                .get_snapshot(&RelPathBuf::new("a.rs").unwrap())
                 .and_then(|s| s.content.clone()),
             Some("h0".to_string())
         );
@@ -1533,7 +1167,7 @@ mod tests {
         assert_eq!(points.len(), 1);
         assert_eq!(
             points[0]
-                .get_snapshot_by_rel(&RelPathBuf::new("a.rs").unwrap())
+                .get_snapshot(&RelPathBuf::new("a.rs").unwrap())
                 .and_then(|s| s.content.clone()),
             Some("mem".to_string())
         );
@@ -1584,27 +1218,24 @@ mod tests {
         // Point 0 should now also carry the merged files from points 1 and 2.
         assert!(
             points[0]
-                .get_snapshot_by_rel(&RelPathBuf::new("b.rs").unwrap())
+                .get_snapshot(&RelPathBuf::new("b.rs").unwrap())
                 .is_some()
         );
         assert!(
             points[0]
-                .get_snapshot_by_rel(&RelPathBuf::new("c.rs").unwrap())
+                .get_snapshot(&RelPathBuf::new("c.rs").unwrap())
                 .is_some()
         );
     }
 
-    /// `get_rewind_points_normalized` is a rewind op and must trigger the
-    /// historical load.
+    /// `get_rewind_points` is a rewind op and must trigger the historical load.
     #[tokio::test]
-    async fn lazy_get_rewind_points_normalized_loads_historical() {
+    async fn lazy_get_rewind_points_loads_historical() {
         let file = write_rewind_file(&[point_with_files(0, &[("a.rs", "h0")])]);
         let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
-        let normalized = tracker
-            .get_rewind_points_normalized(Path::new("/repo"))
-            .await;
-        assert_eq!(normalized.len(), 1);
-        assert_eq!(normalized[0].prompt_index, 0);
+        let points = tracker.get_rewind_points().await;
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].prompt_index, 0);
     }
 
     /// `max_prompt_index` is a rewind op and must trigger the load.
@@ -1706,18 +1337,18 @@ mod tests {
         assert_eq!(m0.prompt_index, 0);
         // before-snapshot: earliest (p0) wins for shared.rs (or_insert keeps it).
         assert_eq!(
-            m0.get_snapshot_by_rel(&RelPathBuf::new("shared.rs").unwrap())
+            m0.get_snapshot(&RelPathBuf::new("shared.rs").unwrap())
                 .unwrap()
                 .content,
             Some("p0-before".into())
         );
         // p1's only1.rs before-snapshot is folded in.
         assert!(
-            m0.get_snapshot_by_rel(&RelPathBuf::new("only1.rs").unwrap())
+            m0.get_snapshot(&RelPathBuf::new("only1.rs").unwrap())
                 .is_some()
         );
         // after-snapshot: latest (p1) wins for shared.rs (insert overwrites).
-        let after_key = FlexiblePath::Relative(RelPathBuf::new("shared.rs").unwrap());
+        let after_key = RelPathBuf::new("shared.rs").unwrap();
         assert_eq!(
             m0.after_snapshots.get(&after_key).unwrap().content,
             Some("p1-after".into())
@@ -1739,7 +1370,7 @@ mod tests {
         assert_eq!(merged[0].prompt_index, 0);
         assert!(
             merged[0]
-                .get_snapshot_by_rel(&RelPathBuf::new("b.rs").unwrap())
+                .get_snapshot(&RelPathBuf::new("b.rs").unwrap())
                 .is_none()
         );
     }

@@ -261,14 +261,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             session_id,
             models: new_models,
-            scheduler_background_loops,
-        } => handle_session_created(
-            app,
-            agent_id,
-            session_id,
-            new_models,
-            scheduler_background_loops,
-        ),
+        } => handle_session_created(app, agent_id, session_id, new_models),
         TaskResult::SessionFailed { agent_id, error } => {
             handle_session_failed(app, agent_id, error)
         }
@@ -278,7 +271,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             worktree_path,
             session_cwd,
             models: new_models,
-            scheduler_background_loops,
         } => handle_worktree_session_created(
             app,
             agent_id,
@@ -286,7 +278,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             worktree_path,
             session_cwd,
             new_models,
-            scheduler_background_loops,
         ),
         TaskResult::WorktreeForked {
             agent_id,
@@ -325,7 +316,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             foreground,
-            scheduler_background_loops,
         } => handle_session_loaded(
             app,
             agent_id,
@@ -335,7 +325,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             foreground,
-            scheduler_background_loops,
         ),
         TaskResult::SessionTitleFromDisk { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id)
@@ -1110,21 +1099,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::BundleStatusReady {
             has_cache,
             version,
-            personas,
-            roles,
             agents,
             skills,
-            persona_details,
-            role_details,
         } => {
             app.bundle_state.has_cache = has_cache;
             app.bundle_state.version = version.unwrap_or_default();
-            app.bundle_state.personas = personas;
-            app.bundle_state.roles = roles;
             app.bundle_state.agents = agents;
             app.bundle_state.skills = skills;
-            app.bundle_state.persona_details = persona_details;
-            app.bundle_state.role_details = role_details;
             vec![]
         }
         TaskResult::BundleStatusFailed { error } => {

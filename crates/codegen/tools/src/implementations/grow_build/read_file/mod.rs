@@ -11,46 +11,15 @@ use crate::implementations::read_file::pdf::extract_pdf;
 use crate::types::context::TruncationConfig;
 use crate::types::output::{FileContent, ReadFileOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::Params;
 #[allow(unused_imports)]
 use crate::types::resources::{
     Cwd, DisplayCwd, FileSystem, GitignoreFilter, PathNotFoundHints, RespectGitignore,
     SharedResources, TruncationCfg, display_cwd_or_cwd, resolve_model_path,
 };
+use crate::types::schema::GrowIntegerSchema;
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
 use std::sync::LazyLock;
-mod versions;
-use crate::types::schema::GrowIntegerSchema;
-/// Configuration for the ReadFile tool, stored as `Params<ReadFileParams>` in Resources.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadFileParams {
-    #[serde(default)]
-    pub cursor_rules_on_read: bool,
-}
-crate::register_resource!("grow_build", "ReadFile", ReadFileParams);
-/// Internal version discriminant for read_file.
-///
-/// `read_file` has cross-cutting version divergence: gitignore enforcement
-/// and error mapping. If extracting into version modules, this tool is the
-/// highest-risk candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadFileVersion {
-    Current,
-    Legacy0_4_10,
-}
-impl ReadFileVersion {
-    pub(crate) fn from_contract(v: Option<&str>) -> Self {
-        match v {
-            Some("legacy-0.4.10") => Self::Legacy0_4_10,
-            _ => Self::Current,
-        }
-    }
-    pub(crate) fn is_legacy(self) -> bool {
-        self == Self::Legacy0_4_10
-    }
-}
 pub(crate) const MAX_NUM_TOKENS: usize = 25_000;
 pub const MAX_LINES_READ: usize = 1_000;
 pub use crate::implementations::read_file::{
@@ -123,11 +92,6 @@ pub struct ReadFileInput {
     )]
     pub format: Option<String>,
 }
-async fn cursor_rules_on_read_enabled(resources: &SharedResources) -> bool {
-    let res = resources.lock().await;
-    res.get::<Params<ReadFileParams>>()
-        .is_some_and(|p| p.0.cursor_rules_on_read)
-}
 /// Harness-compatible negative offset resolution (1-indexed start line).
 ///
 /// Negatives use the reference `split('\n')` field count plus a phantom field when
@@ -186,12 +150,10 @@ fn is_skill_markdown(path: &std::path::Path) -> bool {
     }
     stack.into_iter().any(|c| c == "skills")
 }
-/// Result of extracting file content lines with both default and concise formats
+/// Result of extracting model-facing and raw file content.
 pub struct ExtractedContent {
-    /// Default format: line numbers with → separator (no padding)
+    /// Line numbers with → separator (no padding).
     pub content: String,
-    /// Concise format: identical to content (kept for backward compatibility)
-    pub content_concise: String,
     /// Raw unformatted content
     pub raw_output: String,
     /// Base64 images captured per-line before truncation. Plumbed through
@@ -217,7 +179,6 @@ pub fn extract_file_content_lines(
     use std::borrow::Cow;
     use std::fmt::Write as _;
     let mut output = String::new();
-    let mut output_concise = String::new();
     let (mut start, mut end) = (0, 0);
     let mut first_line: Option<usize> = None;
     let mut extracted_images: Vec<crate::util::base64_images::ExtractedImage> = Vec::new();
@@ -227,7 +188,6 @@ pub fn extract_file_content_lines(
     let take = limit.unwrap_or(usize::MAX);
     if file_content.is_empty() && total_lines > 0 && skip == 0 && take > 0 {
         _ = write!(&mut output, "1→").ok();
-        _ = write!(&mut output_concise, "1→").ok();
         first_line = Some(1);
     }
     for (i, (pos, line_len, line)) in file_content
@@ -248,7 +208,6 @@ pub fn extract_file_content_lines(
             first_line = Some(i + 1);
         } else {
             output.push('\n');
-            output_concise.push('\n');
         }
         end = pos + line_len;
         let line: Cow<'_, str> = match crate::util::base64_images::try_extract_base64_images(line) {
@@ -261,10 +220,8 @@ pub fn extract_file_content_lines(
         let line_num = i + 1;
         if is_first_visible || line_num.is_multiple_of(10) {
             _ = write!(&mut output, "{line_num}→{line}").ok();
-            _ = write!(&mut output_concise, "{line_num}→{line}").ok();
         } else {
             output.push_str(&line);
-            output_concise.push_str(&line);
         }
     }
     if has_trailing_empty {
@@ -276,11 +233,9 @@ pub fn extract_file_content_lines(
                 first_line = Some(line_num);
             } else {
                 output.push('\n');
-                output_concise.push('\n');
             }
             if is_first_visible || line_num.is_multiple_of(10) {
                 _ = write!(&mut output, "{line_num}→").ok();
-                _ = write!(&mut output_concise, "{line_num}→").ok();
             }
         }
     }
@@ -295,20 +250,16 @@ pub fn extract_file_content_lines(
     }
     ExtractedContent {
         content: output,
-        content_concise: output_concise,
         raw_output,
         extracted_images,
     }
 }
 /// Core read-file logic shared by `ReadFileTool` and `ReadFileConciseTool`.
 ///
-/// Always uses the padded `content` field. Concise post-processing
-/// (swapping in `content_concise`) is done by `ReadFileConciseTool` after this
-/// returns.
+/// Produces the single canonical numbered representation.
 pub(crate) async fn run_read_file(
     input: ReadFileInput,
     cwd_override: Option<std::path::PathBuf>,
-    contract_version: Option<&str>,
     resources: SharedResources,
     streamable_out: Option<&mut bool>,
     invoking_param_names: &crate::types::resources::InvokingToolParamNames,
@@ -336,32 +287,23 @@ pub(crate) async fn run_read_file(
         }
         Err(_) => (joined_path, None),
     };
-    let version = ReadFileVersion::from_contract(contract_version);
-    let is_legacy = version.is_legacy();
-    let skip_gitignore = is_legacy && versions::legacy_0_4_10::allows_gitignored_reads();
-    if !skip_gitignore {
-        let res = resources.lock().await;
-        let respect_gitignore = res.get::<RespectGitignore>().is_some_and(|r| r.0);
-        if respect_gitignore
-            && let Some(filter) = res.get::<GitignoreFilter>()
-            && filter.is_ignored(&path)
-        {
-            let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
-            return Ok(ReadFileOutput::FileReadError(format!(
-                "Error: {} is ignored by .gitignore and cannot be read.",
-                display_dcwd.join(&input.path).display()
-            )));
-        }
+    let res = resources.lock().await;
+    let respect_gitignore = res.get::<RespectGitignore>().is_some_and(|r| r.0);
+    if respect_gitignore
+        && let Some(filter) = res.get::<GitignoreFilter>()
+        && filter.is_ignored(&path)
+    {
+        let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
+        return Ok(ReadFileOutput::FileReadError(format!(
+            "Error: {} is ignored by .gitignore and cannot be read.",
+            display_dcwd.join(&input.path).display()
+        )));
     }
+    drop(res);
     let file_bytes = match fs.read_file(&path).await {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::debug!(?e, "Failed to read file");
-            if is_legacy {
-                return Ok(ReadFileOutput::FileReadError(
-                    versions::legacy_0_4_10::render_read_error(&path),
-                ));
-            }
             let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
             let display_path = display_dcwd.join(&input.path);
             return Ok(match e.io_error_kind() {
@@ -491,7 +433,6 @@ pub(crate) async fn run_read_file(
         let stored_offset = stored_read_offset(input.offset);
         return Ok(ReadFileOutput::FileContent(FileContent {
             content: String::new(),
-            content_concise: None,
             absolute_path: path,
             offset: stored_offset,
             limit: input.limit,
@@ -579,21 +520,10 @@ pub(crate) async fn run_read_file(
     if let Some(flag) = streamable_out {
         *flag = true;
     }
-    let mut content = extracted.content;
-    let mut content_concise = Some(extracted.content_concise);
+    let content = extracted.content;
     let extracted_images = extracted.extracted_images;
-    crate::implementations::cursor_rules_on_read::append_cursor_rules_for_read(
-        cursor_rules_on_read_enabled(&resources).await,
-        resources.clone(),
-        &cwd,
-        &path,
-        &mut content,
-        &mut content_concise,
-    )
-    .await;
     Ok(ReadFileOutput::FileContent(FileContent {
         content,
-        content_concise,
         absolute_path: path,
         offset: stored_offset,
         limit: stored_limit,
@@ -726,13 +656,11 @@ impl ReadFileTool {
             .extensions
             .get::<tool_runtime::Cwd>()
             .map(|c| c.0.clone());
-        let bv = crate::types::tool_metadata::behavior_version(ctx);
         let mut streamable_text = false;
         let invoking = crate::types::tool_metadata::invoking_param_names(ctx);
         let output = run_read_file(
             input,
             cwd_override.clone(),
-            bv.as_deref(),
             resources.clone(),
             Some(&mut streamable_text),
             &invoking,
@@ -791,34 +719,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn legacy_read_file_not_found_returns_exact_historical_message() {
-        let tmp = TempDir::new().unwrap();
-        let tool = ReadFileTool;
-        let resources = test_resources(tmp.path());
-        let input = ReadFileInput {
-            path: "nonexistent.txt".to_string(),
-            offset: None,
-            limit: None,
-            pages: None,
-            format: None,
-        };
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let result = tool_runtime::Tool::run(&tool, ctx, input).await.unwrap();
-        let expected = format!(
-            "Failed to read file: {}",
-            tmp.path().join("nonexistent.txt").display()
-        );
-        match result {
-            ReadFileOutput::FileReadError(msg) => {
-                assert_eq!(msg, expected);
-            }
-            other => panic!("Expected legacy FileReadError, got {:?}", other),
-        }
-    }
-    #[tokio::test]
-    async fn current_read_file_not_found_returns_structured_not_found() {
+    async fn read_file_not_found_returns_structured_not_found() {
         let tmp = TempDir::new().unwrap();
         let tool = ReadFileTool;
         let resources = test_resources(tmp.path());
@@ -840,34 +741,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn legacy_read_file_directory_returns_exact_historical_message() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir(tmp.path().join("subdir")).unwrap();
-        let tool = ReadFileTool;
-        let resources = test_resources(tmp.path());
-        let input = ReadFileInput {
-            path: "subdir".to_string(),
-            offset: None,
-            limit: None,
-            pages: None,
-            format: None,
-        };
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let result = tool_runtime::Tool::run(&tool, ctx, input).await.unwrap();
-        let expected_path = dunce::canonicalize(tmp.path().join("subdir"))
-            .unwrap_or_else(|_| tmp.path().join("subdir"));
-        let expected = format!("Failed to read file: {}", expected_path.display());
-        match result {
-            ReadFileOutput::FileReadError(msg) => {
-                assert_eq!(msg, expected);
-            }
-            other => panic!("Expected legacy FileReadError, got {:?}", other),
-        }
-    }
-    #[tokio::test]
-    async fn current_read_file_is_directory_returns_structured_error() {
+    async fn read_file_is_directory_returns_structured_error() {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir(tmp.path().join("subdir")).unwrap();
         let tool = ReadFileTool;
@@ -908,7 +782,6 @@ mod tests {
         match result {
             ReadFileOutput::FileContent(content) => {
                 assert_eq!(content.content, "");
-                assert!(content.content_concise.is_none());
                 assert_eq!(content.raw_output, "");
                 assert_eq!(content.total_lines, 0);
             }
@@ -989,7 +862,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn read_file_concise_output() {
+    async fn read_file_numbered_output() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), "hello\nworld\n").unwrap();
         let tool = ReadFileTool;
@@ -1006,8 +879,7 @@ mod tests {
             .unwrap();
         match result {
             ReadFileOutput::FileContent(content) => {
-                let concise = content.content_concise.unwrap();
-                assert_eq!(concise, "1→hello\nworld\n");
+                assert_eq!(content.content, "1→hello\nworld\n");
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
@@ -1147,7 +1019,6 @@ mod tests {
     fn test_extract_file_content_lines_basic() {
         let extracted = extract_file_content_lines("1\n2\r\n3\n", None, None, 4);
         assert_eq!(extracted.content, "1→1\n2\n3\n");
-        assert_eq!(extracted.content_concise, "1→1\n2\n3\n");
         assert_eq!(extracted.raw_output, "1\n2\r\n3\n");
     }
     /// Regression: a long single-line base64 URI used to be cut
@@ -1215,14 +1086,12 @@ mod tests {
     fn test_extract_file_content_lines_with_offset() {
         let extracted = extract_file_content_lines("1\n2\n3\r\n4\r", Some(3), None, 4);
         assert_eq!(extracted.content, "3→3\n4\r".to_owned());
-        assert_eq!(extracted.content_concise, "3→3\n4\r".to_owned());
         assert_eq!(extracted.raw_output, "3\r\n4\r".to_owned());
     }
     #[test]
     fn test_extract_file_content_lines_with_offset_and_limit() {
         let extracted = extract_file_content_lines("1\n2\n3\r\n4\r", Some(2), Some(2), 4);
         assert_eq!(extracted.content, "2→2\n3".to_owned());
-        assert_eq!(extracted.content_concise, "2→2\n3".to_owned());
         assert_eq!(extracted.raw_output, "2\n3\n".to_owned());
     }
     #[test]
@@ -1360,38 +1229,6 @@ mod tests {
             other => {
                 panic!(
                     "Expected FileReadError for gitignored file with RespectGitignore(true), got {:?}",
-                    other
-                )
-            }
-        }
-    }
-    #[tokio::test]
-    async fn legacy_read_file_allows_gitignored_files() {
-        let tmp = TempDir::new().unwrap();
-        let canonical_root = dunce::canonicalize(tmp.path()).unwrap();
-        let build_dir = canonical_root.join("build");
-        std::fs::create_dir(&build_dir).unwrap();
-        std::fs::write(build_dir.join("output.txt"), "build output data\n").unwrap();
-        let tool = ReadFileTool;
-        let resources = test_resources_with_gitignore(tmp.path());
-        let input = ReadFileInput {
-            path: "build/output.txt".to_string(),
-            offset: None,
-            limit: None,
-            pages: None,
-            format: None,
-        };
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let result = tool_runtime::Tool::run(&tool, ctx, input).await.unwrap();
-        match result {
-            ReadFileOutput::FileContent(content) => {
-                assert!(content.raw_output.contains("build output data"));
-            }
-            other => {
-                panic!(
-                    "Expected FileContent for legacy gitignored file, got {:?}",
                     other
                 )
             }
@@ -2502,7 +2339,6 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     fn extract_first_line_always_numbered_small_read() {
         let extracted = extract_file_content_lines("a\nb\nc\n", None, None, 4);
         assert_eq!(extracted.content, "1→a\nb\nc\n");
-        assert_eq!(extracted.content_concise, "1→a\nb\nc\n");
     }
     #[test]
     fn extract_first_visible_line_numbered_with_offset() {
@@ -2526,7 +2362,6 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     fn extract_empty_only_window_still_anchored() {
         let extracted = extract_file_content_lines("hello\n", Some(2), None, 2);
         assert_eq!(extracted.content, "2→");
-        assert_eq!(extracted.content_concise, "2→");
     }
     /// Harness parity: offset=-1 on a file with no trailing `\n` resolves to the
     /// phantom field only (start past any `split_inclusive` line), so Grow
@@ -2542,7 +2377,6 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             "phantom-only start must not emit split_inclusive lines"
         );
         assert!(extracted.raw_output.is_empty());
-        assert!(extracted.content_concise.is_empty());
     }
     #[test]
     fn read_file_input_accepts_negative_offset_json() {

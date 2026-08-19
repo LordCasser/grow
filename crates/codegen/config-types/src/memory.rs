@@ -51,7 +51,7 @@ impl Default for MemoryEmbeddingConfig {
 
 /// Hybrid search scoring configuration (`[memory.search]`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MemorySearchConfig {
     /// Maximum number of search results to return.
     pub max_results: usize,
@@ -61,14 +61,6 @@ pub struct MemorySearchConfig {
     pub vector_weight: f32,
     /// Weight for BM25 text similarity in hybrid scoring.
     pub text_weight: f32,
-    /// **Deprecated** — use `temporal_decay` instead.
-    ///
-    /// Per-day decay factor for recency boosting (0.0–1.0).
-    /// When `temporal_decay.enabled` is true, this field is ignored.
-    /// When `temporal_decay.enabled` is false and this is set, it is
-    /// converted to an approximate half-life for backward compatibility:
-    /// `half_life ≈ -1 / log₂(recency_decay)`.
-    pub recency_decay: f32,
     /// Temporal decay configuration for time-aware scoring.
     pub temporal_decay: TemporalDecayConfig,
     /// MMR diversity re-ranking configuration (opt-in).
@@ -89,7 +81,6 @@ impl Default for MemorySearchConfig {
             min_score: 0.35,
             vector_weight: 0.7,
             text_weight: 0.3,
-            recency_decay: DEFAULT_RECENCY_DECAY,
             temporal_decay: TemporalDecayConfig::default(),
             mmr: MmrConfig::default(),
             source_weights,
@@ -178,19 +169,8 @@ where
     Ok(v.map(|x| x.clamp(0.0, 1.0)))
 }
 
-/// Default value for the legacy `recency_decay` field.
-pub const DEFAULT_RECENCY_DECAY: f32 = 0.95;
-
 impl MemorySearchConfig {
     /// Resolve the effective half-life for temporal decay.
-    ///
-    /// Priority order:
-    /// 1. `temporal_decay.enabled = true` → use `temporal_decay.half_life_days`
-    /// 2. `temporal_decay.enabled = false` AND `recency_decay` differs from
-    ///    the default (0.95) → convert the legacy per-day factor to an
-    ///    approximate half-life: `half_life ≈ -1.0 / log₂(recency_decay)`.
-    ///    This preserves behavior for users who only set `recency_decay`.
-    /// 3. Otherwise → `None` (decay fully disabled).
     pub fn effective_half_life_days(&self) -> Option<f64> {
         if self.temporal_decay.enabled {
             if self.temporal_decay.half_life_days <= 0.0 {
@@ -201,22 +181,6 @@ impl MemorySearchConfig {
                 return None;
             }
             return Some(self.temporal_decay.half_life_days);
-        }
-
-        // Legacy backward compat: if the user explicitly set recency_decay
-        // to a non-default value, convert it to an approximate half-life.
-        if (self.recency_decay - DEFAULT_RECENCY_DECAY).abs() > f32::EPSILON
-            && self.recency_decay > 0.0
-            && self.recency_decay < 1.0
-        {
-            let half_life = -1.0 / (self.recency_decay as f64).log2();
-            tracing::info!(
-                recency_decay = self.recency_decay,
-                converted_half_life_days = half_life,
-                "converting legacy recency_decay to temporal decay half-life; \
-                 consider migrating to [memory.search.temporal_decay]"
-            );
-            return Some(half_life);
         }
 
         None
@@ -298,7 +262,7 @@ impl Default for MemoryDreamConfig {
 /// Events are coalesced in a lock-free `ArcSwap` set; sync runs at most once
 /// per search call when dirty files are present and the claim is acquired.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MemoryWatcherConfig {
     /// Whether the file watcher is enabled. Default: true (when memory is enabled).
     pub enabled: bool,
@@ -413,7 +377,6 @@ mod tests {
         assert_eq!(MemoryEmbeddingConfig::default().dimensions, 1024);
         let s = MemorySearchConfig::default();
         assert_eq!(s.max_results, 6);
-        assert_eq!(s.recency_decay, DEFAULT_RECENCY_DECAY);
         assert!(s.temporal_decay.enabled);
         assert!(!s.mmr.enabled);
         assert!(MemorySessionConfig::default().save_on_end);
@@ -447,22 +410,14 @@ mod tests {
     }
 
     #[test]
-    fn effective_half_life_converts_legacy_recency_decay() {
-        let mut s = MemorySearchConfig::default();
-        s.temporal_decay.enabled = false;
-        s.recency_decay = 0.5; // non-default → converted
-        let hl = s.effective_half_life_days().unwrap();
-        assert!(
-            (hl - 1.0).abs() < 1e-9,
-            "0.5 per-day decay ⇒ ~1 day half-life, got {hl}"
-        );
+    fn search_rejects_removed_recency_decay() {
+        assert!(serde_json::from_str::<MemorySearchConfig>(r#"{"recency_decay":0.5}"#).is_err());
     }
 
     #[test]
-    fn effective_half_life_none_when_disabled_and_default_recency() {
+    fn effective_half_life_none_when_disabled() {
         let mut s = MemorySearchConfig::default();
         s.temporal_decay.enabled = false;
-        // recency_decay left at default ⇒ no decay
         assert_eq!(s.effective_half_life_days(), None);
     }
 }

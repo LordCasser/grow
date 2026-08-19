@@ -124,21 +124,18 @@ impl SessionActor {
         self.signals_handle()
             .record_model_usage(&sampling_config.model);
         if apply_prompt_override && !skip_prompt_rewrite {
-            let mut conversation = self.chat_state_handle.get_conversation().await;
-            for item in conversation.iter_mut() {
-                if let ConversationItem::System(sys) = item {
-                    if use_concise {
-                        sys.content = std::sync::Arc::<str>::from(
-                            agent::prompt::template::COMPACT_SYSTEM_PROMPT,
-                        );
-                    } else {
-                        sys.content =
-                            std::sync::Arc::<str>::from(self.agent.borrow().system_prompt());
-                    }
-                    break;
-                }
-            }
-            self.chat_state_handle.replace_conversation(conversation);
+            let system_prompt = if use_concise {
+                agent::prompt::template::COMPACT_SYSTEM_PROMPT.to_owned()
+            } else {
+                self.agent.borrow().system_prompt().to_owned()
+            };
+            self.chat_state_handle
+                .replace_system_head(&system_prompt)
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("model context was not durably recorded: {error}"))
+                })?;
         } else if !apply_prompt_override {
             tracing::info!(
                 session_id = %self.session_info.id.0,
@@ -220,14 +217,6 @@ impl SessionActor {
                 ))
             })?;
         let new_system_prompt = new_agent.system_prompt().to_string();
-        let mut new_prompt_context = new_agent.prompt_context().clone();
-        new_prompt_context.normalize_for_persistence();
-        if let Some(handle) = self.compaction.prefire.take_handle() {
-            handle.abort();
-            let _ = handle.await;
-            self.compaction.prefire.finish();
-        }
-        self.compaction.prefire.clear();
         *self.agent.borrow_mut() = new_agent;
         *self.active_agent_type.lock() = Some(new_agent_name.clone());
         if let Err(e) = self.workspace_ops.bind_local_session(
@@ -248,9 +237,6 @@ impl SessionActor {
                     tool_index,
                 )))
                 .await;
-            if let Some(client) = self.rebuild_spec.managed_gateway_tool_client.clone() {
-                bridge.update_resource(client).await;
-            }
             if let Some(display_cwd) = self.display_cwd.get() {
                 bridge
                     .set_display_cwd(std::path::PathBuf::from(display_cwd))
@@ -305,14 +291,16 @@ impl SessionActor {
         }
         let new_user_prefix = self.build_user_message_prefix().await;
         {
-            let mut conversation = self.chat_state_handle.get_conversation().await;
+            let Some((mut conversation, source_surface_revision)) = self
+                .chat_state_handle
+                .get_conversation_with_revision()
+                .await
+            else {
+                return Err(acp::Error::internal_error()
+                    .data("rebuilt agent context unavailable: chat-state actor stopped"));
+            };
             let _ = replace_or_insert_system_head(&mut conversation, &new_system_prompt);
-            let drop_startup_skill_reminder = false;
-            Self::rewrite_zero_turn_prefix(
-                &mut conversation,
-                new_user_prefix,
-                drop_startup_skill_reminder,
-            );
+            Self::rewrite_zero_turn_prefix(&mut conversation, new_user_prefix);
             if !conversation_has_project_instructions(&conversation)
                 && let Some(agents_md_reminder) = self.agent.borrow().agents_md_user_reminder()
             {
@@ -323,10 +311,15 @@ impl SessionActor {
                 );
             }
             self.inject_baseline_skill_reminder(&mut conversation).await;
-            self.chat_state_handle.replace_conversation(conversation);
+            self.chat_state_handle
+                .replace_context_durably(conversation, source_surface_revision)
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error().data(format!(
+                        "rebuilt agent context was not durably recorded: {error}"
+                    ))
+                })?;
         }
-        save_prompt_context(&self.session_info, &new_prompt_context);
-        save_system_prompt(&self.session_info, &new_system_prompt);
         let _ = self
             .notifications
             .persistence_tx
@@ -350,10 +343,7 @@ impl SessionActor {
     /// wiping user/assistant history: swap only the leading `System` message,
     /// atomically inside the `ChatStateActor` (see
     /// `ChatStateCommand::ReplaceSystemHead` for the serialization guarantees).
-    /// `system_prompt.txt` (not owned by the persistence actor) is saved
-    /// directly, even on a head no-op, so a previously-diverged secondary
-    /// artifact self-heals. Skipped entirely on a verbatim mirror-fork
-    /// (`preserve_inherited_system`).
+    /// Skipped entirely on a verbatim mirror-fork (`preserve_inherited_system`).
     pub(super) async fn handle_replace_system_prompt(&self, system_prompt: String) {
         if self.startup_hints.preserve_inherited_system {
             tracing::debug!(
@@ -362,18 +352,21 @@ impl SessionActor {
             );
             return;
         }
-        let Some(changed) = self
+        let changed = match self
             .chat_state_handle
             .replace_system_head(&system_prompt)
             .await
-        else {
-            tracing::error!(
+        {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::error!(
                 session_id = %self.session_info.id.0,
-                "handle_replace_system_prompt: chat-state actor unavailable; override not applied"
-            );
-            return;
+                %error,
+                "handle_replace_system_prompt: durable replacement failed; override not applied"
+                );
+                return;
+            }
         };
-        save_system_prompt(&self.session_info, &system_prompt);
         if changed {
             tracing::info!(
                 session_id = %self.session_info.id.0,

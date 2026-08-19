@@ -10,10 +10,10 @@ For scripts, CI, evals, and agent servers, start with always-approve so tools ru
 
 ```bash
 # stdio (local process / many SDKs)
-grow agent --always-approve stdio
+grow agent --permission-mode always-approve stdio
 
 # WebSocket server
-grow agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+grow agent --permission-mode always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
 You can also set always-approve per session on `session/new`:
@@ -22,7 +22,7 @@ You can also set always-approve per session on `session/new`:
 {
   "cwd": "/path/to/project",
   "mcpServers": [],
-  "_meta": { "yoloMode": true }
+  "_meta": { "permissionMode": "always-approve" }
 }
 ```
 
@@ -47,7 +47,7 @@ The [Agent Client Protocol (ACP)](https://agentclientprotocol.com) defines how c
 stdio is the common local integration path. The agent speaks JSON-RPC on stdin and stdout:
 
 ```bash
-grow agent --always-approve stdio
+grow agent --permission-mode always-approve stdio
 ```
 
 Typical clients: IDE extensions (Zed, Neovim, Emacs), custom tools, and ACP SDKs.
@@ -57,14 +57,14 @@ Typical clients: IDE extensions (Zed, Neovim, Emacs), custom tools, and ACP SDKs
 Agent options apply to the `stdio`, `serve`, and internal `leader` transports. They go after `agent` and before the mode name. Mode-specific flags go after the mode (for example `serve --bind`).
 
 ```bash
-grow agent --always-approve --model deepseek/deepseek-chat stdio
-grow agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+grow agent --permission-mode always-approve --model deepseek/deepseek-chat stdio
+grow agent --permission-mode always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
 | Flag | Description |
 | ---- | ----------- |
 | `-m, --model <MODEL>` | Configured provider/model ID (for example `deepseek/deepseek-chat`). |
-| `--always-approve` | Run without interactive tool-permission prompts. Alias: `--yolo`. |
+| `--permission-mode <MODE>` | Select `ask`, `auto`, or `always-approve`. |
 | `--agent-profile <PATH>` | Load an agent profile from a file. |
 | `--leader` / `--no-leader` | Connect to a shared leader process, or force a local agent. When a non-`off` sandbox profile is requested, leader mode is refused so tools stay in-process (see [Sandbox Mode](18-sandbox.md)). |
 
@@ -73,7 +73,7 @@ grow agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ## Server mode
 
 ```bash
-grow agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+grow agent --permission-mode always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
 Clients connect over WebSocket and authenticate with the secret token. If you omit `--secret`, the agent prints a generated token at startup, or set `GROW_AGENT_SECRET`. The process keeps state across client reconnects. Permissions match other entry points; see [Permissions and safety](22-permissions-and-safety.md).
@@ -169,14 +169,13 @@ Optional fields on `session/new`:
 | `rules` | Extra rules appended to the system prompt. |
 | `systemPromptOverride` | Replacement system prompt. |
 | `agentProfile` | Agent profile name or JSON object. |
-| `yoloMode` | When `true`, always-approve for this session. |
-| `autoMode` | When `true`, auto permission mode for this session. Superseded when always-approve is already on. |
+| `permissionMode` | Session permission mode: `ask`, `auto`, or `always-approve`. |
 
 ```json
 {
   "cwd": "/path/to/project",
   "mcpServers": [],
-  "_meta": { "yoloMode": true }
+  "_meta": { "permissionMode": "always-approve" }
 }
 ```
 
@@ -222,7 +221,7 @@ class GrowACPChat {
   constructor(private cwd = ".") {}
 
   async init() {
-    this.proc = spawn("grow", ["agent", "--always-approve", "stdio"]);
+    this.proc = spawn("grow", ["agent", "--permission-mode", "always-approve", "stdio"]);
     this.rl = readline.createInterface({ input: this.proc.stdout! });
 
     await this.request("initialize", {
@@ -236,7 +235,7 @@ class GrowACPChat {
     const { sessionId } = await this.request("session/new", {
       cwd: this.cwd,
       mcpServers: [],
-      _meta: { yoloMode: true },
+      _meta: { permissionMode: "always-approve" },
     });
     this.sessionId = sessionId;
     return this;

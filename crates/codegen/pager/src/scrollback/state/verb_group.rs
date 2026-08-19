@@ -442,7 +442,7 @@ mod tests {
 
     fn sub_started(child_sid: &str) -> ScrollbackEntry {
         subagent(SubagentBlock::started(
-            "task", child_sid, "explore", None, None, None, /*is_background=*/ true,
+            "task", child_sid, "explore", None, /*is_background=*/ true,
         ))
     }
 

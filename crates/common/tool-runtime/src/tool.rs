@@ -162,7 +162,7 @@ pub enum ToolProgress {
 /// authors populate these in their `ToolOutput::model_output()` impls so
 /// downstream consumers don't need to know the concrete tool type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentBlock {
     /// Plain text. Equivalent to `ToolProgress::Text` but allowed inside a
     /// content list so a tool can interleave images and text.
@@ -176,7 +176,6 @@ pub enum ContentBlock {
     /// - `path`: file path on the Grow Computer filesystem
     /// - `metadata`: arbitrary key-value pairs (e.g. `title`, `webpage_url`)
     Image {
-        #[serde(alias = "mimeType")]
         mime_type: String,
         data: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,7 +191,7 @@ pub enum ContentBlock {
     /// optional preview data.
     Resource {
         uri: String,
-        #[serde(default, skip_serializing_if = "Option::is_none", alias = "mimeType")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,

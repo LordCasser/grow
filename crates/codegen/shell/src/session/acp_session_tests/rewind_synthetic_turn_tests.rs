@@ -6,7 +6,7 @@
 //! truncation that counts only non-synthetic `User` items therefore leaves
 //! the "rewound" turn in the model's context.
 
-use super::support::create_test_actor;
+use super::support::{create_test_actor, seed_test_timeline};
 
 use crate::sampling::ConversationItem;
 use crate::session::{RewindMode, RewindRequest};
@@ -52,30 +52,29 @@ async fn run_rewind_over_synthetic_turn(mark_turn_starts: bool) {
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
 
-    let mut snap = actor
-        .chat_state_handle
-        .snapshot()
-        .await
-        .expect("snapshot available");
-    snap.conversation = seed_conversation(mark_turn_starts);
-    snap.prompt_index = 3;
-    snap.prompt_texts = vec![
-        "P0".into(),
-        "Background task abc completed".into(),
-        "P2".into(),
-    ];
-    snap.last_compaction_prompt_index = None;
-    actor.chat_state_handle.restore_snapshot(snap);
+    seed_test_timeline(
+        &actor,
+        seed_conversation(mark_turn_starts),
+        &["P0", "Background task abc completed", "P2"],
+    )
+    .await;
 
     // Rewind to prompt #2 — "restore state before P2 ran".
-    let resp = actor
+    let result = actor
         .handle_rewind(RewindRequest {
             target_prompt_index: 2,
             force: true,
             mode: RewindMode::ConversationOnly,
         })
-        .await
-        .expect("handle_rewind ok");
+        .await;
+    if !mark_turn_starts {
+        assert!(
+            result.is_err(),
+            "v2 Timeline must reject unmarked prompt history"
+        );
+        return;
+    }
+    let resp = result.expect("handle_rewind ok");
     assert!(resp.success, "rewind should succeed: {resp:?}");
     assert_eq!(resp.prompt_text.as_deref(), Some("P2"));
 
@@ -171,19 +170,12 @@ async fn rewind_to_start_keeps_only_preamble() {
             let mut conversation = seed_conversation(true);
             // Pre-turn reminder in the preamble prefix must survive target=0.
             conversation.insert(2, ConversationItem::system_reminder("skills"));
-            let mut snap = actor
-                .chat_state_handle
-                .snapshot()
-                .await
-                .expect("snapshot available");
-            snap.conversation = conversation;
-            snap.prompt_index = 3;
-            snap.prompt_texts = vec![
-                "P0".into(),
-                "Background task abc completed".into(),
-                "P2".into(),
-            ];
-            actor.chat_state_handle.restore_snapshot(snap);
+            seed_test_timeline(
+                &actor,
+                conversation,
+                &["P0", "Background task abc completed", "P2"],
+            )
+            .await;
 
             let resp = actor
                 .handle_rewind(RewindRequest {
@@ -244,12 +236,7 @@ async fn rewind_twice_narrows_history_each_time() {
                 item.set_prompt_index(idx);
                 item
             };
-            let mut snap = actor
-                .chat_state_handle
-                .snapshot()
-                .await
-                .expect("snapshot available");
-            snap.conversation = vec![
+            let conversation = vec![
                 ConversationItem::system("SYS"),
                 ConversationItem::user("<user_info>OS: test</user_info>"),
                 marked("P0", 0),
@@ -263,15 +250,7 @@ async fn rewind_twice_narrows_history_each_time() {
                 marked("P4", 4),
                 ConversationItem::assistant("A4"),
             ];
-            snap.prompt_index = 5;
-            snap.prompt_texts = vec![
-                "P0".into(),
-                "W1".into(),
-                "P2".into(),
-                "W3".into(),
-                "P4".into(),
-            ];
-            actor.chat_state_handle.restore_snapshot(snap);
+            seed_test_timeline(&actor, conversation, &["P0", "W1", "P2", "W3", "P4"]).await;
 
             // First rewind: to turn 3 (drops W3, A3, P4, A4).
             let first = actor
@@ -360,12 +339,7 @@ async fn rewind_to_midpoint_with_synthetic_turns_on_both_sides() {
                     }
                     item
                 };
-                let mut snap = actor
-                    .chat_state_handle
-                    .snapshot()
-                    .await
-                    .expect("snapshot available");
-                snap.conversation = vec![
+                let conversation = vec![
                     ConversationItem::system("SYS"),
                     ConversationItem::user("<user_info>OS: test</user_info>"),
                     user("P0", 0),
@@ -379,24 +353,23 @@ async fn rewind_to_midpoint_with_synthetic_turns_on_both_sides() {
                     user("P4", 4),
                     ConversationItem::assistant("A4"),
                 ];
-                snap.prompt_index = 5;
-                snap.prompt_texts = vec![
-                    "P0".into(),
-                    "W1".into(),
-                    "P2".into(),
-                    "W3".into(),
-                    "P4".into(),
-                ];
-                actor.chat_state_handle.restore_snapshot(snap);
+                seed_test_timeline(&actor, conversation, &["P0", "W1", "P2", "W3", "P4"]).await;
 
-                let resp = actor
+                let result = actor
                     .handle_rewind(RewindRequest {
                         target_prompt_index: 2,
                         force: true,
                         mode: RewindMode::ConversationOnly,
                     })
-                    .await
-                    .expect("handle_rewind ok");
+                    .await;
+                if !mark_turn_starts {
+                    assert!(
+                        result.is_err(),
+                        "v2 Timeline must reject unmarked prompt history"
+                    );
+                    continue;
+                }
+                let resp = result.expect("handle_rewind ok");
                 assert!(resp.success, "mark={mark_turn_starts}: {resp:?}");
                 assert_eq!(resp.prompt_text.as_deref(), Some("P2"));
 
@@ -431,19 +404,12 @@ async fn rewind_to_synthetic_auto_wake_turn_cuts_at_the_wake() {
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
 
-            let mut snap = actor
-                .chat_state_handle
-                .snapshot()
-                .await
-                .expect("snapshot available");
-            snap.conversation = seed_conversation(true);
-            snap.prompt_index = 3;
-            snap.prompt_texts = vec![
-                "P0".into(),
-                "Background task abc completed".into(),
-                "P2".into(),
-            ];
-            actor.chat_state_handle.restore_snapshot(snap);
+            seed_test_timeline(
+                &actor,
+                seed_conversation(true),
+                &["P0", "Background task abc completed", "P2"],
+            )
+            .await;
 
             let resp = actor
                 .handle_rewind(RewindRequest {

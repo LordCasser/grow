@@ -54,7 +54,6 @@ impl acp::Agent for MvpAgent {
                     ),
                 );
             });
-        workspace::trust::migrate_legacy_hook_trust();
         let mut client_type = arguments
             .meta
             .as_ref()
@@ -246,8 +245,7 @@ impl acp::Agent for MvpAgent {
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
         let initial_client_mcp_servers = arguments.mcp_servers.clone();
         let mcp_servers = self
-            .resolve_mcp_servers(arguments.mcp_servers, cwd.as_path())
-            .await;
+            .resolve_mcp_servers(arguments.mcp_servers, cwd.as_path());
         let mcp_meta_config_map = parse_mcp_meta_config(arguments.meta.as_ref());
         let client_session_id = arguments
             .meta
@@ -259,17 +257,10 @@ impl acp::Agent for MvpAgent {
             .as_ref()
             .and_then(|m| m.get("modelId").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty());
-        let session_yolo_mode = arguments
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("yoloMode"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(self.default_yolo_mode);
-        let session_auto_mode = resolve_session_auto_mode(
+        let session_permission_mode = resolve_session_permission_mode(
             arguments.meta.as_ref(),
-            self.default_auto_mode,
-            session_yolo_mode,
-        );
+            self.default_permission_mode,
+        )?;
         let session_id = match client_session_id {
             Some(s) => {
                 uuid::Uuid::try_parse(s)
@@ -370,42 +361,43 @@ impl acp::Agent for MvpAgent {
                         origin_client.clone(),
                     )
             });
-        if let Some(effort) = self.models_manager.model_default_reasoning_effort(&session_sampling.model)
-            && self
-                .models_manager
-                .model_supports_reasoning_effort(&session_sampling.model)
-        {
-            session_sampling.reasoning_effort = Some(effort);
-        }
-        let (summary_client, summary_model) = self
-            .build_summary_client(&session_sampling)?;
         let (model_id, fallback_notice) = crate::agent::models::resolve_new_session_model_id(
             &self.models_manager.models(),
             resolved_custom_model,
             &self.models_manager.current_model_id(),
         );
         if let Some(notice) = fallback_notice {
+            session_sampling =
+                self.resolve_sampling_config_for_model(&model_id, origin_client.clone());
             tracing::warn!(
                 requested_model = %notice.requested.0,
                 fallback_model = %model_id.0,
-                "new_session: requested model no longer resolves to a catalog key; falling back to the default model"
+                "new_session: requested catalog model disappeared; falling back to the default model"
             );
             self.send_model_auto_switched(&session_id, &notice.requested, &model_id, &notice.reason)
                 .await;
         }
+        if let Some(effort) = self
+            .models_manager
+            .model_default_reasoning_effort(model_id.0.as_ref())
+        {
+            session_sampling.reasoning_effort = Some(effort);
+        }
+        let (summary_client, summary_model) = self.build_session_title_client(&session_sampling)?;
+        let session_title_route = Some(crate::session::summary::SessionTitleRoute::new(
+            summary_client,
+            summary_model,
+        ));
         let session_model_id = model_id.clone();
         let _timer = crate::instrumentation_timer!("session.persistence_init");
         let persistence = crate::session::persistence::new(
             &session_info,
             model_id,
-            summary_client,
             Some(self.gateway.clone()),
-            summary_model,
         )
         .await
         .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
         self.set_turn_number(&session_id, 0u64);
-        let chat_history = vec![];
         let client_code_nav_enabled = arguments
             .meta
             .as_ref()
@@ -426,10 +418,9 @@ impl acp::Agent for MvpAgent {
                         initial_client_mcp_servers,
                         mcp_meta_config_map,
                         persistence,
-                        timeline_events: None,
-                        chat_history,
+                        session_title_route,
+                        timeline_bootstrap: crate::session::TimelineBootstrap::Fresh,
                         rewind_points_file_path: None,
-                        initial_total_tokens: 0,
                         origin_client: origin_client.clone(),
                         client_code_nav_enabled,
                         client_terminal,
@@ -439,15 +430,13 @@ impl acp::Agent for MvpAgent {
                         persisted_signals: None,
                         persisted_behavior: None,
                         persisted_goal_mode: None,
-                        persisted_goal_mode_rejected: false,
                         persisted_control_revision: 0,
                         persisted_workflow_runs: Vec::new(),
                         persisted_announcement_state: None,
                         session_meta: arguments.meta.as_ref(),
                         persisted_agent_name: None,
                         session_model_id,
-                        session_yolo_mode,
-                        session_auto_mode: session_auto_mode && !session_yolo_mode,
+                        session_permission_mode,
                         prompt_display_cwd: None,
             };
             self.spawn_and_register_session(init, spawn_opts).await
@@ -459,15 +448,7 @@ impl acp::Agent for MvpAgent {
             let ci = client_identifier.clone();
             let cv = self.client_version();
             let cwd_str = cwd.as_str().to_owned();
-            let perm = if session_yolo_mode {
-                ::diagnostics::enums::PermissionMode::AlwaysApprove
-            } else if session_auto_mode
-                && crate::util::config::auto_permission_mode_enabled_from_disk()
-            {
-                ::diagnostics::enums::PermissionMode::Auto
-            } else {
-                ::diagnostics::enums::PermissionMode::Ask
-            };
+            let perm = session_permission_mode;
             tokio::spawn(async move {
                 let git = ::diagnostics::context::collect_git_context(&cwd_str);
                 let ev = ::diagnostics::events::SessionNew {
@@ -601,8 +582,7 @@ impl acp::Agent for MvpAgent {
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
         let initial_client_mcp_servers = client_mcp_servers.clone();
         let mcp_servers = self
-            .resolve_mcp_servers(client_mcp_servers, cwd.as_path())
-            .await;
+            .resolve_mcp_servers(client_mcp_servers, cwd.as_path());
         let mcp_meta_config_map = parse_mcp_meta_config(request_meta.as_ref());
         let mut load_timer = crate::instrumentation_timer!("session.load_session");
         load_timer.with_field("session_id", session_id.0.as_ref());
@@ -659,15 +639,11 @@ impl acp::Agent for MvpAgent {
                 &self.models_manager.current_model_id(),
                 origin_client.clone(),
             );
-        let (summary_client, summary_model) = self
-            .build_summary_client(&load_session_sampling)?;
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
         let (persistence_info, persistence) = crate::session::persistence::load_light(
                 &session_info,
-                summary_client,
                 Some(self.gateway.clone()),
-                summary_model,
             )
             .await
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?;
@@ -675,50 +651,20 @@ impl acp::Agent for MvpAgent {
         let crate::session::persistence::PersistedInfoLight {
             mut summary,
             timeline_events,
-            chat_history,
-            plan_state: _,
-            mut session_control,
+            mut control_snapshot,
             updates_file_path,
             rewind_points_file_path,
             signals: persisted_signals,
             announcement_state: persisted_announcement_state,
-            session_control_rejected,
             workflow_runs: persisted_workflow_runs,
         } = persistence_info;
-        if let (Some(updates_path), Some(control)) =
-            (updates_file_path.as_ref(), session_control.as_mut())
-            && let Some(goal) = control.goal.as_mut()
-            && goal.status == crate::session::goal_tracker::GoalStatus::Active
-            && goal.phase == crate::session::goal_tracker::GoalPhase::Summarizing
-        {
-            match crate::session::storage::has_successful_goal_finalization(
-                updates_path,
-                &goal.goal_id,
-            ) {
-                Ok(true) => {
-                    goal.status = crate::session::goal_tracker::GoalStatus::Complete;
-                    control.behavior = crate::session::behavior::BehaviorSnapshot::normal();
-                    tracing::info!(
-                        goal_id = %goal.goal_id,
-                        "reconciled Goal completion from durable finalization terminal"
-                    );
-                }
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
-                    %error,
-                    goal_id = %goal.goal_id,
-                    "could not scan Goal finalization terminal during restore"
-                ),
-            }
-        }
-        let persisted_control_revision = session_control
+        let persisted_control_revision = control_snapshot
             .as_ref()
             .map_or(0, |control| control.control_revision);
-        let persisted_behavior = session_control
+        let persisted_behavior = control_snapshot
             .as_ref()
             .map(|control| control.behavior.clone());
-        let _persisted_goal_mode = session_control.and_then(|control| control.goal);
-        let persisted_goal_mode_rejected = session_control_rejected;
+        let _persisted_goal_mode = control_snapshot.and_then(|control| control.goal);
         let configured_models = self.models_manager.models();
         let available_models = self.models_manager.available();
         let persisted_model_id = summary.current_model_id.clone();
@@ -745,19 +691,6 @@ impl acp::Agent for MvpAgent {
                 persisted_model_id.0
             ))
         })?;
-        if summary.current_model_id != persisted_model_id {
-            // Self-heal: the persisted id was a bare slug that only resolved
-            // through unique-slug recovery — rewrite the summary with the
-            // canonical key. `agent_name`/`reasoning_effort` stay `None` so
-            // the persisted values are preserved.
-            let _ = persistence
-                .tx
-                .send(crate::session::persistence::PersistenceMsg::CurrentModel {
-                    model_id: summary.current_model_id.clone(),
-                    agent_name: None,
-                    reasoning_effort: None,
-                });
-        }
         let restored_compaction_count = persisted_signals
             .as_ref()
             .map(|s| s.compaction_count as u64)
@@ -817,16 +750,10 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("cursor"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let session_yolo_mode = request_meta
-            .as_ref()
-            .and_then(|m| m.get("yoloMode"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(self.default_yolo_mode);
-        let session_auto_mode = resolve_session_auto_mode(
+        let session_permission_mode = resolve_session_permission_mode(
             request_meta.as_ref(),
-            self.default_auto_mode,
-            session_yolo_mode,
-        );
+            self.default_permission_mode,
+        )?;
         let restore_code_requested = request_meta
             .as_ref()
             .and_then(|m| m.get("grow/restore_code"))
@@ -894,18 +821,14 @@ impl acp::Agent for MvpAgent {
                 self.cfg.borrow().session.load_envrc.unwrap_or(true)
             }
         };
-        let (initial_total_tokens, delta_completions, unfinished_subagents) = if no_replay {
+        let (delta_completions, subagent_projections) = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
                 "Skipping session replay (noReplay requested by client)"
             );
-            (
-                Self::extract_initial_tokens_from_updates(&updates_file_path),
-                Vec::new(),
-                Vec::new(),
-            )
+            (Vec::new(), Default::default())
         } else {
-            let (tokens, replay_end_offset, unfinished_subagents) = self
+            let (replay_end_offset, subagent_projections) = self
                 .replay_session_updates(
                     &session_id,
                     &cwd,
@@ -937,7 +860,7 @@ impl acp::Agent for MvpAgent {
                     Vec::new()
                 }
             };
-            (tokens, completions, unfinished_subagents)
+            (completions, subagent_projections)
         };
         if let Some(handle) = self.sessions.borrow().get(&session_id) {
             handle.gateway_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -947,7 +870,7 @@ impl acp::Agent for MvpAgent {
         }
         let reconcile_completions = {
             let _timer = crate::instrumentation_timer!("session.reconcile_stale_tasks");
-            self.reconcile_stale_background_tasks(&session_id, &updates_file_path)
+            self.repair_stale_background_task_projections(&session_id, &updates_file_path)
         };
         for rx in reconcile_completions {
             let _ = rx.await;
@@ -979,6 +902,14 @@ impl acp::Agent for MvpAgent {
             let mut spawn_timer = crate::instrumentation_timer!("session.spawn_and_register_session");
             spawn_timer.with_field("session_id", session_id.0.as_ref());
             let persisted_agent_name = summary.agent_name.clone();
+            let session_title_route = if summary.display_title().is_empty() {
+                let (client, model) = self.build_session_title_client(&load_session_sampling)?;
+                Some(crate::session::summary::SessionTitleRoute::new(
+                    client, model,
+                ))
+            } else {
+                None
+            };
             self.spawn_and_register_session(
                     init,
                     SessionSpawnOptions {
@@ -988,10 +919,11 @@ impl acp::Agent for MvpAgent {
                         initial_client_mcp_servers,
                         mcp_meta_config_map,
                         persistence,
-                        timeline_events: Some(timeline_events),
-                        chat_history,
+                        session_title_route,
+                        timeline_bootstrap: crate::session::TimelineBootstrap::Existing(
+                            timeline_events,
+                        ),
                         rewind_points_file_path,
-                        initial_total_tokens,
                         origin_client: origin_client.clone(),
                         client_code_nav_enabled,
                         client_terminal,
@@ -1001,15 +933,13 @@ impl acp::Agent for MvpAgent {
                         persisted_signals,
                         persisted_behavior,
                         persisted_goal_mode: _persisted_goal_mode,
-                        persisted_goal_mode_rejected,
                         persisted_control_revision,
                         persisted_workflow_runs,
                         persisted_announcement_state,
                         session_meta: request_meta.as_ref(),
                         persisted_agent_name: persisted_agent_name.as_deref(),
                         session_model_id: summary.current_model_id.clone(),
-                        session_yolo_mode,
-                        session_auto_mode: session_auto_mode && !session_yolo_mode,
+                        session_permission_mode,
                         prompt_display_cwd,
                     },
                 )
@@ -1057,48 +987,26 @@ impl acp::Agent for MvpAgent {
         {
             handle.set_client_hooks(hooks);
         }
-        #[allow(unused_variables)]
-        let local_transcript_rendered = !no_replay
-            && updates_file_path
-                .as_ref()
-                .and_then(|p| std::fs::metadata(p).ok())
-                .is_some_and(|m| m.len() > 0);
         if let Some(handle) = self.sessions.borrow_mut().get_mut(&session_id) {
             handle.code_nav_enabled = client_code_nav_enabled;
-            if session_yolo_mode && !handle.yolo_mode {
-                tracing::debug!(
-                    session_id = %session_id.0,
-                    "Setting YOLO mode on reconnect from load_session request metadata"
-                );
-                handle.yolo_mode = true;
-                let _ = handle
-                    .cmd_tx
-                    .send(SessionCommand::SetYoloMode {
-                        enabled: true,
-                    });
-            }
-            if session_auto_mode && !session_yolo_mode
-                && crate::util::config::auto_permission_mode_enabled_from_disk()
-            {
-                tracing::debug!(
-                    session_id = %session_id.0,
-                    "Setting auto mode on reconnect from load_session request metadata"
-                );
-                handle.yolo_mode = false;
-                let _ = handle
-                    .cmd_tx
-                    .send(SessionCommand::SetAutoMode {
-                        enabled: true,
-                    });
-            }
+            handle.permission_mode = session_permission_mode;
+            let _ = handle.cmd_tx.send(SessionCommand::SetPermissionMode {
+                mode: session_permission_mode,
+            });
         }
         let orphan_parent = {
             let sessions = self.sessions.borrow();
             sessions
                 .get(&session_id)
-                .map(|handle| (handle.cmd_tx.clone(), handle.info.cwd.clone()))
+                .map(|handle| {
+                    (
+                        handle.cmd_tx.clone(),
+                        handle.info.cwd.clone(),
+                        handle.chat_state_handle.clone(),
+                    )
+                })
         };
-        if let Some((parent_cmd_tx, session_cwd)) = orphan_parent {
+        if let Some((parent_cmd_tx, session_cwd, parent_chat_state)) = orphan_parent {
             let session_dir = crate::session::persistence::session_dir(
                 &SessionInfo {
                     id: session_id.clone(),
@@ -1106,12 +1014,14 @@ impl acp::Agent for MvpAgent {
                 },
             );
             crate::agent::subagent::reconcile_orphaned_subagents_with_backend(
-                    &unfinished_subagents,
+                    &subagent_projections,
+                    !no_replay,
                     &tools::implementations::grow_build::task::backend::ChannelBackend::new(
                         self.subagent_event_tx.clone(),
                     ),
                     &session_dir,
                     session_id.0.as_ref(),
+                    &parent_chat_state,
                     &self.gateway,
                     Some(&parent_cmd_tx),
                 )
@@ -1242,15 +1152,7 @@ impl acp::Agent for MvpAgent {
                 tool_call_count: restored_tool_call_count,
                 behavior: restored_behavior,
                 plan_phase: restored_plan_phase,
-                permission_mode: if session_yolo_mode {
-                    ::diagnostics::enums::PermissionMode::AlwaysApprove
-                } else if session_auto_mode
-                    && crate::util::config::auto_permission_mode_enabled_from_disk()
-                {
-                    ::diagnostics::enums::PermissionMode::Auto
-                } else {
-                    ::diagnostics::enums::PermissionMode::Ask
-                },
+                permission_mode: session_permission_mode,
                 model_id: summary.current_model_id.0.to_string(),
                 restored_from_disk: true,
             });
@@ -1433,7 +1335,6 @@ impl acp::Agent for MvpAgent {
                 admission: None,
                 respond_to: tx,
                 persist_ack: None,
-                parsed_prompt_tx: None,
             })
             .map_err(|e| {
                 acp::Error::internal_error()
@@ -1724,9 +1625,6 @@ impl acp::Agent for MvpAgent {
             "grow/session/import" => {
                 crate::extensions::session_state::handle_import(&args).await
             }
-            "grow/session/load_history" => {
-                crate::extensions::chat_conversation_history::handle(self, &args).await
-            }
             "grow/session/search" => {
                 crate::extensions::session_search::handle(&args).await
             }
@@ -1736,8 +1634,7 @@ impl acp::Agent for MvpAgent {
             }
             "grow/session/rename" | "grow/session/delete"
             | "grow/session/update_mcp_servers" | "grow/session/fork"
-            | "grow/internal/reload_all_mcp_servers"
-            | "grow/internal/reload_project_mcp_servers" | "grow/internal/reload_skills"
+            | "grow/internal/reload_mcp_catalog" | "grow/internal/reload_skills"
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
             | "grow/internal/reload_announcements"
             | "grow/plugins/reload" | "grow/commands/list" | "grow/commands/execute"
@@ -1765,9 +1662,6 @@ impl acp::Agent for MvpAgent {
             }
             "grow/suggest" => crate::extensions::suggest::handle(self, &args).await,
             "grow/suggestPrompt" => crate::extensions::suggest::handle(self, &args).await,
-            s if s.starts_with("grow/session_summaries/") => {
-                crate::agent::handlers::session::handle(self, &args).await
-            }
             s if s.starts_with("grow/git/worktree/") => {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::worktree::handle(self, &ops, &args).await
@@ -1824,13 +1718,11 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::code_nav::handle(self, &ops, &args).await
             }
             s if s.starts_with("grow/skills/") || s == "grow/workflows/list" => {
-                let compat = self.cfg.borrow().compat_resolved;
                 crate::extensions::skills::handle(
-                        self,
-                        &args,
-                        self.plugin_registry_handle.snapshot().as_deref(),
-                        compat,
-                    )
+                    self,
+                    &args,
+                    self.plugin_registry_handle.snapshot().as_deref(),
+                )
                     .await
             }
             s if s.starts_with("grow/review") => {
@@ -1861,73 +1753,31 @@ impl acp::Agent for MvpAgent {
         args: acp::ExtNotification,
     ) -> Result<(), acp::Error> {
         tracing::info!("Received extension notification: method={}", args.method);
-        if args.method.as_ref() == "grow/yolo_mode_changed"
+        if args.method.as_ref() == "grow/permission_mode_changed"
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,
             >(args.params.get())
         {
-            let sender_id = params.get("clientIdentifier").and_then(|v| v.as_str());
-            let permission_mode = params
-                .get("permission_mode")
+            let session_id = params.get("sessionId").and_then(|v| v.as_str());
+            let mode = params
+                .get("permissionMode")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let yolo_signal = params.get("yolo_mode").and_then(|v| v.as_bool());
-            if let Some(yolo_mode) = yolo_signal {
-                let mut sessions = self.sessions.borrow_mut();
-                let updated_sessions = apply_yolo_mode_to_matching_sessions(
-                    &mut sessions,
-                    sender_id,
-                    yolo_mode,
-                );
-                tracing::info!(
-                    yolo_mode,
-                    sender = ?sender_id,
-                    target_sessions = updated_sessions,
-                    total_sessions = sessions.len(),
-                    "Setting YOLO mode for matching sessions"
-                );
-            }
-            let auto_mode_explicit = params.get("auto_mode").and_then(|v| v.as_bool());
-            let want_auto = auto_mode_explicit == Some(true)
-                || permission_mode == "auto";
-            let clear_auto = auto_mode_explicit == Some(false)
-                || (matches!(permission_mode, "always-approve" | "ask" | "default")
-                    && !want_auto);
-            let enable_auto = want_auto && yolo_signal != Some(true);
-            if enable_auto || clear_auto {
-                let enabled = enable_auto;
-                let matches_sender = |h: &crate::session::SessionHandle| -> bool {
-                    sender_id.is_none()
-                        || h.origin_client.as_ref().map(|c| c.product.as_str())
-                            == sender_id
-                };
-                let mut sessions = self.sessions.borrow_mut();
-                let total_sessions = sessions.len();
-                let mut updated = 0;
-                for h in sessions.values_mut() {
-                    if !matches_sender(h) {
-                        continue;
+                .and_then(|mode| match mode {
+                    "ask" => Some(crate::util::config::PermissionMode::Ask),
+                    "auto" => Some(crate::util::config::PermissionMode::Auto),
+                    "always-approve" => {
+                        Some(crate::util::config::PermissionMode::AlwaysApprove)
                     }
-                    if h
+                    _ => None,
+                });
+            if let (Some(session_id), Some(mode)) = (session_id, mode) {
+                let session_id = acp::SessionId::new(session_id);
+                if let Some(handle) = self.sessions.borrow_mut().get_mut(&session_id) {
+                    handle.permission_mode = mode;
+                    let _ = handle
                         .cmd_tx
-                        .send(crate::session::SessionCommand::SetAutoMode {
-                            enabled,
-                        })
-                        .is_ok()
-                    {
-                        if enabled {
-                            h.yolo_mode = false;
-                        }
-                        updated += 1;
-                    }
+                        .send(crate::session::SessionCommand::SetPermissionMode { mode });
                 }
-                tracing::info!(
-                    auto_mode = enabled,
-                    sender = ?sender_id,
-                    target_sessions = updated,
-                    total_sessions,
-                    "Setting auto permission mode for matching sessions"
-                );
             }
         }
         if args.method.as_ref() == "grow/permissions/reset" {

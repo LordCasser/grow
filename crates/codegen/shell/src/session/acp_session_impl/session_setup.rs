@@ -31,7 +31,6 @@ impl SessionActor {
     pub(super) async fn initialize(&self, system_prompt: String) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge.on_skill_discovery_clear().await;
-        save_system_prompt(&self.session_info, &system_prompt);
         let system_message = ConversationItem::system(system_prompt);
         let mut messages = vec![system_message];
         if let Some(effects) = self.inject_baseline_skill_reminder(&mut messages).await
@@ -39,8 +38,21 @@ impl SessionActor {
         {
             self.send_available_commands_update().await;
         }
-        self.chat_state_handle
-            .replace_conversation(messages);
+        let Some((_, source_surface_revision)) = self
+            .chat_state_handle
+            .get_conversation_with_revision()
+            .await
+        else {
+            tracing::error!("failed to publish initial context: chat-state actor stopped");
+            return;
+        };
+        if let Err(error) = self
+            .chat_state_handle
+            .replace_context_durably(messages, source_surface_revision)
+            .await
+        {
+            tracing::error!(%error, "failed to durably publish initial session context");
+        }
     }
     /// Ensure the conversation carries the correct baseline skill
     /// `<system-reminder>`: exactly one for an agent that has skills and uses reminders,
@@ -53,13 +65,7 @@ impl SessionActor {
     /// bridge's pending baseline.
     ///
     /// Idempotent: strips any existing baseline skill reminder before
-    /// injecting, so a reminder-using -> reminder-using rebuild -- where
-    /// `rewrite_zero_turn_prefix` keeps the inherited reminder (it only drops it
-    /// for an inline-rendering target) -- cannot double-list.
-    ///
-    /// The inline-rendering agent still drains (after enabling XML format) so `announced_names` is
-    /// populated and later discovery reminders don't re-announce the baseline;
-    /// `wrap_skill_reminder` returns `None` for the inline-rendering agent+`BaselineChange`.
+    /// injecting, so a zero-turn Agent rebuild cannot double-list the baseline.
     ///
     /// Returns the drained effects so callers can honor `send_available_commands`
     /// on their own schedule.
@@ -68,10 +74,6 @@ impl SessionActor {
         conversation: &mut Vec<ConversationItem>,
     ) -> Option<tools::types::skill_discovery_tracker::SkillUpdateEffects> {
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let is_cursor = self.is_cursor_harness();
-        if is_cursor {
-            bridge.set_skill_listing_xml_format(true).await;
-        }
         conversation.retain(|item| {
             !matches!(
                 item,
@@ -88,14 +90,6 @@ impl SessionActor {
     }
     pub(super) async fn build_prefix_background(&self) -> String {
         let start = std::time::Instant::now();
-        if matches!(self.mcp_strategy, McpInitStrategy::Blocking) {
-            use agent::prompt::user_message::UserMessageTemplate;
-            let mcp_wait = match self.agent.borrow().definition().user_message_template {
-                UserMessageTemplate::Default => std::time::Duration::from_secs(15),
-                _ => std::time::Duration::from_secs(60),
-            };
-            self.wait_for_mcp_handshakes_bounded(mcp_wait).await;
-        }
         let prefix = self.build_user_message_prefix().await;
         tracing::info!(
             session_id = %self.session_info.id.0,
@@ -132,7 +126,14 @@ impl SessionActor {
                 (self.build_user_message_prefix().await, "sync_fallback")
             }
         };
-        let mut conversation = self.chat_state_handle.get_conversation().await;
+        let Some((mut conversation, source_surface_revision)) = self
+            .chat_state_handle
+            .get_conversation_with_revision()
+            .await
+        else {
+            tracing::error!("failed to publish deferred context: chat-state actor stopped");
+            return;
+        };
         let insert_at = conversation.len().min(1);
         conversation.insert(insert_at, ConversationItem::user(prefix));
         if !self.startup_hints.preserve_inherited_system
@@ -145,23 +146,13 @@ impl SessionActor {
                 ConversationItem::project_instructions(agents_md_reminder),
             );
         }
-        if let Some(personas_reminder) = self.agent.borrow().personas_user_reminder() {
-            let personas_at = conversation
-                .len()
-                .min(
-                    conversation
-                        .iter()
-                        .position(|item| {
-                            matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_none())
-                        })
-                        .unwrap_or(conversation.len()),
-                );
-            conversation.insert(
-                personas_at,
-                ConversationItem::system_reminder(personas_reminder),
-            );
+        if let Err(error) = self
+            .chat_state_handle
+            .replace_context_durably(conversation, source_surface_revision)
+            .await
+        {
+            tracing::error!(%error, "failed to durably publish deferred session context");
         }
-        self.chat_state_handle.replace_conversation(conversation);
         tracing::info!(
             session_id = %self.session_info.id.0,
             source,
@@ -180,7 +171,6 @@ impl SessionActor {
             Some(cwd),
             &skills_config,
             plugin_snapshot.as_deref(),
-            self.rebuild_spec.compat,
         )
         .await;
         let skill_count = new_skills.len();
@@ -250,29 +240,14 @@ impl SessionActor {
         )
         .await;
     }
-    /// Build the wrapped `<system[_-]reminder>` carrier for a skill
-    /// update, applying the harness-specific gate and tag selection.
+    /// Build the wrapped system-reminder carrier for a skill update.
     ///
-    /// Returns `None` when no reminder should be emitted -- either
-    /// because the effect carried no body, or because the compat
-    /// harness is suppressing this kind of update. The compat preamble
-    /// snapshots the full skill baseline in `<agent_skills>`, so a
-    /// `BaselineChange` reminder fired for it would be redundant.
-    /// `Discovery` reminders (skills found mid-session via tool
-    /// navigation into directories the baseline hadn't seen) are kept
-    /// for both harnesses; the preamble cannot list those.
-    ///
-    /// Tag selection for skill reminders. Centralized here so new call sites
-    /// cannot accidentally drift the gating or tag selection.
+    /// Returns `None` when the update has no reminder body. Tag selection is
+    /// centralized here so call sites cannot drift.
     pub(super) fn wrap_skill_reminder(
         &self,
         effects: &tools::types::skill_discovery_tracker::SkillUpdateEffects,
     ) -> Option<ConversationItem> {
-        use tools::types::skill_discovery_tracker::SkillUpdateKind;
-        let is_cursor = self.is_cursor_harness();
-        if is_cursor && effects.kind == SkillUpdateKind::BaselineChange {
-            return None;
-        }
         let text = effects.system_reminder.as_deref()?;
         let tag = self.reminder_wrapper_tag();
         Some(ConversationItem::system_reminder(format!(
@@ -291,8 +266,7 @@ impl SessionActor {
     /// `PromptContext` is not involved. The system prompt is not mutated.
     ///
     /// Apply skill update effects: inject a system-reminder and refresh
-    /// slash commands. Both default and compat agents receive mid-session
-    /// discovery reminders.
+    /// slash commands for the active agent.
     pub(super) async fn apply_skill_update_effects(
         &self,
         effects: tools::types::skill_discovery_tracker::SkillUpdateEffects,
@@ -446,7 +420,6 @@ impl SessionActor {
             .as_deref()
             .map(|id| self.models_manager.model_show_model_fingerprint(id))
             .unwrap_or(false);
-        let conversation_id = None;
         SessionInfoData {
             model,
             model_display_name: None,
@@ -454,7 +427,6 @@ impl SessionActor {
             model_fingerprint,
             show_model_fingerprint,
             api_backend,
-            conversation_id,
             agent_name: Some(agent_name),
             turns: turns as u64,
             turn_index,

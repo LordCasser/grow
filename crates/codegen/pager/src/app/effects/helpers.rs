@@ -145,25 +145,6 @@ pub(crate) fn parse_session_load_foreground(
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
 }
-/// CANONICAL wire parser for the `session/new` / `session/load` response
-/// `_meta[SCHEDULER_BACKGROUND_LOOPS_META_KEY]`.
-///
-/// Carries whether THIS session's scheduled fires run as detached background
-/// subagents, as the shell resolved it when the session's actor spawned. The
-/// pager stores it per session and must not re-resolve the setting: a
-/// mid-session flip would then make `/loop`'s wording describe a runtime the
-/// already-spawned session will never use. `None` when the shell predates the
-/// key (or for gateway chat sessions, which have no local fires), leaving the
-/// reader on the startup seed.
-pub(crate) fn parse_session_scheduler_background_loops(
-    resp_meta: Option<&acp::Meta>,
-) -> Option<bool> {
-    resp_meta
-        .and_then(|m| {
-            m.get(shell::session::SCHEDULER_BACKGROUND_LOOPS_META_KEY)
-        })
-        .and_then(|v| v.as_bool())
-}
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
 fn is_disk_full_error(raw: &str) -> bool {
     raw.contains(fast_worktree::OUT_OF_DISK_CONTEXT)
@@ -219,11 +200,8 @@ pub(crate) struct SessionFlags {
     /// as `restoreCode` in the `resume_session` ACP payload for worktrees.
     pub restore_code: Option<bool>,
     pub agent_override: Option<serde_json::Value>,
-    /// Always-approve for this session (`_meta.yoloMode`).
-    pub yolo_mode: bool,
-    /// Auto (classifier) permission mode (`_meta.autoMode`). Mutually exclusive
-    /// with `yolo_mode` on the agent; both may be set only if yolo wins at spawn.
-    pub auto_mode: bool,
+    /// Canonical session permission mode (`_meta.permissionMode`).
+    pub permission_mode: shell::util::config::PermissionMode,
     /// Effective screen mode label (`ScreenMode::meta_label`), stamped into
     /// every `PromptRequest._meta.screenMode` for minimal-vs-regular usage
     /// diagnostics. `None` (key omitted) only under `Default` in tests; real
@@ -237,9 +215,8 @@ pub(crate) struct SessionFlags {
 impl SessionFlags {
     /// Build the `_meta` JSON value for ACP `NewSessionRequest` / `LoadSessionRequest`.
     ///
-    /// In practice always `Some`: the permission seeds (`yoloMode` /
-    /// `autoMode`) are emitted unconditionally (absent key ≠ off; see the
-    /// emit-site comment below). `--no-ask-user` always forces
+    /// In practice always `Some`: `permissionMode` is emitted unconditionally.
+    /// `--no-ask-user` always forces
     /// `askUserQuestion: false` into the meta, even when paired with
     /// `GROW_AGENT` — the env var chooses the *agent*, but the tool-strip is
     /// independent.
@@ -251,12 +228,10 @@ impl SessionFlags {
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));
         }
-        meta.insert("yoloMode".into(), serde_json::json!(self.yolo_mode));
         meta.insert(
-            "autoMode".into(),
-            serde_json::json!(super::dispatch::effective_auto(
-                self.yolo_mode,
-                self.auto_mode
+            "permissionMode".into(),
+            serde_json::json!(shell::util::config::permission_mode_canonical_str(
+                self.permission_mode,
             )),
         );
         if meta.is_empty() { None } else { Some(meta) }
@@ -264,72 +239,68 @@ impl SessionFlags {
 }
 #[derive(Default)]
 pub(crate) struct EffectMeta;
-/// Extract the first user prompt text from a session's `chat_history.jsonl`.
-///
-/// Returns the first line of the `<user_query>` content (if present),
-/// or the first line of the raw user message text.
+/// Extract the first branch-local prompt from the canonical Timeline.
 pub(super) fn extract_first_user_prompt(
     info: &shell::session::info::Info,
 ) -> Option<String> {
-    use std::io::BufRead;
-    let history_path = shell::session::persistence::session_dir(info)
-        .join("chat_history.jsonl");
-    let file = std::fs::File::open(history_path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines() {
-        let line = line.ok()?;
-        let v: serde_json::Value = serde_json::from_str(&line).ok()?;
-        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
-            continue;
-        }
-        let content = v.get("content");
-        let text = content
-            .and_then(|c| c.as_array())
-            .and_then(|arr| {
-                arr
-                    .iter()
-                    .find_map(|block| {
-                        if block.get("type")?.as_str()? == "text" {
-                            block.get("text")?.as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .or_else(|| content.and_then(|c| c.as_str()).map(String::from))?;
-        if let Some(start) = text.find("<user_query>") {
-            let after = &text[start + "<user_query>".len()..];
-            let end = after.find("</user_query>").unwrap_or(after.len());
-            let query = after[..end].trim();
-            if !query.is_empty() && !query.starts_with('<') {
-                return Some(query.to_string());
-            }
-        }
-    }
-    None
+    load_timeline(info)?
+        .prompt_texts()
+        .into_iter()
+        .next()
+        .and_then(|text| {
+            text.lines()
+                .next()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+        })
 }
-/// Typed deserialization so schema drift is caught at compile time.
-/// Synthetic user messages (auto-continue, doom-loop) are excluded.
-pub(super) fn count_chat_history_stats(history_path: &Path) -> (usize, usize) {
-    use std::io::BufRead;
-    use shell::sampling::{AssistantItem, ConversationItem, UserItem};
-    let mut turn_count = 0usize;
-    let mut tool_call_count = 0usize;
-    let Ok(file) = std::fs::File::open(history_path) else {
+
+pub(super) fn count_timeline_stats(info: &shell::session::info::Info) -> (usize, usize) {
+    let Some(timeline) = load_timeline(info) else {
         return (0, 0);
     };
-    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-        match serde_json::from_str::<ConversationItem>(&line) {
-            Ok(ConversationItem::User(UserItem { synthetic_reason: None, .. })) => {
-                turn_count += 1;
-            }
-            Ok(ConversationItem::Assistant(AssistantItem { ref tool_calls, .. })) => {
-                tool_call_count += tool_calls.len();
-            }
-            _ => {}
-        }
-    }
-    (turn_count, tool_call_count)
+    let turns = timeline
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { .. })
+            )
+        })
+        .count();
+    let tools = timeline
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started { .. })
+            )
+        })
+        .count();
+    (turns, tools)
+}
+
+fn load_timeline(info: &shell::session::info::Info) -> Option<chat_state::Timeline> {
+    let path = shell::session::persistence::session_dir(info).join("timeline.jsonl");
+    let bytes = std::fs::read(path).ok()?;
+    let complete_len = if bytes.last().is_none_or(|byte| *byte == b'\n') {
+        bytes.len()
+    } else {
+        bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1)
+    };
+    let events = bytes[..complete_len]
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice::<chat_state::TimelineEvent>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    chat_state::Timeline::from_events(events).ok()
 }
 /// Reads `_meta["grow/listScope"]` from a session-list payload.
 pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {
@@ -349,8 +320,9 @@ pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope
 /// Shared by the resume picker ([`Effect::FetchSessionList`]) and the
 /// dashboard's non-leader idle-session fallback
 /// ([`Effect::FetchDashboardSessions`]) so both produce identical labels.
-/// Sessions older than 30 days, and sessions with no usable user prompt
-/// (empty `summary` after fallbacks), are dropped.
+/// Sessions older than 30 days are dropped. The current protocol requires one
+/// canonical `title`; no `summary`, `firstPrompt`, or snake_case wire fallback
+/// is accepted here.
 pub(super) fn parse_session_picker_entries(
     payload: &serde_json::Value,
 ) -> Vec<crate::app::app_view::SessionPickerEntry> {
@@ -367,27 +339,15 @@ pub(super) fn parse_session_picker_entries(
         .filter_map(|v| {
             let id = v
                 .get("sessionId")
-                .or_else(|| v.get("session_id"))
                 .and_then(|s| s.as_str())?
                 .to_string();
-            let summary = v
-                .get("summary")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let first_prompt = v
-                .get("firstPrompt")
-                .or_else(|| v.get("first_prompt"))
-                .and_then(|s| s.as_str())
-                .map(String::from);
+            let title = v.get("title").and_then(|s| s.as_str())?.to_string();
             let parsed_updated: Option<chrono::DateTime<chrono::Utc>> = v
                 .get("updatedAt")
-                .or_else(|| v.get("updated_at"))
                 .and_then(|s| s.as_str())
                 .and_then(|s| s.parse().ok());
             let parsed_created: Option<chrono::DateTime<chrono::Utc>> = v
                 .get("createdAt")
-                .or_else(|| v.get("created_at"))
                 .and_then(|s| s.as_str())
                 .and_then(|s| s.parse().ok());
             let updated_at: chrono::DateTime<chrono::Utc> = match parsed_updated {
@@ -400,28 +360,7 @@ pub(super) fn parse_session_picker_entries(
                 None => return None,
             };
             use tools::implementations::skills::skill::extract_skill_display_text;
-            let display = if let Some(ref fp) = first_prompt {
-                if let Some(d) = extract_skill_display_text(fp) {
-                    d
-                } else if !summary.is_empty() {
-                    extract_skill_display_text(&summary).unwrap_or(summary)
-                } else {
-                    fp.lines().next().unwrap_or_default().trim().to_string()
-                }
-            } else if !summary.is_empty() {
-                extract_skill_display_text(&summary).unwrap_or(summary)
-            } else {
-                let info_cwd = v
-                    .get("cwd")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let info = shell::session::info::Info {
-                    id: acp::SessionId::new(id.clone()),
-                    cwd: info_cwd,
-                };
-                extract_first_user_prompt(&info).unwrap_or_default()
-            };
+            let display = extract_skill_display_text(&title).unwrap_or(title);
             let created_at: chrono::DateTime<chrono::Utc> = parsed_created
                 .unwrap_or(updated_at);
             let cwd_str = v
@@ -432,23 +371,19 @@ pub(super) fn parse_session_picker_entries(
             let hostname = v.get("hostname").and_then(|s| s.as_str()).map(String::from);
             let model_id = v
                 .get("modelId")
-                .or_else(|| v.get("model_id"))
                 .and_then(|s| s.as_str())
                 .map(String::from);
             let num_messages = v
                 .get("numMessages")
-                .or_else(|| v.get("num_messages"))
                 .and_then(|n| n.as_u64())
                 .unwrap_or(0) as usize;
             let last_active_at: Option<chrono::DateTime<chrono::Utc>> = v
                 .get("lastActiveAt")
-                .or_else(|| v.get("last_active_at"))
                 .and_then(|s| s.as_str())
                 .and_then(|s| s.parse().ok());
             let branch = v.get("branch").and_then(|s| s.as_str()).map(String::from);
             let worktree_label = v
                 .get("worktreeLabel")
-                .or_else(|| v.get("worktree_label"))
                 .and_then(|s| s.as_str())
                 .map(String::from);
             let repo_name = crate::views::session_picker::repo_name_from_cwd(&cwd_str);
@@ -488,7 +423,7 @@ pub(super) fn session_picker_entry_to_roster(
         cwd: e.cwd.clone(),
         is_worktree: e.worktree_label.is_some(),
         model_id: e.model_id.clone(),
-        yolo: false,
+        permission_mode: diagnostics::enums::PermissionMode::Ask,
         activity: RosterActivity::Dormant,
         resident: false,
         last_change_unix_ms: last_change.timestamp_millis(),
@@ -761,14 +696,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "collapsed_edit_blocks" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("collapsed_edit_blocks", "Bool", &value));
-            };
-            shell::util::config::set_collapsed_edit_blocks(b)
-                .await
-                .map_err(|e| e.to_string())
-        }
         "prompt_suggestions" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("prompt_suggestions", "Bool", &value));
@@ -858,7 +785,7 @@ pub(crate) async fn persist_setting(
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 ///
 /// 1. Persist `ui.permission_mode` to disk.
-/// 2. Fire ACP `grow/yolo_mode_changed` (gated on disk success for
+/// 2. Fire ACP `grow/permission_mode_changed` (gated on disk success for
 ///    `WithRollback`; always for `BestEffort`).
 /// 3. Return the matching `TaskResult`.
 pub(crate) async fn persist_permission_mode_and_notify(
@@ -867,37 +794,35 @@ pub(crate) async fn persist_permission_mode_and_notify(
     persist: PermissionModePersist,
     tx: AcpAgentTx,
 ) -> TaskResult {
-    let enabled = canonical == "always-approve";
-    let auto_mode = canonical == "auto";
     let config_str: &'static str = canonical;
     let disk_result = shell::util::config::update_config(|cfg| {
             cfg.ui.permission_mode = Some(config_str.to_string());
         })
         .await;
     let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
-    if should_send_yolo_acp_notification(&disk_outcome, persist) && session_id.is_some()
+    if should_send_permission_mode_notification(&disk_outcome, persist)
+        && let Some(session_id) = session_id
     {
         let params = serde_json::json!({
-            "yolo_mode": enabled,
-            "auto_mode": auto_mode,
-            "permission_mode": config_str,
+            "sessionId": session_id,
+            "permissionMode": config_str,
         });
         let notification = acp::ExtNotification::new(
-            "grow/yolo_mode_changed",
+            "grow/permission_mode_changed",
             serde_json::value::to_raw_value(&params)
-                .expect("serialize yolo_mode_changed params")
+                .expect("serialize permission_mode_changed params")
                 .into(),
         );
         if let Err(e) = acp_send(notification, &tx).await {
-            tracing::warn!("Failed to send yolo_mode_changed notification: {e}");
+            tracing::warn!("Failed to send permission_mode_changed notification: {e}");
         }
     }
     route_permission_mode_result(disk_outcome, persist, config_str)
 }
-/// Whether to fire the ACP `grow/yolo_mode_changed` notification.
+/// Whether to fire the ACP `grow/permission_mode_changed` notification.
 /// `WithRollback` suppresses on disk failure (agent must not see the
 /// optimistic value). `BestEffort` always fires.
-pub(super) fn should_send_yolo_acp_notification(
+pub(super) fn should_send_permission_mode_notification(
     disk_outcome: &Result<(), String>,
     persist: PermissionModePersist,
 ) -> bool {
@@ -935,9 +860,8 @@ pub(super) fn parse_kill_outcome(
         .map(|payload| payload.outcome)
 }
 /// Map an `grow/subagent/cancel` response (payload under `result`) to a kill
-/// outcome. Prefers the typed `outcome`; falls back to the legacy `cancelled`
-/// bool for an older shell or an unknown future `kind`. An error/unparseable
-/// body is `RpcFailed` (subagent may still be running — leave the row alone).
+/// outcome. An error or invalid payload is `RpcFailed` because the subagent may
+/// still be running, so the caller must leave the row alone.
 pub(super) fn parse_subagent_kill_outcome(resp: &str) -> SubagentKillOutcome {
     use shell::extensions::task::{
         CancelSubagentResponse, SubagentCancelOutcomeDto,
@@ -950,24 +874,15 @@ pub(super) fn parse_subagent_kill_outcome(resp: &str) -> SubagentKillOutcome {
         return SubagentKillOutcome::RpcFailed;
     };
     match payload.outcome {
-        Some(SubagentCancelOutcomeDto::Cancelled) => SubagentKillOutcome::StoppedLive,
-        Some(SubagentCancelOutcomeDto::AlreadyFinished { status }) => {
+        SubagentCancelOutcomeDto::Cancelled => SubagentKillOutcome::StoppedLive,
+        SubagentCancelOutcomeDto::AlreadyFinished { status } => {
             SubagentKillOutcome::NothingLive {
                 status: Some(status),
             }
         }
-        Some(SubagentCancelOutcomeDto::NotFound) => {
+        SubagentCancelOutcomeDto::NotFound => {
             SubagentKillOutcome::NothingLive {
                 status: None,
-            }
-        }
-        Some(SubagentCancelOutcomeDto::Unknown) | None => {
-            if payload.cancelled {
-                SubagentKillOutcome::StoppedLive
-            } else {
-                SubagentKillOutcome::NothingLive {
-                        status: None,
-                    }
             }
         }
     }

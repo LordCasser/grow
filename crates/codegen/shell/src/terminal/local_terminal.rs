@@ -70,7 +70,7 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
 
         // Detach from the controlling terminal so child processes
         // (e.g. GPG pinentry) cannot open /dev/tty and corrupt the TUI.
-        tools::util::detach_command(&mut cmd);
+        tty_utils::detach_command(&mut cmd);
 
         #[allow(clippy::disallowed_methods)] // killed on the request timeout, direct child only
         let mut child = cmd

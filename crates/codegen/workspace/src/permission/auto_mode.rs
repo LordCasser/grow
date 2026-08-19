@@ -1156,8 +1156,6 @@ pub fn is_auto_mode_allowlisted_tool_name(tool_name: &str) -> bool {
             | "TodoWrite"
             | "task_output"
             | "TaskOutput"
-            | "wait_tasks"
-            | "WaitTasks"
             | "ask_user_question"
             | "AskUserQuestion"
             | "plan_control"

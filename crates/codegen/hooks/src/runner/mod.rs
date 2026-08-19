@@ -17,7 +17,7 @@ pub use crate::event::GateKind;
 pub struct RunContext<'a> {
     pub session_id: &'a str,
     pub workspace_root: &'a str,
-    pub process_scope: Option<tools::util::ProcessScope>,
+    pub process_scope: Option<tty_utils::ProcessScope>,
 }
 
 /// Result of running a single hook (any handler type).
@@ -33,6 +33,7 @@ pub enum HookRunnerResult {
 /// JSON from `PreToolUse` gate hooks:
 /// `{"decision": "allow" | "deny", "reason": "…"}`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct GateHookJson {
     pub decision: String,
     #[serde(default)]
@@ -62,6 +63,7 @@ pub(crate) fn gate_json_to_decision(
 /// JSON from `Stop`/`SubagentStop` gate hooks. All fields optional; one output
 /// can combine several signals.
 #[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct StopHookJson {
     #[serde(default)]
     pub decision: Option<String>,
@@ -69,15 +71,9 @@ pub(crate) struct StopHookJson {
     pub reason: Option<String>,
     #[serde(default, rename = "continue")]
     pub continue_: Option<bool>,
-    #[serde(default, rename = "stopReason")]
+    #[serde(default)]
     pub stop_reason: Option<String>,
-    #[serde(default, rename = "hookSpecificOutput")]
-    pub hook_specific_output: Option<StopHookSpecificOutputJson>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct StopHookSpecificOutputJson {
-    #[serde(default, rename = "additionalContext")]
+    #[serde(default)]
     pub additional_context: Option<String>,
 }
 
@@ -106,8 +102,7 @@ pub(crate) fn stop_json_to_outcome(
     Ok(StopHookOutcome {
         block_reason,
         additional_context: json
-            .hook_specific_output
-            .and_then(|output| output.additional_context)
+            .additional_context
             .filter(|context| !context.trim().is_empty()),
         force_stop: (json.continue_ == Some(false)).then_some(crate::result::StopOverride {
             reason: json.stop_reason,

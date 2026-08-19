@@ -1,6 +1,5 @@
 pub mod auto_mode;
 pub mod bash_command_splitting;
-pub mod claude_settings;
 mod exec_risk;
 mod gate_preflight;
 mod manager;
@@ -142,9 +141,9 @@ pub use manager::{PermissionHandle, default_always_allow_scope, spawn_permission
 pub use policy::CompiledPolicy;
 pub use prompter::{
     ALLOW_EDITS_SESSION_OPTION_ID, AcpPrompter, BashCommandPermission, BashCommandSelectedTerms,
-    ENABLE_ALWAYS_APPROVE_OPTION_ID, MCP_TOOL_NAME_DELIMITER, McpScopeSelection, McpToolPermission,
-    PromptOutcome, is_enable_always_approve_option, mcp_pretty_name_if_qualified,
-    mcp_titleize_segment, mcp_tool_action, mcp_tool_display_name,
+    ENABLE_ALWAYS_APPROVE_OPTION_ID, McpScopeSelection, McpToolPermission, PromptOutcome,
+    is_enable_always_approve_option, mcp_pretty_name_if_qualified, mcp_titleize_segment,
+    mcp_tool_action, mcp_tool_display_name,
 };
 pub use shell_access::{
     ProtectedEditPermission, ProtectedEditReason, command_write_paths_in_tree,

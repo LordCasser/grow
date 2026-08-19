@@ -114,7 +114,7 @@ grow mcp add --transport sse linear https://mcp.linear.app/sse
 # Remove a server
 grow mcp remove github
 
-# Enable or disable a local/TOML (or compat-sourced) server
+# Enable or disable a configured or plugin-provided server
 grow mcp enable github
 grow mcp disable github
 
@@ -132,9 +132,9 @@ By default `grow mcp add` writes to `~/.grow/config.toml` (`--scope user`). Use 
 
 `grow mcp enable` / `disable` persist the personal on/off state to user `~/.grow/config.toml` (`disabled_mcp_servers`, and `[mcp_servers.<name>].enabled` when that entry exists). Scope:
 
-- **Known names:** user/project Grow TOML, names already on the disabled list, compat sources (`.mcp.json`, Claude, Cursor), **plugin** MCP servers (same discovery as doctor/`/mcps`), and legacy managed `grow_com_*` (no local entry required).
+- **Known names:** user/project Grow TOML, names already on the disabled list, and plugin MCP servers (same discovery as doctor/`/mcps`).
 - **Enable only:** if the cwd-nearest project definition has sticky `enabled = false`, that single key is cleared (comments preserved); disable never rewrites project configs.
-- **Not full `/mcps` parity:** gateway connectors (`managed_gateway:…`, stored under `disabled_mcp_tools.__managed_gateway_connectors`) stay Space-only in the TUI. Idempotent; unknown names exit 1.
+- **Idempotent:** repeated enable/disable requests are no-ops; unknown names exit 1.
 
 Breaking changes from earlier releases: `--env` now takes one `KEY=value` per flag (use `-e A=1 -e B=2`, not `--env A=1 B=2`), and server names may only contain letters, numbers, hyphens, and underscores.
 
@@ -211,23 +211,6 @@ The model has access to two built-in tools for working with MCP servers:
 - `use_tool` — Call an integration tool discovered via `search_tool`. Specify the fully-qualified tool name (e.g., `github__create_issue`).
 
 Grow keeps the request prefix stable by sending these two discovery tools rather than every dynamic MCP schema. A system reminder lists connected servers and tells the model to search proactively when a server can provide authoritative data or an in-scope action; `search_tool` returns the exact schema required by `use_tool`.
-
----
-
-## Compatibility
-
-Grow loads MCP server configurations from multiple sources for compatibility:
-
-| Source | Format | Location | Configurable |
-|--------|--------|----------|-------------|
-| `config.toml` | Native Grow config | `~/.grow/config.toml`, `.grow/config.toml` | Always on |
-| `.claude.json` | Claude Code format | `~/.claude.json` | `[compat.claude] mcps` |
-| `.cursor/mcp.json` | Cursor format | `~/.cursor/mcp.json`, `<project>/.cursor/mcp.json` | `[compat.cursor] mcps` |
-| `.mcp.json` | MCP standard format | Project root (cwd to git root) | Loaded unless you have imported or dismissed the Claude import prompt (the import marker is set) |
-
-All sources are merged in priority order: config.toml > Claude > Cursor > `.mcp.json`. Servers from higher-priority sources take precedence when names conflict.
-
-The Claude and Cursor MCP sources are scanned by default. To disable scanning for a specific vendor, set `[compat.<vendor>] mcps = false` in `~/.grow/config.toml` or the corresponding environment variable (`GROW_CURSOR_MCPS_ENABLED`, `GROW_CLAUDE_MCPS_ENABLED`). See [Configuration](05-configuration.md#harness-compatibility) for details. Use `grow inspect` to see which MCP servers were loaded and their vendor origin (`[cursor]`, `[claude]`).
 
 ---
 

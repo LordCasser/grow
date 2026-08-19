@@ -109,7 +109,7 @@ pub struct AddArgs {
     name: String,
 
     /// Command to launch (stdio) or URL to connect to (http, sse)
-    #[arg(value_name = "COMMAND_OR_URL", group = "source")]
+    #[arg(value_name = "COMMAND_OR_URL")]
     command_or_url: Option<String>,
 
     /// Arguments passed to the server command. Place them after `--` so
@@ -132,19 +132,6 @@ pub struct AddArgs {
     /// HTTP header for remote servers (repeatable)
     #[arg(short = 'H', long = "header", value_name = "NAME: VALUE")]
     header: Vec<String>,
-
-    /// Legacy alias for the positional command argument
-    #[arg(long, hide = true, group = "source")]
-    command: Option<String>,
-    /// Legacy companion to --command
-    #[arg(long = "args", hide = true, num_args = 1.., requires = "command")]
-    legacy_args: Vec<String>,
-    /// Legacy alias for adding a remote server by URL
-    #[arg(long, hide = true, group = "source")]
-    url: Option<String>,
-    /// Legacy transport type for --url servers
-    #[arg(long = "type", hide = true)]
-    transport_type: Option<String>,
 }
 
 pub async fn run(mcp_args: McpArgs) -> Result<()> {
@@ -275,39 +262,10 @@ async fn run_add(args: AddArgs) -> Result<()> {
 fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
     validate_server_name(&args.name)?;
 
-    let transport = match args.transport {
-        Some(t) => t,
-        // The legacy --url form defaults to HTTP and honors the legacy --type flag.
-        None if args.url.is_some() => match args.transport_type.as_deref() {
-            Some(t) if t.eq_ignore_ascii_case("sse") => McpTransport::Sse,
-            _ => McpTransport::Http,
-        },
-        None => McpTransport::Stdio,
-    };
+    let transport = args.transport.unwrap_or(McpTransport::Stdio);
     let explicit_transport = args.transport.is_some();
-
-    // Legacy-flag misroutes: --url always means a remote server, and --type
-    // only modifies --url.
-    if args.url.is_some() && transport == McpTransport::Stdio {
-        bail!(
-            "--url cannot be combined with --transport stdio. For a remote server, use --transport http or --transport sse."
-        );
-    }
-    if args.transport_type.is_some() && args.url.is_none() {
-        bail!("--type is only valid together with --url. Use --transport to choose the transport.");
-    }
-
-    let server_args = if args.command.is_some() {
-        &args.legacy_args
-    } else {
-        &args.args
-    };
-    // Clap's "source" group guarantees at most one of these is set.
-    let source = args
-        .command_or_url
-        .as_deref()
-        .or(args.command.as_deref())
-        .or(args.url.as_deref());
+    let server_args = &args.args;
+    let source = args.command_or_url.as_deref();
 
     match transport {
         McpTransport::Stdio => {
@@ -533,11 +491,8 @@ fn surviving_definition(
         .or_else(|| user_defined.then(|| (McpScope::User, shell::util::config::user_config_path())))
 }
 
-/// TOML / disabled list / compat JSON / legacy `grow_com_*` (not gateway).
+/// TOML / disabled list / compat JSON / plugin catalog.
 fn mcp_server_is_known(name: &str, cwd: &Path) -> bool {
-    if name.starts_with("grow_com_") {
-        return true;
-    }
     shell::util::config::cli_known_mcp_server_names(cwd).contains(name)
 }
 
@@ -554,12 +509,6 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
     // also targets compat/plugin names that may contain dots or other keys.
     if name.is_empty() {
         bail!("Server name cannot be empty.");
-    }
-    if name.starts_with("managed_gateway:") || name.contains(':') {
-        eprintln!(
-            "Gateway connectors (e.g. managed_gateway:…) cannot be toggled via CLI; use Space in /mcps."
-        );
-        std::process::exit(1);
     }
     let cwd = current_dir_or_exit();
 
@@ -916,124 +865,12 @@ mod tests {
     }
 
     #[test]
-    fn add_legacy_flag_forms_still_parse() {
-        let add = parse_add(&[
-            "grow",
-            "mcp",
-            "add",
-            "oldfs",
-            "--command",
-            "npx",
-            "--args",
-            "@foo/bar",
-            "/path",
-        ]);
-        let resolved = resolve_add(&add).expect("legacy stdio form resolves");
-        match resolved.transport {
-            McpServerTransportConfig::Stdio { command, args, .. } => {
-                assert_eq!(command, "npx");
-                assert_eq!(args, vec!["@foo/bar".to_string(), "/path".to_string()]);
-            }
-            other => panic!("expected stdio transport, got {other:?}"),
+    fn add_removed_flags_are_rejected() {
+        for flag in ["--command", "--args", "--url", "--type"] {
+            let err = PagerArgs::try_parse_from(["grow", "mcp", "add", "server", flag, "value"])
+                .expect_err("removed flag must not parse");
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
         }
-
-        let add = parse_add(&[
-            "grow",
-            "mcp",
-            "add",
-            "remote",
-            "--url",
-            "https://mcp.example.com/sse",
-            "--type",
-            "sse",
-        ]);
-        let resolved = resolve_add(&add).expect("legacy url form resolves");
-        match resolved.transport {
-            McpServerTransportConfig::StreamableHttp {
-                url,
-                transport_type,
-                ..
-            } => {
-                assert_eq!(url, "https://mcp.example.com/sse");
-                assert_eq!(transport_type.as_deref(), Some("sse"));
-            }
-            other => panic!("expected http transport, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn add_legacy_command_conflicts_with_positional() {
-        let err = PagerArgs::try_parse_from([
-            "grow",
-            "mcp",
-            "add",
-            "fs",
-            "npx",
-            "--command",
-            "other-npx",
-        ])
-        .expect_err("--command and a positional command are mutually exclusive");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
-    }
-
-    #[test]
-    fn add_legacy_multi_value_env_is_rejected() {
-        // Pre-parity --env was greedy (`--env A=1 B=2`); with --command the
-        // stray pair now lands in the positional and trips the source group.
-        let err = PagerArgs::try_parse_from([
-            "grow",
-            "mcp",
-            "add",
-            "github",
-            "--command",
-            "npx",
-            "--args",
-            "@foo/bar",
-            "--env",
-            "A=1",
-            "B=2",
-        ])
-        .expect_err("greedy --env must no longer parse");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
-
-        // Without --command the stray pair used to be silently written as the
-        // command; resolve_add must reject it with migration guidance.
-        let add = parse_add(&[
-            "grow", "mcp", "add", "pg", "--env", "A=1", "B=2", "--", "npx", "-y", "server",
-        ]);
-        let err = resolve_add(&add).expect_err("env-shaped command must fail");
-        assert!(err.to_string().contains("-e A=1 -e B=2"), "got: {err}");
-    }
-
-    #[test]
-    fn add_legacy_url_and_type_misuse_is_rejected() {
-        // --url with an explicit stdio transport used to silently store the
-        // URL as a stdio command.
-        let add = parse_add(&[
-            "grow",
-            "mcp",
-            "add",
-            "foo",
-            "--url",
-            "https://mcp.example.com/mcp",
-            "-t",
-            "stdio",
-        ]);
-        let err = resolve_add(&add).expect_err("--url with stdio transport must fail");
-        assert!(err.to_string().contains("--url"), "got: {err}");
-
-        // --type without --url used to be silently ignored.
-        let add = parse_add(&[
-            "grow",
-            "mcp",
-            "add",
-            "bar",
-            "https://x.example/sse",
-            "--type",
-            "sse",
-        ]);
-        let err = resolve_add(&add).expect_err("--type without --url must fail");
-        assert!(err.to_string().contains("--transport"), "got: {err}");
     }
 
     #[test]
@@ -1146,12 +983,12 @@ mod tests {
             other => panic!("expected mcp enable, got {other:?}"),
         }
 
-        let args = PagerArgs::try_parse_from(["grow", "mcp", "disable", "grow_com_slack"])
+        let args = PagerArgs::try_parse_from(["grow", "mcp", "disable", "slack"])
             .expect("disable should parse");
         match args.command {
             Some(Command::Mcp(McpArgs {
                 command: McpCommand::Disable { name },
-            })) => assert_eq!(name, "grow_com_slack"),
+            })) => assert_eq!(name, "slack"),
             other => panic!("expected mcp disable, got {other:?}"),
         }
     }

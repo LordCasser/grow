@@ -2,18 +2,10 @@
 //! (~4x smaller), for compact persistence of bash output via
 //! `BashNotificationBase.output`.
 //!
-//! The deserializer accepts both the base64 string and the legacy integer-array
-//! form, so a new consumer can read an old producer; the serializer always emits
-//! base64. The CHANGELOG (2026-05-29) covers the consumer-before-producer deploy
-//! ordering this implies. Requires a self-describing format (JSON): the dual-form
-//! detection and the `#[serde(flatten)]` on the notification structs both force
-//! `deserialize_any`.
-
-use std::fmt;
-
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use serde::Deserialize as _;
+use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
 
 /// Serialize a byte slice as a base64 string.
@@ -24,56 +16,13 @@ where
     serializer.serialize_str(&STANDARD.encode(bytes))
 }
 
-/// Deserialize `Vec<u8>` from either a base64 string (new form) or an integer
-/// array (legacy form).
+/// Deserialize `Vec<u8>` from the canonical base64 string form.
 pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    deserializer.deserialize_any(BytesVisitor)
-}
-
-/// Accepts both a base64 string and a legacy integer array.
-struct BytesVisitor;
-
-impl<'de> Visitor<'de> for BytesVisitor {
-    type Value = Vec<u8>;
-
-    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("a base64 string or an array of bytes")
-    }
-
-    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        STANDARD.decode(v).map_err(de::Error::custom)
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(v.to_vec())
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(v)
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut bytes = Vec::new();
-        while let Some(b) = seq.next_element::<u8>()? {
-            bytes.push(b);
-        }
-        Ok(bytes)
-    }
+    let encoded = String::deserialize(deserializer)?;
+    STANDARD.decode(encoded).map_err(de::Error::custom)
 }
 
 #[cfg(test)]
@@ -111,10 +60,9 @@ mod tests {
     }
 
     #[test]
-    fn vec_reads_legacy_integer_array() {
-        let legacy = json!({ "output": [104, 101, 108, 108, 111] });
-        let w: Wrapper = serde_json::from_value(legacy).unwrap();
-        assert_eq!(w.output, b"hello".to_vec());
+    fn vec_rejects_integer_array() {
+        let array = json!({ "output": [104, 101, 108, 108, 111] });
+        assert!(serde_json::from_value::<Wrapper>(array).is_err());
     }
 
     #[test]
@@ -156,8 +104,7 @@ mod tests {
         }
         assert!(data.contains(&0x00) && data.contains(&0xff));
 
-        // A bare `Vec<u8>` serializes as the legacy integer array — the baseline
-        // the base64 form must beat. Measure it before moving `data`.
+        // Compare against serde's default integer-array representation.
         let int_array_len = serde_json::to_string(&data).unwrap().len();
 
         let w = Wrapper { output: data };

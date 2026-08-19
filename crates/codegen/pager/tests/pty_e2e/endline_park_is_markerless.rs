@@ -49,13 +49,13 @@ async fn parked_enter_queues_until_wait_finishes() {
     content.set_response("ENDLINE_FINAL_ANSWER");
 
     let binary = pager_binary().expect("resolve pager binary");
-    // --yolo skips the bash permission prompt; --trust skips the folder-trust gate.
+    // --permission-mode always-approve skips the bash permission prompt; --trust skips the folder-trust gate.
     let mut harness = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

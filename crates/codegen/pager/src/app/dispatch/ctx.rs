@@ -167,11 +167,11 @@ pub(crate) enum SwitchCause {
     // sets `DashboardState::attached_agent` directly.
 }
 
-/// Surface a launch-blocked `--yolo` once on the first agent view (the TUI owns
+/// Surface a launch-blocked `--permission-mode always-approve` once on the first agent view (the TUI owns
 /// the terminal, so stderr is gone); idempotent via `.take()`. Dashboard flows
 /// that bypass [`switch_to_agent`] call it directly.
-pub(super) fn surface_yolo_launch_block_notice(app: &mut AppView, target: AgentId) {
-    if let Some(warning) = app.yolo_launch_block_notice.take()
+pub(super) fn surface_always_approve_launch_block_notice(app: &mut AppView, target: AgentId) {
+    if let Some(warning) = app.always_approve_launch_block_notice.take()
         && let Some(agent) = app.agents.get_mut(&target)
     {
         agent
@@ -195,7 +195,7 @@ pub(super) fn surface_screen_mode_switch_hint(app: &mut AppView, target: AgentId
 }
 
 /// Switch the active agent — the primary funnel for assigning `ActiveView::Agent`
-/// (new, resume, picker, fork); also fires [`surface_yolo_launch_block_notice`].
+/// (new, resume, picker, fork); also fires [`surface_always_approve_launch_block_notice`].
 /// No-op if `target` is unknown or already active. Dashboard-first flows that
 /// assign `Agent` directly must call the notice themselves.
 pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, _cause: SwitchCause) {
@@ -225,10 +225,11 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, _cause: Switch
     // Re-anchor the global permission-mode mirror to the now-active agent so the
     // cycle's `sync_active_auto_flag` (which derives from the global) can't copy a
     // different agent's stale Auto/Always-Approve onto this one. Per-session
-    // yolo/auto are the source of truth; the global is a write-only mirror.
+    // always-approve/auto are the source of truth; the global is a write-only mirror.
     if let Some(agent) = app.agents.get(&target) {
-        let (is_yolo, is_auto) = (agent.session.is_yolo(), agent.session.is_auto());
-        let reanchor = if is_yolo {
+        let (is_always_approve, is_auto) =
+            (agent.session.is_always_approve(), agent.session.is_auto());
+        let reanchor = if is_always_approve {
             Some("always-approve")
         } else if is_auto && app.auto_mode_gate {
             // Gate-aware: never re-anchor the global mirror to "auto" when the
@@ -239,7 +240,7 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, _cause: Switch
             app.current_ui.permission_mode.as_deref(),
             Some("always-approve") | Some("auto")
         ) {
-            // Non-yolo/non-auto agent: clear a stale yolo/auto mirror left by a
+            // Non-always-approve/non-auto agent: clear a stale always-approve/auto mirror left by a
             // different agent; preserve an existing ask/default distinction.
             Some("ask")
         } else {
@@ -252,7 +253,7 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, _cause: Switch
     // Seed the auto feature gate on the (possibly new) active agent's slash
     // registry.
     app.sync_permission_mode_slash_gate();
-    surface_yolo_launch_block_notice(app, target);
+    surface_always_approve_launch_block_notice(app, target);
 }
 
 pub(super) fn find_agent_id_by_session_id(

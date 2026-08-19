@@ -81,17 +81,17 @@ Deep Research foreground 只保留明确 `ToolScope::Read` 的工具；未分类
 
 权限拒绝是子 Agent 的工具级结果，不是 turn 级终止：Auto deny/unavailable、人工 Reject/TimedOut 和 `request_tool_access` 失败都让当前工具 fail closed，并把可操作的失败结果交回下一次子模型采样；只有明确 Cancel、父任务终止或 session teardown 可以取消子 turn。最终 `PermissionEvent` 是审计事实源，经 primary session 的 audit bridge 持久化为 UI-only update。Pager 将同一主 Agent turn 内到达的事件保留在一个带 epoch 的稳定结构化权限块中；status、tool 等中间消息不会拆组，只有真实 `TurnCompleted` 推进 epoch 并封口。展开成员始终单行，双击成员读取完整 live 请求和 classifier reason；持久化 replay 只恢复脱敏安全摘要。该块不复用 tool-verb 分类或其设置，也不进入模型上下文。
 
-## 原子 control snapshot
+## 原子 Timeline Control 事件
 
-`session-control.json` 包含 architecture version、control revision、Behavior snapshot、Plan phase/approval/artifact revision/hash、Goal state/receipt 与 Deep Research owned run id。
+Timeline 的 `control` 事件包含单调 control revision，以及 Behavior snapshot、Plan phase/approval/artifact revision/hash、Goal state/receipt 与 Deep Research owned run id。它是唯一持久控制事实；不存在 control sidecar。
 
 - 控制命令收到持久化 ack 后才返回 Applied/成功。
 - 先持久化将要到达的控制状态，再取消 exact foreground/owned run并发布 UI projection。
-- Goal finalization 的 `TurnCompleted` 携带结构化 origin/turn kind/goal id/stage id，并与 control ack共享同一有序 persistence actor，确保 terminal先落盘，再写 Complete/Normal。若进程恰在两次写入之间退出，恢复器从 durable terminal 对账并补写 Complete receipt，不重复 final report。
+- Goal finalization 的 Timeline turn identity 携带结构化 origin/turn kind/goal id/stage id，turn terminal携带 stop reason/completion kind；terminal与 Control事件共享同一有序 Timeline actor，确保 terminal先落盘，再写 Complete/Normal。若进程恰在两次写入之间退出，恢复器从 durable Timeline terminal对账并补写 Complete receipt，不读取 `updates.jsonl`，也不重复 final report。
 - Plan 的 submit/approve/reject/abandon 都等待 control ack；持久化失败时恢复内存中的前一 Behavior snapshot，不向模型或 Pager 发布不可恢复的相位。
 - Plan 恢复校验 artifact hash；Deep Research 校验 owned manifest。失败均恢复 Normal且不删除公共 Workflow。
-- current architecture 的 Goal内部冲突 fail closed为 Paused并保持 Goal；旧 architecture 直接清除并 Normal。
-- split `behavior.json`/`goal/state.json` 不迁移，检测后诊断并删除。
+- Goal 内部冲突 fail closed 为 Paused 并保持 Goal；不支持的 architecture version 直接拒绝加载。
+- Behavior 与 Goal 只通过 Timeline `control` 事件原子提交；不存在第二套控制状态读写路径。
 - session fork把 Goal/Deep Research清为 Normal，不复制 runtime ownership。
 
 ## Pager 与 motion

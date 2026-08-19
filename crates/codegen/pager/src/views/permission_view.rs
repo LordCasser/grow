@@ -223,11 +223,6 @@ fn shortcut_label(index: usize) -> &'static str {
         .unwrap_or(SHORTCUT_LABELS[0])
 }
 
-// ── Subagent tracking ──────────────────────────────────────────────────
-
-// SubagentInfo lives in app::subagent — re-export for backward compat.
-pub use crate::app::subagent::SubagentInfo;
-
 // ── Height calculation ─────────────────────────────────────────────────
 
 /// Chrome height for the permission view as actually rendered.

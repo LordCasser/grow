@@ -384,7 +384,7 @@ pub async fn handle(
                 .dispatch(&op, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            let result = response.data.ok_or_else(|| {
+            let result = response.into_structured().ok_or_else(|| {
                 acp::Error::internal_error().data("git_status_ext returned no structured data")
             })?;
             if let Some(git_root) = git_root

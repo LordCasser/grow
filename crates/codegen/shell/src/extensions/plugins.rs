@@ -56,7 +56,6 @@ pub fn loaded_plugin_to_info(plugin: &agent::plugins::LoadedPlugin) -> PluginInf
         id: plugin.id.0.clone(),
         root: plugin.root.display().to_string(),
         scope,
-        trusted: plugin.trusted,
         enabled: plugin.enabled,
         version: plugin.version.clone(),
         description: plugin.description.clone(),
@@ -68,8 +67,7 @@ pub fn loaded_plugin_to_info(plugin: &agent::plugins::LoadedPlugin) -> PluginInf
         hook_count: plugin.hook_count,
         mcp_server_count: plugin.mcp_server_count,
         mcp_status,
-        marketplace_source: marketplace_source_label(&origin),
-        origin: Some(origin),
+        origin,
         conflict: plugin.conflict.clone(),
     }
 }
@@ -80,15 +78,7 @@ fn origin_to_dto(origin: &agent::plugins::PluginOrigin) -> PluginOrigin {
     match origin {
         AgentOrigin::CliOverride => PluginOrigin::CliOverride,
         AgentOrigin::ProjectGrow => PluginOrigin::ProjectGrow,
-        AgentOrigin::ProjectClaude => PluginOrigin::ProjectClaude,
         AgentOrigin::UserGrow => PluginOrigin::UserGrow,
-        AgentOrigin::UserClaude => PluginOrigin::UserClaude,
-        AgentOrigin::ClaudeMarketplace { marketplace } => PluginOrigin::ClaudeMarketplace {
-            marketplace: marketplace.clone(),
-        },
-        AgentOrigin::ClaudeInstalled { marketplace } => PluginOrigin::ClaudeInstalled {
-            marketplace: marketplace.clone(),
-        },
         AgentOrigin::MarketplaceInstall {
             source_name,
             git_url,
@@ -97,36 +87,6 @@ fn origin_to_dto(origin: &agent::plugins::PluginOrigin) -> PluginOrigin {
             git_url: git_url.clone(),
         },
         AgentOrigin::ConfigPath => PluginOrigin::ConfigPath,
-    }
-}
-
-/// Derive the legacy `marketplace_source` label (older-pager compat) from the
-/// origin: marketplace display name, or a `git: owner/repo` label for direct
-/// git installs.
-fn marketplace_source_label(origin: &PluginOrigin) -> Option<String> {
-    match origin {
-        PluginOrigin::MarketplaceInstall {
-            source_name: Some(name),
-            ..
-        } => Some(name.clone()),
-        PluginOrigin::MarketplaceInstall {
-            source_name: None,
-            git_url: Some(url),
-        } => {
-            // Derive short name from URL: "https://github.com/obra/superpowers.git" → "obra/superpowers"
-            let label = url
-                .trim_end_matches(".git")
-                .rsplit("://")
-                .next()
-                .and_then(|s| {
-                    s.strip_prefix("github.com/")
-                        .or_else(|| s.strip_prefix("gitlab.com/"))
-                        .or(Some(s))
-                })
-                .unwrap_or(url);
-            Some(format!("git: {label}"))
-        }
-        _ => None,
     }
 }
 
@@ -231,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn info_carries_origin_and_marketplace_display_name() {
+    fn info_carries_marketplace_origin() {
         let plugin = make_loaded_plugin(AgentOrigin::MarketplaceInstall {
             source_name: Some("Featured Marketplace".to_string()),
             git_url: Some("https://example.com/mp.git".to_string()),
@@ -239,72 +199,42 @@ mod tests {
         let info = loaded_plugin_to_info(&plugin);
         assert_eq!(
             info.origin,
-            Some(PluginOrigin::MarketplaceInstall {
+            PluginOrigin::MarketplaceInstall {
                 source_name: Some("Featured Marketplace".to_string()),
                 git_url: Some("https://example.com/mp.git".to_string()),
-            })
-        );
-        assert_eq!(
-            info.marketplace_source.as_deref(),
-            Some("Featured Marketplace")
+            }
         );
     }
 
     #[test]
-    fn direct_git_install_gets_git_label() {
+    fn direct_git_install_carries_url_in_origin() {
         let plugin = make_loaded_plugin(AgentOrigin::MarketplaceInstall {
             source_name: None,
             git_url: Some("https://github.com/obra/superpowers.git".to_string()),
         });
         let info = loaded_plugin_to_info(&plugin);
         assert_eq!(
-            info.marketplace_source.as_deref(),
-            Some("git: obra/superpowers")
+            info.origin,
+            PluginOrigin::MarketplaceInstall {
+                source_name: None,
+                git_url: Some("https://github.com/obra/superpowers.git".to_string()),
+            }
         );
     }
 
     #[test]
-    fn direct_local_install_has_no_marketplace_source() {
+    fn direct_local_install_carries_empty_marketplace_origin() {
         let plugin = make_loaded_plugin(AgentOrigin::MarketplaceInstall {
             source_name: None,
             git_url: None,
         });
         let info = loaded_plugin_to_info(&plugin);
-        assert_eq!(info.marketplace_source, None);
         assert_eq!(
             info.origin,
-            Some(PluginOrigin::MarketplaceInstall {
+            PluginOrigin::MarketplaceInstall {
                 source_name: None,
                 git_url: None,
-            })
+            }
         );
-    }
-
-    #[test]
-    fn claude_origins_map_to_dto_without_marketplace_source() {
-        for (agent_origin, expected) in [
-            (
-                AgentOrigin::ClaudeMarketplace {
-                    marketplace: "mp".to_string(),
-                },
-                PluginOrigin::ClaudeMarketplace {
-                    marketplace: "mp".to_string(),
-                },
-            ),
-            (
-                AgentOrigin::ClaudeInstalled {
-                    marketplace: Some("mp".to_string()),
-                },
-                PluginOrigin::ClaudeInstalled {
-                    marketplace: Some("mp".to_string()),
-                },
-            ),
-            (AgentOrigin::UserClaude, PluginOrigin::UserClaude),
-            (AgentOrigin::ProjectClaude, PluginOrigin::ProjectClaude),
-        ] {
-            let info = loaded_plugin_to_info(&make_loaded_plugin(agent_origin));
-            assert_eq!(info.origin, Some(expected));
-            assert_eq!(info.marketplace_source, None);
-        }
     }
 }

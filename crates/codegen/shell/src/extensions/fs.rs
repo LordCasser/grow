@@ -4,10 +4,7 @@
 //! Business logic delegated to `session::file_system::*` pure functions.
 use super::{Empty, ExtResult, parse_params, to_ext_response};
 use crate::agent::MvpAgent;
-use crate::session::ExtMethodResult;
-use crate::session::file_system::{
-    self as fs, FsListParams, FsReadFileData, check_file_size_limits,
-};
+use crate::session::file_system::{self as fs, FsListParams, FsReadFileData};
 use agent_client_protocol as acp;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -80,19 +77,14 @@ pub struct FsExistsRequest {
     pub path: String,
 }
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FsReadFileRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub path: String,
     #[serde(default = "default_max_bytes")]
     pub max_bytes: usize,
-    #[serde(default)]
-    pub max_lines: Option<usize>,
-    /// Byte offset for a binary-safe ranged read. When `offset`/`length`
-    /// is set (or `encoding` is `base64`) the read returns the chunk
-    /// `[offset, offset + length)`; otherwise the whole file is read
-    /// (legacy behavior).
+    /// Byte offset for a binary-safe ranged read.
     #[serde(default)]
     pub offset: Option<u64>,
     /// Bytes to read for a ranged read. Absent means "to EOF", but the
@@ -191,41 +183,18 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
         "grow/fs/read_file" => {
             let req = parse_params::<FsReadFileRequest>(args)?;
-            let max_lines = req.max_lines;
-            let path_str = req.path.clone();
-            let ranged = req.offset.is_some()
-                || req.length.is_some()
-                || req.encoding == FsReadEncoding::Base64;
             let path = resolve_path(agent, &req.path, req.session_id.as_ref())?;
             let (path, _) = confine_local(agent, &path, req.session_id.as_ref()).await?;
-            let read_result: anyhow::Result<FsReadFileData> = if ranged {
-                fs::read_file_ranged(
-                    &path,
-                    req.offset.unwrap_or(0),
-                    req.length.unwrap_or(u64::MAX),
-                    req.max_bytes as u64,
-                    req.encoding,
-                )
-                .await
-            } else {
-                fs::read_file(&path).await
-            };
+            let read_result: anyhow::Result<FsReadFileData> = fs::read_file_ranged(
+                &path,
+                req.offset.unwrap_or(0),
+                req.length.unwrap_or(u64::MAX),
+                req.max_bytes as u64,
+                req.encoding,
+            )
+            .await;
             match read_result {
-                Ok(data) => {
-                    let size_check = if ranged {
-                        Ok(())
-                    } else {
-                        check_file_size_limits(&data, &path_str, None, max_lines)
-                    };
-                    if let Err(err) = size_check {
-                        let ext_result: ExtMethodResult<FsReadFileData> = err.into();
-                        ext_result
-                            .to_ext_response()
-                            .map_err(|e| acp::Error::internal_error().data(e.to_string()))
-                    } else {
-                        to_ext_response(Ok(data))
-                    }
-                }
+                Ok(data) => to_ext_response(Ok(data)),
                 Err(e) => to_ext_response(Err::<FsReadFileData, _>(e)),
             }
         }

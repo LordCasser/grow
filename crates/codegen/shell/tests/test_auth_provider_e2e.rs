@@ -53,9 +53,14 @@ async fn provider_backed_model_sends_minted_token_on_the_wire() {
 command = "{helper}"
 token_ttl_secs = 3600
 
-[model.proxied-gateway]
-model = "mock-gateway-model"
+[models]
+default = "mock/proxied-gateway"
+
+[provider.mock.options]
 base_url = "{base}"
+
+[provider.mock.models.proxied-gateway]
+model = "mock-gateway-model"
 context_window = 200000
 auth_provider = "gateway"
 "#,
@@ -70,9 +75,9 @@ auth_provider = "gateway"
     cmd.args([
         "-p",
         "say hi",
-        "--yolo",
+        "--permission-mode", "always-approve",
         "--model",
-        "proxied-gateway",
+        "mock/proxied-gateway",
         "--max-turns",
         "1",
         "--output-format",
@@ -153,9 +158,14 @@ async fn undefined_provider_fails_closed_and_never_leaks_session_key() {
     std::fs::write(
         grow_home.join("config.toml"),
         format!(
-            r#"[model.proxied-gateway]
-model = "mock-gateway-model"
+            r#"[models]
+default = "mock/proxied-gateway"
+
+[provider.mock.options]
 base_url = "{base}"
+
+[provider.mock.models.proxied-gateway]
+model = "mock-gateway-model"
 context_window = 200000
 auth_provider = "gateway"
 "#,
@@ -168,9 +178,9 @@ auth_provider = "gateway"
     cmd.args([
         "-p",
         "say hi",
-        "--yolo",
+        "--permission-mode", "always-approve",
         "--model",
-        "proxied-gateway",
+        "mock/proxied-gateway",
         "--max-turns",
         "1",
         "--output-format",
@@ -255,9 +265,14 @@ args = ["--profile", "corp"]
 token_ttl_secs = 3600
 timeout_secs = 10
 
-[model.proxied-gateway]
-model = "mock-gateway-model"
+[models]
+default = "mock/proxied-gateway"
+
+[provider.mock.options]
 base_url = "{base}"
+
+[provider.mock.models.proxied-gateway]
+model = "mock-gateway-model"
 context_window = 200000
 auth_provider = "gateway"
 "#,
@@ -271,9 +286,9 @@ auth_provider = "gateway"
     cmd.args([
         "-p",
         "say hi",
-        "--yolo",
+        "--permission-mode", "always-approve",
         "--model",
-        "proxied-gateway",
+        "mock/proxied-gateway",
         "--max-turns",
         "1",
         "--output-format",

@@ -83,7 +83,7 @@ fn debug_cmd(
         .set_env("USERPROFILE", home)
         .set_env("GROW_HOME", home.join(".grow"));
     let mut cmd = tokio::process::Command::new(grow_binary());
-    cmd.args(["-p", "say hi", "--yolo", "--output-format", "json"])
+    cmd.args(["-p", "say hi", "--permission-mode", "always-approve", "--output-format", "json"])
         .args(extra)
         .arg("--cwd")
         .arg(workdir)

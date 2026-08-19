@@ -231,7 +231,7 @@ pub enum TaskEntry {
         styled: Line<'static>,
         running: bool,
         started_at: Instant,
-        /// Capitalized agent-type / persona label (e.g. `Explore`, `Plan`,
+        /// Capitalized agent-type label (e.g. `Explore`, `Plan`,
         /// `General`). Used to order subagents by type within their group.
         type_label: String,
     },
@@ -304,7 +304,7 @@ impl TaskEntry {
             // Prefix the description with a constant `Task` tag in the
             // theme's secondary text color so the entry type is identifiable
             // at a glance, the same way subagent rows lead with their
-            // persona/role label. The prefix is included in `label` so it
+            // agent-type label. The prefix is included in `label` so it
             // is searchable (the tasks-pane filter matches against `label`).
             const PREFIX: &str = "Task ";
             let desc_style = if running {
@@ -358,8 +358,8 @@ impl TaskEntry {
     fn from_subagent(info: &SubagentInfo) -> Self {
         let theme = Theme::current();
 
-        // Single consolidated label (persona > role > subagent_type > tag >
-        // "general") plus description with any `[tag]` prefix stripped.
+        // Single consolidated label (subagent_type > tag > "general") plus
+        // description with any `[tag]` prefix stripped.
         let (type_label, description) = format_subagent_label(info);
         let model_suffix = info
             .model
@@ -2075,8 +2075,6 @@ mod tests {
             child_session_id: Arc::from("cs-1"),
             description: Arc::from("Find API endpoints"),
             subagent_type: Arc::from("explore"),
-            persona: None,
-            role: None,
             model: None,
             context_source: None,
             resumed_from: None,
@@ -3194,9 +3192,9 @@ mod tests {
     }
 
     #[test]
-    fn entry_label_includes_meta() {
+    fn entry_label_includes_model_meta() {
         let mut info = make_info();
-        info.persona = Some("researcher".into());
+        info.subagent_type = "researcher".into();
         info.model = Some("grow-3".into());
         let entry = TaskEntry::from_subagent(&info);
         let label = match &entry {
@@ -3205,7 +3203,7 @@ mod tests {
         };
         assert!(
             label.contains("Researcher"),
-            "label should contain capitalized persona: {label}",
+            "label should contain capitalized agent type: {label}",
         );
         assert!(
             label.contains("grow-3"),

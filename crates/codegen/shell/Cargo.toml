@@ -122,6 +122,7 @@ tools = { path = "../tools" }
 tty-utils = { workspace = true }
 workflow = { path = "../workflow" }
 workspace = { workspace = true }
+workspace-types = { workspace = true }
 agent = { path = "../agent" }
 config = { workspace = true }
 config-types = { workspace = true }
@@ -216,6 +217,3 @@ required-features = ["test-support"]
 
 [lints]
 workspace = true
-[[bin]]
-name = "chat-history-downgrade"
-path = "src/bin/chat-history-downgrade.rs"

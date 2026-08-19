@@ -1,5 +1,4 @@
 use super::*;
-use tools::implementations::grow_build::LoopFireMode;
 
 fn completed_goal_control_cancel_trigger(
     control: Option<&'static str>,
@@ -46,7 +45,6 @@ impl SessionActor {
             task_wake_fallback: None,
             respond_to,
             persist_ack: None,
-            parsed_prompt_tx: None,
             queue_meta: None,
         });
     }
@@ -73,18 +71,12 @@ impl SessionActor {
         let slash_skills = self.slash_skills_for_resolve().await;
         let availability = self.command_availability().await;
         let (_, workflows, _) = self.named_workflow_snapshot();
-        let loop_fire_mode = if self.rebuild_spec.scheduler_background_loops {
-            LoopFireMode::Detached
-        } else {
-            LoopFireMode::InSession
-        };
         let action = match slash_commands::resolve(
             blocks,
             &slash_skills,
             availability,
             slash_commands::SkillSlashRewrite::RewriteToRun,
             &workflows,
-            loop_fire_mode,
         ) {
             Err(SlashCommandOutcome::Builtin(action)) => action,
             Err(SlashCommandOutcome::InvokeSkill { .. }) => {
@@ -195,7 +187,7 @@ impl SessionActor {
         }
     }
 
-    /// Execute a built-in slash command (e.g. `/compact`, `/yolo`).
+    /// Execute a built-in slash command (e.g. `/compact`, `/always-approve`).
     pub(super) async fn execute_builtin_slash_command(
         self: &Arc<Self>,
         action: BuiltinAction,
@@ -209,36 +201,34 @@ impl SessionActor {
                 self.run_compact(user_context).await?;
                 ok_end_turn(0, None)
             }
-            BuiltinAction::SetYolo { enabled } => {
-                let was = self.permissions.is_yolo_mode();
-                self.permissions.set_yolo_mode(enabled);
-                // Report the ACTUAL state, not the request: the manager clamps a
-                // requested ON to OFF under the always-approve pin, so `enabled`
-                // would mis-report a turn-on (event, diagnostics, and the log line)
-                // that never happened.
-                let actual = self.permissions.is_yolo_mode();
-                if let Some(actual) = yolo_toggle_report(was, actual) {
-                    self.emit_event(crate::session::events::Event::YoloToggled { enabled: actual });
-                    ::diagnostics::session_ctx::log_event(::diagnostics::events::YoloToggled {
-                        enabled: actual,
-                        previous_state: was,
-                        trigger: ::diagnostics::events::YoloTrigger::SlashCommand,
+            BuiltinAction::SetPermissionMode { mode } => {
+                let was = self.permissions.mode();
+                self.permissions.set_mode(mode);
+                let actual = self.permissions.mode();
+                if permission_mode_change(was, actual).is_some() {
+                    self.emit_event(crate::session::events::Event::PermissionModeChanged {
+                        previous_mode: was,
+                        mode: actual,
                     });
+                    ::diagnostics::session_ctx::log_event(
+                        ::diagnostics::events::PermissionModeChanged {
+                            mode: actual,
+                            previous_mode: was,
+                            trigger: ::diagnostics::events::PermissionModeTrigger::SlashCommand,
+                        },
+                    );
                     tracing::info_span!(
                         "session.permission_mode_changed",
-                        from_mode = crate::session::diagnostics::permission_mode_label(was),
-                        to_mode = crate::session::diagnostics::permission_mode_label(actual),
+                        from_mode = was.as_str(),
+                        to_mode = actual.as_str(),
                         trigger = "slash_command",
-                        enabled = actual,
                     )
                     .in_scope(|| {});
                 }
-                let status = if actual { "enabled" } else { "disabled" };
                 tracing::info!(
                     session_id = %self.session_info.id.0,
-                    requested = enabled,
-                    enabled = actual,
-                    "YOLO mode {status} via /yolo slash command",
+                    ?mode,
+                    "Permission mode selected via /always-approve",
                 );
                 ok_end_turn(0, None)
             }
@@ -523,15 +513,14 @@ impl SessionActor {
                 let ctx = &info.context;
                 let context_pct = token_estimation::usage_percentage(ctx.used, ctx.total);
 
-                let summary_path = crate::session::persistence::session_dir(&self.session_info)
-                    .join("summary.json");
+                let summary_path = self.session_dir.join("summary.json");
                 let title = tokio::task::spawn_blocking(move || {
                     std::fs::read_to_string(&summary_path)
                         .ok()
                         .and_then(|raw| {
                             serde_json::from_str::<crate::session::persistence::Summary>(&raw).ok()
                         })
-                        .map(|s| s.session_summary)
+                        .and_then(|s| s.display_title_opt())
                         .filter(|s| !s.is_empty())
                 })
                 .await
@@ -923,7 +912,7 @@ impl SessionActor {
                 );
                 let msg = if enabled && !self.memory.is_enabled() {
                     if let Some(ref params) = self.memory.backend_params {
-                        let storage = crate::session::memory::MemoryStorage::new(
+                        let storage = memory::MemoryStorage::new(
                             std::path::Path::new(&self.session_info.cwd),
                             None,
                         );
@@ -931,11 +920,10 @@ impl SessionActor {
                             tracing::warn!(error = %e, "failed to initialize memory storage on re-enable");
                             format!("Memory could not be enabled: {e}")
                         } else {
-                            let backend =
-                                crate::session::memory::MemoryBackendImpl::from_session_params(
-                                    storage.clone(),
-                                    params,
-                                );
+                            let backend = memory::MemoryBackendImpl::from_session_params(
+                                storage.clone(),
+                                params,
+                            );
                             *self.memory.search_counter.borrow_mut() =
                                 Some(backend.search_counter.clone());
                             let backend: std::sync::Arc<

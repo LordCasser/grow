@@ -164,8 +164,7 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             percentage: u8,
         },
         AutoCompactCompleted {
-            #[serde(default)]
-            tokens_before: Option<u64>,
+            tokens_before: u64,
         },
         AutoCompactFailed {
             error: String,
@@ -237,7 +236,7 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         }
         GrowUpdate::AutoCompactCompleted { tokens_before } => {
             ExtEvent::Lifecycle(Lifecycle::CompactCompleted {
-                pre_tokens: tokens_before.unwrap_or(0),
+                pre_tokens: tokens_before,
             })
         }
         GrowUpdate::AutoCompactFailed { error } => {

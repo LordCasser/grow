@@ -43,7 +43,7 @@ fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> Command {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
     cmd.stdin(Stdio::null());
-    tools::util::detach_command(&mut cmd);
+    tty_utils::detach_command(&mut cmd);
 
     cmd.arg("--json");
     cmd.arg("--line-number");

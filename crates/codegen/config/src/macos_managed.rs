@@ -35,7 +35,7 @@ fn managed_requirements_from(read: impl FnOnce() -> Option<String>) -> Option<to
 /// used **verbatim** — `$VAR`/`${VAR}` are deliberately NOT expanded: this is
 /// the trusted, non-forgeable admin layer, and expanding from the local process
 /// environment would let the very user the forced check excludes influence the
-/// policy (which feeds yolo / permission / minimum-version enforcement). FFI-free,
+/// policy (which feeds always-approve / permission / minimum-version enforcement). FFI-free,
 /// so unit-tested on every platform; invalid base64/UTF-8/TOML or an empty table
 /// yields `None`.
 fn decode_managed_toml(encoded: &str) -> Option<toml::Value> {

@@ -74,9 +74,6 @@ pub enum WaitingReason {
         /// Defaults to false until raw_input arrives.
         waits: bool,
     },
-    /// Blocked until one or more background tasks finish
-    /// (`wait_commands_or_subagents` / `wait_tasks`).
-    TasksComplete,
     /// Explicit sleep / await (`Await` / `Sleep …`).
     Sleep,
 }
@@ -129,7 +126,6 @@ impl WaitingReason {
                 ..
             } => format_waiting_for_subject(subject),
             Self::TaskOutput { .. } => "Waiting on task output…".to_string(),
-            Self::TasksComplete => "Waiting on tasks…".to_string(),
             Self::Sleep => "Sleeping…".to_string(),
         }
     }
@@ -139,7 +135,6 @@ impl WaitingReason {
             Self::Model => "waiting_model",
             Self::Subagent => "waiting_subagent",
             Self::TaskOutput { .. } => "waiting_task_output",
-            Self::TasksComplete => "waiting_tasks_complete",
             Self::Sleep => "waiting_sleep",
         }
     }
@@ -200,7 +195,7 @@ impl TurnActivity {
 }
 #[derive(Debug, Clone)]
 pub struct PendingCompaction {
-    pub tokens_before: Option<u64>,
+    pub tokens_before: u64,
     pub estimate_after: u64,
     pub elapsed_ms: Option<i64>,
     pub last_used: Option<u64>,
@@ -228,16 +223,12 @@ pub struct AcpUpdateTracker {
     /// Updated on every thought chunk as `agentTimestampMs - streamStartMs`.
     /// Frozen when thinking ends (passed to `finish_running_with_time`).
     last_thinking_elapsed_ms: Option<i64>,
-    /// When true, the next UserMessageChunk is a skill body that follows
-    /// a skill metadata chunk. It should be silently absorbed so the
-    /// raw skill instructions don't appear in scrollback.
-    skip_next_skill_body: bool,
     /// Tool call IDs suppressed from scrollback (e.g. TodoWrite).
     /// Their ToolCallUpdate counterparts are silently dropped too.
     suppressed_tools: std::collections::HashSet<String>,
     /// Suppressed-but-blocking tool calls, keyed by tool-call ID → the reason
     /// the turn is waiting. These tools (`get_command_or_subagent_output`,
-    /// `wait_tasks`, `Sleep`, …) are kept out of `pending_tools` (so they never
+    /// `Sleep`, …) are kept out of `pending_tools` (so they never
     /// hit scrollback) but the turn *is* blocked on them — without this the
     /// spinner falls back to a generic "Waiting…". Populated in
     /// `handle_tool_call`, cleared on the suppressed tool's completion update
@@ -461,10 +452,9 @@ impl AcpUpdateTracker {
             .values()
             .min_by_key(|w| match &w.reason {
                 WaitingReason::TaskOutput { .. } => 0,
-                WaitingReason::TasksComplete => 1,
-                WaitingReason::Sleep => 2,
-                WaitingReason::Subagent => 3,
-                WaitingReason::Model => 4,
+                WaitingReason::Sleep => 1,
+                WaitingReason::Subagent => 2,
+                WaitingReason::Model => 3,
             })
             .map(|w| w.reason.clone())
     }
@@ -512,7 +502,7 @@ impl AcpUpdateTracker {
     }
     pub fn defer_compaction(
         &mut self,
-        tokens_before: Option<u64>,
+        tokens_before: u64,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
     ) {
@@ -661,17 +651,14 @@ impl AcpUpdateTracker {
     /// becomes mergeable when the earlier call lands). Loops so runs of 3+
     /// collapse pairwise.
     ///
-    /// Ingestion-time only: a later `collapsed_edit_blocks` flip never
-    /// merges or unmerges rows that already landed.
+    /// Coalescing is structural and ingestion-time only; presentation choices
+    /// never split or merge transcript rows after they land.
     fn try_coalesce_edit(
         &mut self,
         entry_id: EntryId,
         scrollback: &mut ScrollbackState,
         is_replay: bool,
     ) {
-        if !crate::appearance::cache::load_collapsed_edit_blocks() {
-            return;
-        }
         if scrollback
             .get_by_id(entry_id)
             .and_then(Self::coalescable_edit)
@@ -860,7 +847,6 @@ impl AcpUpdateTracker {
         self.suppressed_tools.clear();
         self.blocking_waits.clear();
         self.orphan_updates.clear();
-        self.skip_next_skill_body = false;
     }
     /// Finish the current thinking block, passing elapsed time to the entry.
     ///
@@ -1064,7 +1050,6 @@ impl AcpUpdateTracker {
                 if is_task_variant(variant) {
                     let run_in_bg = raw_input
                         .get("run_in_background")
-                        .or_else(|| raw_input.get("background"))
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true);
                     if variant == Some("Task")
@@ -1219,10 +1204,6 @@ impl AcpUpdateTracker {
         scrollback: &mut ScrollbackState,
     ) -> bool {
         let text = extract_text_from_content(&chunk.content);
-        if self.skip_next_skill_body {
-            self.skip_next_skill_body = false;
-            return false;
-        }
         if text.is_empty() {
             return false;
         }
@@ -1252,9 +1233,6 @@ impl AcpUpdateTracker {
                 .then_some(entry.id)
             })
         }) {
-            if text.contains("<command-name>") {
-                self.skip_next_skill_body = true;
-            }
             let prompt_index = chunk
                 .meta
                 .as_ref()
@@ -1309,10 +1287,10 @@ impl AcpUpdateTracker {
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
+        if user_message_hidden_from_scrollback(&chunk, meta, &text) {
+            return false;
+        }
         let mut block = if let Some(dt) = display_override {
-            if text.contains("<command-name>") {
-                self.skip_next_skill_body = true;
-            }
             let (as_skill, as_cron) = match &chunk.content {
                 acp::ContentBlock::Text(t) => {
                     let m = t.meta.as_ref();
@@ -1338,22 +1316,7 @@ impl AcpUpdateTracker {
         } else if !skill_token_ranges.is_empty() {
             crate::scrollback::blocks::UserPromptBlock::with_skill_tokens(text, skill_token_ranges)
         } else {
-            let skill_display =
-                tools::implementations::skills::skill::extract_skill_display_text(&text);
-            if let Some(display_text) = skill_display {
-                self.skip_next_skill_body = true;
-                crate::scrollback::blocks::UserPromptBlock::skill(display_text)
-            } else if text.starts_with('/') && !text.starts_with("//") {
-                crate::scrollback::blocks::UserPromptBlock::skill(text)
-            } else if let Some(cmd) = extract_skill_header_command(&text) {
-                crate::scrollback::blocks::UserPromptBlock::new(cmd)
-            } else if let Some(prompt) = extract_cron_prompt_body(&text) {
-                crate::scrollback::blocks::UserPromptBlock::cron(prompt)
-            } else if user_message_hidden_from_scrollback(&chunk, meta, &text) {
-                return false;
-            } else {
-                crate::scrollback::blocks::UserPromptBlock::new(text)
-            }
+            crate::scrollback::blocks::UserPromptBlock::new(text)
         };
         block.message_id = message_id;
         block.prompt_index = prompt_index;
@@ -1401,28 +1364,6 @@ fn parse_skill_token_ranges(v: &serde_json::Value) -> Vec<std::ops::Range<usize>
         })
         .unwrap_or_default()
 }
-/// Extract a slash command name from a skill instruction markdown header.
-///
-/// Matches text starting with `# /command -- ` (the format used by
-/// `InjectSkill`). Returns the `## Input` section's content if present,
-/// prefixed with the command name. Falls back to just the command name.
-///
-/// Example: `"# /loop -- schedule a recurring prompt\n\n...\n## Input\n5m check deploy"`
-/// → `"/loop 5m check deploy"`
-fn extract_skill_header_command(text: &str) -> Option<String> {
-    let text = text.strip_prefix("# ")?;
-    if !text.starts_with('/') {
-        return None;
-    }
-    let cmd_name = text.split(&[' ', '\n'][..]).next()?;
-    if let Some(input_idx) = text.find("## Input\n") {
-        let args = text[input_idx + "## Input\n".len()..].trim();
-        if !args.is_empty() {
-            return Some(format!("{cmd_name} {args}"));
-        }
-    }
-    Some(cmd_name.to_string())
-}
 /// Whether a `UserMessageChunk` must stay out of scrollback.
 ///
 /// Type-driven (preferred):
@@ -1441,29 +1382,6 @@ fn user_message_hidden_from_scrollback(
         .and_then(|m| m.get(user_message_chunk_meta::HIDE_FROM_SCROLLBACK))
         .and_then(|v| v.as_bool())
         == Some(true)
-}
-/// Extract the user's prompt from `<system-reminder>` cron framing.
-///
-/// Matches the format produced by `format_scheduled_task_prompt`:
-/// `"<system-reminder>\nThis is a scheduled task execution...\n</system-reminder>\n\n<prompt>"`
-///
-/// Returns the prompt text after the closing tag, or `None` if the text
-/// doesn't match the cron framing pattern.
-fn extract_cron_prompt_body(text: &str) -> Option<String> {
-    if !text.starts_with("<system-reminder>") {
-        return None;
-    }
-    let end_tag = "</system-reminder>";
-    let close = text.find(end_tag)?;
-    let header = &text[..close];
-    if !header.contains("scheduled task execution") {
-        return None;
-    }
-    let body = text[close + end_tag.len()..].trim();
-    if body.is_empty() {
-        return None;
-    }
-    Some(body.to_string())
 }
 /// Merge ToolCallUpdate fields with the base ToolCall.
 /// Update fields take precedence when present.
@@ -1885,32 +1803,30 @@ fn content_text(tc: &acp::ToolCall) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-/// Check if a tool call is bg-task internal plumbing
-/// (get_command_or_subagent_output, kill_command_or_subagent,
-/// wait_commands_or_subagents, and the external background-await tool).
+/// Check if a tool call is bg-task internal plumbing: task output/kill and the
+/// external background-await tool.
 ///
 /// These are suppressed from scrollback because the bg task pane provides
 /// visibility into task status and output.
 fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
     matches!(
         tc.title.as_str(),
-        // Current names (post-rename)
-        "get_command_or_subagent_output" | "kill_command_or_subagent" | "wait_commands_or_subagents"
-        // Old names (persisted sessions / replay)
-        | "get_task_output" | "kill_task" | "wait_tasks"
-        // Intermediate names (mid-rename sessions)
-        | "get_task_or_subagent_output" | "kill_task_or_subagent" | "wait_tasks_or_subagents"
-        | "AwaitShell" | "Await"
+        // Model-facing defaults and internal tool ids.
+        "get_command_or_subagent_output"
+            | "kill_command_or_subagent"
+            | "get_task_output"
+            | "kill_task"
+            | "AwaitShell"
+            | "Await"
     ) || tc.title.starts_with("Await:")
         || tc.title.starts_with("Sleep ")
-        || tc.title.starts_with("Wait tasks:")
         || tc.title.starts_with("Kill task:")
         || tc
             .raw_input
             .as_ref()
             .and_then(|v| v.get("variant"))
             .and_then(|v| v.as_str())
-            .is_some_and(|v| matches!(v, "TaskOutput" | "KillTask" | "WaitTasks"))
+            .is_some_and(|v| matches!(v, "TaskOutput" | "KillTask"))
 }
 /// Classify a *blocking* suppressed tool into the [`WaitingReason`] the turn is
 /// waiting on, or `None` for suppressed tools that don't block the turn (e.g.
@@ -1924,10 +1840,8 @@ fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
         .as_ref()
         .and_then(|v| v.get("variant"))
         .and_then(|v| v.as_str());
-    if matches!(
-        title,
-        "get_command_or_subagent_output" | "get_task_output" | "get_task_or_subagent_output"
-    ) || variant == Some("TaskOutput")
+    if matches!(title, "get_command_or_subagent_output" | "get_task_output")
+        || variant == Some("TaskOutput")
     {
         let task_ids = tc
             .raw_input
@@ -1939,14 +1853,6 @@ fn blocking_wait_reason(tc: &acp::ToolCall) -> Option<WaitingReason> {
             subject: None,
             waits: timeout_waits(tc.raw_input.as_ref()),
         });
-    }
-    if matches!(
-        title,
-        "wait_commands_or_subagents" | "wait_tasks" | "wait_tasks_or_subagents"
-    ) || title.starts_with("Wait tasks:")
-        || variant == Some("WaitTasks")
-    {
-        return Some(WaitingReason::TasksComplete);
     }
     if matches!(title, "Await" | "AwaitShell")
         || title.starts_with("Await:")
@@ -2002,7 +1908,7 @@ fn is_bg_tool(tc: &acp::ToolCall) -> bool {
         && tc
             .raw_input
             .as_ref()
-            .and_then(|v| v.get("is_background").or_else(|| v.get("background")))
+            .and_then(|v| v.get("is_background"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
 }
@@ -2885,67 +2791,6 @@ mod tests {
         assert!(tracker.handle_update(user_message("second question"), &meta(), &mut sb));
         assert_eq!(sb.len(), 3);
     }
-    /// Skill replay: XML metadata becomes a clean skill block, body is absorbed.
-    #[test]
-    fn skill_replay_creates_clean_block() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        let xml = "<command-name>implement</command-name>\n\
-                    <command-message>/implement</command-message>\n\
-                    <command-args>fix the rendering bug</command-args>";
-        assert!(tracker.handle_update(user_message(xml), &meta(), &mut sb));
-        assert_eq!(sb.len(), 1);
-        let entry = sb.get(0).unwrap();
-        match &entry.block {
-            RenderBlock::UserPrompt(block) => {
-                assert_eq!(
-                    block.skill_token_ranges,
-                    vec![0..10],
-                    "leading /implement token styled as skill"
-                );
-                assert_eq!(block.text, "/implement fix the rendering bug");
-            }
-            other => panic!("expected UserPrompt, got {:?}", other),
-        }
-        assert!(
-            !tracker.handle_update(user_message("You are an orchestrator..."), &meta(), &mut sb,),
-            "skill body should be absorbed",
-        );
-        assert_eq!(sb.len(), 1, "no new entry for skill body");
-    }
-    /// Skill replay without args still creates a clean block.
-    #[test]
-    fn skill_replay_no_args() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        let xml = "<command-name>deploy</command-name>\n\
-                    <command-message>/deploy</command-message>";
-        assert!(tracker.handle_update(user_message(xml), &meta(), &mut sb));
-        let entry = sb.get(0).unwrap();
-        match &entry.block {
-            RenderBlock::UserPrompt(block) => {
-                assert_eq!(block.skill_token_ranges, vec![0..7]);
-                assert_eq!(block.text, "/deploy");
-            }
-            other => panic!("expected UserPrompt, got {:?}", other),
-        }
-        assert!(!tracker.handle_update(user_message("Deploy instructions"), &meta(), &mut sb,));
-        assert_eq!(sb.len(), 1);
-    }
-    /// finish_turn clears stale skip_next_skill_body.
-    #[test]
-    fn finish_turn_clears_skill_body_skip() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        let xml = "<command-name>commit</command-name>\n\
-                    <command-message>/commit</command-message>";
-        tracker.handle_update(user_message(xml), &meta(), &mut sb);
-        assert!(tracker.skip_next_skill_body);
-        tracker.finish_turn(&mut sb);
-        assert!(!tracker.skip_next_skill_body);
-        assert!(tracker.handle_update(user_message("new question"), &meta(), &mut sb,));
-        assert_eq!(sb.len(), 2);
-    }
     #[test]
     fn tool_update_before_tool_call_race() {
         let mut sb = ScrollbackState::new();
@@ -3649,13 +3494,12 @@ mod tests {
             );
         }
     }
-    /// ScrollbackState with an explicit `expanded_by_default` shape override
-    /// (flag-independent: the `Some` beats the `collapsed_edit_blocks` cache).
+    /// ScrollbackState with an explicit `expanded_by_default` shape override.
     fn edit_config_scrollback(expanded_by_default: bool) -> ScrollbackState {
         use crate::appearance::AppearanceConfig;
         let mut sb = ScrollbackState::new();
         let mut appearance = AppearanceConfig::default();
-        appearance.scrollback.blocks.edit.expanded_by_default = Some(expanded_by_default);
+        appearance.scrollback.blocks.edit.expanded_by_default = expanded_by_default;
         sb.set_appearance(appearance);
         sb
     }
@@ -3930,7 +3774,6 @@ mod tests {
     #[test]
     fn adjacent_same_file_edits_coalesce() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
@@ -3954,7 +3797,6 @@ mod tests {
     #[test]
     fn overlapping_adjacent_edits_stitch_into_single_hunk() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             for (i, line) in (5..=9).enumerate() {
@@ -3983,28 +3825,8 @@ mod tests {
         .unwrap();
     }
     #[test]
-    fn coalesce_disabled_when_collapsed_edit_blocks_off() {
-        std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(false);
-            let mut sb = ScrollbackState::new();
-            let mut tracker = AcpUpdateTracker::new();
-            run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
-            run_edit(&mut tracker, &mut sb, "e2", "foo.rs", 40);
-            assert_eq!(
-                sb.len(),
-                2,
-                "flag off keeps the legacy one-row-per-call transcript"
-            );
-            assert_eq!(edit_block_at(&sb, 0).hunks.len(), 1);
-            assert_eq!(edit_block_at(&sb, 1).hunks.len(), 1);
-        })
-        .join()
-        .unwrap();
-    }
-    #[test]
     fn three_sequential_edits_chain_into_one() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
@@ -4021,7 +3843,6 @@ mod tests {
     #[test]
     fn different_files_do_not_coalesce() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
@@ -4034,7 +3855,6 @@ mod tests {
     #[test]
     fn intervening_entry_breaks_coalesce_run() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
@@ -4054,7 +3874,6 @@ mod tests {
     #[test]
     fn parallel_out_of_order_completion_coalesces() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             tracker.handle_update(edit_tool_start("e1"), &meta(), &mut sb);
@@ -4076,7 +3895,6 @@ mod tests {
     #[test]
     fn errored_edit_does_not_coalesce() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
@@ -4101,7 +3919,6 @@ mod tests {
     #[test]
     fn committed_edit_does_not_coalesce() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
@@ -4117,7 +3934,6 @@ mod tests {
     #[test]
     fn untrusted_summary_edit_does_not_coalesce() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
@@ -4141,7 +3957,6 @@ mod tests {
     #[test]
     fn replay_precompleted_edits_coalesce_without_hl_queue() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             let replay = NotificationMeta {
@@ -4163,7 +3978,6 @@ mod tests {
     #[test]
     fn coalesce_repoints_pending_edit_hl_to_survivor() {
         std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
             let mut sb = ScrollbackState::new();
             let mut tracker = AcpUpdateTracker::new();
             run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
@@ -4641,8 +4455,6 @@ mod tests {
     #[test]
     fn activity_waiting_for_blocking_bg_plumbing_tools() {
         let cases = [
-            ("wait_commands_or_subagents", WaitingReason::TasksComplete),
-            ("wait_tasks", WaitingReason::TasksComplete),
             ("Await", WaitingReason::Sleep),
             ("Sleep 5s", WaitingReason::Sleep),
         ];
@@ -4822,13 +4634,14 @@ mod tests {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
         tracker.handle_update(
-            tool_call("t1", acp::ToolKind::Other, "wait_tasks"),
+            tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
             &meta(),
             &mut sb,
         );
+        tracker.handle_update(timeout_update("t1", 30_000), &meta(), &mut sb);
         assert_eq!(
             tracker.activity(),
-            Some(TurnActivity::Waiting(WaitingReason::TasksComplete))
+            Some(TurnActivity::Waiting(WaitingReason::task_output()))
         );
         tracker.finish_turn(&mut sb);
         assert_eq!(tracker.activity(), None);
@@ -5491,7 +5304,7 @@ mod tests {
         assert!(!is_task_tool(&with_variant));
     }
     #[test]
-    fn is_bg_plumbing_tool_recognizes_all_name_generations() {
+    fn is_bg_plumbing_tool_recognizes_canonical_names_and_ids() {
         assert!(is_bg_plumbing_tool(&initial_tool_call(
             "t1",
             "get_command_or_subagent_output"
@@ -5502,34 +5315,17 @@ mod tests {
         )));
         assert!(is_bg_plumbing_tool(&initial_tool_call(
             "t3",
-            "wait_commands_or_subagents"
-        )));
-        assert!(is_bg_plumbing_tool(&initial_tool_call(
-            "t4",
             "get_task_output"
         )));
-        assert!(is_bg_plumbing_tool(&initial_tool_call("t5", "kill_task")));
-        assert!(is_bg_plumbing_tool(&initial_tool_call("t6", "wait_tasks")));
-        assert!(is_bg_plumbing_tool(&initial_tool_call(
-            "t7",
-            "get_task_or_subagent_output"
-        )));
-        assert!(is_bg_plumbing_tool(&initial_tool_call(
-            "t8",
-            "kill_task_or_subagent"
-        )));
-        assert!(is_bg_plumbing_tool(&initial_tool_call(
-            "t9",
-            "wait_tasks_or_subagents"
-        )));
-        assert!(is_bg_plumbing_tool(&initial_tool_call("t10", "AwaitShell")));
-        assert!(is_bg_plumbing_tool(&initial_tool_call("t10b", "Await")));
-        let mut with_variant = initial_tool_call("t11", "anything");
-        with_variant.raw_input = Some(serde_json::json!({"variant": "WaitTasks"}));
+        assert!(is_bg_plumbing_tool(&initial_tool_call("t4", "kill_task")));
+        assert!(is_bg_plumbing_tool(&initial_tool_call("t5", "AwaitShell")));
+        assert!(is_bg_plumbing_tool(&initial_tool_call("t6", "Await")));
+        let mut with_variant = initial_tool_call("t7", "anything");
+        with_variant.raw_input = Some(serde_json::json!({"variant": "TaskOutput"}));
         assert!(is_bg_plumbing_tool(&with_variant));
-        assert!(!is_bg_plumbing_tool(&initial_tool_call("t12", "read_file")));
+        assert!(!is_bg_plumbing_tool(&initial_tool_call("t8", "read_file")));
         assert!(!is_bg_plumbing_tool(&initial_tool_call(
-            "t13",
+            "t9",
             "spawn_subagent"
         )));
     }
@@ -5959,37 +5755,10 @@ mod tests {
             other => panic!("expected UserPrompt, got {:?}", other),
         }
     }
-    /// displayText with legacy XML raw text still skips the body block.
+    /// Without explicit display metadata, content is rendered verbatim; the
+    /// pager never infers protocol semantics from XML or slash-shaped text.
     #[test]
-    fn replay_display_text_with_legacy_xml_skips_body() {
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        let xml = "<command-name>implement</command-name>\n\
-                    <command-message>/implement</command-message>\n\
-                    <command-args>fix bug</command-args>";
-        tracker.handle_update(
-            user_message_with_display_text(xml, "/implement fix bug", true),
-            &meta(),
-            &mut sb,
-        );
-        assert_eq!(sb.len(), 1);
-        let entry = sb.get(0).unwrap();
-        match &entry.block {
-            RenderBlock::UserPrompt(block) => {
-                assert_eq!(block.skill_token_ranges, vec![0..10]);
-                assert_eq!(block.text, "/implement fix bug");
-            }
-            other => panic!("expected UserPrompt, got {:?}", other),
-        }
-        assert!(
-            !tracker.handle_update(user_message("You are an orchestrator..."), &meta(), &mut sb),
-            "skill body should be absorbed",
-        );
-        assert_eq!(sb.len(), 1, "no new entry for skill body");
-    }
-    /// Sessions without displayText still work via legacy fallback.
-    #[test]
-    fn replay_without_display_text_uses_legacy_detection() {
+    fn replay_without_display_metadata_renders_verbatim() {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
         let xml = "<command-name>commit</command-name>\n\
@@ -6000,8 +5769,8 @@ mod tests {
         let entry = sb.get(0).unwrap();
         match &entry.block {
             RenderBlock::UserPrompt(block) => {
-                assert_eq!(block.skill_token_ranges, vec![0..7]);
-                assert_eq!(block.text, "/commit fix typo");
+                assert!(block.skill_token_ranges.is_empty());
+                assert_eq!(block.text, xml);
             }
             other => panic!("expected UserPrompt, got {:?}", other),
         }
@@ -6011,7 +5780,7 @@ mod tests {
         let entry2 = sb2.get(0).unwrap();
         match &entry2.block {
             RenderBlock::UserPrompt(block) => {
-                assert_eq!(block.skill_token_ranges, vec![0..5]);
+                assert!(block.skill_token_ranges.is_empty());
                 assert_eq!(block.text, "/help");
             }
             other => panic!("expected UserPrompt, got {:?}", other),
@@ -6123,7 +5892,7 @@ mod tests {
         }
     }
     /// Malformed/out-of-bounds ranges never panic; the block degrades to a
-    /// plain prompt (missing meta keeps the legacy fallbacks — pinned above).
+    /// plain prompt.
     #[test]
     fn replay_malformed_skill_token_ranges_degrade_to_plain() {
         let mut sb = ScrollbackState::new();

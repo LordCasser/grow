@@ -15,8 +15,6 @@ pub mod agent;
 pub mod auth;
 pub mod builtin;
 pub mod bundle;
-pub mod claude_import;
-pub mod claude_import_state;
 pub mod cli_models;
 pub mod config;
 pub use shell_base::cpu_profile;

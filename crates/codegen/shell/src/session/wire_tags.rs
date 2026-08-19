@@ -84,7 +84,6 @@ pub(crate) static TASK_COMPLETED: LazyLock<String> = LazyLock::new(|| {
             description: None,
             is_backgrounded: false,
         },
-        will_wake: false,
     })
 });
 

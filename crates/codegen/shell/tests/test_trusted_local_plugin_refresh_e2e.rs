@@ -237,7 +237,7 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
     cmd.args([
         "-p",
         "say hello",
-        "--yolo",
+        "--permission-mode", "always-approve",
         "--output-format",
         "json",
         "--cwd",

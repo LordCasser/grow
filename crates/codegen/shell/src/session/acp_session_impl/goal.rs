@@ -1221,7 +1221,6 @@ impl SessionActor {
             Some(start_rx),
             completion_tx,
             None,
-            None,
         ));
         drop(state);
         self.publish_turn_scope_resources(prompt_id, &origin, tool_types::BehaviorId::Goal)

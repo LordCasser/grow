@@ -2,15 +2,14 @@
 
 use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
-    set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
-    set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
-    set_contextual_hint_inner, set_default_model_inner, set_default_selected_permission_inner,
-    set_display_refresh_auto_cadence_inner, set_fork_secondary_model_inner,
-    set_group_tool_verbs_inner, set_hunk_tracker_mode_inner, set_invert_scroll_inner,
-    set_keep_text_selection_inner, set_max_thoughts_width_inner, set_multiline_mode,
-    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
-    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
-    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_auto_light_theme_inner, set_auto_update_inner, set_combine_queued_prompts_inner,
+    set_compact_mode, set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
+    set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
+    set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
+    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
+    set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
+    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
     set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
 };
@@ -48,7 +47,6 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
-    let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let default_model_id = app.models.current_model_id_str().map(str::to_owned);
     let default_model_catalog: Vec<_> = app
         .models
@@ -72,8 +70,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
             state.ui_snapshot = ui_snapshot.clone();
             state.pager_snapshot = crate::settings::PagerLocalSnapshot {
                 multiline_mode: agent.multiline_mode,
-                yolo_mode: agent.session.is_yolo(),
-                auto_mode: agent.session.is_auto(),
+                permission_mode: agent.session.permission_mode(),
                 current_model_id: default_model_id.clone(),
                 available_models: default_model_catalog.clone(),
                 behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
@@ -97,9 +94,6 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 respect_manual_folds: respect_manual_folds_from_app,
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
-                scheduler_background_loops: agent
-                    .scheduler_background_loops
-                    .unwrap_or(scheduler_background_loops_seed),
             };
         }
     }
@@ -193,7 +187,6 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
-    let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let default_model_id = app.models.current_model_id_str().map(str::to_owned);
     let default_model_catalog: Vec<_> = app
         .models
@@ -226,8 +219,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
 
     let pager_snapshot = crate::settings::PagerLocalSnapshot {
         multiline_mode: agent.multiline_mode,
-        yolo_mode: agent.session.is_yolo(),
-        auto_mode: agent.session.is_auto(),
+        permission_mode: agent.session.permission_mode(),
         current_model_id: default_model_id,
         available_models: default_model_catalog,
         behavior_mode: agent.behavior_mode_pending.unwrap_or(agent.behavior_mode),
@@ -251,9 +243,6 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         respect_manual_folds: respect_manual_folds_from_app,
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
-        scheduler_background_loops: agent
-            .scheduler_background_loops
-            .unwrap_or(scheduler_background_loops_seed),
     };
     let mut state = Box::new(SettingsModalState::new(
         registry,
@@ -644,40 +633,14 @@ fn agent_multiline_mode(app: &AppView) -> bool {
     false
 }
 
-/// Helper to read the active agent's `yolo_mode`. See
-/// [`agent_multiline_mode`] for the no-agent fallback rationale.
-fn agent_yolo_mode(app: &AppView) -> bool {
+/// Helper to read the active agent's permission mode.
+fn agent_permission_mode(app: &AppView) -> shell::util::config::PermissionMode {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        return agent.session.is_yolo();
+        return agent.session.permission_mode();
     }
-    false
-}
-
-/// Helper to read the active agent's `auto_mode`. See
-/// [`agent_multiline_mode`] for the no-agent fallback rationale.
-fn agent_auto_mode(app: &AppView) -> bool {
-    if let ActiveView::Agent(id) = app.active_view
-        && let Some(agent) = app.agents.get(&id)
-    {
-        return agent.session.is_auto();
-    }
-    false
-}
-
-/// Effective `scheduler_background_loops` for the active agent: the value the
-/// shell pinned for that session, falling back to the startup seed while the
-/// session response is still in flight (or with no agent at all). See
-/// [`agent_multiline_mode`] for the no-agent fallback rationale.
-fn agent_scheduler_background_loops(app: &AppView) -> bool {
-    if let ActiveView::Agent(id) = app.active_view
-        && let Some(agent) = app.agents.get(&id)
-        && let Some(value) = agent.scheduler_background_loops
-    {
-        return value;
-    }
-    app.scheduler_background_loops_seed
+    shell::util::config::PermissionMode::Ask
 }
 
 fn agent_behavior_mode(app: &AppView) -> tools::types::BehaviorId {
@@ -711,8 +674,7 @@ fn agent_command_available(app: &AppView, name: &str) -> bool {
 pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocalSnapshot {
     crate::settings::PagerLocalSnapshot {
         multiline_mode: agent_multiline_mode(app),
-        yolo_mode: agent_yolo_mode(app),
-        auto_mode: agent_auto_mode(app),
+        permission_mode: agent_permission_mode(app),
         current_model_id: app.models.current_model_id_str().map(str::to_owned),
         available_models: app
             .models
@@ -731,7 +693,6 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         respect_manual_folds: app.appearance.scrollback.scroll.respect_manual_folds,
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
-        scheduler_background_loops: agent_scheduler_background_loops(app),
     }
 }
 
@@ -793,9 +754,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("scroll_lines", SettingValue::Int(v)) => Some(Action::SetScrollLines(*v)),
         ("show_thinking_blocks", SettingValue::Bool(b)) => Some(Action::SetShowThinkingBlocks(*b)),
         ("group_tool_verbs", SettingValue::Bool(b)) => Some(Action::SetGroupToolVerbs(*b)),
-        ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
-            Some(Action::SetCollapsedEditBlocks(*b))
-        }
         ("prompt_suggestions", SettingValue::Bool(b)) => Some(Action::SetPromptSuggestions(*b)),
         ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
         ("default_selected_permission", SettingValue::Enum(s)) => {
@@ -808,7 +766,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("auto_light_theme", SettingValue::Enum(s)) => {
             Some(Action::SetAutoLightTheme((*s).to_owned()))
         }
-        // Four explicit arms, one per
+        // Three explicit arms, one per
         // canonical, all dispatched through the typed
         // `Action::SetDefaultPermissionMode(kind)` (NOT the session selector
         // `Action::SetPermissionMode`). The reset path IS modal-
@@ -822,7 +780,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
         // production through the normal reset flow. The other two
         // arms exist as forcing functions:
         //   - If the registered default changes to
-        //     "default" or "always-approve", the matching arm fires
+        //     "auto" or "always-approve", the matching arm fires
         //     correctly — no silent collapse onto the session selector.
         //   - The arms exercise the same canonical→kind mapping that
         //     `action_for_enum_commit` uses, so the dispatch surface
@@ -846,9 +804,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("permission_mode", SettingValue::Enum("auto")) => Some(Action::SetDefaultPermissionMode(
             crate::app::actions::PermissionModeKind::Auto,
         )),
-        ("permission_mode", SettingValue::Enum("default")) => Some(
-            Action::SetDefaultPermissionMode(crate::app::actions::PermissionModeKind::Default),
-        ),
         // default_model: empty string → ClearDefaultModel; non-empty
         // is a registry/dispatch skew guard.
         ("default_model", SettingValue::String(s)) => {
@@ -1004,7 +959,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                     PermissionModeKind::Ask
                 }
             };
-            if super::super::modes::yolo_enable_blocked(app, kind.is_always_approve()).is_some() {
+            if super::super::modes::always_approve_enable_blocked(app, kind.is_always_approve())
+                .is_some()
+            {
                 tracing::warn!(
                     target: "settings",
                     key = "permission_mode",
@@ -1012,7 +969,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 );
                 kind = PermissionModeKind::Ask;
             }
-            app.default_yolo = kind.is_always_approve();
+            app.default_permission_mode = kind.as_runtime();
             app.current_ui.permission_mode = Some(kind.as_canonical().to_string());
         }
         // `default_model` rollback restores only the new-session template.
@@ -1075,9 +1032,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("show_thinking_blocks", SettingValue::Bool(b)) => set_show_thinking_blocks_inner(app, *b),
         ("group_tool_verbs", SettingValue::Bool(b)) => set_group_tool_verbs_inner(app, *b),
-        ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
-            set_collapsed_edit_blocks_inner(app, *b)
-        }
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
         // keep_text_selection: restore the cache mirror to the canonical value.
         ("keep_text_selection", SettingValue::Enum(s)) => {

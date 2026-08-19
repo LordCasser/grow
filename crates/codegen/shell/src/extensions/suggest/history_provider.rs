@@ -8,11 +8,13 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 
 use super::{RankedSuggestion, SuggestContext, SuggestionSource, stamp_whole_line_range};
-use crate::session::prompt_history;
+use crate::extensions::prompt_history;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
+const MAX_LOCAL_SESSIONS: usize = 128;
+const MAX_LOCAL_ENTRIES: usize = 200;
 const MAX_CROSS_CWD_ENTRIES: usize = 200;
-const MAX_CROSS_CWD_DIRS: usize = 20;
+const MAX_CROSS_CWD_SESSIONS: usize = 200;
 const MAX_SHELL_HISTORY_ENTRIES: usize = 200;
 const MAX_RESULTS: usize = 10;
 
@@ -25,9 +27,23 @@ impl HistoryProvider {
             return Vec::new();
         }
 
-        let local = prompt_history::load_bash_prompts_async(ctx.cwd.clone())
-            .await
-            .unwrap_or_default();
+        let local = match prompt_history::load_bash_prompts(
+            Some(&ctx.cwd),
+            MAX_LOCAL_SESSIONS,
+            MAX_LOCAL_ENTRIES,
+        )
+        .await
+        {
+            Ok(prompts) => prompts,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    cwd = ctx.cwd,
+                    "failed to project local Bash history"
+                );
+                Vec::new()
+            }
+        };
 
         let shell_history = get_or_refresh_shell_history_cache().await;
         let cross_cwd = get_or_refresh_cross_cwd_cache().await;
@@ -71,13 +87,12 @@ fn rank_history_matches(
         let text = prompt.clone();
         results.push(RankedSuggestion {
             display: text.clone(),
-            insert_text: text,
+            replacement: text,
             description: String::new(),
             source: SuggestionSource::History,
             priority,
             is_ghost_candidate: results.is_empty(),
-            replace_range: None,
-            token_text: None,
+            replace_range: (0, 0),
             truncated: false,
         });
 
@@ -119,7 +134,13 @@ async fn get_or_refresh_cross_cwd_cache() -> Arc<CrossCwdCache> {
         return current;
     }
 
-    let result = match tokio::task::spawn_blocking(scan_cross_cwd_prompts).await {
+    let result = match prompt_history::load_bash_prompts(
+        None,
+        MAX_CROSS_CWD_SESSIONS,
+        MAX_CROSS_CWD_ENTRIES,
+    )
+    .await
+    {
         Ok(prompts) => {
             let new = Arc::new(CrossCwdCache {
                 prompts,
@@ -128,49 +149,14 @@ async fn get_or_refresh_cross_cwd_cache() -> Arc<CrossCwdCache> {
             swap.store(Arc::clone(&new));
             new
         }
-        Err(_) => current,
+        Err(error) => {
+            tracing::warn!(?error, "failed to project cross-workspace Bash history");
+            current
+        }
     };
 
     CROSS_CWD_REFRESHING.store(false, Ordering::Release);
     result
-}
-
-fn scan_cross_cwd_prompts() -> Vec<String> {
-    let sessions_dir = crate::util::grow_home::grow_home().join("sessions");
-    let entries = match std::fs::read_dir(&sessions_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut dirs: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-        .filter_map(|e| {
-            let mtime = e.metadata().ok()?.modified().ok()?;
-            Some((e.path(), mtime))
-        })
-        .collect();
-
-    dirs.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let mut prompts = Vec::new();
-    for (dir, _) in dirs.iter().take(MAX_CROSS_CWD_DIRS) {
-        if prompts.len() >= MAX_CROSS_CWD_ENTRIES {
-            break;
-        }
-
-        let cwd = match crate::util::grow_home::decode_cwd_from_dirname(dir) {
-            Some(decoded) => decoded,
-            None => continue,
-        };
-
-        if let Ok(dir_prompts) = prompt_history::load_bash_prompts(&cwd) {
-            let remaining = MAX_CROSS_CWD_ENTRIES - prompts.len();
-            prompts.extend(dir_prompts.into_iter().take(remaining));
-        }
-    }
-
-    prompts
 }
 
 // --- Shell history cache ---
@@ -381,7 +367,7 @@ mod tests {
         let local = vec!["git commit".into(), "git checkout".into()];
         let results = rank_history_matches("git commit", &local, &[], &[]);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].insert_text, "git commit");
+        assert_eq!(results[0].replacement, "git commit");
         assert!(
             results[0].priority >= 30,
             "exact match priority {} should be >= 30",
@@ -418,8 +404,8 @@ mod tests {
         let cross = vec!["git pull".into(), "git fetch".into()];
         let results = rank_history_matches("git p", &local, &[], &cross);
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].insert_text, "git push");
-        assert_eq!(results[1].insert_text, "git pull");
+        assert_eq!(results[0].replacement, "git push");
+        assert_eq!(results[1].replacement, "git pull");
     }
 
     #[test]
@@ -428,7 +414,7 @@ mod tests {
         let cross = vec!["git push origin dev".into()];
         let results = rank_history_matches("git push", &local, &[], &cross);
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].insert_text, "git push origin main");
+        assert_eq!(results[0].replacement, "git push origin main");
         assert!(results[0].priority > results[1].priority);
     }
 
@@ -464,7 +450,7 @@ mod tests {
         let local = vec!["make build".into()];
         let cross = vec!["make build".into(), "make test".into()];
         let results = rank_history_matches("make", &local, &[], &cross);
-        let texts: Vec<&str> = results.iter().map(|r| r.insert_text.as_str()).collect();
+        let texts: Vec<&str> = results.iter().map(|r| r.replacement.as_str()).collect();
         assert_eq!(texts, &["make build", "make test"]);
     }
 
@@ -492,8 +478,8 @@ mod tests {
         let local = vec!["git commit".into(), "grep foo".into(), "ls".into()];
         let results = rank_history_matches("g", &local, &[], &[]);
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].insert_text, "git commit");
-        assert_eq!(results[1].insert_text, "grep foo");
+        assert_eq!(results[0].replacement, "git commit");
+        assert_eq!(results[1].replacement, "grep foo");
     }
 
     // --- Shell history priority ordering ---
@@ -505,9 +491,9 @@ mod tests {
         let cross = vec!["git push origin dev".into()];
         let results = rank_history_matches("git push", &local, &shell, &cross);
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].insert_text, "git push origin main");
-        assert_eq!(results[1].insert_text, "git push origin staging");
-        assert_eq!(results[2].insert_text, "git push origin dev");
+        assert_eq!(results[0].replacement, "git push origin main");
+        assert_eq!(results[1].replacement, "git push origin staging");
+        assert_eq!(results[2].replacement, "git push origin dev");
         // Priority decreases: local > shell > cross
         assert!(results[0].priority > results[1].priority);
         assert!(results[1].priority > results[2].priority);
@@ -518,7 +504,7 @@ mod tests {
         let local = vec!["ls -la".into()];
         let shell = vec!["ls -la".into(), "ls -lh".into()];
         let results = rank_history_matches("ls", &local, &shell, &[]);
-        let texts: Vec<&str> = results.iter().map(|r| r.insert_text.as_str()).collect();
+        let texts: Vec<&str> = results.iter().map(|r| r.replacement.as_str()).collect();
         assert_eq!(texts, &["ls -la", "ls -lh"]);
     }
 

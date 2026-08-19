@@ -11,25 +11,17 @@ pub(super) const MAX_FOLLOW_UP_LABEL: usize = 256;
 /// retained `follow_up_seen` ring.
 pub(super) const MAX_RESPONSE_ID_LEN: usize = 128;
 
-/// Deserialize shape of the `grow/follow_ups` params emitted by the shell
-/// translator: `{ response_id, suggestions: [{ label, .. }] }`. The keys are
-/// The wire keys use snake_case — NOT camelCase like most other pager
-/// notification payloads — so this struct must match snake_case verbatim.
-/// Every field defaults so a malformed/partial payload degrades to "no
-/// chips" instead of erroring.
+/// Canonical `grow/follow_ups` payload. Session and turn identities are
+/// mandatory so notifications never depend on the active view or arrival
+/// ordering for routing.
 #[derive(serde::Deserialize)]
 pub(super) struct FollowUpsParams {
-    #[serde(default)]
+    #[serde(rename = "sessionId")]
+    session_id: acp::SessionId,
     response_id: String,
-    #[serde(default)]
     suggestions: Vec<FollowUpSuggestionParam>,
-    /// Turn identity stamped by the shell (the same `promptId` it puts on every
-    /// `session/update`). OPTIONAL — older shells omit it; when present it makes
-    /// viewer-adoption dedup deterministic (see
-    /// [`AgentView::apply_follow_ups_with_prompt`]). camelCase to match the
-    /// `promptId` convention the shell uses on `session/update` meta.
-    #[serde(default, rename = "promptId")]
-    prompt_id: Option<String>,
+    #[serde(rename = "promptId")]
+    prompt_id: String,
     /// Reserved replay marker carrier. Absent in v1 (the shell never sets
     /// it); honored from day one so future replay producers need no pager
     /// change. Parsed loosely as a JSON value to read the `"grow/replayed"`
@@ -65,11 +57,9 @@ pub(super) fn sanitize_suggestion(label: &str) -> String {
 ///
 /// Newest-response-wins keying lives in [`AgentView::apply_follow_ups`]. The
 /// reserved `_meta["grow/replayed"] == true` marker suppresses rendering (it
-/// is absent today and treated as optional). The params carry no session id,
-/// so chips target the active agent; a background agent's follow-ups would
-/// mis-route — a forwarding obligation for the shell to add a session id.
-/// Server-controlled count and label length are bounded and labels sanitized
-/// at ingestion. Malformed/partial payloads are ignored (no chip, no panic).
+/// is absent today and treated as optional). Server-controlled count and label
+/// length are bounded and labels sanitized at ingestion. Malformed payloads
+/// are ignored (no chip, no panic).
 pub(super) fn handle_follow_ups(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(params) = serde_json::from_str::<FollowUpsParams>(notif.params.get()) else {
         return false;
@@ -99,11 +89,16 @@ pub(super) fn handle_follow_ups(notif: &acp::ExtNotification, app: &mut AppView)
         })
         .collect();
 
-    let ActiveView::Agent(id) = app.active_view else {
+    let Some(matched) = find_session_match(app, &params.session_id) else {
         return false;
     };
+    if matches!(matched, SessionMatch::Child(_)) {
+        return false;
+    }
+    let id = matched.agent_id();
+    let is_active = is_matched_agent_active(app, id);
     let Some(agent) = app.agents.get_mut(&id) else {
         return false;
     };
-    agent.apply_follow_ups_with_prompt(params.response_id, params.prompt_id.as_deref(), suggestions)
+    agent.apply_follow_ups(params.response_id, &params.prompt_id, suggestions) && is_active
 }

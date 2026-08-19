@@ -14,10 +14,9 @@ use crate::config::{AgentDefinition, AgentScope, BuiltinAgentName};
 use crate::error::AgentBuildError;
 use crate::prompt::context::TemplateOverride;
 
-/// Project-level agent directories to scan (`.grow/agents/` + `.claude/agents/` compat).
-const PROJECT_AGENT_SUBDIRS: &[&str] = &[".grow/agents", ".claude/agents"];
+const PROJECT_AGENT_SUBDIR: &str = ".grow/agents";
 
-/// Existing project-level agent dirs (`.grow/agents` / `.claude/agents`), walked
+/// Existing project-level `.grow/agents` directories, walked
 /// from `cwd` up to the git worktree root (inclusive). Returns
 /// `(existing dirs, git_root)`. Mirrors [`crate::plugins::project_plugin_dirs`].
 pub fn project_agent_dirs(cwd: Option<&Path>) -> (Vec<PathBuf>, Option<PathBuf>) {
@@ -28,15 +27,15 @@ pub fn project_agent_dirs(cwd: Option<&Path>) -> (Vec<PathBuf>, Option<PathBuf>)
     (project_agent_dirs_in(&chain.dirs), chain.git_root)
 }
 
-/// Existing project agent dirs (`.grow/agents` / `.claude/agents`) under each
+/// Existing project `.grow/agents` directories under each
 /// dir of a precomputed cwd→git-root chain ([`crate::repo::RepoDirChain`]).
 ///
-/// Single source of the `PROJECT_AGENT_SUBDIRS` walk: the folder-trust detector
+/// Single source of the project Agent walk: the folder-trust detector
 /// (`repo_configs_present`) reuses its one shared chain here so detection can
 /// never drift from discovery (adding a third project-agent dir updates both at
 /// once).
 pub fn project_agent_dirs_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    crate::repo::existing_subdirs_along(chain_dirs, PROJECT_AGENT_SUBDIRS)
+    crate::repo::existing_subdirs_along(chain_dirs, &[PROJECT_AGENT_SUBDIR])
 }
 
 // ── Subagent entry types ─────────────────────────────────────────────
@@ -503,7 +502,6 @@ fn by_name_in_cwd_with_plugins_and_home(
     None
 }
 
-/// Expand `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` (and the Grow
 /// Load one plugin-provided agent file, tagged with its owning plugin.
 ///
 /// Untrusted plugins are parsed frontmatter-only so their prompt body never
@@ -535,8 +533,8 @@ fn load_plugin_agent_definition(
     }
 }
 
-/// Expand `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` (and the Grow
-/// aliases) in a plugin agent's body so the model receives absolute paths,
+/// Expand `${GROW_PLUGIN_ROOT}` / `${GROW_PLUGIN_DATA}` in a plugin agent's
+/// body so the model receives absolute paths,
 /// matching the expected load-time resolution for these variables.
 fn substitute_plugin_vars(def: &mut AgentDefinition, plugin: &crate::plugins::LoadedPlugin) {
     // Untrusted plugins are loaded frontmatter-only (body is None), and most
@@ -559,8 +557,8 @@ fn substitute_plugin_vars(def: &mut AgentDefinition, plugin: &crate::plugins::Lo
     }
 }
 
-/// Load project agent definitions from every `.grow/agents` / `.claude/agents`
-/// dir along the cwd→git-root walk, via the shared [`project_agent_dirs`] SSOT.
+/// Load project Agent definitions from every `.grow/agents` directory along
+/// the cwd→git-root walk, via the shared [`project_agent_dirs`] SSOT.
 fn load_project_definitions(
     cwd: &Path,
     definitions: &mut Vec<AgentDefinition>,
@@ -1283,7 +1281,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_agent_with_unrecognized_color_is_still_discovered() {
+    fn plugin_agent_with_removed_color_field_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("workspace");
         let home = tmp.path().join("home");
@@ -1307,17 +1305,18 @@ mod tests {
             Some(&home),
             Some(&home.join(".grow")),
         );
-        assert!(entries.iter().any(|e| e.name == "plugin-one:painter"));
+        assert!(!entries.iter().any(|e| e.name == "plugin-one:painter"));
 
-        let def = by_name_in_cwd_with_plugins_and_home(
-            "plugin-one:painter",
-            &cwd,
-            Some(&registry),
-            Some(&home),
-            Some(&home.join(".grow")),
-        )
-        .expect("agent must resolve despite the unrecognized color");
-        assert_eq!(def.color, None, "unrecognized color must be dropped");
+        assert!(
+            by_name_in_cwd_with_plugins_and_home(
+                "plugin-one:painter",
+                &cwd,
+                Some(&registry),
+                Some(&home),
+                Some(&home.join(".grow")),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1363,7 +1362,7 @@ mod tests {
         fs::create_dir_all(&plugin_agents).unwrap();
         // Mirrors how enterprise plugin-dev agents reference the plugin root.
         let content = "---\nname: runner\ndescription: Runs a tool\n---\n\
-            Run python3 \"${CLAUDE_PLUGIN_ROOT}/tools/x.py\"\n";
+            Run python3 \"${GROW_PLUGIN_ROOT}/tools/x.py\"\n";
         fs::write(plugin_agents.join("runner.md"), content).unwrap();
 
         let registry = make_plugin_registry("plugin-one", PluginScope::User, vec![plugin_agents]);
@@ -1385,7 +1384,7 @@ mod tests {
             "expected resolved root in: {bare_body}"
         );
         assert!(
-            !bare_body.contains("${CLAUDE_PLUGIN_ROOT}"),
+            !bare_body.contains("${GROW_PLUGIN_ROOT}"),
             "literal token must be gone: {bare_body}"
         );
 
@@ -1403,7 +1402,7 @@ mod tests {
             qualified_body.contains(&resolved),
             "expected resolved root in: {qualified_body}"
         );
-        assert!(!qualified_body.contains("${CLAUDE_PLUGIN_ROOT}"));
+        assert!(!qualified_body.contains("${GROW_PLUGIN_ROOT}"));
     }
 
     #[test]
@@ -1414,9 +1413,8 @@ mod tests {
         let plugin = registry.get("plugin-one").unwrap();
 
         let mut def = AgentDefinition::default_grow_build();
-        def.prompt_body = Some("Body ${CLAUDE_PLUGIN_ROOT}/x".to_string());
-        def.system_prompt =
-            TemplateOverride::Custom("Data at ${CLAUDE_PLUGIN_DATA}/db".to_string());
+        def.prompt_body = Some("Body ${GROW_PLUGIN_ROOT}/x".to_string());
+        def.system_prompt = TemplateOverride::Custom("Data at ${GROW_PLUGIN_DATA}/db".to_string());
 
         substitute_plugin_vars(&mut def, plugin);
 
@@ -1426,7 +1424,7 @@ mod tests {
         match &def.system_prompt {
             TemplateOverride::Custom(tpl) => {
                 assert_eq!(tpl, &expected_prompt);
-                assert!(!tpl.contains("${CLAUDE_PLUGIN_DATA}"));
+                assert!(!tpl.contains("${GROW_PLUGIN_DATA}"));
             }
             other => panic!("expected Custom system_prompt, got {other:?}"),
         }

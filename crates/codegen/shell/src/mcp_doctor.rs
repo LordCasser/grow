@@ -6,7 +6,6 @@ use std::path::Path;
 use serde::Serialize;
 use tools::types::config_source::ConfigSource;
 
-use crate::session::managed_mcp;
 use crate::session::mcp_servers;
 
 // ── Report types ────────────────────────────────────────────────
@@ -98,7 +97,6 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
             .ok()
             .and_then(|t| t.get("plugins").and_then(|v| v.clone().try_into().ok()))
             .unwrap_or_default();
-    plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
     let mut plugin_config = plugins_cfg.to_discovery_config();
     // Route through the live folder-trust gate (matches actual hook/MCP/LSP
     // gating) so the doctor report shows an untrusted folder's project plugin
@@ -114,23 +112,15 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
         &plugin_config.enabled,
     );
 
-    // mcp-doctor is a diagnostic tool; use default (all-on) compat to show everything.
-    let sourced = crate::session::managed_mcp::merge_managed_mcp_servers_sourced(
-        cwd,
-        Some(&plugin_registry),
-        &tools::types::compat::CompatConfig::default(),
-    );
+    let sourced =
+        crate::session::mcp_catalog::merge_mcp_servers_sourced(cwd, Some(&plugin_registry));
 
     let mut config_count = 0usize;
-    let mut claude_count = 0usize;
-    let mut mcp_json_count = 0usize;
     let mut plugin_counts: HashMap<String, usize> = HashMap::new();
     let mut servers = Vec::new();
     for (server, source) in sourced {
         match &source {
             ConfigSource::ConfigToml { .. } | ConfigSource::Project { .. } => config_count += 1,
-            ConfigSource::ClaudeJson { .. } => claude_count += 1,
-            ConfigSource::McpJson { .. } => mcp_json_count += 1,
             ConfigSource::Plugin { plugin_name, .. } => {
                 *plugin_counts.entry(plugin_name.clone()).or_default() += 1;
             }
@@ -175,129 +165,10 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
         });
     }
 
-    let claude_imported = crate::claude_import::is_claude_import_marked();
-    if claude_imported {
-        sources.push(ConfigSourceStatus {
-            path: "~/.claude.json".to_string(),
-            status: ConfigSourceState::Skipped {
-                reason: "claude_compat imported = true".to_string(),
-            },
-        });
-    } else if let Some(home) = dirs::home_dir() {
-        let claude_path = home.join(".claude.json");
-        if claude_path.is_file() {
-            sources.push(ConfigSourceStatus {
-                path: "~/.claude.json".to_string(),
-                status: ConfigSourceState::Found {
-                    server_count: claude_count,
-                },
-            });
-        } else {
-            sources.push(ConfigSourceStatus {
-                path: "~/.claude.json".to_string(),
-                status: ConfigSourceState::NotFound,
-            });
-        }
-    } else {
-        sources.push(ConfigSourceStatus {
-            path: "~/.claude.json".to_string(),
-            status: ConfigSourceState::NotFound,
-        });
-    }
-
-    if claude_imported {
-        sources.push(ConfigSourceStatus {
-            path: ".mcp.json".to_string(),
-            status: ConfigSourceState::Skipped {
-                reason: "claude_compat imported = true".to_string(),
-            },
-        });
-    } else {
-        let mcp_json_files = crate::util::config::find_mcp_json_files(cwd);
-        if mcp_json_files.is_empty() {
-            sources.push(ConfigSourceStatus {
-                path: ".mcp.json".to_string(),
-                status: ConfigSourceState::NotFound,
-            });
-        } else {
-            sources.push(ConfigSourceStatus {
-                path: ".mcp.json".to_string(),
-                status: ConfigSourceState::Found {
-                    server_count: mcp_json_count,
-                },
-            });
-        }
-    }
-
     (sources, servers)
 }
 
 // ── Managed (service.example.com) server discovery ─────────────────────────
-
-const MANAGED_SOURCE_LABEL: &str = "service.example.com";
-
-fn managed_skipped(reason: impl Into<String>) -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
-    (
-        ConfigSourceStatus {
-            path: MANAGED_SOURCE_LABEL.to_string(),
-            status: ConfigSourceState::Skipped {
-                reason: reason.into(),
-            },
-        },
-        vec![],
-    )
-}
-
-fn managed_found(
-    count: usize,
-    servers: Vec<DiscoveredServer>,
-) -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
-    (
-        ConfigSourceStatus {
-            path: MANAGED_SOURCE_LABEL.to_string(),
-            status: ConfigSourceState::Found {
-                server_count: count,
-            },
-        },
-        servers,
-    )
-}
-
-/// Discover configured managed servers when a deployment key is available.
-async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
-    let Some(deployment_key) = crate::managed_config::resolve_deployment_key() else {
-        return managed_skipped("no deployment key configured");
-    };
-
-    let proxy_url = crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
-
-    let configs = match managed_mcp::fetch_managed_configs(&proxy_url, &deployment_key).await {
-        Ok(configs) => configs,
-        Err(e) => return managed_skipped(format!("fetch failed: {e}")),
-    };
-    if configs.is_empty() {
-        return managed_found(0, vec![]);
-    }
-
-    let mut servers: Vec<agent_client_protocol::McpServer> = vec![];
-    managed_mcp::auto_inject_managed_servers_with_disabled(
-        &mut servers,
-        &configs,
-        &Default::default(),
-    );
-    managed_mcp::inject_managed_headers(&mut servers, &configs);
-
-    let source = ConfigSource::Managed { path: None };
-    let discovered: Vec<DiscoveredServer> = servers
-        .into_iter()
-        .map(|server| DiscoveredServer {
-            server,
-            source: source.clone(),
-        })
-        .collect();
-
-    managed_found(discovered.len(), discovered)
-}
 
 // ── Check functions ─────────────────────────────────────────────
 
@@ -317,7 +188,7 @@ fn resolve_command(command: &str) -> Option<String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    tools::util::detach_std_command(&mut cmd);
+    tty_utils::detach_std_command(&mut cmd);
     cmd.output()
         .ok()
         .filter(|o| o.status.success())
@@ -486,26 +357,7 @@ async fn check_server(
 // ── Entry point ─────────────────────────────────────────────────
 
 pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
-    let (mut sources, mut discovered) = discover_servers(cwd);
-
-    let (managed_source, managed_servers) = try_discover_managed_servers().await;
-    sources.push(managed_source);
-    discovered.extend(managed_servers);
-
-    let allowlist = &workspace::permission::resolution::managed_settings().mcp_allowlist;
-    if allowlist.is_restricted() {
-        let path = allowlist
-            .source_path
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "managed-settings.json".to_string());
-        sources.push(ConfigSourceStatus {
-            path: format!("server allowlist ({})", path),
-            status: ConfigSourceState::Found {
-                server_count: allowlist.entries.len() + allowlist.deny_entries.len(),
-            },
-        });
-    }
+    let (sources, discovered) = discover_servers(cwd);
 
     let all_server_names: Vec<String> = discovered
         .iter()
@@ -549,12 +401,6 @@ pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
         .map(|d| {
             let label = d.source.display_label();
             let name = mcp_servers::mcp_server_name(&d.server).to_string();
-            let block_detail = (!allowlist.is_server_allowed(&d.server)).then(|| {
-                crate::session::managed_mcp::McpDisabledReason::for_blocked_server(
-                    allowlist, &d.server,
-                )
-                .to_string()
-            });
             let disabled = disabled_names.contains(&name);
             let untrusted = untrusted_project.contains(&name);
             async move {
@@ -571,8 +417,7 @@ pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
                         "set enabled = true or remove from disabled_mcp_servers",
                     ))
                 } else {
-                    block_detail
-                        .map(|detail| Check::fail_no_hint("blocked by organization policy", detail))
+                    None
                 };
                 if let Some(check) = skip_reason {
                     let (transport, target) = describe_server(&d.server);

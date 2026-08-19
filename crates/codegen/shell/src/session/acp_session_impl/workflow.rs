@@ -114,7 +114,8 @@ impl SessionActor {
     }
 
     fn deep_research_report_artifact_path(&self, run_id: &str) -> Option<PathBuf> {
-        let path = crate::session::persistence::session_dir(&self.session_info)
+        let path = self
+            .session_dir
             .join("workflows")
             .join(run_id)
             .join("scratch")
@@ -197,7 +198,7 @@ impl SessionActor {
     ) {
         let cwd = std::path::Path::new(self.session_info.cwd.as_str());
         let registry = crate::session::workflow::registry::WorkflowRegistry::scan(Some(cwd));
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let session_dir = &self.session_dir;
         match crate::session::workflow::workspace::WorkflowWorkspace::open(&session_dir, cwd) {
             Ok(workspace) => {
                 let catalog = workspace.catalog(cwd);
@@ -250,7 +251,7 @@ impl SessionActor {
             );
         }
         let cwd = std::path::Path::new(self.session_info.cwd.as_str());
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let session_dir = &self.session_dir;
         let mut workspace =
             match crate::session::workflow::workspace::WorkflowWorkspace::open(&session_dir, cwd) {
                 Ok(workspace) => workspace,
@@ -520,7 +521,7 @@ impl SessionActor {
             );
         }
         let cwd = std::path::Path::new(self.session_info.cwd.as_str());
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let session_dir = &self.session_dir;
         let workspace =
             match crate::session::workflow::workspace::WorkflowWorkspace::open(&session_dir, cwd) {
                 Ok(workspace) => workspace,

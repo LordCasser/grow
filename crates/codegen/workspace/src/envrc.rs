@@ -70,7 +70,7 @@ fn try_direnv_export(dir: &Path) -> Option<HashMap<String, String>> {
     cmd.args(["export", "json"])
         .current_dir(dir)
         .stdin(std::process::Stdio::null());
-    tools::util::detach_std_command(&mut cmd);
+    tty_utils::detach_std_command(&mut cmd);
     let output = cmd.output().ok()?;
 
     if !output.status.success() {
@@ -150,7 +150,7 @@ env -0
         .arg(&script)
         .current_dir(dir)
         .stdin(std::process::Stdio::null());
-    tools::util::detach_std_command(&mut bash_cmd);
+    tty_utils::detach_std_command(&mut bash_cmd);
     let output = bash_cmd.output();
 
     let output = match output {
@@ -214,7 +214,7 @@ pub fn load_envrc_or_empty(dir: &Path) -> HashMap<String, String> {
 /// (executed in a bash subshell) only when `trusted`, else returns an empty map.
 /// The shell call sites pass the `project_scope_allowed` verdict so the "run a
 /// cloned repo's `.envrc` only when the folder is trusted" rule lives in ONE
-/// place (mirrors `permission::claude_settings::load_claude_env_with_project`).
+/// place.
 pub fn load_envrc_or_empty_when_trusted(dir: &Path, trusted: bool) -> HashMap<String, String> {
     if trusted {
         load_envrc_or_empty(dir)

@@ -5,6 +5,7 @@ use super::*;
 
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::SideQuestionError;
+use backon::BackoffBuilder as _;
 use sampling_types::SamplingError;
 
 /// Retry policy for the one-shot `/btw` model call: 3 attempts total
@@ -28,11 +29,6 @@ fn should_retry_side_question(e: &SamplingError) -> bool {
     e.is_overloaded() && !e.is_retry_vetoed()
 }
 
-/// Clone the base `/btw` request for a retry attempt.
-fn build_side_question_attempt(base: &ConversationRequest) -> ConversationRequest {
-    base.clone()
-}
-
 impl SessionActor {
     /// Handle a /btw side question — single-turn model call using the
     /// parent session's full context.
@@ -44,16 +40,12 @@ impl SessionActor {
     /// - Wraps the question in a `<system-reminder>` block in a user message
     /// - Single turn, no tool execution
     ///
-    /// Generates a unique btw session ID and persists the result to
-    /// `btw_history.jsonl` in the session folder.
+    /// The parent Timeline freezes the input range and owns one Sideband spawn;
+    /// the independent Sideband ledger owns every request attempt and outcome.
     pub(super) async fn handle_side_question(
         &self,
         question: &str,
     ) -> Result<String, SideQuestionError> {
-        let btw_session_id = format!("btw-{}", uuid::Uuid::new_v4());
-        let parent_session_id = self.session_info.id.to_string();
-        let asked_at = chrono::Utc::now();
-
         let sampling_client = self
             .prepare_chat_completion(false)
             .await
@@ -64,9 +56,14 @@ impl SessionActor {
         // `ContentBlock::Thinking` without a top-level `thinking` config. The
         // Anthropic Messages API rejects requests that include thinking blocks in
         // messages but omit the `thinking` parameter.
-        let mut items: Vec<ConversationItem> = chat_state::compaction_utils::strip_reasoning_blocks(
-            self.chat_state_handle.get_conversation().await,
-        );
+        let materialized = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await
+            .ok_or_else(|| SideQuestionError::Sideband("chat-state actor is unavailable".into()))?;
+        let input_ref = materialized.input_ref;
+        let mut items: Vec<ConversationItem> =
+            chat_state::compaction_utils::strip_reasoning_blocks(materialized.surface);
 
         // /btw fires mid-turn, so the snapshot may end with an assistant
         // message whose tool_calls have no matching ToolResult yet. The
@@ -104,7 +101,7 @@ impl SessionActor {
              Simply answer the question with the information you have.</{tag}>\n\n\
              {question}"
         );
-        items.push(ConversationItem::user(wrapped_question));
+        items.push(ConversationItem::user(wrapped_question.clone()));
 
         let tool_definitions = self.prepare_tool_definitions().await;
         let tool_specs: Vec<ToolSpec> = tool_definitions.into_iter().map(ToolSpec::from).collect();
@@ -115,22 +112,6 @@ impl SessionActor {
             .await
             .map(|c| c.model)
             .unwrap_or_default();
-
-        let persist = |answer: String, success: bool, error: Option<String>, attempts: u32| {
-            let _ = self.notifications.persistence_tx.send(PersistenceMsg::Btw(
-                crate::session::persistence::BtwEntry {
-                    btw_session_id: btw_session_id.clone(),
-                    parent_session_id: parent_session_id.clone(),
-                    asked_at,
-                    question: question.to_string(),
-                    answer,
-                    model: model.clone(),
-                    success,
-                    error,
-                    attempts,
-                },
-            ));
-        };
 
         // Don't set temperature explicitly — cli-chat-proxy may inject
         // `thinking` config via request_defaults for thinking-enabled models,
@@ -148,38 +129,75 @@ impl SessionActor {
             ..Default::default()
         };
 
+        let mut sideband = self
+            .begin_sideband(
+                chat_state::SidebandPurpose::InfoRequest,
+                wrapped_question,
+                SidebandInput::Frozen(vec![input_ref]),
+                chat_state::SidebandRoute {
+                    model: model.clone(),
+                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+
         // conversation_collect is one-shot (no sampler-actor retry); /btw adds
-        // its own bounded overload-only retry (policy + predicate above).
-        use backon::Retryable as _;
-        let attempts = std::cell::Cell::new(1u32);
-        let result =
-            (|| sampling_client.conversation_collect(build_side_question_attempt(&base_request)))
-                .retry(side_question_retry_policy())
-                .when(should_retry_side_question)
-                .notify(|e: &SamplingError, backoff: std::time::Duration| {
-                    attempts.set(attempts.get() + 1);
+        // its own bounded overload-only retry. Every attempt is durable before
+        // the provider request leaves the process.
+        let mut backoff = side_question_retry_policy().build();
+        let mut feedback = None;
+        let result = loop {
+            sideband
+                .attempt(feedback.take())
+                .await
+                .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+            match sampling_client
+                .conversation_collect(base_request.clone())
+                .await
+            {
+                Err(error) if should_retry_side_question(&error) => {
+                    let Some(delay) = backoff.next() else {
+                        break Err(error);
+                    };
+                    feedback = Some(error.to_string());
                     tracing::warn!(
-                        backoff_ms = backoff.as_millis() as u64,
-                        error = %e,
+                        backoff_ms = delay.as_millis() as u64,
+                        error = %error,
                         "side question overload; retrying"
                     );
-                })
-                .await;
+                    tokio::time::sleep(delay).await;
+                }
+                settled => break settled,
+            }
+        };
 
         match result {
             Ok(response) => {
                 let content = response.assistant_text();
                 if content.is_empty() {
                     let err = SideQuestionError::EmptyResponse;
-                    persist(String::new(), false, Some(err.to_string()), attempts.get());
+                    sideband
+                        .fail(chat_state::SidebandOutcome::Failed, err.to_string())
+                        .await
+                        .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
                     return Err(err);
                 }
-                persist(content.clone(), true, None, attempts.get());
+                let usage = sideband_usage(&response);
+                let finish = sideband_finish(&response);
+                sideband
+                    .complete(content.clone(), None, usage, finish)
+                    .await
+                    .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
                 Ok(content)
             }
             Err(e) => {
                 let err = SideQuestionError::from(e);
-                persist(String::new(), false, Some(err.to_string()), attempts.get());
+                sideband
+                    .fail(chat_state::SidebandOutcome::Failed, err.to_string())
+                    .await
+                    .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
                 Err(err)
             }
         }
@@ -203,7 +221,19 @@ impl SessionActor {
         // the conversation reads as bumped-after-capture and cancels this recap.
         let recap_epoch = self.recap_epoch.get();
 
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let Some(materialized) = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await
+        else {
+            tracing::warn!("recap: chat-state actor is unavailable");
+            if !auto {
+                self.emit_recap_unavailable().await;
+            }
+            return;
+        };
+        let input_ref = materialized.input_ref;
+        let conversation = materialized.surface;
         let main_turns = session_recap::main_turn_count(&conversation);
 
         let stored = self.last_recap_main_turn.get();
@@ -286,10 +316,6 @@ impl SessionActor {
         // dropping the recap. The recap instruction keeps the body to
         // ~25–40 words, and `clean_recap_text` caps it at a generous
         // RECAP_MAX_CHARS safety net, so an explicit token cap isn't needed.
-        let started_at = chrono::Utc::now().to_rfc3339();
-        // Clone the exact request items for the on-disk artifact (recap never
-        // mutates conversation state, so this file is the only durable record).
-        let chat_history_for_artifact = items.clone();
         // Main-turn tool specs: tools serialize into the cached token prefix.
         let tool_defs = self.prepare_tool_definitions().await;
         let tools = self.turn_base_tool_specs(&tool_defs);
@@ -302,21 +328,48 @@ impl SessionActor {
             ..Default::default()
         };
 
+        let mut sideband = match self
+            .begin_sideband(
+                chat_state::SidebandPurpose::SessionRecap,
+                session_recap::recap_instruction(tag),
+                SidebandInput::Frozen(vec![input_ref]),
+                chat_state::SidebandRoute {
+                    model: model.clone(),
+                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                },
+                None,
+            )
+            .await
+        {
+            Ok(sideband) => sideband,
+            Err(error) => {
+                tracing::warn!(%error, "recap: failed to start Sideband");
+                clear_in_flight();
+                if !auto {
+                    self.emit_recap_unavailable().await;
+                }
+                return;
+            }
+        };
+        if let Err(error) = sideband.attempt(None).await {
+            tracing::warn!(%error, "recap: failed to commit Sideband attempt");
+            clear_in_flight();
+            if !auto {
+                self.emit_recap_unavailable().await;
+            }
+            return;
+        }
+
         let response = match sampling_client.conversation_collect(request).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "recap: model call failed");
-                self.persist_recap_request_artifact(
-                    chat_history_for_artifact,
-                    &model,
-                    auto,
-                    strip_reasoning,
-                    tag,
-                    started_at,
-                    None,
-                    None,
-                    Some(&e.to_string()),
-                );
+                if let Err(record_error) = sideband
+                    .fail(chat_state::SidebandOutcome::Failed, e.to_string())
+                    .await
+                {
+                    tracing::warn!(%record_error, "recap: failed to commit Sideband failure");
+                }
                 clear_in_flight();
                 // A manual `/recap` shows a loading spinner; clear it on failure.
                 if !auto {
@@ -330,17 +383,15 @@ impl SessionActor {
         let summary = session_recap::clean_recap_text(&raw_response);
         if summary.is_empty() {
             tracing::debug!("recap: model returned empty summary");
-            self.persist_recap_request_artifact(
-                chat_history_for_artifact,
-                &model,
-                auto,
-                strip_reasoning,
-                tag,
-                started_at,
-                None,
-                Some(raw_response.as_str()).filter(|s| !s.is_empty()),
-                Some("empty summary after clean_recap_text"),
-            );
+            if let Err(record_error) = sideband
+                .fail(
+                    chat_state::SidebandOutcome::Failed,
+                    "empty summary after clean_recap_text",
+                )
+                .await
+            {
+                tracing::warn!(%record_error, "recap: failed to commit empty Sideband result");
+            }
             clear_in_flight();
             // A manual `/recap` shows a loading spinner; clear it when empty.
             if !auto {
@@ -349,7 +400,27 @@ impl SessionActor {
             return;
         }
 
-        // New prompt while generating: keep artifact, skip display, leave watermark.
+        let usage = sideband_usage(&response);
+        let finish = sideband_finish(&response);
+        if let Err(error) = sideband
+            .complete(
+                raw_response.clone(),
+                Some(serde_json::json!({ "summary": summary.clone() })),
+                usage,
+                finish,
+            )
+            .await
+        {
+            tracing::warn!(%error, "recap: failed to commit Sideband result");
+            clear_in_flight();
+            if !auto {
+                self.emit_recap_unavailable().await;
+            }
+            return;
+        }
+
+        // New prompt while generating: keep the completed Sideband, skip
+        // display, and leave the watermark unchanged.
         // Applies to manual `/recap` too: spinner-less clients (e.g. Grow
         // an embedding client) would otherwise append the late recap mid-turn.
         if self.recap_was_cancelled(recap_epoch) {
@@ -359,38 +430,17 @@ impl SessionActor {
                 current_epoch = self.recap_epoch.get(),
                 "session recap cancelled (new prompt while generating; not shown)"
             );
-            self.persist_recap_request_artifact(
-                chat_history_for_artifact,
-                &model,
-                auto,
-                strip_reasoning,
-                tag,
-                started_at,
-                Some(summary.as_str()),
-                Some(raw_response.as_str()),
-                Some("cancelled: new prompt while recap generating"),
-            );
             self.drop_recap_after_cancel(auto).await;
             return;
         }
 
-        // Auto long-tail: save artifact, do not show. Manual always shows.
+        // Auto long-tail: preserve the completed Sideband but do not show it.
+        // Manual always shows.
         if auto && session_recap::should_suppress_auto_recap_display(&raw_response, &summary) {
             tracing::info!(
                 raw_bytes = raw_response.len(),
                 summary_bytes = summary.len(),
-                "session recap suppressed (auto long-tail; artifact saved, not shown)"
-            );
-            self.persist_recap_request_artifact(
-                chat_history_for_artifact,
-                &model,
-                auto,
-                strip_reasoning,
-                tag,
-                started_at,
-                Some(summary.as_str()),
-                Some(raw_response.as_str()),
-                Some("auto recap suppressed: long-tail output not shown"),
+                "session recap suppressed (auto long-tail; Sideband saved, not shown)"
             );
             // Commit watermark only if still live (no await between check and mark).
             let _ = self.try_commit_recap(recap_epoch, main_turns);
@@ -398,17 +448,6 @@ impl SessionActor {
         }
 
         tracing::info!(auto, chars = summary.len(), "session recap generated");
-        self.persist_recap_request_artifact(
-            chat_history_for_artifact,
-            &model,
-            auto,
-            strip_reasoning,
-            tag,
-            started_at,
-            Some(summary.as_str()),
-            Some(raw_response.as_str()),
-            None,
-        );
         // Final cancel check immediately before mark+emit (no await between).
         if !self.try_commit_recap(recap_epoch, main_turns) {
             if !auto {
@@ -454,56 +493,6 @@ impl SessionActor {
         }
     }
 
-    /// Persist a recap request artifact for offline prompt / garble analysis.
-    /// Writes `{session_dir}/recap_requests/{request_id}.json` containing the
-    /// exact `ConversationItem` list sent to the model plus the cleaned
-    /// summary and raw assistant text (or error) in the local session directory.
-    /// Best-effort: send-failures are logged at `warn` and never surfaced —
-    /// clear the loading spinner it is showing instead of animating forever.
-    /// a missing artifact must never disrupt recap display.
-    #[allow(clippy::too_many_arguments)]
-    fn persist_recap_request_artifact(
-        &self,
-        chat_history: Vec<ConversationItem>,
-        model: &str,
-        auto: bool,
-        strip_reasoning: bool,
-        reminder_tag: &str,
-        started_at: String,
-        summary: Option<&str>,
-        raw_response: Option<&str>,
-        error: Option<&str>,
-    ) {
-        use crate::extensions::notification::RecapRequestFile;
-        use crate::session::persistence::PersistenceMsg;
-
-        let artifact = RecapRequestFile {
-            schema_version: 1,
-            request_id: uuid::Uuid::new_v4().to_string(),
-            created_at: started_at,
-            trigger: if auto { "auto" } else { "manual" }.to_owned(),
-            model: model.to_owned(),
-            strip_reasoning,
-            reminder_tag: reminder_tag.to_owned(),
-            chat_history,
-            summary: summary.map(str::to_owned),
-            raw_response: raw_response.map(str::to_owned),
-            error: error.map(str::to_owned),
-        };
-
-        if self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::RecapRequest(artifact))
-            .is_err()
-        {
-            tracing::warn!(
-                session_id = %self.session_info.id.0,
-                "Failed to send recap request artifact to persistence channel"
-            );
-        }
-    }
-
     /// Tell the live client that a manual `/recap` produced no recap, so it can
     ///
     /// Only the manual path shows a spinner, so callers gate this on `!auto`.
@@ -532,6 +521,7 @@ impl SessionActor {
             No explanation, no markdown, no quotes. Just the raw command.";
 
         let user_msg = format!("CWD: {cwd}\nPartial command: {prefix}");
+        let sideband_prompt = format!("{system}\n\n{user_msg}");
 
         let items = vec![
             ConversationItem::system(system.to_owned()),
@@ -552,27 +542,61 @@ impl SessionActor {
 
         let request_id = sampler::RequestId::random();
         let idle_timeout = std::time::Duration::from_secs(5);
+        let mut sideband = self
+            .begin_sideband(
+                chat_state::SidebandPurpose::PromptSuggestion,
+                sideband_prompt,
+                SidebandInput::None,
+                chat_state::SidebandRoute {
+                    model: request.model.clone().unwrap_or_default(),
+                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                },
+                None,
+            )
+            .await
+            .ok()?;
+        sideband.attempt(None).await.ok()?;
 
         let result = match sampling_client.api_backend() {
             crate::sampling::ApiBackend::ChatCompletions => {
-                let (raw, meta) = sampling_client.conversation_stream(request).await.ok()?;
+                let (raw, meta) = match sampling_client.conversation_stream(request).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = sideband
+                            .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                            .await;
+                        return None;
+                    }
+                };
                 let events = sampler::stream_chat_completions(raw, meta, request_id, idle_timeout);
                 sampler::collect_response(events).await
             }
             crate::sampling::ApiBackend::Responses => {
-                let (raw, meta, doom_loop) = sampling_client
-                    .conversation_stream_responses(request)
-                    .await
-                    .ok()?;
+                let (raw, meta, doom_loop) =
+                    match sampling_client.conversation_stream_responses(request).await {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            let _ = sideband
+                                .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                                .await;
+                            return None;
+                        }
+                    };
                 let events =
                     sampler::stream_responses(raw, meta, request_id, idle_timeout, doom_loop);
                 sampler::collect_response(events).await
             }
             crate::sampling::ApiBackend::Messages => {
-                let (raw, meta) = sampling_client
-                    .conversation_stream_messages(request)
-                    .await
-                    .ok()?;
+                let (raw, meta) = match sampling_client.conversation_stream_messages(request).await
+                {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = sideband
+                            .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                            .await;
+                        return None;
+                    }
+                };
                 let events = sampler::stream_messages(raw, meta, request_id, idle_timeout);
                 sampler::collect_response(events).await
             }
@@ -581,10 +605,29 @@ impl SessionActor {
         match result {
             Ok((response, _metrics)) => {
                 let text = response.assistant_text();
-                if text.is_empty() { None } else { Some(text) }
+                if text.is_empty() {
+                    let _ = sideband
+                        .fail(
+                            chat_state::SidebandOutcome::Failed,
+                            "AI suggest returned an empty command",
+                        )
+                        .await;
+                    None
+                } else {
+                    let usage = sideband_usage(&response);
+                    let finish = sideband_finish(&response);
+                    sideband
+                        .complete(text.clone(), None, usage, finish)
+                        .await
+                        .ok()?;
+                    Some(text)
+                }
             }
             Err(e) => {
                 tracing::debug!(error = %e.message, "AI suggest inference failed");
+                let _ = sideband
+                    .fail(chat_state::SidebandOutcome::Failed, e.message)
+                    .await;
                 None
             }
         }
@@ -628,7 +671,12 @@ impl SessionActor {
             return None;
         };
 
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let materialized = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await?;
+        let input_ref = materialized.input_ref;
+        let conversation = materialized.surface;
         let Some(transcript) = prompt_suggest::build_transcript(&conversation) else {
             tracing::debug!(
                 items = conversation.len(),
@@ -657,12 +705,10 @@ impl SessionActor {
             .as_path()
             .to_string_lossy()
             .into_owned();
+        let user_prompt = prompt_suggest::suggest_prompt_user_message(&transcript, &cwd);
         let items = vec![
             ConversationItem::system(prompt_suggest::SUGGEST_PROMPT_SYSTEM.to_owned()),
-            ConversationItem::user(prompt_suggest::suggest_prompt_user_message(
-                &transcript,
-                &cwd,
-            )),
+            ConversationItem::user(user_prompt),
         ];
 
         let request = ConversationRequest {
@@ -673,10 +719,28 @@ impl SessionActor {
             ..Default::default()
         };
 
+        let mut sideband = self
+            .begin_sideband(
+                chat_state::SidebandPurpose::PromptSuggestion,
+                format!("{}\n\nCWD: {cwd}", prompt_suggest::SUGGEST_PROMPT_SYSTEM),
+                SidebandInput::Frozen(vec![input_ref]),
+                chat_state::SidebandRoute {
+                    model: request.model.clone().unwrap_or_default(),
+                    backend: sideband_backend(sampling_client.api_backend()).into(),
+                },
+                None,
+            )
+            .await
+            .ok()?;
+        sideband.attempt(None).await.ok()?;
+
         let response = match sampling_client.conversation_collect(request).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(error = %e, "prompt suggest inference failed");
+                let _ = sideband
+                    .fail(chat_state::SidebandOutcome::Failed, e.to_string())
+                    .await;
                 return None;
             }
         };
@@ -691,6 +755,27 @@ impl SessionActor {
         {
             tracing::debug!("prompt suggest: rejected repeat of a past user prompt");
             suggestion = None;
+        }
+        if let Some(accepted) = &suggestion {
+            let usage = sideband_usage(&response);
+            let finish = sideband_finish(&response);
+            sideband
+                .complete(
+                    raw.clone(),
+                    Some(serde_json::json!({ "suggestion": accepted })),
+                    usage,
+                    finish,
+                )
+                .await
+                .ok()?;
+        } else {
+            sideband
+                .fail(
+                    chat_state::SidebandOutcome::Failed,
+                    "prompt suggestion failed local output validation",
+                )
+                .await
+                .ok()?;
         }
         tracing::debug!(
             raw_preview = %tools::util::truncate_str(raw.trim(), 60),

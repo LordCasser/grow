@@ -6,7 +6,7 @@
 //! popup modal in the pager becomes an instance of `ModalWindow` with
 //! different features enabled via [`ModalWindowConfig`].
 //!
-//! The visual style follows the import-claude modal's design: accent-colored
+//! The visual style uses accent-colored
 //! square border, bold title on top border, generous inner padding, inline
 //! centered footer shortcuts with hover highlights, and a `Clear` background.
 
@@ -151,7 +151,7 @@ impl ModalSizing {
     }
 
     /// Large popup: ~90% width, generous padding. Good for forms/detail views.
-    /// Used by: import_claude_modal. Same as Default.
+    /// Same dimensions as the default large modal.
     pub fn large() -> Self {
         Self::default()
     }
@@ -159,7 +159,7 @@ impl ModalSizing {
     /// Returns adjusted sizing for compact mode with *very little margins*.
     ///
     /// Goal: maximize usable content area inside every popup (command palette,
-    /// /resume sessions, plugins/hooks/mcps, import-claude, docs, etc.).
+    /// /resume sessions, plugins/hooks/MCP, docs, and similar surfaces).
     pub fn with_compact(mut self, compact: bool) -> Self {
         if compact {
             // Almost no outer centering margin — the popup can nearly touch
@@ -918,7 +918,7 @@ pub(crate) fn footer_lines_with_tip_gap(
 ///
 /// Draws `▶ ` (collapsed) or `▼ ` (expanded) in `gray_dim` with optional
 /// hover brightening (bold + `text_primary`). The style matches both the
-/// import-claude modal's header rows and the picker's expandable rows.
+/// modal header rows and the picker's expandable rows.
 ///
 /// - `collapsed`: which glyph to show.
 /// - `hovered`: brighten the glyph for hover feedback.

@@ -47,8 +47,7 @@ mod tests {
     fn make_ctx<'a>(
         models: &'a ModelState,
         bundle: &'a BundleState,
-        yolo_mode: bool,
-        auto_mode: bool,
+        permission_mode: shell::util::config::PermissionMode,
     ) -> CommandExecCtx<'a> {
         CommandExecCtx {
             models,
@@ -56,8 +55,7 @@ mod tests {
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: PagerLocalSnapshot {
-                yolo_mode,
-                auto_mode,
+                permission_mode,
                 auto_mode_gate: true,
                 ..PagerLocalSnapshot::default()
             },
@@ -68,7 +66,7 @@ mod tests {
     fn off_turns_auto_on() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        let mut ctx = make_ctx(&models, &bundle, false, false);
+        let mut ctx = make_ctx(&models, &bundle, shell::util::config::PermissionMode::Ask);
         assert!(matches!(
             AutoCommand.run(&mut ctx, ""),
             CommandResult::Action(Action::SetPermissionMode(PermissionModeKind::Auto))
@@ -79,7 +77,7 @@ mod tests {
     fn on_selects_auto_idempotently() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        let mut ctx = make_ctx(&models, &bundle, false, true);
+        let mut ctx = make_ctx(&models, &bundle, shell::util::config::PermissionMode::Auto);
         assert!(matches!(
             AutoCommand.run(&mut ctx, ""),
             CommandResult::Action(Action::SetPermissionMode(PermissionModeKind::Auto))
@@ -90,8 +88,11 @@ mod tests {
     fn always_approve_switches_to_auto() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        // Stale auto_mode=true with yolo on must still switch to Auto.
-        let mut ctx = make_ctx(&models, &bundle, true, true);
+        let mut ctx = make_ctx(
+            &models,
+            &bundle,
+            shell::util::config::PermissionMode::AlwaysApprove,
+        );
         assert!(matches!(
             AutoCommand.run(&mut ctx, ""),
             CommandResult::Action(Action::SetPermissionMode(PermissionModeKind::Auto))
@@ -102,7 +103,7 @@ mod tests {
     fn ignores_args() {
         let models = ModelState::default();
         let bundle = BundleState::default();
-        let mut ctx = make_ctx(&models, &bundle, false, false);
+        let mut ctx = make_ctx(&models, &bundle, shell::util::config::PermissionMode::Ask);
         assert!(matches!(
             AutoCommand.run(&mut ctx, "extra"),
             CommandResult::Action(Action::SetPermissionMode(PermissionModeKind::Auto))

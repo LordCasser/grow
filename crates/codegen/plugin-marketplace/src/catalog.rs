@@ -1,13 +1,8 @@
 //! Parse the CI-generated `plugin-index.json` component catalog.
 //!
-//! Directory precedence mirrors `index::load_index`:
-//! `.grow-plugin/plugin-index.json` (preferred), then
-//! `.claude-plugin/plugin-index.json` — but only one filename is probed per
-//! directory, and a present-but-unreadable/unparseable preferred catalog does
-//! not fall back to the other directory (never serve possibly-stale data when
-//! the authoritative file is broken). The catalog is presentation-layer
-//! enrichment only: failures degrade to `None` and never fail a marketplace
-//! listing.
+//! The optional catalog has one location:
+//! `.grow-plugin/plugin-index.json`. It is presentation-layer enrichment only;
+//! failures degrade to `None` and never alter marketplace identity.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,6 +15,7 @@ const SUPPORTED_VERSION: u64 = 1;
 
 /// Top-level `plugin-index.json` catalog, keyed by index plugin name.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginCatalog {
     pub version: u64,
     #[serde(default)]
@@ -28,6 +24,7 @@ pub struct PluginCatalog {
 
 /// Per-plugin catalog entry.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
     /// Commit the components were extracted from (required for URL-sourced
     /// entries; optional for in-repo plugins).
@@ -62,215 +59,82 @@ impl PluginCatalog {
 }
 
 /// Load `plugin-index.json` from a marketplace root, or `None` when absent,
-/// malformed, or of an unsupported version. A missing file falls through to
-/// the next candidate directory; a broken one does not (see module docs).
+/// malformed, or of an unsupported version.
 pub fn load_catalog(marketplace_root: &Path) -> Option<PluginCatalog> {
-    let candidates = [
-        marketplace_root
-            .join(".grow-plugin")
-            .join("plugin-index.json"),
-        marketplace_root
-            .join(".claude-plugin")
-            .join("plugin-index.json"),
-    ];
-    for path in &candidates {
-        let content = match std::fs::read_to_string(path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                tracing::warn!("failed to read {}: {e}", path.display());
-                return None;
-            }
-        };
-        let mut catalog: PluginCatalog = match serde_json::from_str(&content) {
-            Ok(catalog) => catalog,
-            Err(e) => {
-                tracing::warn!("failed to parse {}: {e}", path.display());
-                return None;
-            }
-        };
-        if catalog.version != SUPPORTED_VERSION {
-            tracing::warn!(
-                "unsupported plugin catalog version {} in {}",
-                catalog.version,
-                path.display()
-            );
+    let path = marketplace_root
+        .join(".grow-plugin")
+        .join("plugin-index.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!("failed to read {}: {error}", path.display());
             return None;
         }
-        for entry in catalog.plugins.values_mut() {
-            entry.components.sanitize();
+    };
+    let mut catalog: PluginCatalog = match serde_json::from_str(&content) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            tracing::warn!("failed to parse {}: {error}", path.display());
+            return None;
         }
-        return Some(catalog);
+    };
+    if catalog.version != SUPPORTED_VERSION {
+        tracing::warn!(
+            "unsupported plugin catalog version {} in {}",
+            catalog.version,
+            path.display()
+        );
+        return None;
     }
-    None
+    for entry in catalog.plugins.values_mut() {
+        entry.components.sanitize();
+    }
+    Some(catalog)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn write_catalog(dir: &Path, subdir: &str, content: &str) {
-        let d = dir.join(subdir);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("plugin-index.json"), content).unwrap();
+    fn write_catalog(root: &Path, content: &str) {
+        let directory = root.join(".grow-plugin");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("plugin-index.json"), content).unwrap();
     }
 
-    const BASIC: &str = r#"{
-        "version": 1,
-        "plugins": {
-            "superpowers": {
-                "sha": "61f1903bed7b322c9745f6ba67095bc006de7e63",
-                "components": {
-                    "skills": [
-                        { "name": "brainstorming", "description": "Structured ideation" }
-                    ],
-                    "commands": [ { "name": "/brainstorm" } ],
-                    "hooks": [ { "name": "PreToolUse", "description": "Bash" } ]
-                }
-            }
-        }
-    }"#;
-
     #[test]
-    fn load_catalog_parses_grow_plugin_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(dir.path(), ".grow-plugin", BASIC);
-        let catalog = load_catalog(dir.path()).unwrap();
-        let components = catalog.components_for("superpowers", None).unwrap();
-        assert_eq!(components.skills.len(), 1);
-        assert_eq!(components.skills[0].name, "brainstorming");
+    fn loads_canonical_catalog() {
+        let root = tempfile::tempdir().unwrap();
+        write_catalog(
+            root.path(),
+            r#"{"version":1,"plugins":{"p":{"sha":"abc","components":{"skills":[{"name":"review"}]}}}}"#,
+        );
+        let catalog = load_catalog(root.path()).unwrap();
         assert_eq!(
-            components.skills[0].description.as_deref(),
-            Some("Structured ideation")
+            catalog.components_for("p", Some("abc")).unwrap().skills[0].name,
+            "review"
         );
-        assert_eq!(components.commands[0].name, "/brainstorm");
-        assert_eq!(components.hooks[0].name, "PreToolUse");
-        assert!(components.agents.is_empty());
+        assert!(catalog.components_for("p", Some("other")).is_none());
     }
 
     #[test]
-    fn load_catalog_falls_back_to_claude_plugin_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(dir.path(), ".claude-plugin", BASIC);
-        assert!(load_catalog(dir.path()).is_some());
-    }
+    fn rejects_alternate_location_and_unknown_fields() {
+        let claude = tempfile::tempdir().unwrap();
+        let directory = claude.path().join(".claude-plugin");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("plugin-index.json"),
+            r#"{"version":1,"plugins":{}}"#,
+        )
+        .unwrap();
+        assert!(load_catalog(claude.path()).is_none());
 
-    #[test]
-    fn load_catalog_prefers_grow_dir_over_claude_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(dir.path(), ".grow-plugin", BASIC);
+        let unknown = tempfile::tempdir().unwrap();
         write_catalog(
-            dir.path(),
-            ".claude-plugin",
-            r#"{"version": 1, "plugins": {"other": {"components": {}}}}"#,
+            unknown.path(),
+            r#"{"version":1,"generatedAt":"now","plugins":{}}"#,
         );
-        let catalog = load_catalog(dir.path()).unwrap();
-        assert!(catalog.plugins.contains_key("superpowers"));
-        assert!(!catalog.plugins.contains_key("other"));
-    }
-
-    #[test]
-    fn load_catalog_missing_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(load_catalog(dir.path()).is_none());
-    }
-
-    #[test]
-    fn load_catalog_malformed_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(dir.path(), ".grow-plugin", "not json");
-        assert!(load_catalog(dir.path()).is_none());
-    }
-
-    #[test]
-    fn load_catalog_broken_preferred_does_not_fall_back() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(dir.path(), ".grow-plugin", "not json");
-        write_catalog(dir.path(), ".claude-plugin", BASIC);
-        assert!(load_catalog(dir.path()).is_none());
-    }
-
-    #[test]
-    fn load_catalog_unsupported_version_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(
-            dir.path(),
-            ".grow-plugin",
-            r#"{"version": 2, "plugins": {}}"#,
-        );
-        assert!(load_catalog(dir.path()).is_none());
-    }
-
-    #[test]
-    fn load_catalog_ignores_unknown_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(
-            dir.path(),
-            ".grow-plugin",
-            r#"{
-                "$schema": "https://example.com/grow/plugin-index.schema.json",
-                "version": 1,
-                "generatedAt": "2026-06-09T12:00:00Z",
-                "plugins": {
-                    "p": { "components": { "skills": [{"name": "s", "extra": 1}] }, "future": true }
-                }
-            }"#,
-        );
-        let catalog = load_catalog(dir.path()).unwrap();
-        assert_eq!(
-            catalog.components_for("p", None).unwrap().skills[0].name,
-            "s"
-        );
-    }
-
-    #[test]
-    fn load_catalog_sanitizes_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(
-            dir.path(),
-            ".grow-plugin",
-            r#"{
-                "version": 1,
-                "plugins": {
-                    "p": { "components": { "skills": [{"name": "a\u001b[31mb", "description": "x\u0007y"}] } }
-                }
-            }"#,
-        );
-        let catalog = load_catalog(dir.path()).unwrap();
-        let components = catalog.components_for("p", None).unwrap();
-        assert_eq!(components.skills[0].name, "a[31mb");
-        assert_eq!(components.skills[0].description.as_deref(), Some("xy"));
-    }
-
-    #[test]
-    fn components_for_gates_on_sha() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(dir.path(), ".grow-plugin", BASIC);
-        let catalog = load_catalog(dir.path()).unwrap();
-        let pinned = "61f1903bed7b322c9745f6ba67095bc006de7e63";
-        assert!(
-            catalog
-                .components_for("superpowers", Some(pinned))
-                .is_some()
-        );
-        assert!(
-            catalog
-                .components_for("superpowers", Some("deadbeef"))
-                .is_none()
-        );
-        assert!(catalog.components_for("unknown", None).is_none());
-    }
-
-    #[test]
-    fn components_for_requires_catalog_sha_when_index_pinned() {
-        let dir = tempfile::tempdir().unwrap();
-        write_catalog(
-            dir.path(),
-            ".grow-plugin",
-            r#"{"version": 1, "plugins": {"p": {"components": {"skills": [{"name": "s"}]}}}}"#,
-        );
-        let catalog = load_catalog(dir.path()).unwrap();
-        assert!(catalog.components_for("p", Some("abc123")).is_none());
-        assert!(catalog.components_for("p", None).is_some());
+        assert!(load_catalog(unknown.path()).is_none());
     }
 }

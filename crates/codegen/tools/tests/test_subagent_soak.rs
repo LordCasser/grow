@@ -317,11 +317,7 @@ impl ChildRunner for SoakRunner {
             let promoted = reporter
                 .started(StartedChild {
                     child_session_id: request.id.clone(),
-                    persona: None,
                     resumed_from: request.resume_from.clone(),
-                    child_cwd: request.cwd.clone().unwrap_or_default(),
-                    worktree_path: None,
-                    effective_model_id: "soak-model".to_owned(),
                     definition_background: false,
                     control: SoakControl {
                         cancellation: cancellation.clone(),
@@ -339,7 +335,6 @@ impl ChildRunner for SoakRunner {
                         ..Default::default()
                     },
                     completion_data: (),
-                    snapshot_ref: None,
                 };
             }
             if request.id.starts_with("conc-") {
@@ -357,7 +352,6 @@ impl ChildRunner for SoakRunner {
                     ..Default::default()
                 },
                 completion_data: (),
-                snapshot_ref: None,
             }
         })
     }

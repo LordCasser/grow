@@ -269,23 +269,9 @@ impl AgentView {
     /// the currently-shown response refreshes it in place (no-op when
     /// identical); empty `suggestions` retracts that response's chips. Returns
     /// `true` when the displayed chips changed (a redraw is warranted).
-    /// Backward-compatible shim used by tests that don't exercise the turn
-    /// identity: equivalent to a follow_ups notification with no stamped
-    /// `promptId` (the older-shell / replay path). Production always routes
-    /// through [`apply_follow_ups_with_prompt`] from `handle_follow_ups`.
-    #[cfg(test)]
-    pub(crate) fn apply_follow_ups(
-        &mut self,
-        response_id: String,
-        suggestions: Vec<String>,
-    ) -> bool {
-        self.apply_follow_ups_with_prompt(response_id, None, suggestions)
-    }
-
-    /// `apply_follow_ups` with the turn identity (`prompt_id`) the shell stamps
-    /// on each `grow/follow_ups` notification (the same `promptId` it stamps on
-    /// every `session/update`). The identity makes viewer-adoption dedup
-    /// DETERMINISTIC:
+    /// The shell stamps the turn identity (`prompt_id`) on each
+    /// `grow/follow_ups` notification. The identity makes viewer-adoption dedup
+    /// deterministic:
     ///
     /// - A re-delivery of the CURRENTLY-ADOPTED turn's follow-ups (its
     ///   `prompt_id` equals `session.current_prompt_id`) re-renders even when its
@@ -294,14 +280,10 @@ impl AgentView {
     /// - A buffer-replayed `grow/follow_ups` for a PRIOR turn's `response_id`
     ///   stays rejected by the seen-ring (its `prompt_id` is not the active one),
     ///   so stale chips are never revived on the new turn.
-    ///
-    /// `prompt_id == None` (older shells, or a replay path that lacks it) is
-    /// treated as "not provably the current turn" → it falls back to the
-    /// monotonic newest-wins seen-ring and NEVER revives a cleared prior turn.
-    pub(crate) fn apply_follow_ups_with_prompt(
+    pub(crate) fn apply_follow_ups(
         &mut self,
         response_id: String,
-        prompt_id: Option<&str>,
+        prompt_id: &str,
         suggestions: Vec<String>,
     ) -> bool {
         // Re-delivery of the currently-shown response: refresh in place.
@@ -336,31 +318,26 @@ impl AgentView {
                     response_id,
                     suggestions,
                 });
-                self.follow_up_shown_prompt_id = prompt_id.map(str::to_owned);
+                self.follow_up_shown_prompt_id = Some(prompt_id.to_owned());
             }
             return true;
         }
 
         // Does this notification belong to the turn the client has currently
-        // adopted? Deterministic when the shell stamped the `promptId`; `false`
-        // for older shells / replay paths without one (those rely on the
-        // newest-wins seen-ring below and never revive a prior turn).
+        // adopted?
         let current_prompt_id = self.session.current_prompt_id.as_deref();
-        let is_current_turn =
-            matches!((prompt_id, current_prompt_id), (Some(pid), Some(cur)) if pid == cur);
+        let is_current_turn = current_prompt_id == Some(prompt_id);
         // A stamped `promptId` that names a DIFFERENT turn than the one
         // currently adopted: this is a non-current turn's follow_ups (a PRIOR
         // turn's late first-time arrival, or a not-yet-adopted turn). It must
         // never render — as a re-delivery OR as "newest" — while another turn is
         // active, or its chips would appear over the running turn.
         //
-        // Guarded on `current == Some`: a `None` `promptId` (older shells) has
-        // no turn identity → newest-wins fallback; and `current == None` (e.g. a
-        // just-finished turn whose trailing follow_ups arrive after
+        // Guarded on `current == Some`: `current == None` (e.g. a just-finished
+        // turn whose trailing follow_ups arrive after
         // `current_prompt_id` was cleared) is NOT a mismatch, so those chips
         // still render.
-        let names_other_active_turn =
-            matches!((prompt_id, current_prompt_id), (Some(pid), Some(cur)) if pid != cur);
+        let names_other_active_turn = current_prompt_id.is_some_and(|cur| prompt_id != cur);
 
         if self.follow_up_seen.contains_key(&response_id) {
             // Already accepted. Normally this is an older, superseded response →
@@ -377,7 +354,7 @@ impl AgentView {
                     response_id,
                     suggestions,
                 });
-                self.follow_up_shown_prompt_id = prompt_id.map(str::to_owned);
+                self.follow_up_shown_prompt_id = Some(prompt_id.to_owned());
                 return true;
             }
             return false;
@@ -393,10 +370,8 @@ impl AgentView {
         // current again, so its buffered entry is never flushed (no stale
         // revival) and is eventually FIFO-evicted by the cap.
         if names_other_active_turn {
-            if let Some(pid) = prompt_id
-                && !suggestions.is_empty()
-            {
-                self.buffer_pending_follow_ups(pid.to_owned(), response_id, suggestions);
+            if !suggestions.is_empty() {
+                self.buffer_pending_follow_ups(prompt_id.to_owned(), response_id, suggestions);
             }
             return false;
         }
@@ -420,7 +395,7 @@ impl AgentView {
             response_id,
             suggestions,
         });
-        self.follow_up_shown_prompt_id = prompt_id.map(str::to_owned);
+        self.follow_up_shown_prompt_id = Some(prompt_id.to_owned());
         true
     }
 
@@ -455,7 +430,7 @@ impl AgentView {
     }
 
     /// Flush a buffered `grow/follow_ups` for `prompt_id` (a turn that has just
-    /// become current). Renders the chips through [`apply_follow_ups_with_prompt`]
+    /// become current). Renders the chips through [`apply_follow_ups`]
     /// — now that `current_prompt_id == prompt_id`, the stamped delivery is
     /// accepted as the active turn's. Returns whether chips were rendered. A
     /// no-op when nothing is buffered for `prompt_id`. Callers invoke this AFTER
@@ -471,13 +446,13 @@ impl AgentView {
         {
             self.follow_up_pending_order.remove(pos);
         }
-        self.apply_follow_ups_with_prompt(pending.response_id, Some(prompt_id), pending.suggestions)
+        self.apply_follow_ups(pending.response_id, prompt_id, pending.suggestions)
     }
 
     /// Drop the shown follow-up chips at a turn start (UX: they belong to the
     /// previous response). The response stays recorded in `follow_up_seen`, so a
     /// stale re-delivery stays rejected; the active turn's own re-delivery still
-    /// re-renders via the `prompt_id` match in [`apply_follow_ups_with_prompt`],
+    /// re-renders via the `prompt_id` match in [`apply_follow_ups`],
     /// so this is used for BOTH viewer-adoption and self-driven turn starts.
     pub(crate) fn clear_follow_ups(&mut self) {
         self.follow_ups = None;
@@ -587,16 +562,20 @@ impl AgentView {
         let Some(session_id) = self.session.session_id.clone() else {
             return;
         };
-        // Whether to probe for MCP servers after install. URL-sourced plugins
-        // are not cloned at scan time, so their `has_mcp` is always false; treat
-        // a remote URL as "may ship MCP" and probe anyway, otherwise the post-
-        // install handoff is skipped for exactly the plugins that need it.
+        // Probe when the canonical inventory declares MCP servers. Remote
+        // entries without a SHA-verified inventory remain unknown, so probe
+        // them after installation instead of inventing a second capability bit.
         let expects_mcp = self
             .plugin_cta
             .candidates
             .iter()
             .find(|c| c.name == name)
-            .is_some_and(|c| c.has_mcp || c.remote_url.is_some());
+            .is_some_and(|c| {
+                c.components
+                    .as_ref()
+                    .is_some_and(|components| !components.mcp_servers.is_empty())
+                    || (c.components.is_none() && c.remote_url.is_some())
+            });
         self.plugin_cta.phase = CtaPhase::Installing {
             plugin_relative_path: plugin_relative_path.clone(),
             name,
@@ -635,10 +614,6 @@ mod plugin_cta_notify_tests {
             domains: Vec::new(),
             homepage: None,
             relative_path: format!("plugins/{name}"),
-            skill_count: 0,
-            has_hooks: false,
-            has_agents: false,
-            has_mcp: false,
             install_status: "not_installed".into(),
             installed_version: None,
             components: None,
@@ -754,7 +729,10 @@ mod plugin_cta_notify_tests {
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
         let mut entry = cta_entry("figma");
-        entry.has_mcp = true;
+        entry.components = Some(extension_types::PluginComponents {
+            mcp_servers: vec![extension_types::ComponentItem::new("figma", None)],
+            ..Default::default()
+        });
         agent.plugin_cta.candidates = vec![entry];
         agent.plugin_cta.mcp_attempt = 7;
         agent.plugin_cta.phase = CtaPhase::Matched {
@@ -771,7 +749,7 @@ mod plugin_cta_notify_tests {
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
-        // cta_entry defaults has_mcp = false (skills-only).
+        // The empty inventory is a known skills-only plugin for this test.
         agent.plugin_cta.candidates = vec![cta_entry("figma")];
         agent.plugin_cta.phase = CtaPhase::Matched {
             plugin_relative_path: "plugins/figma".into(),
@@ -786,10 +764,9 @@ mod plugin_cta_notify_tests {
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.session.session_id = Some("sess-1".to_string().into());
-        // URL-sourced plugins report has_mcp = false at scan time (not cloned
-        // yet); a remote URL must still trigger the post-install MCP probe.
+        // A URL-sourced plugin without verified inventory must still trigger
+        // the post-install MCP probe.
         let mut entry = cta_entry("figma");
-        entry.has_mcp = false;
         entry.remote_url = Some("https://github.com/acme/figma-plugin.git".into());
         agent.plugin_cta.candidates = vec![entry];
         agent.plugin_cta.phase = CtaPhase::Matched {

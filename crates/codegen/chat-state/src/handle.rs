@@ -54,7 +54,7 @@ impl ChatStateHandle {
     pub async fn record_timeline_event_durably(
         &self,
         kind: TimelineEventKind,
-    ) -> Result<(), TimelineWriteError> {
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
         self.query("RecordTimelineEventDurably", |reply| {
             ChatStateCommand::RecordTimelineEventDurably { kind, reply }
         })
@@ -159,11 +159,6 @@ impl ChatStateHandle {
         .is_some()
     }
 
-    /// Increment prompt index (called at start of each user turn).
-    pub fn increment_prompt_index(&self) {
-        let _ = self.cmd_tx.send(ChatStateCommand::IncrementPromptIndex);
-    }
-
     /// Update the sampling config (e.g., model switch).
     pub fn update_sampling_config(&self, config: SamplingConfig) {
         let _ = self
@@ -192,25 +187,32 @@ impl ChatStateHandle {
             .send(ChatStateCommand::RecordTurnStart { timestamp_ms });
     }
 
-    /// Replace conversation history.
-    pub fn replace_conversation(&self, items: Vec<ConversationItem>) {
-        self.send_replace(items, crate::MessageCause::SessionRestore);
-    }
-
-    /// Replace conversation history for compaction.
-    /// Sets `compaction_occurred` on the active turn capture.
-    pub fn replace_conversation_for_compaction(&self, items: Vec<ConversationItem>) {
-        self.send_replace(items, crate::MessageCause::Compaction);
-    }
-
-    pub async fn replace_conversation_for_rewind(
+    /// Rebuild runtime context as one durable Timeline Surface event.
+    pub async fn replace_context_durably(
         &self,
         items: Vec<ConversationItem>,
+        expected_surface_revision: u64,
     ) -> Result<(), TimelineWriteError> {
-        self.query("ReplaceConversationDurably", |reply| {
-            ChatStateCommand::ReplaceConversationDurably {
+        self.send_replace_durably(
+            items,
+            crate::MessageCause::ContextRebuild,
+            expected_surface_revision,
+        )
+        .await
+    }
+
+    /// Shadow one summary-declared Surface range for compaction.
+    pub async fn replace_compaction_range(
+        &self,
+        target: crate::SurfaceRange,
+        items: Vec<ConversationItem>,
+        expected_surface_revision: u64,
+    ) -> Result<(), TimelineWriteError> {
+        self.query("ReplaceCompactionRangeDurably", |reply| {
+            ChatStateCommand::ReplaceCompactionRangeDurably {
+                target,
                 items,
-                cause: crate::MessageCause::Rewind,
+                expected_surface_revision,
                 reply,
             }
         })
@@ -218,10 +220,34 @@ impl ChatStateHandle {
         .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
-    fn send_replace(&self, items: Vec<ConversationItem>, cause: crate::MessageCause) {
-        let _ = self
-            .cmd_tx
-            .send(ChatStateCommand::ReplaceConversation { items, cause });
+    pub async fn rewind_durably(
+        &self,
+        target_prompt_index: usize,
+    ) -> Result<(), TimelineWriteError> {
+        self.query("RewindDurably", |reply| ChatStateCommand::RewindDurably {
+            target_prompt_index,
+            reply,
+        })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
+    }
+
+    async fn send_replace_durably(
+        &self,
+        items: Vec<ConversationItem>,
+        cause: crate::MessageCause,
+        expected_surface_revision: u64,
+    ) -> Result<(), TimelineWriteError> {
+        self.query("ReplaceSurfaceDurably", |reply| {
+            ChatStateCommand::ReplaceSurfaceDurably {
+                items,
+                cause,
+                expected_surface_revision,
+                reply,
+            }
+        })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
     /// Atomically rewrite all canonical image groups and await the persisted
@@ -246,7 +272,7 @@ impl ChatStateHandle {
     /// Prune the tool results selected by `plan` inside the actor and await
     /// the report. The actor trims each selected item's content to
     /// head + marker + tail, re-estimates `total_tokens` (never upward), and
-    /// persists via the same `replace_history` path as compaction.
+    /// persists the canonical Timeline replacement.
     ///
     /// Returns `Err(PruneError::ActorUnavailable)` when the actor is dead or
     /// drops the reply — pruning is never silently skipped.
@@ -280,25 +306,14 @@ impl ChatStateHandle {
     /// Atomically align the leading `System` message with `prompt` (insert one
     /// if absent), persisting when changed. Serializes with turn pushes inside
     /// the actor, so a mid-turn reconnect can't drop concurrent updates.
-    /// Returns `Some(changed)`, or `None` if the actor is dead.
-    pub async fn replace_system_head(&self, prompt: &str) -> Option<bool> {
+    /// Returns only after the replacement is durable.
+    pub async fn replace_system_head(&self, prompt: &str) -> Result<bool, TimelineWriteError> {
         let prompt = prompt.to_owned();
         self.query("ReplaceSystemHead", |reply| {
             ChatStateCommand::ReplaceSystemHead { prompt, reply }
         })
         .await
-    }
-
-    /// Cache prompt text for rewind preview.
-    pub fn cache_prompt_text(&self, text: String) {
-        let _ = self.cmd_tx.send(ChatStateCommand::CachePromptText { text });
-    }
-
-    /// Record compaction boundary for rewind.
-    pub fn record_compaction_at(&self, prompt_index: usize) {
-        let _ = self
-            .cmd_tx
-            .send(ChatStateCommand::RecordCompactionAt { prompt_index });
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
     /// Flush pending persistence writes to disk.
@@ -313,11 +328,16 @@ impl ChatStateHandle {
             .send(ChatStateCommand::UpdateCredentials { credentials });
     }
 
-    /// Restore from a snapshot.
-    pub fn restore_snapshot(&self, snapshot: ChatStateSnapshot) {
-        let _ = self
-            .cmd_tx
-            .send(ChatStateCommand::RestoreSnapshot(Box::new(snapshot)));
+    /// Restore only provider token accounting from the session summary.
+    pub async fn seed_token_accounting(&self, total_tokens: u64) -> bool {
+        self.query("SeedTokenAccounting", |reply| {
+            ChatStateCommand::SeedTokenAccounting {
+                total_tokens,
+                reply,
+            }
+        })
+        .await
+        .is_some()
     }
 
     /// Begin capturing turn messages. Call at the start of a real user turn
@@ -366,7 +386,7 @@ impl ChatStateHandle {
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         persist_memory_reminder: bool,
-    ) -> Option<ConversationRequest> {
+    ) -> Result<ConversationRequest, TimelineWriteError> {
         self.query("BuildConversationRequest", |reply| {
             ChatStateCommand::BuildConversationRequest {
                 tool_definitions,
@@ -376,6 +396,7 @@ impl ChatStateHandle {
             }
         })
         .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
     /// Get a clone of the full conversation.
@@ -387,6 +408,15 @@ impl ChatStateHandle {
         .unwrap_or_default()
     }
 
+    /// Get a coherent Surface plus the revision required for a later
+    /// optimistic compaction commit.
+    pub async fn get_conversation_with_revision(&self) -> Option<(Vec<ConversationItem>, u64)> {
+        self.query("GetConversationWithRevision", |reply| {
+            ChatStateCommand::GetConversationWithRevision { reply }
+        })
+        .await
+    }
+
     pub async fn trajectory(&self) -> Option<TrajectorySnapshot> {
         self.query("GetTrajectory", |reply| ChatStateCommand::GetTrajectory {
             reply,
@@ -394,15 +424,37 @@ impl ChatStateHandle {
         .await
     }
 
-    pub async fn get_rewind_surface(&self, target_prompt_index: usize) -> Vec<ConversationItem> {
-        self.query("GetRewindSurface", |reply| {
-            ChatStateCommand::GetRewindSurface {
-                target_prompt_index,
+    /// Freeze the reference and materialize exactly that committed Surface in
+    /// one actor command, so auxiliary assembly cannot race a parent append.
+    pub async fn materialize_timeline(
+        &self,
+        timeline_id: String,
+    ) -> Option<crate::TimelineMaterialization> {
+        self.query("MaterializeTimeline", |reply| {
+            ChatStateCommand::MaterializeTimeline { timeline_id, reply }
+        })
+        .await
+        .flatten()
+    }
+
+    /// Fetch one read-only page from a completed compaction's shadowed range.
+    /// `None` means the actor is unavailable; the inner result is Timeline
+    /// validation for the supplied summary reference.
+    pub async fn fetch_compacted_context(
+        &self,
+        summary_seq: u64,
+        offset: usize,
+        limit: usize,
+    ) -> Option<Result<(Vec<ConversationItem>, usize), crate::TimelineError>> {
+        self.query("FetchCompactedContext", |reply| {
+            ChatStateCommand::FetchCompactedContext {
+                summary_seq,
+                offset,
+                limit,
                 reply,
             }
         })
         .await
-        .unwrap_or_default()
     }
 
     /// Get current prompt index.
@@ -516,16 +568,6 @@ impl ChatStateHandle {
     }
 
     /// Truncate conversation to a target prompt index (for rewind).
-    pub async fn truncate_to_prompt_index(&self, target: usize) {
-        self.query("TruncateToPromptIndex", |reply| {
-            ChatStateCommand::TruncateToPromptIndex {
-                target_prompt_index: target,
-                reply,
-            }
-        })
-        .await;
-    }
-
     /// Get credential secrets.
     pub async fn get_credentials(&self) -> Credentials {
         self.query("GetCredentials", |reply| ChatStateCommand::GetCredentials {

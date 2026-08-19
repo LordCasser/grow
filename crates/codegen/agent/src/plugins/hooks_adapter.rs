@@ -99,12 +99,10 @@ fn process_hooks_content(
         warnings.push(msg);
     }
 
-    // Native `GROW_PLUGIN_*` vars plus their vendor-compat aliases.
+    // Canonical plugin-owned environment.
     let plugin_env: HashMap<String, String> = HashMap::from([
         ("GROW_PLUGIN_ROOT".to_string(), plugin_root.to_string()),
-        ("CLAUDE_PLUGIN_ROOT".to_string(), plugin_root.to_string()),
         ("GROW_PLUGIN_DATA".to_string(), plugin_data.to_string()),
-        ("CLAUDE_PLUGIN_DATA".to_string(), plugin_data.to_string()),
     ]);
 
     for spec in &mut specs {
@@ -120,7 +118,7 @@ fn process_hooks_content(
             plugin_name,
             spec.name
         );
-        // Resolve plugin path placeholders at load time (mirrors managed_mcp)
+        // Resolve plugin path placeholders at load time (mirrors the MCP catalog)
         // so the command works regardless of the runner's spawn branch.
         if let Some(cmd) = &spec.command {
             let cmd_str = cmd.to_string_lossy();
@@ -176,10 +174,10 @@ mod tests {
     fn prefilter_removes_unsupported_events() {
         let json = r#"{
             "hooks": {
-                "SessionStart": [{"hooks": [{"type": "command", "command": "echo start"}]}],
+                "session_start": [{"hooks": [{"type": "command", "command": "echo start"}]}],
                 "CustomEvent": [{"hooks": [{"type": "command", "command": "echo custom"}]}],
                 "UnknownHook": [{"hooks": [{"type": "command", "command": "echo unknown"}]}],
-                "PostToolUse": [{"hooks": [{"type": "command", "command": "echo post"}]}]
+                "post_tool_use": [{"hooks": [{"type": "command", "command": "echo post"}]}]
             }
         }"#;
 
@@ -191,8 +189,8 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&filtered).unwrap();
         let hooks = parsed["hooks"].as_object().unwrap();
-        assert!(hooks.contains_key("SessionStart"));
-        assert!(hooks.contains_key("PostToolUse"));
+        assert!(hooks.contains_key("session_start"));
+        assert!(hooks.contains_key("post_tool_use"));
         assert!(!hooks.contains_key("CustomEvent"));
         assert!(!hooks.contains_key("UnknownHook"));
     }
@@ -201,10 +199,10 @@ mod tests {
     fn prefilter_preserves_all_supported_events() {
         let json = r#"{
             "hooks": {
-                "SessionStart": [],
-                "PreToolUse": [],
-                "PostToolUse": [],
-                "SessionEnd": []
+                "session_start": [],
+                "pre_tool_use": [],
+                "post_tool_use": [],
+                "session_end": []
             }
         }"#;
 
@@ -253,7 +251,7 @@ mod tests {
             &hooks_file,
             r#"{
                 "hooks": {
-                    "SessionStart": [
+                    "session_start": [
                         {
                             "hooks": [
                                 {"type": "command", "command": "echo plugin-hook"}
@@ -283,10 +281,6 @@ mod tests {
             "/path/to/plugin"
         );
         assert_eq!(
-            specs[0].extra_env.get("CLAUDE_PLUGIN_ROOT").unwrap(),
-            "/path/to/plugin"
-        );
-        assert_eq!(
             specs[0].extra_env.get("GROW_PLUGIN_DATA").unwrap(),
             "/path/to/data"
         );
@@ -299,7 +293,7 @@ mod tests {
     fn parse_inline_hooks_from_value() {
         let value = serde_json::json!({
             "hooks": {
-                "SessionStart": [
+                "session_start": [
                     {
                         "hooks": [
                             {"type": "command", "command": "echo inline-hook"}
@@ -329,7 +323,7 @@ mod tests {
     fn parse_inline_hooks_filters_unsupported_events() {
         let value = serde_json::json!({
             "hooks": {
-                "PostToolUse": [
+                "post_tool_use": [
                     {"hooks": [{"type": "command", "command": "echo post"}]}
                 ],
                 "FutureEvent": [
@@ -352,11 +346,11 @@ mod tests {
     fn parse_plugin_hooks_substitutes_plugin_root_in_command() {
         let value = serde_json::json!({
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {"hooks": [
-                        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre.sh"},
-                        {"type": "command", "command": "${GROW_PLUGIN_ROOT}/hooks/alias.sh"},
-                        {"type": "command", "command": "${CLAUDE_PLUGIN_DATA}/cache/post.sh"}
+                        {"type": "command", "command": "${GROW_PLUGIN_ROOT}/hooks/pre.sh"},
+                        {"type": "command", "command": "${GROW_PLUGIN_ROOT}/hooks/second.sh"},
+                        {"type": "command", "command": "${GROW_PLUGIN_DATA}/cache/post.sh"}
                     ]}
                 ]
             }
@@ -377,7 +371,7 @@ mod tests {
             .map(|s| s.command.as_ref().unwrap().to_string_lossy().into_owned())
             .collect();
         assert!(commands.contains(&"/opt/plugins/gb1183/hooks/pre.sh".to_string()));
-        assert!(commands.contains(&"/opt/plugins/gb1183/hooks/alias.sh".to_string()));
+        assert!(commands.contains(&"/opt/plugins/gb1183/hooks/second.sh".to_string()));
         assert!(commands.contains(&"/var/plugins/gb1183/cache/post.sh".to_string()));
 
         // None of the resolved commands should still contain the literal
@@ -396,25 +390,26 @@ mod tests {
             .map(|s| s.command_raw.as_deref().unwrap_or(""))
             .collect();
         assert!(
-            raws.contains(&"${CLAUDE_PLUGIN_ROOT}/hooks/pre.sh"),
+            raws.contains(&"${GROW_PLUGIN_ROOT}/hooks/pre.sh"),
             "command_raw must preserve the source string verbatim, got {raws:?}"
         );
         assert!(
-            raws.contains(&"${GROW_PLUGIN_ROOT}/hooks/alias.sh"),
+            raws.contains(&"${GROW_PLUGIN_ROOT}/hooks/second.sh"),
             "command_raw must preserve the source string verbatim, got {raws:?}"
         );
         assert!(
-            raws.contains(&"${CLAUDE_PLUGIN_DATA}/cache/post.sh"),
+            raws.contains(&"${GROW_PLUGIN_DATA}/cache/post.sh"),
             "command_raw must preserve the source string verbatim, got {raws:?}"
         );
     }
 
     #[test]
-    fn parse_inline_hooks_handles_empty_value() {
+    fn parse_inline_hooks_rejects_missing_hooks_key() {
         let value = serde_json::json!({});
         let (specs, warnings) = parse_plugin_hooks_from_value(&value, "empty", "/root", "/data");
         assert!(specs.is_empty());
-        assert!(warnings.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("exactly one top-level key: 'hooks'"));
     }
 
     /// Regression: generic env vars (`${HOME}`) resolve at load time, and plugin
@@ -423,9 +418,9 @@ mod tests {
     fn parse_plugin_hooks_resolves_plugin_root_exactly_once() {
         let value = serde_json::json!({
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {"hooks": [
-                        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/x.sh"}
+                        {"type": "command", "command": "${GROW_PLUGIN_ROOT}/x.sh"}
                     ]}
                 ]
             }
@@ -453,22 +448,20 @@ mod tests {
         );
     }
 
-    /// User-declared `env` is kept, but the four plugin-owned keys always win.
+    /// User-declared `env` is kept, but the two plugin-owned keys always win.
     #[test]
     fn parse_plugin_hooks_user_env_merged_with_plugin_precedence() {
-        // All four keys, so a one-key regression can't pass.
+        // Both keys are covered so a one-key regression cannot pass.
         let value = serde_json::json!({
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {"hooks": [
                         {
                             "type": "command",
                             "command": "echo hi",
                             "env": {
                                 "FOO": "bar",
-                                "CLAUDE_PLUGIN_ROOT": "/user/wins?",
                                 "GROW_PLUGIN_ROOT": "/user/wins?",
-                                "CLAUDE_PLUGIN_DATA": "/user/wins?",
                                 "GROW_PLUGIN_DATA": "/user/wins?"
                             }
                         }
@@ -494,11 +487,9 @@ mod tests {
             "user-declared env keys must survive plugin merge"
         );
 
-        // All four plugin-owned keys: plugin wins over the user's attempt.
+        // Both plugin-owned keys: plugin wins over the user's attempt.
         for (key, expected) in [
-            ("CLAUDE_PLUGIN_ROOT", "/actual/plugin/root"),
             ("GROW_PLUGIN_ROOT", "/actual/plugin/root"),
-            ("CLAUDE_PLUGIN_DATA", "/actual/plugin/data"),
             ("GROW_PLUGIN_DATA", "/actual/plugin/data"),
         ] {
             assert_eq!(
@@ -522,7 +513,7 @@ mod tests {
         let cmd_bare = format!("${var}/raw.sh");
         let value = serde_json::json!({
             "hooks": {
-                "PreToolUse": [
+                "pre_tool_use": [
                     {"hooks": [
                         {"type": "command", "command": cmd_braces},
                         {"type": "command", "command": cmd_bare},

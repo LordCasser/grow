@@ -1260,6 +1260,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1555,7 +1556,6 @@ dependencies = [
 name = "compaction"
 version = "1.1.11"
 dependencies = [
- "anyhow",
  "async-trait",
  "serde",
  "serde_json",
@@ -4346,8 +4346,8 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml",
- "tools",
  "tracing",
+ "tty-utils",
  "url",
 ]
 
@@ -5448,6 +5448,7 @@ dependencies = [
  "tool-types",
  "tools",
  "tracing",
+ "tty-utils",
  "version",
  "which",
  "workspace-types",
@@ -6262,6 +6263,7 @@ dependencies = [
  "anyhow",
  "base64",
  "blake3",
+ "chat-state",
  "chrono",
  "clap",
  "clap_complete",
@@ -6284,6 +6286,7 @@ dependencies = [
  "insta",
  "libc",
  "markdown",
+ "memory",
  "mermaid",
  "nix 0.31.3",
  "nucleo",
@@ -6335,6 +6338,7 @@ dependencies = [
  "wait-timeout",
  "windows-sys 0.59.0",
  "workspace",
+ "workspace-types",
 ]
 
 [[package]]
@@ -7776,12 +7780,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
 
 [[package]]
-name = "runfiles"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b966e2656ad15fd22e76d2bcb8b7f88e5cb2ee5071539b19aa751423169f35e0"
-
-[[package]]
 name = "rusqlite"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8564,6 +8562,7 @@ dependencies = [
  "windows",
  "workflow",
  "workspace",
+ "workspace-types",
 ]
 
 [[package]]
@@ -9239,7 +9238,6 @@ dependencies = [
 name = "test-utils"
 version = "0.1.0"
 dependencies = [
- "runfiles",
  "tracing",
  "tracing-subscriber",
 ]
@@ -10247,6 +10245,7 @@ dependencies = [
  "tokio",
  "tools",
  "tracing",
+ "tty-utils",
  "version",
  "wiremock",
 ]
@@ -11267,11 +11266,9 @@ dependencies = [
 name = "workspace-types"
 version = "1.1.11"
 dependencies = [
- "base64",
  "chrono",
  "serde",
  "serde_json",
- "thiserror 2.0.19",
 ]
 
 [[package]]

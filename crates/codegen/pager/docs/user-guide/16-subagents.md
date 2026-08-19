@@ -1,230 +1,160 @@
-# Subagents and Personas
+# Subagents
 
-Subagents are independent child sessions that handle tasks in parallel. Each subagent has its own context window, so the main agent can delegate work (research, implementation, testing, and code review) without consuming its own context. A subagent reports a summary back to the parent when it finishes.
+Subagents are independent child sessions for bounded delegated work. Each child owns its context window, model loop, tool runtime, permission state, and durable Timeline. The parent receives a terminal result only after the child lifecycle has been committed.
 
 Subagents are enabled by default.
 
 ---
 
-## Agents vs Personas
+## Agent definitions
 
-Agents and personas both customize behavior, but they operate at different levels:
+An Agent definition is the only mechanism for defining a child role. It owns the role prompt, authored tool ceiling, default capability mode, and MCP inheritance policy. Definitions are Markdown files under `.grow/agents/**/*.md` or `~/.grow/agents/**/*.md`.
 
-| | **Agents** | **Personas** |
-|---|---|---|
-| **What they configure** | A role prompt and tool policy | A behavioral overlay added to a subagent's prompt |
-| **Scope** | Primary session or subagent | Subagents only |
-| **How you set them** | At startup, or with agent definitions (`.md` files in `.grow/agents/` or `~/.grow/agents/`) | In `config.toml` (`[subagents.personas]`) or `.toml` files under `.grow/personas/`; applied during subagent resolution |
-| **What they control** | Role instructions, tool availability, prompt body, and skills | Tone, output format, task focus, and input/output contracts |
-| **Who edits them** | You -- create, delete, or toggle them in the agents modal or by editing files | You -- define custom personas in config or files; bundled personas are read-only |
-| **Examples** | `grow`, `general-purpose`, `explore` | `researcher`, `concise` |
+The session owns mutable runtime state such as model selection, Behavior, permissions, and live grants. Grow does not layer a second behavioral-overlay system on top of an Agent.
 
-An Agent supplies the role used by a session; the session separately owns its model, Behavior, and Permission state. A persona shapes how a subagent behaves within that role. A subagent always runs as an Agent type (for example, `general-purpose`), and resolution can layer a persona on top.
-
-Manage both in the agents modal. Open it with `/config-agents` (alias `/agents`), or open the Personas tab directly with `/personas`. The modal has two tabs: **Agents** and **Personas**.
+Open `/config-agents` to inspect or edit discovered definitions.
 
 ---
 
-## Disabling Subagents
-
-Disable subagents with an environment variable or the config file:
+## Disabling subagents
 
 ```bash
-export GROW_SUBAGENTS=0              # Environment variable
+export GROW_SUBAGENTS=0
 ```
 
 ```toml
-# ~/.grow/config.toml
 [subagents]
 enabled = false
 ```
 
 ---
 
-## How Subagents Work
+## Lifecycle and persistence
 
-When the main agent identifies work to delegate, it calls the `spawn_subagent` tool to start a child session. The child runs with:
+When the parent calls `spawn_subagent`, Grow:
 
-- Its own context window, independent of the parent
-- A hard-eligible toolset determined by its authored preset/additional tools, session policy, depth, and MCP inheritance; runtime-injected native tools do not enlarge requestable Execute/ReadWrite eligibility
-- A child-local current grant set seeded by its capability mode
-- Optional persona instructions applied during resolution
+1. commits the spawn fact to the parent Timeline;
+2. atomically creates the child session with a seed-source fact;
+3. runs the child against its own Timeline and runtime;
+4. commits the child's terminal result;
+5. closes the parent spawn by referencing that exact child event.
 
-The parent receives the child's output -- usually a summary -- when the child finishes.
+Successful non-empty output is stored once as an immutable content-addressed artifact. There is no parallel metadata or output-file lifecycle.
 
----
-
-## Built-in Agent Types
-
-The `spawn_subagent` tool accepts a `subagent_type` parameter that selects the child's role:
-
-| Type              | Description                                          |
-| ----------------- | ---------------------------------------------------- |
-| `general-purpose` | Default type. Full-capability agent for any task.    |
-| `explore`         | Research agent. Starts with search/read/grep and can request shell execution when needed, but cannot request edits. Use it for codebase investigation. |
-| `plan`            | Planning agent. Explores the codebase and produces a structured implementation plan; does not edit files. |
-
-Project- or user-defined agents can add new types or shadow these built-ins by name.
+After restart, Grow reconstructs child rows and terminal state from the parent and child Timeline facts. A broken link, missing child, or mismatched terminal metrics fails closed instead of selecting another transcript heuristically.
 
 ---
 
-## Personas
+## Built-in Agent types
 
-A persona is a named behavioral overlay. Its instructions are injected into the subagent's conversation as a `<system-reminder>`, which shapes tone, output format, and task focus without changing the subagent's agent type, model, or tools.
+The `subagent_type` argument selects the child definition:
 
-Define personas in `config.toml` or in `.toml` files:
+| Type | Purpose |
+| --- | --- |
+| `general-purpose` | General implementation and investigation work. |
+| `explore` | Read-focused codebase investigation. It can request execution when the definition allows it, but cannot request edits. |
+| `plan` | Exploration and implementation planning without file edits. |
 
-```toml
-[subagents.personas.researcher]
-instructions = "You are a thorough researcher. Always cite specific file paths."
-description = "Deep investigator."
-```
-
-Grow discovers file-based personas from these locations, in priority order:
-
-- `.grow/personas/*.toml` (project)
-- `~/.grow/personas/*.toml` (user)
-- The bundled personas directory (lowest priority)
-
-Each file defines one persona, and the file name (without the extension) becomes the persona name. Inline `config.toml` personas take precedence over files. Only `.toml` files are discovered.
-
-Manage personas in the Personas tab of the agents modal (`/personas`). Bundled personas are read-only; personas you define are editable.
-
-> **Note:** Grow applies personas through subagent resolution and roles, not through a `spawn_subagent` parameter. The main agent does not pass a persona name when it spawns a child.
-
-### Persona Fields
-
-| Field               | Description                                                          |
-| ------------------- | ------------------------------------------------------------------- |
-| `instructions`      | Inline instruction text applied as the persona layer.               |
-| `instructions_file` | Path to an instruction file, loaded at spawn time and merged after `instructions`. |
-| `description`       | Short summary shown in the persona catalog. Falls back to the first paragraph of `instructions`. |
-| `inputs` / `outputs`| Declared input and output contract (see below).                     |
-| `model`             | Model override applied when the persona is used.                    |
-| `reasoning_effort`  | Reasoning effort applied when the persona is used.                  |
-| `default_isolation` | Default isolation mode (`none` or `worktree`).                      |
-
-### Input/Output Contracts
-
-A persona can declare the inputs it expects and the outputs it produces. The parent agent reads these to know what context to supply and what artifacts to expect. This lets you chain personas, so one persona's output file becomes the next persona's input:
-
-```toml
-[[subagents.personas.reviewer.inputs]]
-name = "review_file"
-io_type = "file"
-required = true
-description = "Path to the code under review"
-
-[[subagents.personas.reviewer.outputs]]
-name = "summary_file"
-io_type = "file"
-required = false
-description = "Path to write review notes"
-```
-
-Each field has a `name`, an `io_type` (defaults to `file`), a `required` flag, and a `description`.
-
-### Persona Resolution
-
-When a persona applies, Grow resolves the effective model and reasoning effort in this order, highest priority first:
-
-1. Explicit spawn-time override
-2. Role default
-3. Persona default
-4. Parent session
-
-Isolation follows the same order for the first three steps but defaults to `none` (no worktree) rather than inheriting from the parent session.
-
-If a persona is requested but cannot be resolved -- it is not found, has no instructions, or its `instructions_file` is unreadable -- the spawn fails.
+Project and user definitions can add new types or intentionally shadow a built-in name.
 
 ---
 
-## Spawning Subagents
+## Spawning a child
 
-The main agent calls the `spawn_subagent` tool. Its parameters:
+`spawn_subagent` accepts:
 
-| Parameter         | Description                                                       |
-| ----------------- | ---------------------------------------------------------------- |
-| `prompt`          | The full task prompt for the subagent.                           |
-| `description`     | A short label for the task (3-5 words).                          |
-| `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
-| `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `false`. |
-| `capability_mode` | Initial capability grant: `read-only`, `read-write`, `execute`, or `all`. An explicit spawn value overrides the Agent definition default. |
-| `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
-| `resume_from`     | Continue a completed subagent's conversation. Pass its subagent ID. |
-| `cwd`             | Working directory for the subagent. Mutually exclusive with `isolation: worktree`; ignored when `resume_from` is set (the resumed child inherits its source's directory). |
+| Parameter | Meaning |
+| --- | --- |
+| `prompt` | Complete delegated task. |
+| `description` | Short task label. |
+| `subagent_type` | Agent definition; defaults to `general-purpose`. |
+| `background` | Return immediately with a child ID. |
+| `capability_mode` | Initial grant: `read-only`, `read-write`, `execute`, or `all`. |
+| `isolation` | `none` or an isolated git `worktree`. |
+| `resume_from` | Continue a completed child by ID. |
+| `cwd` | Child working directory; mutually exclusive with worktree isolation. |
 
-When you run a subagent in the background, retrieve its result later with `get_command_or_subagent_output`.
+Retrieve a background result with `get_command_or_subagent_output`.
+
+### Resume semantics
+
+`resume_from` creates a new child from a completed canonical lifecycle. It inherits the source transcript and model, while re-rendering the current Agent definition, system prompt, and tool runtime. Live grants and in-memory tool state are never copied.
+
+The source must belong to the current parent session and use the same Agent type.
 
 ---
 
-## Capability Modes
+## Capability model
 
-A capability mode is the subagent's initial grant inside its hard-eligible toolset:
+The Agent definition establishes a hard-eligible tool ceiling. The live capability mode grants a subset of that ceiling:
 
-| Mode         | Read | Write | Execute | Description                                  |
-| ------------ | ---- | ----- | ------- | -------------------------------------------- |
-| `read-only`  | Yes  | No    | No      | Read, search, inspect, and discover eligible MCP tools; no file edits, shell, or MCP server grant. |
-| `read-write` | Yes  | Yes   | No      | Read, plus create, edit, delete, and move files. No shell. |
-| `execute`    | Yes  | No    | Yes     | Read, plus run shell commands and background tasks. No file edits. |
-| `all`        | Yes  | Yes   | Yes     | Every capability remaining inside the hard eligibility ceiling. |
+| Mode | Read | Write | Execute |
+| --- | --- | --- | --- |
+| `read-only` | Yes | No | No |
+| `read-write` | Yes | Yes | No |
+| `execute` | Yes | No | Yes |
+| `all` | Yes | Yes | Yes |
 
-If you omit `capability_mode`, the Agent definition supplies the initial mode. The built-in `explore` starts read-only but is eligible to request shell execution when its assigned investigation requires it; `general-purpose` starts with its definition's full toolset.
-
-Restricted capabilities are hidden from model tool definitions. A child can call `request_tool_access` for one eligible target at a time:
+Tools outside the current grant are not exposed to the model. A child can request one eligible boundary expansion with `request_tool_access`:
 
 ```json
 {
   "target": { "type": "native", "capability": "execute" },
-  "purpose": "Run the repository's focused parser tests to validate the finding"
+  "purpose": "Run the focused parser tests needed to validate the finding"
 }
 ```
 
-Native targets are `execute` (shell execution and its lifecycle controls) and `read-write` (edit, write, delete, and move). MCP access is requested by server:
+Native targets are `execute` and `read-write`. MCP access is requested per server:
 
 ```json
 {
   "target": { "type": "mcp_server", "server": "github" },
-  "purpose": "Inspect the issue referenced by the assigned review"
+  "purpose": "Inspect the issue referenced by the review"
 }
 ```
 
-The result is `granted`, `already_granted`, `denied`, or `unavailable`. `unavailable` means the target is outside the Agent's hard ceiling and does not open an approval prompt. A grant lasts only for that live child: it is not persisted, inherited by descendants, copied to siblings, or restored by recreating/resuming a child. Granting a capability makes its tools visible on the next model sample and admits ordinary calls inside that live fence. It enriches rather than replaces the child's permission mode: hooks and managed rules still apply, and a rare secondary shell-risk request is handled as always-approve, Auto judgment, or Ask according to that child session's effective mode. Managed policy and protected or explicitly interactive boundaries remain authoritative.
+The result is `granted`, `already_granted`, `denied`, or `unavailable`. An unavailable target lies outside the hard ceiling and cannot open an approval flow. Grants live only in the current child; they are not persisted, inherited, or restored by resuming.
+
+Managed policy, hooks, and protected interactive boundaries remain authoritative after a grant.
 
 ---
 
-## Context Inheritance
+## Permission mode
 
-### resume_from
+```toml
+[subagents]
+permission_mode = "auto"       # auto | ask | always-approve | follow
+classifier_input = "context"   # context | request_only
+```
 
-The `resume_from` parameter lets a new subagent continue where a completed subagent left off, which is useful for multi-stage workflows:
+- `auto` classifies only explicit capability-boundary requests. Normal calls already admitted by the live fence do not invoke the classifier.
+- `ask` routes the request to the real child-session approval UI.
+- `always-approve` still applies managed-policy clamps.
+- `follow` reads the primary session's current decision mode for each request; it does not copy remembered grants.
 
-1. Spawn a research subagent to investigate a problem.
-2. Spawn a second subagent with `resume_from` set to the first subagent's ID, so it picks up with the full research context.
+Classifier input and verdicts are ephemeral and never become primary model history. Invalid output, timeout exhaustion, or a non-retryable provider failure denies only the requested expansion.
 
-The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
+---
 
-### MCP inheritance
+## MCP inheritance
 
-Subagents inherit the parent session’s **already-connected and enabled** MCP server catalog by default. That includes local stdio/HTTP servers and plugin-sourced agents (for example `my-plugin:reviewer`). Inheritance establishes eligibility, not authorization: `search_tool` shows each eligible result's server and whether it is `granted` or `requires_grant`; the child requests one server and then calls its tools through `use_tool`. The concrete MCP call still receives a second permission decision.
+Children inherit the parent's connected and enabled MCP catalog by default. Inheritance establishes eligibility, not authorization. `search_tool` reports whether a result is granted, and `use_tool` performs the concrete call only after the required server grant and permission decision.
 
-The inherited ceiling stays live. If the parent disables/removes a server or hides a concrete tool, every descendant immediately fails the search/use eligibility check even if it previously received a server grant. Directory changes are reconciled into the existing child bridge at the next sampling boundary and surfaced through the normal MCP reminder update.
+The inherited ceiling stays live: removing a parent server or hiding a tool immediately makes it ineligible for descendants.
 
-Control inheritance with agent frontmatter `mcpInheritance`:
+Agent frontmatter controls inheritance:
 
 | Value | Effect |
-| ----- | ------ |
-| `all` (default if omitted) | Inherit every parent-connected MCP server |
-| `none` | Inherit no parent MCP servers |
-| `named: [server, …]` | Inherit only the listed server names |
-| `except: [server, …]` | Inherit all parent servers except the listed names |
-
-Example:
+| --- | --- |
+| `all` | Inherit every parent-connected server. |
+| `none` | Inherit none. |
+| `named: [server, …]` | Inherit only listed servers. |
+| `except: [server, …]` | Inherit all except listed servers. |
 
 ```yaml
 ---
 name: research-only
-description: Read MCP tools but not internal connectors
+description: Research with selected MCP tools
 tools: search_tool, use_tool, Read
 mcpInheritance:
   except:
@@ -232,151 +162,62 @@ mcpInheritance:
 ---
 ```
 
-**Plugin agents** inherit parent MCP the same way. For security they still cannot:
-
-- Declare their own `mcpServers` in agent frontmatter (ignored with a warning)
-- Declare hooks in agent frontmatter
-- Set `permissionMode: bypassPermissions`
-
-Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **parent/session** after the plugin is trusted — they are not a child-only frontmatter declaration. See [Plugins](09-plugins.md) and [MCP Servers](07-mcp-servers.md).
+Plugin Agents use the same rule. They cannot declare child-only MCP servers or hooks in Agent frontmatter; trusted plugin MCP configuration attaches to the parent session catalog.
 
 ---
 
-## Isolation: Worktree Mode
+## Worktree isolation
 
-For tasks that modify files, run a subagent in an isolated git worktree with `isolation: worktree`. This keeps the child's edits from conflicting with the parent's:
+Set `isolation: worktree` for editing tasks that must not share the parent's working tree. Grow creates a managed worktree, reports its path in the child result, and exposes an explicit apply operation through `grow/git/worktree/*`.
 
-- The subagent works in its own copy of the working tree.
-- Its changes stay isolated from the parent until you merge them.
-- The subagent's result includes the worktree path.
-
-Grow manages worktrees through the `grow/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
+The child does not silently merge its changes into the parent workspace.
 
 ---
 
 ## Configuration
 
-### Permission Mode
-
-All subagent levels use one global mode for requests that widen their current capability fence:
-
-```toml
-[subagents]
-permission_mode = "auto" # auto | ask | always-approve | follow
-classifier_input = "context" # context | request_only
-```
-
-- `auto` (default) judges only an explicit `request_tool_access` boundary expansion. Ordinary calls already admitted by the child's live capability fence skip the primary-model classifier and its audit noise, while managed policy and hard safety boundaries remain binding. With `[subagents].classifier_input = "context"` (the default), a boundary request uses a read-only snapshot of the primary task context. Set it to `"request_only"` to send only the proposed action and save tokens when task intent is not needed. In either mode the request and structured verdict are ephemeral and never enter primary model history. `[auto_mode].classifier_model` does not override this path. Empty/schema-invalid output, a recoverable provider error, or a per-attempt timeout can retransmit once inside one total deadline; exhaustion or a non-retryable error fails only that grant request. It does not open an ordinary approval prompt or terminate the child.
-- `ask` routes approval to the real child session UI and shows its Agent type, task, target, and purpose.
-- `always-approve` uses the same managed-policy clamps as the primary Always Approve mode.
-- `follow` reads the primary session's current mode for every request. It follows only the decision mode, not the primary session's remembered grants.
-
-Native capability grants and MCP-server grants are child-session memory only. One MCP-server grant covers all eligible tools on that server for the live child, without repeated authorization. Grants do not write project permission state or affect the parent, siblings, descendants, or a newly created child. Static permission rules and managed policy still apply globally.
-
-### Per-Type Toggles and Model Overrides
-
-Disable specific agent types, or route them to a different model:
+Toggle Agent types or route them to a configured model:
 
 ```toml
 [subagents.toggle]
-explore = true                       # default -- omit to keep enabled
-plan = false                         # disable the plan subagent
+explore = true
+plan = false
 
 [subagents.models]
-explore = "deepseek/deepseek-chat"   # route explore to a configured model
+explore = "deepseek/deepseek-chat"
 ```
 
-Per-type model overrides apply for any parent. Without an override, a subagent inherits the parent's model.
+Without an override, a child inherits the parent's model.
 
-### Custom Roles and Personas
+Define custom roles in Agent Markdown:
 
-Define custom roles with their own capability and model defaults:
-
-```toml
-[subagents.roles.researcher]
-description = "Deep research agent"
-default_capability_mode = "read-only"
-model = "deepseek/deepseek-chat"
-prompt_file = ".grow/prompts/researcher.md"
+```markdown
+---
+name: researcher
+description: Evidence-driven repository investigator
+toolPreset: explore
+capabilityMode: read-only
+---
+Investigate the delegated question and report concrete file-level evidence.
 ```
 
-Define custom personas with behavioral instructions:
+---
 
-```toml
-[subagents.personas.concise]
-instructions = "Be concise. No filler words."
-# instructions_file = ".grow/personas/concise.md"  # or load from a file
-```
+## TUI and debugging
 
-Grow also discovers roles from `.grow/roles/*.toml` and personas from `.grow/personas/*.toml`. Inline `config.toml` definitions take precedence over files.
+- `Ctrl+G` toggles the tasks pane for active and completed children and background commands.
+- `/config-agents` opens the Agent-definition catalog.
+- Enter on a child lifecycle row opens its framed transcript.
+- `q`, `Esc`, or the close button returns to the parent.
+
+The parent scrollback shows spawn, progress, permission audit, and terminal rows. The child frame shows the complete child transcript, thinking blocks, tool calls, live activity, elapsed time, model, and resume/fork state.
+
+For event-level debugging, open the Trajectory page exposed by the local session debug server. It reads the same durable Timeline projection used for recovery, with filters for layer, actor, class, producer, visibility, text, and cursor range.
 
 ---
 
-## The Tasks Pane (TUI)
+## Depth limits
 
-Grow shows running and finished work in side panes on the agent screen:
+`[subagents].max_depth` limits recursive spawning. At the boundary the spawn tool is removed from the child's eligible toolset. A live capability grant cannot restore it or bypass Goal/Workflow ownership.
 
-- Press `Ctrl+G` to toggle the tasks pane, which lists active and completed subagents and background commands with their status.
-- Press `Ctrl+T` to toggle the separate todo pane.
-
-To view the available agent types and personas, open the command palette with `Ctrl+P` and choose **Manage Agents** (`/config-agents`).
-
-Subagents appear at the top of the tasks pane in their own collapsible "Subagents" group.
-
----
-
-## Viewing Subagents in the TUI
-
-Subagents appear in several places in the interactive TUI:
-
-### Scrollback (parent conversation history)
-
-When a subagent is spawned, a compact lifecycle block is added to the *parent's* scrollback:
-
-- `Subagent running: "do the thing" (Implementer · grow-3) — Thinking`
-- Or for background subagents: `Subagent started: "..."`
-
-Auto permission decisions are also recorded in the parent's scrollback as structured audit rows identifying the child, tool, access summary, and outcome. Consecutive permission rows fold into one summary (with per-outcome counts across all participating subagents); expanding the summary shows each decision as one compact line. Double-click an individual expanded row to open its full tool-call ID, source, reason, and judgment latency. These replayable audit rows are UI state only; they are never sent back to the primary model as conversation history.
-
-While running, the block shows a live activity suffix (e.g. "Running: cargo test", "Compacting", "Retrying (2/3)") pulled from the child's turn tracker. The bullet animates (or is colored) according to state.
-
-Press **Enter** (or Ctrl-F) on the block to open the subagent's full transcript.
-
-For blocking subagents the single entry updates its bullet color when the child finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in Xs: "..."` block is appended.
-
-### Tasks pane (Ctrl+G)
-
-As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect.
-
-### Fullscreen framed view (the child transcript)
-
-When you open a subagent (from a scrollback block or the tasks pane), the parent view is replaced by a bordered frame containing the child's full transcript:
-
-- Title bar inside the frame: status icon (spinner / ✓ / ✗), label + bold description + model, optional "resumed"/"forked" badge, live activity · elapsed time, and [✗] close button.
-- The child's own scrollback, thinking, tool calls, and (limited) prompt area render inside the frame.
-- Subagent views are largely observational — you generally cannot send new top-level prompts directly to them the way you can a parent session.
-
-Use `q`, `Esc`, or click the close button to pop back to the parent view. The parent's scrollback continues to show the subagent's status.
-
----
-
-## Depth Limits
-
-`[subagents].max_depth` controls recursive spawning (`1` keeps the tree flat; larger values permit descendants). The Task tool is removed at the configured boundary. Dynamic capability grants cannot restore it or bypass Goal/Workflow ownership rules.
-
----
-
-## When to Use Subagents
-
-**Good use cases:**
-
-- Researching a codebase while the parent continues other work
-- Running tests in parallel while the parent implements changes
-- Reviewing generated changes before you commit them
-- Delegating independent tasks that do not depend on each other
-
-**When not to use:**
-
-- Simple tasks that the parent can handle directly
-- Tasks that require tight back-and-forth with the user, since a subagent runs autonomously and isn't suited to interactive exchanges
-- Tasks where the context setup cost exceeds the parallelism benefit
+Use subagents for independent investigation, implementation, focused testing, and review. Keep tightly interactive or trivially small work in the parent session.

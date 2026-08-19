@@ -2,13 +2,12 @@ use serde::Serialize;
 
 use super::envelope::{FacetMap, SessionKind, SessionMetaEnvelope};
 use super::facets::{FacetRegistry, NormalizedItem};
-use crate::session::merge::MergedSession;
+use crate::session::listing::SessionListing;
 
 #[derive(Debug, Clone)]
 pub struct UnifiedRow {
     pub kind: SessionKind,
-    pub legacy: MergedSession,
-    pub title: String,
+    pub session: SessionListing,
     pub updated_at: Option<String>,
     pub facets: FacetMap,
 }
@@ -20,17 +19,15 @@ impl UnifiedRow {
         }
     }
 
-    pub fn into_ext_superset(self) -> ExtSupersetRow {
+    pub fn into_session_list_row(self) -> SessionListRow {
         let UnifiedRow {
             kind,
-            legacy,
-            title,
+            session,
             facets,
             updated_at: _,
         } = self;
-        ExtSupersetRow {
-            legacy,
-            title,
+        SessionListRow {
+            session,
             meta: Self::envelope(kind, facets),
         }
     }
@@ -38,15 +35,14 @@ impl UnifiedRow {
     pub fn into_session_info(self) -> SessionInfo {
         let UnifiedRow {
             kind,
-            legacy,
-            title,
+            session,
             updated_at,
             facets,
         } = self;
         SessionInfo {
-            session_id: legacy.session_id,
-            cwd: legacy.cwd,
-            title: (!title.is_empty()).then_some(title),
+            session_id: session.session_id,
+            cwd: session.cwd,
+            title: Some(session.title),
             updated_at,
             meta: Self::envelope(kind, facets),
         }
@@ -59,20 +55,18 @@ impl UnifiedRow {
     }
 }
 
-pub fn merged_session_to_row(m: MergedSession, reg: &FacetRegistry) -> UnifiedRow {
-    let facets = reg.extract_all(&NormalizedItem::from_merged(&m));
-    let title = m.summary.clone();
-    let updated_at = effective_local_ts(&m);
+pub fn session_listing_to_row(session: SessionListing, reg: &FacetRegistry) -> UnifiedRow {
+    let facets = reg.extract_all(&NormalizedItem::from_listing(&session));
+    let updated_at = effective_local_ts(&session);
     UnifiedRow {
         kind: SessionKind::Build,
-        legacy: m,
-        title,
+        session,
         updated_at,
         facets,
     }
 }
 
-fn effective_local_ts(m: &MergedSession) -> Option<String> {
+fn effective_local_ts(m: &SessionListing) -> Option<String> {
     m.last_active_at
         .as_deref()
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
@@ -87,10 +81,9 @@ pub struct RowMeta {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ExtSupersetRow {
+pub struct SessionListRow {
     #[serde(flatten)]
-    pub legacy: MergedSession,
-    pub title: String,
+    pub session: SessionListing,
     #[serde(rename = "_meta")]
     pub meta: RowMeta,
 }

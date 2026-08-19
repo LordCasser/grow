@@ -5,14 +5,14 @@
 //! surface until the snapshot is re-copied. This module re-copies refreshable
 //! local installs (under-home or trusted) at session spawn and `/plugins reload`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::git_install::{
     copy_dir_recursive, discover_plugins_in_dir, remove_repo_path, repo_plugin_map,
 };
-use super::install_registry::{InstallError, InstallKind, InstallRegistry, RepoPlugin};
+use super::install_registry::{InstallError, InstallKind, InstallRegistry};
 use super::trust::TrustStore;
 
 /// Orphaned tmp/backup siblings younger than this may belong to a concurrent live
@@ -46,14 +46,12 @@ pub(crate) fn refresh_local_installs_from_disk(trust: &TrustStore, force: bool) 
 }
 
 /// A local install snapshotted out of the registry so the refresh loop can mutate
-/// the registry while iterating. `expected` is the recorded plugin set used to
-/// guard against scope-changing rediscovery.
+/// the registry while iterating.
 struct RefreshTarget {
     key: String,
     source_path: PathBuf,
     subdir: Option<String>,
     dest: PathBuf,
-    expected: HashMap<String, RepoPlugin>,
 }
 
 /// Re-copy refreshable local installs from their live `source_path` into the
@@ -81,7 +79,6 @@ fn refresh_local_installs(
                 source_path: source_path.clone(),
                 subdir: subdir.clone(),
                 dest: repo.path.clone(),
-                expected: repo.plugins.clone(),
             }),
             _ => None,
         })
@@ -92,7 +89,6 @@ fn refresh_local_installs(
         source_path,
         subdir,
         dest,
-        expected,
     } in targets
     {
         let refreshable =
@@ -108,22 +104,13 @@ fn refresh_local_installs(
             continue;
         }
 
-        match recopy_local_install(&source_path, subdir.as_deref(), &dest, &expected) {
-            Ok(Some(plugins)) => {
+        match recopy_local_install(&source_path, subdir.as_deref(), &dest) {
+            Ok(plugins) => {
                 if let Some(repo) = registry.get_repo_mut(&key) {
                     repo.plugins = plugins;
                     repo.updated_at = chrono::Utc::now().to_rfc3339();
                 }
                 summary.refreshed += 1;
-            }
-            Ok(None) => {
-                // Kept the snapshot: rediscovered plugin set/scope differs from
-                // recorded (e.g. legacy install without a persisted `subdir`).
-                tracing::debug!(
-                    repo_key = %key,
-                    "kept stale local plugin snapshot: rediscovered plugin set/scope differs from recorded"
-                );
-                summary.skipped += 1;
             }
             Err(e) => {
                 tracing::warn!(repo_key = %key, error = %e, "local plugin refresh failed");
@@ -171,12 +158,9 @@ fn snapshot_matches_source(source: &Path, dest: &Path) -> bool {
     }
 }
 
-/// Re-copy `source_path` into `dest`, returning the rediscovered plugins, or
-/// `Ok(None)` to keep the existing snapshot unchanged.
-///
-/// Invariant: refresh only syncs file contents within the existing plugin set;
-/// if rediscovery is empty or changes the `(name, subdir)` set, the snapshot is
-/// kept as-is (protects legacy entries whose `subdir` wasn't persisted).
+/// Re-copy `source_path` into `dest` and return its current manifest-derived
+/// plugin set. The live trusted source is authoritative; a changed plugin set
+/// replaces the registry entry instead of preserving stale discovery state.
 ///
 /// `subdir` scopes discovery as it did at install time; symlinks in the source
 /// are skipped (see [`copy_dir_recursive`]). The swap is rename-aside (move live
@@ -186,8 +170,7 @@ fn recopy_local_install(
     source_path: &Path,
     subdir: Option<&str>,
     dest: &Path,
-    expected: &HashMap<String, RepoPlugin>,
-) -> Result<Option<HashMap<String, RepoPlugin>>, InstallError> {
+) -> Result<HashMap<String, super::install_registry::RepoPlugin>, InstallError> {
     let parent = dest.parent().ok_or_else(|| InstallError::InstallFailed {
         detail: format!("install path has no parent: {}", dest.display()),
     })?;
@@ -217,18 +200,14 @@ fn recopy_local_install(
         }
     };
 
-    // Keep the snapshot unless the rediscovered (name, subdir) set is unchanged.
-    let discovered_ids: BTreeSet<(&str, Option<&str>)> = discovered
-        .iter()
-        .map(|p| (p.name.as_str(), p.subdir.as_deref()))
-        .collect();
-    let expected_ids: BTreeSet<(&str, Option<&str>)> = expected
-        .iter()
-        .map(|(name, rp)| (name.as_str(), rp.subdir.as_deref()))
-        .collect();
-    if discovered.is_empty() || discovered_ids != expected_ids {
+    if discovered.is_empty() {
         let _ = remove_repo_path(&tmp);
-        return Ok(None);
+        return Err(InstallError::InstallFailed {
+            detail: format!(
+                "local plugin source contains no valid plugin manifests: {}",
+                source_path.display()
+            ),
+        });
     }
 
     let _ = remove_repo_path(&backup);
@@ -267,7 +246,7 @@ fn recopy_local_install(
     }
     let _ = remove_repo_path(&backup);
 
-    Ok(Some(repo_plugin_map(&discovered)))
+    Ok(repo_plugin_map(&discovered))
 }
 
 /// Promote the freshly-copied `tmp` tree onto `dest`. A test hook can force this
@@ -405,7 +384,7 @@ mod tests {
     #[serial(home_env)]
     fn refresh_local_install_picks_up_new_agent() {
         let (_home_tmp, home, _home_guard) = home_tempdir();
-        let source = home.join(".claude").join("demo-plugin");
+        let source = home.join("plugin-sources").join("demo-plugin");
         write_plugin_json(&source, "demo-plugin");
         write_agent_md(&source, "old");
 
@@ -425,7 +404,7 @@ mod tests {
     #[serial(home_env)]
     fn refresh_skips_unchanged_source() {
         let (_home_tmp, home, _home_guard) = home_tempdir();
-        let source = home.join(".claude").join("demo-plugin");
+        let source = home.join("plugin-sources").join("demo-plugin");
         write_plugin_json(&source, "demo-plugin");
         write_agent_md(&source, "old");
 
@@ -448,7 +427,7 @@ mod tests {
     #[serial(home_env)]
     fn refresh_picks_up_content_preserving_rename() {
         let (_home_tmp, home, _home_guard) = home_tempdir();
-        let source = home.join(".claude").join("demo-plugin");
+        let source = home.join("plugin-sources").join("demo-plugin");
         write_plugin_json(&source, "demo-plugin");
         write_agent_md(&source, "old");
 
@@ -477,7 +456,7 @@ mod tests {
     #[serial(home_env)]
     fn refresh_promote_failure_rolls_back_to_prior_snapshot() {
         let (_home_tmp, home, _home_guard) = home_tempdir();
-        let source = home.join(".claude").join("demo-plugin");
+        let source = home.join("plugin-sources").join("demo-plugin");
         write_plugin_json(&source, "demo-plugin");
         write_agent_md(&source, "old");
 
@@ -590,78 +569,5 @@ mod tests {
         assert_eq!(summary.refreshed, 1, "{summary:?}");
         assert!(!installed.repo_path.join("link-out/secret.txt").exists());
         assert!(installed.repo_path.join("extra.txt").exists());
-    }
-
-    #[test]
-    #[serial(home_env)]
-    fn refresh_keeps_stale_when_legacy_subdir_scope_lost() {
-        let (_home_tmp, home, _home_guard) = home_tempdir();
-        // Legacy multi-package source: the real plugin is at plugins/foo;
-        // other-dir is unrelated root-level content that root-scope discovery
-        // would pick up.
-        let workspace = home.join("workspace");
-        write_plugin_json(&workspace.join("plugins/foo"), "foo");
-        write_agent_md(&workspace.join("other-dir"), "noise");
-
-        // Snapshot the full source (mirrors the install-time copy).
-        let install_dir = home.join(".grow").join("installed-plugins");
-        std::fs::create_dir_all(&install_dir).unwrap();
-        let dest = install_dir.join("foo-legacy");
-        copy_dir_recursive(&workspace, &dest).unwrap();
-
-        // Legacy entry: install-level `subdir` was never persisted (None), but the
-        // per-plugin RepoPlugin recorded the correct scope.
-        let mut registry = InstallRegistry::empty(install_dir);
-        let now = chrono::Utc::now().to_rfc3339();
-        registry.insert(
-            "foo-legacy".to_string(),
-            InstalledRepo {
-                kind: InstallKind::Local {
-                    source_path: workspace.clone(),
-                    subdir: None,
-                },
-                installed_at: now.clone(),
-                updated_at: now,
-                path: dest.clone(),
-                plugins: HashMap::from([(
-                    "foo".to_string(),
-                    RepoPlugin {
-                        subdir: Some("plugins/foo".to_string()),
-                        version: None,
-                    },
-                )]),
-                marketplace: None,
-            },
-        );
-
-        // Edit the source under plugins/foo so a content refresh would trigger.
-        write_agent_md(&workspace.join("plugins/foo"), "added");
-
-        // force=true so the unchanged-skip can't mask the scope-identity guard.
-        let trust = TrustStore::load_from(home.join(".grow").join("trusted-plugins"));
-        let summary = refresh_local_installs(&mut registry, &trust, true);
-
-        // Root-scope rediscovery would change the plugin set/scope, so keep stale:
-        // no refresh, and repo.plugins / repo.kind must be untouched (no corruption).
-        assert_eq!(
-            summary.refreshed, 0,
-            "scope change must keep stale: {summary:?}"
-        );
-        let repo = registry.get_repo("foo-legacy").unwrap();
-        assert_eq!(repo.plugins.len(), 1);
-        assert_eq!(
-            repo.plugins.get("foo").and_then(|p| p.subdir.as_deref()),
-            Some("plugins/foo")
-        );
-        match &repo.kind {
-            InstallKind::Local {
-                source_path,
-                subdir,
-            } => {
-                assert_eq!(source_path, &workspace);
-                assert!(subdir.is_none());
-            }
-            _ => panic!("expected Local"),
-        }
     }
 }

@@ -17,20 +17,19 @@ Set `background: true` on the `run_terminal_command` tool to run a command in th
 
 ### Getting Output
 
-Use the `get_command_or_subagent_output` tool to check on a background command or subagent:
+Use the `get_command_or_subagent_output` tool to check on one or more background commands or subagents:
 
-- `get_command_or_subagent_output(task_id)` — current output and status without waiting
-- `get_command_or_subagent_output(task_id, timeout_ms=30000)` — wait up to the given milliseconds for completion
+- `get_command_or_subagent_output(task_ids=["id"])` — current output and status without waiting
+- `get_command_or_subagent_output(task_ids=["id"], timeout_ms=30000)` — wait up to the given milliseconds for completion
 
 ### Waiting for Multiple Tasks
 
-Use `wait_commands_or_subagents` to block on several tasks at once:
+Use the same `get_command_or_subagent_output` contract with several task IDs:
 
 - `task_ids` — the list of task IDs to wait for (maximum 20)
-- `mode` — `wait_any` returns when the first task completes; `wait_all` waits for every task
-- `timeout_ms` — the maximum time to wait, in milliseconds (default: 30 seconds)
+- `timeout_ms` — a positive maximum wait in milliseconds; omit it or pass `0` for an immediate snapshot
 
-The tool returns the status and output for every task you list.
+With a positive timeout, the call returns when every listed task finishes or the timeout expires. It always returns the status and available output for every task you list.
 
 ### Killing Background Tasks
 
@@ -196,7 +195,7 @@ Whenever background work is still running while the agent looks idle — between
 
 It counts running background commands, monitors, scheduled `/loop` tasks, and background subagents, and updates live as each finishes. Any of them can wake the agent for a new turn (commands and subagents on completion, monitors on events, loops on their timer), so the cue stays up until nothing is left. The running counts live only on this status line: completions land in the transcript as a single "Task completed" chip, and "Worked for" markers stay plain — the transcript never repeats or restates the running counts.
 
-While a turn is waiting on background work (blocked in a `get_task_output` or `wait_tasks` call), the status line explains the same input contract used by every running turn:
+While a turn is waiting on background work (a `get_command_or_subagent_output` call with a positive timeout), the status line explains the same input contract used by every running turn:
 
 ```
 ◎ 1 command still running · Enter queues · Ctrl+Enter steers

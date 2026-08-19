@@ -776,12 +776,24 @@ mod tests {
             fx.write_summary(
                 &cwd_str,
                 id,
-                serde_json::json!({ "generated_title": "Fix Login Bug", "title_is_manual": true }),
+                serde_json::json!({
+                    "title": "Fix Login Bug",
+                    "title_source": { "kind": "user" },
+                    "title_event_seq": 1,
+                }),
             );
             fx.write_summary(
                 &cwd_str,
                 "bbbbbbbb-1111-2222-3333-555555555555",
-                serde_json::json!({ "generated_title": "Other Work" }),
+                serde_json::json!({
+                    "title": "Other Work",
+                    "title_source": {
+                        "kind": "generated",
+                        "sideband_id": "018f0000-0000-7000-8000-000000000001",
+                        "result_seq": 1,
+                    },
+                    "title_event_seq": 1,
+                }),
             );
             match resume("fix login bug", &cwd_str).await.unwrap() {
                 MaterializedStartup::Resume {
@@ -808,12 +820,24 @@ mod tests {
             fx.write_summary(
                 &cwd_str,
                 "release-notes",
-                serde_json::json!({ "generated_title": "id-owner" }),
+                serde_json::json!({
+                    "title": "id-owner",
+                    "title_source": {
+                        "kind": "generated",
+                        "sideband_id": "018f0000-0000-7000-8000-000000000001",
+                        "result_seq": 1,
+                    },
+                    "title_event_seq": 1,
+                }),
             );
             fx.write_summary(
                 &cwd_str,
                 "cccccccc-1111-2222-3333-444444444444",
-                serde_json::json!({ "generated_title": "release-notes", "title_is_manual": true }),
+                serde_json::json!({
+                    "title": "release-notes",
+                    "title_source": { "kind": "user" },
+                    "title_event_seq": 1,
+                }),
             );
             match resume("release-notes", &cwd_str).await.unwrap() {
                 MaterializedStartup::Resume {

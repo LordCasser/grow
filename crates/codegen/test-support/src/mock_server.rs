@@ -106,14 +106,6 @@ pub struct MockModelEntry {
     /// Optional API backend (e.g. `"messages"`). Emitted as `apiBackend`
     /// when set; absent means the shell's default backend.
     pub api_backend: Option<String>,
-    /// Emitted as `supportsReasoningEffort` (top-level) when true.
-    pub supports_reasoning_effort: bool,
-    /// Emitted as `reasoningEffort` (top-level) when set.
-    pub reasoning_effort: Option<String>,
-    /// Emitted as `reasoningEfforts` (top-level) when non-empty. Each entry is a
-    /// raw JSON option (a table `{ "value": ..., "id"?, "label"?, ... }` or a
-    /// bare value string), matching what `parse_remote_model_value` reads.
-    pub reasoning_efforts: Vec<Value>,
 }
 
 impl MockModelEntry {
@@ -122,9 +114,6 @@ impl MockModelEntry {
             id: id.into(),
             agent_type: None,
             api_backend: None,
-            supports_reasoning_effort: false,
-            reasoning_effort: None,
-            reasoning_efforts: Vec::new(),
         }
     }
 
@@ -140,21 +129,6 @@ impl MockModelEntry {
         self
     }
 
-    pub fn with_supports_reasoning_effort(mut self, supports: bool) -> Self {
-        self.supports_reasoning_effort = supports;
-        self
-    }
-
-    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
-        self.reasoning_effort = Some(effort.into());
-        self
-    }
-
-    pub fn with_reasoning_efforts(mut self, efforts: Vec<Value>) -> Self {
-        self.reasoning_efforts = efforts;
-        self
-    }
-
     fn to_json(&self) -> Value {
         let mut obj = json!({
             "id": self.id,
@@ -167,15 +141,6 @@ impl MockModelEntry {
         }
         if let Some(ref backend) = self.api_backend {
             obj["apiBackend"] = json!(backend);
-        }
-        if self.supports_reasoning_effort {
-            obj["supportsReasoningEffort"] = json!(true);
-        }
-        if let Some(ref effort) = self.reasoning_effort {
-            obj["reasoningEffort"] = json!(effort);
-        }
-        if !self.reasoning_efforts.is_empty() {
-            obj["reasoningEfforts"] = json!(self.reasoning_efforts);
         }
         obj
     }

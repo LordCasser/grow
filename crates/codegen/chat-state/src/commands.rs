@@ -23,6 +23,12 @@ pub enum TimelineWriteError {
     Persistence(#[source] std::io::Error),
     #[error("timeline persistence acknowledgement was lost")]
     AcknowledgementLost,
+    #[error("rewind target {target} is not before current prompt index {current}")]
+    InvalidRewindTarget { target: usize, current: usize },
+    #[error(
+        "surface changed while transformation was in flight (expected revision {expected}, current {actual})"
+    )]
+    SurfaceChanged { expected: u64, actual: u64 },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -82,6 +88,11 @@ pub enum PruneError {
     /// The chat-state actor is dead or dropped the reply.
     #[error("chat-state actor is unavailable")]
     ActorUnavailable,
+
+    /// The canonical Timeline replacement was rejected before becoming
+    /// visible to readers.
+    #[error(transparent)]
+    Timeline(#[from] TimelineWriteError),
 }
 
 /// Failure modes for an explicit Surface integrity repair.
@@ -107,7 +118,7 @@ pub enum ChatStateCommand {
     /// not process another command while awaiting this acknowledgement.
     RecordTimelineEventDurably {
         kind: TimelineEventKind,
-        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
+        reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
 
     /// Persist the exact user-message event, then accept it into Timeline.
@@ -158,9 +169,6 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<()>,
     },
 
-    /// Increment prompt_index (called at start of each user turn).
-    IncrementPromptIndex,
-
     /// Update the sampling config (e.g., model switch).
     UpdateSamplingConfig { config: SamplingConfig },
 
@@ -173,16 +181,37 @@ pub enum ChatStateCommand {
     /// Record turn timing metadata.
     RecordTurnStart { timestamp_ms: i64 },
 
-    /// Replace conversation history.
-    ReplaceConversation {
+    /// Commit a complete Surface transformation before publishing it to the
+    /// actor projection.
+    ReplaceSurfaceDurably {
         items: Vec<ConversationItem>,
         cause: MessageCause,
+        /// Optimistic guard for transformations computed outside the actor.
+        expected_surface_revision: u64,
+        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
-    /// Replace the Surface only after the canonical Timeline event is durable.
-    ReplaceConversationDurably {
+    /// Commit the exact Surface range declared by the active compaction
+    /// summary. Both the optimistic revision and stable range identities are
+    /// checked inside the actor before the Timeline event is persisted.
+    ReplaceCompactionRangeDurably {
+        target: crate::SurfaceRange,
         items: Vec<ConversationItem>,
-        cause: MessageCause,
+        expected_surface_revision: u64,
+        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
+    },
+
+    /// Seed provider token accounting from the session summary. Conversation,
+    /// prompt coordinates, and compaction state remain Timeline-derived.
+    SeedTokenAccounting {
+        total_tokens: u64,
+        reply: oneshot::Sender<()>,
+    },
+
+    /// Select an earlier prompt boundary as the active Surface. The Timeline
+    /// replacement is committed before any derived actor state is changed.
+    RewindDurably {
+        target_prompt_index: usize,
         reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
@@ -196,8 +225,8 @@ pub enum ChatStateCommand {
     },
 
     /// Atomically prune oversized tool-result contents in the stored
-    /// conversation (head + marker + tail) and persist the result through the
-    /// same `replace_history` path as compaction. Runs inside the actor so it
+    /// conversation (head + marker + tail) and persist the Timeline event.
+    /// Runs inside the actor so it
     /// serializes with turn pushes — no read-modify-write race. Idempotent
     /// per plan: already-pruned items are skipped on repeat execution.
     ///
@@ -232,28 +261,19 @@ pub enum ChatStateCommand {
     /// way a read-modify-write via `GetConversation` + `ReplaceConversation`
     /// would. Replies `true` iff the conversation changed (no-op when the head
     /// already matches modulo trailing newlines). A changed head goes through
-    /// `replace_conversation`, which re-bases `total_tokens` to a fresh static
+    /// the Timeline Surface replacement, which re-bases `total_tokens` to a fresh static
     /// estimate — acceptable because a changed head invalidates the KV prefix
     /// anyway.
     ReplaceSystemHead {
         prompt: String,
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
     },
-
-    /// Cache prompt text for rewind preview.
-    CachePromptText { text: String },
-
-    /// Record compaction boundary for rewind.
-    RecordCompactionAt { prompt_index: usize },
 
     /// Flush pending persistence writes to disk (end of turn).
     Flush,
 
     /// Update opaque credential secrets held by the actor.
     UpdateCredentials { credentials: Credentials },
-
-    /// Restore from a snapshot.
-    RestoreSnapshot(Box<ChatStateSnapshot>),
 
     /// Start capturing turn messages. Clears any previous buffer.
     BeginTurnCapture,
@@ -269,7 +289,7 @@ pub enum ChatStateCommand {
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
         persist_memory_reminder: bool,
-        reply: oneshot::Sender<ConversationRequest>,
+        reply: oneshot::Sender<Result<ConversationRequest, TimelineWriteError>>,
     },
 
     /// Get a clone of the full conversation.
@@ -277,14 +297,29 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Vec<ConversationItem>>,
     },
 
+    /// Get one coherent compaction input and its optimistic commit revision.
+    GetConversationWithRevision {
+        reply: oneshot::Sender<(Vec<ConversationItem>, u64)>,
+    },
+
     /// Build the independent debug/read model directly from Timeline.
     GetTrajectory {
         reply: oneshot::Sender<TrajectorySnapshot>,
     },
 
-    GetRewindSurface {
-        target_prompt_index: usize,
-        reply: oneshot::Sender<Vec<ConversationItem>>,
+    /// Atomically freeze a Timeline range and materialize its current Surface.
+    MaterializeTimeline {
+        timeline_id: String,
+        reply: oneshot::Sender<Option<crate::TimelineMaterialization>>,
+    },
+
+    /// Read one page from the exact Surface range shadowed by a completed
+    /// compaction summary. This never mutates or expands the current Surface.
+    FetchCompactedContext {
+        summary_seq: u64,
+        offset: usize,
+        limit: usize,
+        reply: oneshot::Sender<Result<(Vec<ConversationItem>, usize), crate::TimelineError>>,
     },
 
     /// Get current prompt index.
@@ -337,12 +372,6 @@ pub enum ChatStateCommand {
     /// Snapshot state for forking or rewind.
     Snapshot {
         reply: oneshot::Sender<ChatStateSnapshot>,
-    },
-
-    /// Truncate conversation to a target prompt index (for rewind).
-    TruncateToPromptIndex {
-        target_prompt_index: usize,
-        reply: oneshot::Sender<()>,
     },
 
     /// Check if auto-compact is needed (returns token info).
@@ -452,7 +481,6 @@ mod tests {
             item: ConversationItem::tool_result("call-1", "result"),
         };
         let _ = ChatStateCommand::RecordTokenUsage { total_tokens: 100 };
-        let _ = ChatStateCommand::IncrementPromptIndex;
         let _ = ChatStateCommand::UpdateSamplingConfig {
             config: SamplingConfig {
                 base_url: String::new(),
@@ -478,14 +506,21 @@ mod tests {
         let _ = ChatStateCommand::RecordTurnStart {
             timestamp_ms: 12345,
         };
-        let _ = ChatStateCommand::ReplaceConversation {
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::ReplaceSurfaceDurably {
             items: vec![],
-            cause: MessageCause::SessionRestore,
+            cause: MessageCause::ContextRebuild,
+            expected_surface_revision: 0,
+            reply: tx,
         };
         let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::ReplaceConversationDurably {
-            items: vec![],
-            cause: MessageCause::Rewind,
+        let _ = ChatStateCommand::SeedTokenAccounting {
+            total_tokens: 100,
+            reply: tx,
+        };
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::RewindDurably {
+            target_prompt_index: 0,
             reply: tx,
         };
         let (tx, _rx) = oneshot::channel();
@@ -493,21 +528,11 @@ mod tests {
             plan: PrunePlan::default(),
             reply: tx,
         };
-        let _ = ChatStateCommand::CachePromptText {
-            text: "prompt".to_string(),
-        };
-        let _ = ChatStateCommand::RecordCompactionAt { prompt_index: 0 };
         let _ = ChatStateCommand::Flush;
 
         // Queries
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetConversation { reply: tx };
-
-        let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::GetRewindSurface {
-            target_prompt_index: 0,
-            reply: tx,
-        };
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetPromptIndex { reply: tx };
@@ -539,13 +564,21 @@ mod tests {
         let _ = ChatStateCommand::GetNotificationMeta { reply: tx };
 
         let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::Snapshot { reply: tx };
-
-        let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::TruncateToPromptIndex {
-            target_prompt_index: 0,
+        let _ = ChatStateCommand::MaterializeTimeline {
+            timeline_id: "main".into(),
             reply: tx,
         };
+
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::FetchCompactedContext {
+            summary_seq: 1,
+            offset: 0,
+            limit: 4,
+            reply: tx,
+        };
+
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::Snapshot { reply: tx };
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::CheckAutoCompactNeeded {

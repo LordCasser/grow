@@ -3,23 +3,17 @@ use serde::{Deserialize, Serialize};
 /// Maximum serialized size for `toolInput` or `toolResult` in bytes (128 KB).
 pub const MAX_PAYLOAD_SIZE: usize = 128 * 1024;
 
-/// Generates [`HookEventName`] and its `Deserialize`/`parse_key`, `Display`,
-/// `traits()`, and `ALL` from one table, so adding an event is a single row.
-/// Per row: `display` is the canonical rendering (may differ from the variant's
-/// snake_case, e.g. `SubagentEnd` -> `subagent_stop`); `aliases` are the exact
-/// `Deserialize` spellings (disjoint across variants); `traits` is the
-/// `(gate, matcher)` pair. `Serialize` stays derived snake_case.
+/// Generates [`HookEventName`] and its wire parser, display, traits, and `ALL`
+/// from one table. Each event has exactly one canonical snake-case key.
 macro_rules! hook_events {
     ($(
         $(#[$vmeta:meta])*
         $variant:ident {
-            display: $display:literal,
-            aliases: [$($alias:literal),* $(,)?],
+            key: $key:literal,
             traits: ($gate:ident, $matcher:ident $(,)?),
         }
     ),* $(,)?) => {
-        /// Hook event types. `Ord` follows table order (stable, keeps the
-        /// `SubagentStop`/`SubagentEnd` aliases distinct unlike `Display`).
+        /// Hook event types. `Ord` follows table order.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
         #[serde(rename_all = "snake_case")]
         pub enum HookEventName {
@@ -30,10 +24,10 @@ macro_rules! hook_events {
             /// Every variant, in canonical display order.
             pub const ALL: &'static [HookEventName] = &[$(HookEventName::$variant),*];
 
-            /// Source of truth for known spellings, behind `Deserialize` and `parse_key`.
+            /// Source of truth for canonical keys, behind `Deserialize` and `parse_key`.
             fn from_key_str(s: &str) -> Option<Self> {
                 match s {
-                    $($($alias)|* => Some(Self::$variant),)*
+                    $($key => Some(Self::$variant),)*
                     _ => None,
                 }
             }
@@ -53,7 +47,7 @@ macro_rules! hook_events {
 
         impl std::fmt::Display for HookEventName {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(match self { $(Self::$variant => $display,)* })
+                f.write_str(match self { $(Self::$variant => $key,)* })
             }
         }
 
@@ -73,9 +67,7 @@ macro_rules! hook_events {
                         .collect::<Vec<_>>()
                         .join(", ");
                     serde::de::Error::custom(format!(
-                        "unknown hook event: '{s}'. Expected one of: {known} \
-                         (camelCase and per-operation aliases such as \
-                         beforeShellExecution are also accepted)"
+                        "unknown hook event: '{s}'. Expected one of: {known}"
                     ))
                 })
             }
@@ -84,110 +76,70 @@ macro_rules! hook_events {
 }
 
 // Table order is the canonical display order (drives `ALL` and `Ord`).
-// Per-operation aliases map to generic `PreToolUse`/`PostToolUse`.
 hook_events! {
     SessionStart {
-        display: "session_start",
-        aliases: ["SessionStart", "session_start", "sessionStart"],
+        key: "session_start",
         traits: (Observe, Tested),
     },
     UserPromptSubmit {
-        display: "user_prompt_submit",
-        aliases: ["UserPromptSubmit", "user_prompt_submit", "beforeSubmitPrompt"],
+        key: "user_prompt_submit",
         traits: (Observe, Ignored),
     },
     PreToolUse {
-        display: "pre_tool_use",
-        aliases: [
-            "PreToolUse",
-            "pre_tool_use",
-            "preToolUse",
-            "beforeShellExecution",
-            "beforeMCPExecution",
-            "beforeReadFile",
-        ],
+        key: "pre_tool_use",
         traits: (Tool, Tested),
     },
     PostToolUse {
-        display: "post_tool_use",
-        aliases: [
-            "PostToolUse",
-            "post_tool_use",
-            "postToolUse",
-            "afterShellExecution",
-            "afterMCPExecution",
-            "afterFileEdit",
-            "afterAgentResponse",
-            "afterAgentThought",
-        ],
+        key: "post_tool_use",
         traits: (Observe, Tested),
     },
     PostToolUseFailure {
-        display: "post_tool_use_failure",
-        aliases: ["PostToolUseFailure", "post_tool_use_failure", "postToolUseFailure"],
+        key: "post_tool_use_failure",
         traits: (Observe, Tested),
     },
     PermissionDenied {
-        display: "permission_denied",
-        aliases: ["PermissionDenied", "permission_denied", "permissionDenied"],
+        key: "permission_denied",
         traits: (Observe, Tested),
     },
     /// Fires on a genuine turn-end with stop decision control (a hook can block);
     /// not on user interrupts (API-error turns fire `StopFailure`); observe-only at session end.
     Stop {
-        display: "stop",
-        aliases: ["Stop", "stop"],
+        key: "stop",
         traits: (Stop, Ignored),
     },
     /// Fires when the turn ends due to an API error. Output and exit code are ignored.
     StopFailure {
-        display: "stop_failure",
-        aliases: ["StopFailure", "stop_failure", "stopFailure"],
+        key: "stop_failure",
         traits: (Observe, Tested),
     },
     /// Fires when a turn is cancelled (user abort, permission/hook gate). Observe-only:
     /// output and exit code are ignored, and a hook can never delay the cancel itself.
     StopCancelled {
-        display: "stop_cancelled",
-        aliases: ["StopCancelled", "stop_cancelled", "stopCancelled"],
+        key: "stop_cancelled",
         traits: (Observe, Ignored),
     },
     Notification {
-        display: "notification",
-        aliases: ["Notification", "notification"],
+        key: "notification",
         traits: (Observe, Tested),
     },
     SubagentStart {
-        display: "subagent_start",
-        aliases: ["SubagentStart", "subagent_start", "subagentStart"],
+        key: "subagent_start",
         traits: (Observe, Tested),
     },
     SubagentStop {
-        display: "subagent_stop",
-        aliases: ["SubagentStop", "subagent_stop", "subagentStop"],
-        traits: (Stop, Tested),
-    },
-    /// Legacy alias of `SubagentStop`: kept as a distinct variant so a hook
-    /// registered under either spelling round-trips, then collapsed via
-    /// [`HookEventName::canonical`] for dispatch and dedup.
-    SubagentEnd {
-        display: "subagent_stop",
-        aliases: ["SubagentEnd", "subagent_end", "subagentEnd"],
+        key: "subagent_stop",
         traits: (Stop, Tested),
     },
     PreCompact {
-        display: "pre_compact",
-        aliases: ["PreCompact", "pre_compact", "preCompact"],
+        key: "pre_compact",
         traits: (Observe, Tested),
     },
     PostCompact {
-        display: "post_compact",
-        aliases: ["PostCompact", "post_compact", "postCompact"],
+        key: "post_compact",
         traits: (Observe, Tested),
     },
     SessionEnd {
-        display: "session_end",
-        aliases: ["SessionEnd", "session_end", "sessionEnd"],
+        key: "session_end",
         traits: (Observe, Tested),
     },
 }
@@ -216,15 +168,6 @@ pub struct EventTraits {
 }
 
 impl HookEventName {
-    /// Collapse aliases so a registration and the fired event meet on one key
-    /// (`SubagentEnd` is an alias of `SubagentStop`).
-    pub fn canonical(self) -> Self {
-        match self {
-            Self::SubagentEnd => Self::SubagentStop,
-            other => other,
-        }
-    }
-
     /// Validate a bare event key against the accepted spellings; `None` if unknown.
     pub fn parse_key(s: &str) -> Option<Self> {
         Self::from_key_str(s)
@@ -354,7 +297,7 @@ pub struct HookEventEnvelope {
     pub client_identifier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_id: Option<String>,
-    /// Session permission mode (`default`, `auto`, `plan`, `bypassPermissions`) at fire time.
+    /// Canonical Grow permission mode (`ask`, `auto`, or `always-approve`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     #[serde(flatten)]
@@ -589,51 +532,36 @@ mod tests {
 
     #[test]
     fn event_name_deser_all_variants() {
-        let cases: &[(&str, &str, HookEventName)] = &[
-            ("SessionStart", "session_start", HookEventName::SessionStart),
-            ("PreToolUse", "pre_tool_use", HookEventName::PreToolUse),
-            ("PostToolUse", "post_tool_use", HookEventName::PostToolUse),
+        let cases: &[(&str, HookEventName)] = &[
+            ("session_start", HookEventName::SessionStart),
+            ("pre_tool_use", HookEventName::PreToolUse),
+            ("post_tool_use", HookEventName::PostToolUse),
             (
-                "PostToolUseFailure",
                 "post_tool_use_failure",
                 HookEventName::PostToolUseFailure,
             ),
-            ("SessionEnd", "session_end", HookEventName::SessionEnd),
-            ("Stop", "stop", HookEventName::Stop),
-            ("StopFailure", "stop_failure", HookEventName::StopFailure),
-            ("StopCancelled", "stop_cancelled", HookEventName::StopCancelled),
-            ("Notification", "notification", HookEventName::Notification),
+            ("session_end", HookEventName::SessionEnd),
+            ("stop", HookEventName::Stop),
+            ("stop_failure", HookEventName::StopFailure),
+            ("stop_cancelled", HookEventName::StopCancelled),
+            ("notification", HookEventName::Notification),
             (
-                "UserPromptSubmit",
                 "user_prompt_submit",
                 HookEventName::UserPromptSubmit,
             ),
             (
-                "PermissionDenied",
                 "permission_denied",
                 HookEventName::PermissionDenied,
             ),
-            (
-                "SubagentStart",
-                "subagent_start",
-                HookEventName::SubagentStart,
-            ),
-            ("SubagentStop", "subagent_stop", HookEventName::SubagentStop),
-            ("SubagentEnd", "subagent_end", HookEventName::SubagentEnd),
-            ("PreCompact", "pre_compact", HookEventName::PreCompact),
-            ("PostCompact", "post_compact", HookEventName::PostCompact),
+            ("subagent_start", HookEventName::SubagentStart),
+            ("subagent_stop", HookEventName::SubagentStop),
+            ("pre_compact", HookEventName::PreCompact),
+            ("post_compact", HookEventName::PostCompact),
         ];
 
-        for (pascal, snake, expected) in cases {
-            let from_pascal: HookEventName =
-                serde_json::from_str(&format!("\"{pascal}\"")).unwrap();
-            assert_eq!(
-                from_pascal, *expected,
-                "PascalCase deser failed for {pascal}"
-            );
-
-            let from_snake: HookEventName = serde_json::from_str(&format!("\"{snake}\"")).unwrap();
-            assert_eq!(from_snake, *expected, "snake_case deser failed for {snake}");
+        for (key, expected) in cases {
+            let parsed: HookEventName = serde_json::from_str(&format!("\"{key}\"")).unwrap();
+            assert_eq!(parsed, *expected, "deserialization failed for {key}");
         }
     }
 
@@ -653,7 +581,6 @@ mod tests {
             (HookEventName::PermissionDenied, "permission_denied"),
             (HookEventName::SubagentStart, "subagent_start"),
             (HookEventName::SubagentStop, "subagent_stop"),
-            (HookEventName::SubagentEnd, "subagent_stop"), // alias collapses
             (HookEventName::PreCompact, "pre_compact"),
             (HookEventName::PostCompact, "post_compact"),
         ];
@@ -663,29 +590,12 @@ mod tests {
     }
 
     #[test]
-    fn event_name_deser_camel_and_operation_aliases() {
-        let cases: &[(&str, HookEventName)] = &[
-            ("sessionStart", HookEventName::SessionStart),
-            ("preToolUse", HookEventName::PreToolUse),
-            ("beforeShellExecution", HookEventName::PreToolUse),
-            ("beforeMCPExecution", HookEventName::PreToolUse),
-            ("beforeReadFile", HookEventName::PreToolUse),
-            ("postToolUse", HookEventName::PostToolUse),
-            ("afterShellExecution", HookEventName::PostToolUse),
-            ("afterMCPExecution", HookEventName::PostToolUse),
-            ("afterFileEdit", HookEventName::PostToolUse),
-            ("afterAgentResponse", HookEventName::PostToolUse),
-            ("afterAgentThought", HookEventName::PostToolUse),
-            ("beforeSubmitPrompt", HookEventName::UserPromptSubmit),
-            ("subagentStop", HookEventName::SubagentStop),
-            ("subagentEnd", HookEventName::SubagentEnd),
-            ("preCompact", HookEventName::PreCompact),
-            ("stopFailure", HookEventName::StopFailure),
-            ("stopCancelled", HookEventName::StopCancelled),
-        ];
-        for (spelling, expected) in cases {
-            let parsed: HookEventName = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
-            assert_eq!(parsed, *expected, "alias deser failed for {spelling}");
+    fn event_name_rejects_noncanonical_spellings() {
+        for spelling in ["SessionStart", "sessionStart", "beforeShellExecution"] {
+            assert!(
+                serde_json::from_str::<HookEventName>(&format!("\"{spelling}\"")).is_err(),
+                "noncanonical spelling must be rejected: {spelling}"
+            );
         }
     }
 
@@ -702,11 +612,6 @@ mod tests {
         assert_eq!(HookEventName::PreToolUse.traits().gate, GateKind::Tool);
         assert_eq!(HookEventName::Stop.traits().gate, GateKind::Stop);
         assert_eq!(HookEventName::SubagentStop.traits().gate, GateKind::Stop);
-        assert_eq!(
-            HookEventName::SubagentEnd.traits().gate,
-            GateKind::Stop,
-            "alias resolves through canonical()"
-        );
         assert_eq!(HookEventName::PostToolUse.traits().gate, GateKind::Observe);
         assert_eq!(
             HookEventName::StopCancelled.traits().gate,

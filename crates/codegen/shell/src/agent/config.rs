@@ -1,7 +1,5 @@
 use crate::agent::auth_method::ModelByok;
-use crate::agent::model_providers::{
-    ModelProviderConfig, auth_config_issues, model_provider_auth_name, parse_model_providers,
-};
+use crate::agent::provider_catalog::{auth_config_issues, parse_provider_catalog};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::{sampling::ApiBackend, tools::config::ShellToolsetConfig};
 use agent::prompt::skills::SkillsConfig;
@@ -17,9 +15,6 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tools::types::compat::{
-    COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
-};
 /// The mode in which the agent is running.
 /// Identifies the local product surface that owns the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,7 +35,7 @@ pub enum AgentMode {
 }
 /// Default agent type when the server or user config doesn't specify one.
 pub const DEFAULT_AGENT_TYPE: &str = "grow";
-/// Serde default for `ModelInfo.agent_type` and `ModelEntryConfig.agent_type`.
+/// Serde default for `ModelInfo.agent_type`.
 pub fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
 }
@@ -273,10 +268,9 @@ pub struct Requirements {
 pub struct RuntimeResolutionContext<'a> {
     pub raw_config: &'a toml::Value,
     pub remote_settings: Option<&'a crate::util::config::RemoteSettings>,
-    pub is_headless: bool,
     /// `Some(true)` = CLI explicitly enabled, `None` = defer to config/env/remote.
     pub cli_subagents: Option<bool>,
-    pub cli_session_summary_model: Option<&'a str>,
+    pub cli_session_title_model: Option<&'a str>,
     /// CLI `--experimental-memory` flag. Enables cross-session memory.
     pub cli_experimental_memory: bool,
     /// CLI `--no-memory` flag. Overrides all other memory settings.
@@ -315,125 +309,6 @@ pub(crate) fn env_string(name: &str) -> Option<String> {
     }
 }
 pub use config::env_bool;
-/// Compaction-mode precedence (env > config > remote settings > default, with
-/// unrecognized values at each source falling through). `remote` sits just
-/// above the default, mirroring `feature_flag` in `resolve_bool_flag`. Pure so
-/// it's unit-testable without mutating process env.
-fn resolve_compaction_mode_from(
-    env: Option<&str>,
-    config: Option<&str>,
-    remote: Option<&str>,
-) -> chat_state::CompactionMode {
-    use chat_state::CompactionMode;
-    env.and_then(CompactionMode::parse)
-        .or_else(|| config.and_then(CompactionMode::parse))
-        .or_else(|| remote.and_then(CompactionMode::parse))
-        .unwrap_or_default()
-}
-/// Compaction-detail precedence (env > config > remote settings > default). Pure.
-/// Controls the per-turn verbatim detail in `segments` mode (default `verbose`).
-fn resolve_compaction_detail_from(
-    env: Option<&str>,
-    config: Option<&str>,
-    remote: Option<&str>,
-) -> chat_state::CompactionDetail {
-    use chat_state::CompactionDetail;
-    env.and_then(CompactionDetail::parse)
-        .or_else(|| config.and_then(CompactionDetail::parse))
-        .or_else(|| remote.and_then(CompactionDetail::parse))
-        .unwrap_or_default()
-}
-/// Resolve a single vendor-compat cell: env > `[compat]` TOML > remote settings
-/// remote flag > default ON.
-fn resolve_compat_cell(
-    env: &str,
-    cfg: Option<bool>,
-    remote: Option<bool>,
-    default: bool,
-) -> Resolved<bool> {
-    resolve_compat_cell_with_env(config::env_bool(env), cfg, remote, default)
-}
-pub(crate) fn resolve_compat_cell_with_env(
-    env: Option<bool>,
-    cfg: Option<bool>,
-    remote: Option<bool>,
-    default: bool,
-) -> Resolved<bool> {
-    if let Some(value) = env {
-        Resolved::new(value, ConfigSource::Env)
-    } else if let Some(value) = cfg {
-        Resolved::new(value, ConfigSource::Config)
-    } else if let Some(value) = remote {
-        Resolved::new(value, ConfigSource::Remote)
-    } else {
-        Resolved::new(default, ConfigSource::Default)
-    }
-}
-fn remote_compat_value(
-    remote: Option<&crate::util::config::RemoteSettings>,
-    key: Option<CompatRemoteKey>,
-) -> Option<bool> {
-    let remote = remote?;
-    match key? {
-        CompatRemoteKey::CursorSkills => remote.cursor_skills_enabled,
-        CompatRemoteKey::CursorRules => remote.cursor_rules_enabled,
-        CompatRemoteKey::CursorAgents => remote.cursor_agents_enabled,
-        CompatRemoteKey::CursorMcps => remote.cursor_mcps_enabled,
-        CompatRemoteKey::CursorHooks => remote.cursor_hooks_enabled,
-        CompatRemoteKey::ClaudeSkills => remote.claude_skills_enabled,
-        CompatRemoteKey::ClaudeRules => remote.claude_rules_enabled,
-        CompatRemoteKey::ClaudeAgents => remote.claude_agents_enabled,
-        CompatRemoteKey::ClaudeMcps => remote.claude_mcps_enabled,
-        CompatRemoteKey::ClaudeHooks => remote.claude_hooks_enabled,
-    }
-}
-/// Resolve vendor compatibility cells from TOML and remote settings.
-fn resolve_compat_config(
-    config: &CompatConfigToml,
-    remote: Option<&crate::util::config::RemoteSettings>,
-) -> CompatConfig {
-    let defaults = CompatConfig::default();
-    let mut resolved = defaults;
-    for cell in COMPAT_CELLS {
-        resolved.set(
-            cell,
-            resolve_compat_cell(
-                cell.env_var(),
-                config.value(cell),
-                remote_compat_value(remote, cell.remote_key()),
-                defaults.value(cell),
-            )
-            .value,
-        );
-    }
-    resolved
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CompatConfigCellError {
-    Unavailable,
-    Malformed,
-}
-pub(crate) fn compat_config_cell(
-    raw_config: Result<&toml::Value, ()>,
-    cell: tools::types::compat::CompatCell,
-) -> Result<Option<bool>, CompatConfigCellError> {
-    let raw = raw_config.map_err(|()| CompatConfigCellError::Unavailable)?;
-    let Some(compat) = raw.get("compat") else {
-        return Ok(None);
-    };
-    let compat = compat.as_table().ok_or(CompatConfigCellError::Malformed)?;
-    let Some(vendor) = compat.get(cell.vendor().as_str()) else {
-        return Ok(None);
-    };
-    let vendor = vendor.as_table().ok_or(CompatConfigCellError::Malformed)?;
-    let Some(value) = vendor.get(cell.surface().as_str()) else {
-        return Ok(None);
-    };
-    value
-        .as_bool()
-        .map(Some)
-        .ok_or(CompatConfigCellError::Malformed)
-}
 /// Resolve a string setting: cli > env > config > feature flag. `None` if no source provides a value.
 pub(crate) fn resolve_string_flag(
     cli_arg: Option<&str>,
@@ -502,38 +377,6 @@ pub struct PluginsConfig {
     pub cli_plugin_dirs: Vec<std::path::PathBuf>,
 }
 impl PluginsConfig {
-    /// Merge `enabledPlugins` from Claude settings files into this config.
-    ///
-    /// Reads `enabledPlugins` from `~/.claude/settings.json` only (user scope).
-    /// Project-level `<git_root>/.claude/settings.json` is intentionally NOT
-    /// read here: a malicious repo could pre-populate `enabledPlugins` to
-    /// bypass the project-plugin auto-disable logic in `populate_plugin_lists`,
-    /// enabling attacker-controlled hooks (e.g. SessionStart → RCE).
-    /// Native `.grow/config.toml` entries already present take precedence:
-    /// a name is only added if it isn't already in the opposite list.
-    pub fn merge_claude_enabled_plugins(&mut self, _cwd: Option<&std::path::Path>) {
-        if crate::claude_import::is_claude_import_marked_with_log("merge_claude_enabled_plugins") {
-            return;
-        }
-        let mut paths = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            paths.push(home.join(".claude").join("settings.json"));
-        }
-        for path in &paths {
-            let (claude_enabled, claude_disabled) =
-                agent::plugins::marketplace::load_enabled_disabled_plugins(path);
-            for name in claude_enabled {
-                if !self.disabled.contains(&name) && !self.enabled.contains(&name) {
-                    self.enabled.push(name);
-                }
-            }
-            for name in claude_disabled {
-                if !self.enabled.contains(&name) && !self.disabled.contains(&name) {
-                    self.disabled.push(name);
-                }
-            }
-        }
-    }
     /// Build a `DiscoveryConfig` from this plugins config.
     pub fn to_discovery_config(&self) -> agent::plugins::discovery::DiscoveryConfig {
         agent::plugins::discovery::DiscoveryConfig {
@@ -598,7 +441,7 @@ pub struct DiagnosticsConfig {
     pub crash_handler: Option<bool>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
@@ -617,7 +460,7 @@ pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_summary: Option<String>,
+    pub session_title: Option<String>,
     /// Optional vision model used to describe images returned by `read_file`.
     /// When unset, the active model receives those images directly.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -642,15 +485,12 @@ pub struct ModelsConfig {
     /// Remove these model IDs from the catalog entirely. Wins over `hidden_models`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_models: Option<Vec<String>>,
-    /// Fallback `agent_type` for models without a per-model override.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_type: Option<String>,
     /// Global default request headers applied to every model. A per-model
-    /// `[model.<id>].extra_headers` entry overrides per key (case-insensitive).
+    /// A provider model's `extra_headers` entry overrides per key (case-insensitive).
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub extra_headers: IndexMap<String, String>,
     /// Global default values applied to every model that leaves the field
-    /// unset; a per-model `[model.<id>]` value always wins. A deliberately
+    /// unset; a `[provider.<id>.models.<model>]` value always wins. A deliberately
     /// small, allow-listed subset of the per-model fields (only `Option` ones,
     /// so "unset" is unambiguous). Future: these could consolidate into a
     /// `[models.defaults]` sub-table mirroring the per-model schema 1:1; kept
@@ -741,9 +581,6 @@ pub struct MarketplaceConfig {
     /// `[[marketplace.sources]]` entries.
     #[serde(default)]
     pub sources: Vec<MarketplaceSourceEntry>,
-    /// Written/read out-of-band by `extensions::marketplace`, opaque so a wrong-typed value can't fail load.
-    #[serde(default)]
-    pub default_skills_installs_purged: Option<toml::Value>,
 }
 /// A single `[[marketplace.sources]]` entry.
 #[derive(Clone, Debug, Deserialize)]
@@ -821,18 +658,13 @@ pub struct StorageConfig {
     /// Number of days to keep stale sessions before cleanup. Default: 30.
     pub cleanup_ttl_days: Option<u32>,
 }
-/// `[paths]` configuration: extra directories to scan for skills, rules, etc.
-///
-/// These supplement the built-in scan locations (`.grow/skills/`,
-/// `.agents/skills/`, `~/.grow/skills/`). They're written by `/import-claude`
-/// to preserve previously-discovered Claude directories after the runtime
-/// `.claude/` cutoff (see `[claude_compat] imported`).
+/// `[paths]` configuration: explicit additional directories to scan.
 ///
 /// Example:
 /// ```toml
 /// [paths]
-/// extra_skill_dirs = ["~/.claude/skills", "/path/to/.claude/skills"]
-/// extra_rule_dirs = ["~/.claude/rules"]
+/// extra_skill_dirs = ["~/team/skills", "/workspace/shared/skills"]
+/// extra_rule_dirs = ["~/team/rules"]
 /// ```
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -895,8 +727,6 @@ pub struct Config {
     /// [`parse_auth_providers`] from trusted config layers only.
     #[serde(skip)]
     pub auth_providers: IndexMap<String, crate::auth::AuthProviderConfig>,
-    #[serde(skip)]
-    pub model_providers: IndexMap<String, ModelProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcuts: Option<toml::Value>,
     /// Written by the client via `config_toml_edit`; absorbed so it isn't
@@ -925,11 +755,6 @@ pub struct Config {
     /// Skills discovery configuration.
     #[serde(default)]
     pub skills: SkillsConfig,
-    /// Raw `[compat]` vendor-compatibility config (per-vendor × per-surface
-    /// toggles). Resolved into [`Config::compat_resolved`] by
-    /// `resolve_runtime_fields`.
-    #[serde(default)]
-    pub compat: CompatConfigToml,
     /// Plugin system configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
@@ -958,8 +783,6 @@ pub struct Config {
     pub memory: crate::config::MemoryConfig,
     #[serde(default, skip_serializing)]
     pub compaction: CompactionConfig,
-    #[serde(default, skip_serializing)]
-    pub managed_mcps: crate::config::ManagedMcpsConfig,
     /// Final top-level local `announcements` array. The default is Grow's
     /// built-in notice; an explicitly configured empty array disables it.
     #[serde(default = "announcements::default_announcements", skip_serializing)]
@@ -993,13 +816,10 @@ pub struct Config {
     pub reasoning_effort_override: Option<ReasoningEffort>,
     /// CLI override for the session summary model ID.
     #[serde(skip)]
-    pub session_summary_model_override: Option<String>,
-    /// CLI override for YOLO mode (auto-approve all permissions).
-    /// Takes precedence over default settings.
+    pub session_title_model_override: Option<String>,
+    /// Resolved launch default for newly created sessions.
     #[serde(skip)]
-    pub default_yolo_mode: bool,
-    /// Start sessions in auto permission mode (classifier) when no per-session override.
-    pub default_auto_mode: bool,
+    pub default_permission_mode: ::diagnostics::enums::PermissionMode,
     /// CLI `--experimental-memory` flag. Stored for `ConfigReloader` hot-reload re-resolution.
     #[serde(skip)]
     pub cli_experimental_memory: bool,
@@ -1056,12 +876,6 @@ pub struct Config {
     /// Keys are agent names, values are booleans. Omitted agents default to enabled.
     #[serde(skip)]
     pub subagent_toggle: std::collections::HashMap<String, bool>,
-    /// Trust-independent roles from inline, user, and bundled sources.
-    #[serde(skip)]
-    pub subagent_roles: std::collections::HashMap<String, crate::config::SubagentRole>,
-    /// Trust-independent personas from inline, user, and bundled sources.
-    #[serde(skip)]
-    pub subagent_personas: std::collections::HashMap<String, crate::config::SubagentPersona>,
     /// Whether the runtime turn-end TodoGate is force-enabled via the
     /// `--todo-gate` CLI flag. Session-scoped — not persisted. When
     /// true, flips the runtime policy's `enabled` bit on regardless of
@@ -1092,30 +906,17 @@ pub struct Config {
     /// session configuration for diagnostics.
     #[serde(default)]
     pub path_not_found_hints: bool,
-    /// Whether to fetch managed MCP configs from the managed connectors service at startup.
-    /// Resolved by [`crate::config::ManagedMcpsConfig::resolve`]: env var >
-    /// config.toml > remote settings > default (off in headless, on in interactive).
-    #[serde(skip)]
-    pub managed_mcps_enabled: bool,
-    #[serde(skip)]
-    pub managed_mcp_gateway_tools_enabled: bool,
     /// Whether auto-wake is enabled: when a background task or subagent
     /// completes, immediately inject a synthetic prompt instead of waiting
     /// for the idle-gated notification drain.
     #[serde(skip)]
     pub auto_wake_enabled: bool,
-    /// Resolved vendor-compat config (env → `[compat]` TOML → feature flag →
-    /// default ON), built from `compat` + `remote_settings` in
-    /// `resolve_runtime_fields`. Threaded into skills / rules / AGENTS.md
-    /// discovery.
-    #[serde(skip)]
-    pub compat_resolved: CompatConfig,
     /// Enforced requirement pins from `requirements.toml`.
     #[serde(skip)]
     pub requirements: Requirements,
     /// Session title model. `None` means use the active model.
     #[serde(skip)]
-    pub session_summary_model: Option<String>,
+    pub session_title_model: Option<String>,
     /// Image description model. `None` keeps image reads on the active model.
     #[serde(skip)]
     pub image_description_model: Option<String>,
@@ -1131,7 +932,6 @@ pub struct CliAgentOverrides {
     pub disallowed_tools: Option<Vec<String>>,
     pub permission_rules: Vec<workspace::permission::types::PermissionRule>,
     pub max_turns: Option<u32>,
-    pub permission_mode: Option<agent::config::PermissionMode>,
 }
 impl CliAgentOverrides {
     /// Apply to the *main-session* agent, which the operator defines directly:
@@ -1145,9 +945,6 @@ impl CliAgentOverrides {
         if let Some(ref dt) = self.disallowed_tools {
             def.disallowed_tools = dt.clone();
         }
-        if let Some(ref pm) = self.permission_mode {
-            def.permission_mode = pm.clone();
-        }
     }
     /// Subagent variant of [`Self::apply_to_definition`]: records the flags as
     /// session-clamp state (see [`AgentDefinition::session_tools_allowlist`])
@@ -1155,33 +952,13 @@ impl CliAgentOverrides {
     pub fn apply_to_subagent_definition(&self, def: &mut agent::config::AgentDefinition) {
         def.session_tools_allowlist = self.tools.clone();
         def.session_tools_denylist = self.disallowed_tools.clone();
-        if let Some(ref parent_mode) = self.permission_mode
-            && def.plugin_name.is_none()
-        {
-            def.permission_mode =
-                resolve_subagent_permission_mode(def.permission_mode.clone(), parent_mode);
-        }
     }
     pub fn has_definition_overrides(&self) -> bool {
-        self.tools.is_some() || self.disallowed_tools.is_some() || self.permission_mode.is_some()
-    }
-}
-/// Parent bypassPermissions/acceptEdits/auto override the subagent's own mode
-/// (spec); any other parent mode keeps it.
-fn resolve_subagent_permission_mode(
-    own: PermissionMode,
-    parent: &PermissionMode,
-) -> PermissionMode {
-    match parent {
-        PermissionMode::BypassPermissions | PermissionMode::AcceptEdits | PermissionMode::Auto => {
-            parent.clone()
-        }
-        _ => own,
+        self.tools.is_some() || self.disallowed_tools.is_some()
     }
 }
 pub use agent::config::AgentDefinition;
 pub use agent::config::Effort;
-pub use agent::config::PermissionMode;
 pub use client_support::ui_config::{ContextualHints, FollowUpBehavior, UiConfig};
 /// Configuration for selecting the agent definition.
 ///
@@ -1344,7 +1121,6 @@ impl Default for Config {
             config_models: IndexMap::new(),
             config_warnings: Vec::new(),
             auth_providers: IndexMap::new(),
-            model_providers: IndexMap::new(),
             shortcuts: None,
             hints: None,
             ui: UiConfig::default(),
@@ -1355,7 +1131,6 @@ impl Default for Config {
             agent: AgentSelectionConfig::default(),
             repo_changes_dedup: RepoChangesDedupConfig::default(),
             skills: SkillsConfig::default(),
-            compat: CompatConfigToml::default(),
             plugins: PluginsConfig::default(),
             paths: PathsConfig::default(),
             cli: CliConfig::default(),
@@ -1369,7 +1144,6 @@ impl Default for Config {
             subagents: crate::config::SubagentsConfig::default(),
             memory: crate::config::MemoryConfig::default(),
             compaction: CompactionConfig::default(),
-            managed_mcps: crate::config::ManagedMcpsConfig::default(),
             announcements: announcements::default_announcements(),
             tips: None,
             permission: PermissionKnownKeys::default(),
@@ -1380,9 +1154,8 @@ impl Default for Config {
             diagnostics: DiagnosticsConfig::default(),
             default_model_override: None,
             reasoning_effort_override: None,
-            session_summary_model_override: None,
-            default_yolo_mode: false,
-            default_auto_mode: false,
+            session_title_model_override: None,
+            default_permission_mode: ::diagnostics::enums::PermissionMode::Ask,
             agent_profile_path: None,
             client_version: Some(version::VERSION.to_string()),
             mode: AgentMode::default(),
@@ -1395,8 +1168,6 @@ impl Default for Config {
             subagent_classifier_input: Default::default(),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
-            subagent_roles: std::collections::HashMap::new(),
-            subagent_personas: std::collections::HashMap::new(),
             todo_gate: false,
             laziness_debug_log: None,
             respect_gitignore: false,
@@ -1405,12 +1176,9 @@ impl Default for Config {
             cli_no_memory: false,
             cli_subagents: None,
             memory_config: None,
-            managed_mcps_enabled: true,
-            managed_mcp_gateway_tools_enabled: false,
             auto_wake_enabled: true,
-            compat_resolved: CompatConfig::default(),
             requirements: Requirements::default(),
-            session_summary_model: None,
+            session_title_model: None,
             image_description_model: None,
             prompt_suggest_model_pin: crate::config::PromptSuggestModelPin::Unpinned,
         };
@@ -1532,45 +1300,13 @@ impl Config {
         Ok((config, unrecognized_keys))
     }
     pub fn new_from_toml_cfg(raw_config: &toml::Value) -> Result<Self, String> {
-        let normalized_model_config =
-            super::model_providers::normalize_provider_config(raw_config)?;
-        let super::config_model_override_parse::ParsedModelOverrides {
-            models: config_models,
-            warnings: config_warnings,
-        } = super::config_model_override_parse::parse_model_overrides(&normalized_model_config);
         let (mut auth_providers, auth_provider_warnings) = parse_auth_providers(raw_config);
-        let (model_providers, mut model_provider_warnings) =
-            parse_model_providers(&normalized_model_config);
-        for (id, provider) in &model_providers {
-            if let Some(auth) = &provider.auth {
-                let synthetic = model_provider_auth_name(id);
-                if auth_providers.contains_key(&synthetic) {
-                    model_provider_warnings
-                        .push(
-                            super::config_model_override_parse::ConfigWarning::model_provider(
-                                id,
-                                Some("auth"),
-                                super::config_model_override_parse::ConfigWarningKind::ConflictingFields,
-                                format!(
-                                "inline auth overwrites a hand-written \
-                                 [auth_provider.\"{synthetic}\"]; the `model_provider:` prefix is \
-                                 a reserved namespace"
-                            ),
-                            ),
-                        );
-                }
-                auth_providers.insert(synthetic, auth.clone());
-            }
-        }
+        let (config_models, provider_warnings) =
+            parse_provider_catalog(raw_config, &mut auth_providers)?;
         let mut base = toml::Value::try_from(Self::default()).map_err(|e| e.to_string())?;
-        if let toml::Value::Table(ref mut t) = base {
-            t.remove("model");
-        }
         let mut raw_without_model_sections = raw_config.clone();
         if let toml::Value::Table(ref mut t) = raw_without_model_sections {
-            t.remove("model");
             t.remove("auth_provider");
-            t.remove("model_providers");
             t.remove("provider");
         }
         let parsed_mcp_servers =
@@ -1586,11 +1322,9 @@ impl Config {
             Self::deserialize_collecting_unrecognized(base, &raw_without_model_sections)?;
         config.mcp_servers = parsed_mcp_servers.into_iter().collect();
         config.config_models = config_models;
-        config.config_warnings = config_warnings;
+        config.config_warnings = provider_warnings;
         config.auth_providers = auth_providers;
-        config.model_providers = model_providers;
         config.config_warnings.extend(auth_provider_warnings);
-        config.config_warnings.extend(model_provider_warnings);
         unrecognized_keys.sort();
         for key in unrecognized_keys {
             config.config_warnings.push(
@@ -1606,12 +1340,6 @@ impl Config {
             .and_then(toml::Value::as_table)
             .map(|t| t.keys().map(String::as_str).collect())
             .unwrap_or_default();
-        let declared_model_provider_names: std::collections::HashSet<&str> =
-            normalized_model_config
-                .get("model_providers")
-                .and_then(toml::Value::as_table)
-                .map(|t| t.keys().map(String::as_str).collect())
-                .unwrap_or_default();
         for (model_key, model) in &config.config_models {
             if let Some(ref name) = model.auth_provider
                 && !config.auth_providers.contains_key(name)
@@ -1629,48 +1357,13 @@ impl Config {
                     ),
                 );
             }
-            if let Some(ref id) = model.model_provider
-                && !config.model_providers.contains_key(id)
-                && !declared_model_provider_names.contains(id.as_str())
-            {
-                config.config_warnings.push(
-                    super::config_model_override_parse::ConfigWarning::model(
-                        model_key,
-                        Some("model_provider"),
-                        super::config_model_override_parse::ConfigWarningKind::InvalidValue,
-                        format!(
-                            "references [model_providers.{id}], which is not defined; \
-                             provider defaults are not applied — the model uses its own \
-                             credential if set, otherwise fails closed on a custom endpoint"
-                        ),
-                    ),
-                );
-            }
-        }
-        for (id, provider) in &config.model_providers {
-            if let Some(ref name) = provider.auth_provider
-                && !config.auth_providers.contains_key(name)
-                && !declared_provider_names.contains(name.as_str())
-            {
-                config.config_warnings.push(
-                    super::config_model_override_parse::ConfigWarning::model_provider(
-                        id,
-                        Some("auth_provider"),
-                        super::config_model_override_parse::ConfigWarningKind::InvalidValue,
-                        format!(
-                            "references [auth_provider.{name}], which is not defined; \
-                             inheriting models fail closed with no provider credential"
-                        ),
-                    ),
-                );
-            }
         }
         super::config_model_override_parse::log_config_warnings(&config.config_warnings);
         if config.client_version.is_none() {
             config.client_version = Self::default().client_version;
         }
         let model_overrides = crate::config::ModelOverrideConfig::resolve(None, raw_config, None);
-        config.session_summary_model = model_overrides.session_summary;
+        config.session_title_model = model_overrides.session_title;
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
         config.apply_env_overrides();
@@ -1708,6 +1401,36 @@ impl Config {
                     id.split('/').next().unwrap_or("<id>")
                 ));
             }
+            let mut option_ids = std::collections::HashSet::new();
+            let mut option_values = Vec::new();
+            let mut default_count = 0usize;
+            for option in &model.info.reasoning_efforts {
+                let normalized_id = option.id.trim().to_ascii_lowercase();
+                if normalized_id.is_empty() {
+                    return Err(format!(
+                        "model `{id}` has a reasoning_efforts entry with an empty id"
+                    ));
+                }
+                if !option_ids.insert(normalized_id) {
+                    return Err(format!(
+                        "model `{id}` has duplicate reasoning_efforts id `{}`",
+                        option.id
+                    ));
+                }
+                if option_values.contains(&option.value) {
+                    return Err(format!(
+                        "model `{id}` lists reasoning effort `{}` more than once",
+                        option.value
+                    ));
+                }
+                option_values.push(option.value);
+                default_count += usize::from(option.default);
+            }
+            if default_count > 1 {
+                return Err(format!(
+                    "model `{id}` marks more than one reasoning_efforts entry as default"
+                ));
+            }
         }
         Ok(())
     }
@@ -1723,8 +1446,6 @@ impl Config {
         self.subagent_classifier_input = sa.classifier_input;
         self.subagent_model_overrides = sa.models;
         self.subagent_toggle = sa.toggle;
-        self.subagent_roles = sa.roles;
-        self.subagent_personas = sa.personas;
         let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH).ok();
         let remote = self
             .remote_settings
@@ -1738,8 +1459,7 @@ impl Config {
     /// Call immediately after `new_from_toml_cfg()`. Fields resolved:
     /// - subagents base layers (6 fields) via `SubagentsConfig::resolve`
     /// - respect_gitignore via `ToolsConfig::resolve`
-    /// - managed_mcps_enabled via `ManagedMcpsConfig::resolve`
-    /// - session_summary_model / image_description_model /
+    /// - session_title_model / image_description_model /
     ///   prompt_suggest_model_pin via `ModelOverrideConfig::resolve`
     /// - memory_config via `MemoryConfig::resolve`
     /// - path_not_found_hints from remote_settings
@@ -1748,7 +1468,7 @@ impl Config {
     /// `resolve_worktree_type` since it's an agent-level field, not a Config field.
     pub fn resolve_runtime_fields(&mut self, ctx: &RuntimeResolutionContext<'_>) {
         self.cli_subagents = ctx.cli_subagents;
-        self.session_summary_model_override = ctx.cli_session_summary_model.map(|s| s.to_owned());
+        self.session_title_model_override = ctx.cli_session_title_model.map(|s| s.to_owned());
         let cli_flag = ctx.cli_subagents.unwrap_or(false);
         self.resolve_subagents(cli_flag, ctx.raw_config);
         let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH).ok();
@@ -1765,19 +1485,12 @@ impl Config {
             Some(pinned) => pinned,
             None => tools.respect_gitignore,
         };
-        let mcps = crate::config::ManagedMcpsConfig::resolve(
-            ctx.raw_config,
-            ctx.remote_settings,
-            ctx.is_headless,
-        );
-        self.managed_mcps_enabled = mcps.enabled;
-        self.managed_mcp_gateway_tools_enabled = mcps.gateway_tools_enabled;
         let models = crate::config::ModelOverrideConfig::resolve(
-            ctx.cli_session_summary_model,
+            ctx.cli_session_title_model,
             ctx.raw_config,
             ctx.remote_settings,
         );
-        self.session_summary_model = models.session_summary;
+        self.session_title_model = models.session_title;
         self.image_description_model = models.image_description;
         self.prompt_suggest_model_pin = models.prompt_suggestion;
         self.cli_experimental_memory = ctx.cli_experimental_memory;
@@ -1800,7 +1513,6 @@ impl Config {
             .default(true)
             .resolve()
             .value;
-        self.compat_resolved = resolve_compat_config(&self.compat, ctx.remote_settings);
     }
     /// Re-resolve eagerly-resolved runtime fields using the current `Config`
     /// state and fresh `raw_config`. Builds a [`RuntimeResolutionContext`] from
@@ -1809,14 +1521,13 @@ impl Config {
     /// Integration test coverage: `tests/test_settings_refresh.rs`.
     pub fn re_resolve_runtime_fields(&mut self, raw_config: &toml::Value) {
         let remote_settings = self.remote_settings.clone();
-        let cli_session_summary_model = self.session_summary_model_override.clone();
+        let cli_session_title_model = self.session_title_model_override.clone();
         let laziness_debug_log = self.laziness_debug_log.clone();
         let ctx = RuntimeResolutionContext {
             raw_config,
             remote_settings: remote_settings.as_ref(),
-            is_headless: self.mode == AgentMode::Headless,
             cli_subagents: self.cli_subagents,
-            cli_session_summary_model: cli_session_summary_model.as_deref(),
+            cli_session_title_model: cli_session_title_model.as_deref(),
             cli_experimental_memory: self.cli_experimental_memory,
             cli_no_memory: self.cli_no_memory,
             todo_gate: self.todo_gate,
@@ -1828,23 +1539,6 @@ impl Config {
     fn apply_env_overrides(&mut self) {}
     pub fn is_session_recap_enabled(&self) -> bool {
         self.resolve_session_recap().value
-    }
-    /// Two-pass (prefire) compaction gate. Default OFF (opt-in) — enable via
-    /// remote settings `two_pass_compaction_enabled`, the `[features] two_pass_compaction`
-    /// config.toml key, or `GROW_TWO_PASS_COMPACTION` env.
-    pub fn is_two_pass_compaction_enabled(&self) -> bool {
-        self.resolve_two_pass_compaction().value
-    }
-    pub(crate) fn resolve_two_pass_compaction(&self) -> Resolved<bool> {
-        let ff = self
-            .remote_settings
-            .as_ref()
-            .and_then(|s| s.two_pass_compaction_enabled);
-        BoolFlag::env("GROW_TWO_PASS_COMPACTION")
-            .config(self.features.two_pass_compaction)
-            .feature_flag(ff)
-            .default(false)
-            .resolve()
     }
     /// Server-side doom-loop check policy (the `x-grow-doom-loop-check`
     /// header, trigger parsing, and confident-signal resampling, all
@@ -1990,19 +1684,6 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Resolve the mode (env `GROW_COMPACTION_MODE` > config > remote settings >
-    /// default, unrecognized falling through) and, for `Segments`, attach the
-    /// separately-resolved detail level.
-    pub(crate) fn resolve_compaction_mode(&self) -> chat_state::CompactionMode {
-        resolve_compaction_mode_from(
-            env_string("GROW_COMPACTION_MODE").as_deref(),
-            self.features.compaction_mode.as_deref(),
-            self.remote_settings
-                .as_ref()
-                .and_then(|r| r.compaction_mode.as_deref()),
-        )
-        .with_segment_detail(self.resolve_compaction_detail())
-    }
     /// Resolve verbatim-input flag: env `GROW_COMPACTION_VERBATIM_INPUT` > config > remote settings > default `true`.
     pub(crate) fn resolve_compaction_verbatim_input(&self) -> bool {
         BoolFlag::env("GROW_COMPACTION_VERBATIM_INPUT")
@@ -2052,19 +1733,6 @@ impl Config {
                 .and_then(|r| r.compaction_pre_prune_token_budget),
         )
     }
-    /// Precedence: env `GROW_COMPACTION_DETAIL`, then config
-    /// `features.compaction_detail`, then remote settings
-    /// `remote_settings.compaction_detail`, then default (`verbose`). Drives the
-    /// `segments` verbatim detail level.
-    fn resolve_compaction_detail(&self) -> chat_state::CompactionDetail {
-        resolve_compaction_detail_from(
-            env_string("GROW_COMPACTION_DETAIL").as_deref(),
-            self.features.compaction_detail.as_deref(),
-            self.remote_settings
-                .as_ref()
-                .and_then(|r| r.compaction_detail.as_deref()),
-        )
-    }
     pub fn resolve_cancel_rewind(&self) -> Resolved<bool> {
         let ff = self
             .remote_settings
@@ -2102,21 +1770,6 @@ impl Config {
     /// all 7 layers.
     pub fn resolve_mcp_auto_restart(&self) -> Resolved<bool> {
         resolve_mcp_auto_restart(None, None, self.features.mcp_auto_restart, None, None)
-    }
-    /// Resolve whether the pager subscribes to the per-server
-    /// `grow/mcp/server_status` push.
-    ///
-    /// Thin delegate to the canonical
-    /// [`resolve_mcp_push_server_status`] free function — mirrors the
-    /// `resolve_mcp_liveness_watchers` pattern so the two
-    /// implementations can't drift. CLI / managed / feature-flag
-    /// inputs are `None` here because the `Config` method only has
-    /// visibility into the embedded `Features` table; richer call
-    /// sites go through
-    /// [`crate::util::config::resolve_mcp_push_server_status`] which
-    /// stacks all 7 layers.
-    pub fn resolve_mcp_push_server_status(&self) -> Resolved<bool> {
-        resolve_mcp_push_server_status(None, None, self.features.mcp_push_server_status, None, None)
     }
     /// Resolve whether the leader's `ConfigFileWatcher` adds the two
     /// narrow non-recursive watches for `<cwd>/` and `<cwd>/.grow/`.
@@ -2189,36 +1842,6 @@ pub fn resolve_mcp_auto_restart(
     feature_flag: Option<bool>,
 ) -> Resolved<bool> {
     BoolFlag::env("GROW_MCP_AUTO_RESTART")
-        .requirement(requirement)
-        .cli(cli)
-        .config(config)
-        .managed(managed)
-        .feature_flag(feature_flag)
-        .default(true)
-        .resolve()
-}
-/// Canonical resolver for `mcp.push_server_status`. Stacks the same
-/// 7-step `BoolFlag` precedence as
-/// [`resolve_mcp_liveness_watchers`]:
-///
-/// `requirement > cli > env (GROW_MCP_PUSH_SERVER_STATUS) > config >
-/// managed > feature_flag > default (true)`.
-///
-/// Both `Config::resolve_mcp_push_server_status` and
-/// `util::config::resolve_mcp_push_server_status` delegate here so
-/// the precedence is single-sourced.
-///
-/// The default is `true` — the pager's subscription to
-/// `grow/mcp/server_status` is wired default-on, with this
-/// flag existing primarily as a kill switch.
-pub fn resolve_mcp_push_server_status(
-    requirement: Option<bool>,
-    cli: Option<bool>,
-    config: Option<bool>,
-    managed: Option<bool>,
-    feature_flag: Option<bool>,
-) -> Resolved<bool> {
-    BoolFlag::env("GROW_MCP_PUSH_SERVER_STATUS")
         .requirement(requirement)
         .cli(cli)
         .config(config)
@@ -2306,14 +1929,6 @@ pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config:
     crate::session::normalize_cache::NormalizeCache::global()
         .set_enabled(image_normalize_cache_enabled);
 }
-/// Read `env.<key>` from Claude-compat `managed_settings.json`. `Some(true)`
-/// indicates a force-off signal from a Mac-MDM-style admin policy.
-fn managed_settings_env_flag(key: &str) -> Option<bool> {
-    let path = config::claude_managed_settings_path()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    workspace::permission::resolution::json_env_flag(json.get("env"), key)
-}
 /// Assemble the final model map from the configured provider hierarchy.
 /// Remote catalogs and compiled presets are intentionally not model sources.
 pub fn resolve_model_list(cfg: &Config) -> IndexMap<String, ModelEntry> {
@@ -2331,21 +1946,13 @@ pub fn resolve_model_list(cfg: &Config) -> IndexMap<String, ModelEntry> {
                 );
             }
         }
-        let with_provider = model_override.model_provider.as_deref().map(|pid| {
-            match cfg.model_providers.get(pid) {
-                Some(provider) => model_override.with_provider_defaults(provider, pid),
-                None => model_override.with_missing_provider(),
-            }
-        });
-        let effective = with_provider.as_ref().unwrap_or(model_override);
-        let mut entry = effective.apply(key, base);
+        let entry = model_override.apply(key, base);
         tracing::debug!(
             model_key = %key,
             base_url = %entry.info.base_url,
             has_api_key = entry.api_key.is_some(),
             env_key = ?entry.env_key,
             auth_provider = entry.auth_provider.as_ref().map(|p| p.name.as_str()),
-            model_provider = model_override.model_provider.as_deref(),
             had_base,
             "config model override applied"
         );
@@ -2367,60 +1974,14 @@ pub fn resolve_model_list(cfg: &Config) -> IndexMap<String, ModelEntry> {
             provider.attach_trusted_config(config);
         }
     }
-    {
-        let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let donors: std::collections::HashMap<String, (std::num::NonZeroU64, ApiBackend)> =
-            resolved
-                .values()
-                .filter(|e| e.info.context_window.get() != default_cw)
-                .map(|e| {
-                    (
-                        e.info.model.clone(),
-                        (e.info.context_window, e.info.api_backend.clone()),
-                    )
-                })
-                .collect();
-        for entry in resolved.values_mut() {
-            if let Some((donor_cw, donor_backend)) = donors.get(&entry.info.model) {
-                if entry.info.context_window.get() == default_cw {
-                    tracing::debug!(
-                        model = %entry.info.model,
-                        from = default_cw,
-                        to = donor_cw.get(),
-                        "slug-match: inheriting context_window from sibling catalog entry"
-                    );
-                    entry.info.context_window = *donor_cw;
-                }
-                if entry.info.api_backend == ApiBackend::default()
-                    && *donor_backend != ApiBackend::default()
-                {
-                    entry.info.api_backend.clone_from(donor_backend);
-                }
-            }
-        }
-    }
-    if let Some(ref global_agent_type) = cfg.models.agent_type {
-        tracing::warn!(
-            global_agent_type = %global_agent_type,
-            "[models] agent_type is deprecated. Set agent_type on each [model.X] entry instead."
-        );
-        for entry in resolved.values_mut() {
-            if entry.info.agent_type == DEFAULT_AGENT_TYPE {
-                entry.info.agent_type = global_agent_type.clone();
-            }
-        }
-    }
     apply_global_extra_headers(&mut resolved, &cfg.models);
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
-    for entry in resolved.values_mut() {
-        entry.info.derive_reasoning_effort_fields();
-    }
     resolved
 }
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers`
 /// into every model as a base. The presence check is case-insensitive because
 /// the sampler lowers these into an `http::HeaderMap`, so a global `X-Foo` must
-/// not shadow a per-model `x-foo`; a per-model `[model.<id>].extra_headers`
+/// not shadow a per-model `x-foo`; a provider model's `extra_headers`
 /// (applied earlier) therefore wins per key.
 fn apply_global_extra_headers(resolved: &mut IndexMap<String, ModelEntry>, models: &ModelsConfig) {
     if models.extra_headers.is_empty() {
@@ -2474,138 +2035,15 @@ fn apply_global_scalar_defaults(
         }
     }
 }
-/// Resolve a model against the available model map.
-/// Checks the map key (id) first, then falls back to a slug scan.
-pub fn find_model_by_id<'a>(
+/// Resolve an exact `provider/model` identity against the catalog.
+pub fn find_model_by_catalog_id<'a>(
     models: &'a IndexMap<String, ModelEntry>,
     model_id: &str,
 ) -> Option<&'a ModelEntry> {
-    models
-        .get(model_id)
-        .or_else(|| models.values().find(|m| m.model == model_id))
+    models.get(model_id)
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelEntryConfig {
-    /// Stable unique identifier for this catalog entry. When present,
-    /// used as the catalog map key. Falls back to `model` when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// The routing slug sent in API requests.
-    pub model: String,
-    /// The base URL of the model. e.g. "https://api.example.com/v1"
-    pub base_url: String,
-    /// Human-readable display name of the model.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    /// The API key for this model's provider.
-    /// If not set, falls back to env_key, then GROW_API_KEY.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Environment variable name(s) that hold the provider API key.
-    /// Accepts a string or an array (first set, non-empty value wins).
-    /// If not set, falls back to GROW_API_KEY.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub env_key: Option<EnvKeys>,
-    /// Which API backend to use for this model.
-    /// Values: "chat_completions" (default), "responses"
-    #[serde(default)]
-    pub api_backend: ApiBackend,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_scheme: Option<AuthScheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub supports_reasoning_effort: bool,
-    /// Per-model reasoning-effort menu (source of truth). The two legacy fields
-    /// above are derived from this list when it is non-empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reasoning_efforts: Vec<ReasoningEffortOption>,
-    /// Extra headers to send with requests to this model's endpoint.
-    /// Useful for BYOK (Bring Your Own Key) scenarios.
-    /// Example: { "x-anthropic-api-key" = "sk-ant-..." }
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    pub extra_headers: IndexMap<String, String>,
-    /// The total context window size in tokens for this model.
-    /// Used for auto-compact threshold calculations.
-    /// Required — BYOK users must explicitly set this in config.toml.
-    pub context_window: NonZeroU64,
-    /// Per-model auto-compact threshold (0-100). When the session's token
-    /// usage exceeds this percentage of `context_window`, the conversation
-    /// is summarized. Resolver precedence:
-    /// requirements > env > user (per-model > global) > managed (per-model > global)
-    /// > remote per-model (this field) > remote global > 85.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_compact_threshold_percent: Option<u8>,
-    /// Per-model system-prompt identity label (not UI `name`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt_label: Option<String>,
-    /// When true, this model uses concise mode (compact system prompt,
-    /// concise tool output, concise user message prefix, reduced toolset).
-    /// Defaults to false — when omitted or false, nothing changes.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub use_concise: bool,
-    /// The type of system prompt to use for this model.
-    /// e.g. "grow-build", "browser-use".
-    #[serde(default = "default_agent_type")]
-    pub agent_type: String,
-    /// Maximum seconds to wait between SSE chunks during inference streaming.
-    /// When no chunk is received within this duration, the request fails with
-    /// a non-retryable `IdleTimeout` error. This is a per-chunk deadline that
-    /// resets on every received chunk — NOT a total-turn timeout.
-    /// Default: 300 seconds (5 minutes).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inference_idle_timeout_secs: Option<u64>,
-    /// Maximum number of retries for transient API errors (429, 500, 502, etc.)
-    /// during a single inference request. Default: 5.
-    /// Can also be set via the `GROW_MAX_RETRIES` environment variable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_retries: Option<u32>,
-    /// Exclude from the client model picker; still usable by internal tasks.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub hidden: bool,
-    /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compactions_remaining: Option<CompactionsRemaining>,
-    /// Per-model config for the `x-compaction-at` header; `None` disables it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_at_tokens: Option<CompactionAtTokens>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub show_model_fingerprint: bool,
-    /// Inject `stream_tool_calls: true` into the request body
-    /// so the upstream emits per-chunk `function_call_arguments.delta`
-    /// Without this set, backends using this extension send args as one delta
-    /// event, defeating the purpose of streaming.
-    ///
-    /// Per-model opt-in -- BYOK endpoints that don't understand the
-    /// flag should leave this unset to avoid request errors.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream_tool_calls: Option<bool>,
-    /// Per-model Layer-3 LazinessDetector configuration. Defaults to
-    /// the all-disabled state via `#[serde(default)]`.
-    #[serde(default, skip_serializing_if = "is_default_laziness_detector")]
-    pub laziness_detector: LazinessDetectorPerModelConfig,
-}
-/// True when `cfg` equals the all-disabled default. Derives `PartialEq`
-/// on `f32`, which is fine for the current shape because both `f32`
-/// fields default to `None` — there's no parsed-vs-literal `0.7` float
-/// equality footgun. If a future default introduces `Some(0.7)`, this
-/// helper must be reworked (e.g. compare on tolerance, or switch to a
-/// bit-pattern compare) so `skip_serializing_if` doesn't start emitting
-/// `[laziness_detector]` blocks for every model in `config.toml`.
-fn is_default_laziness_detector(cfg: &LazinessDetectorPerModelConfig) -> bool {
-    cfg == &LazinessDetectorPerModelConfig::default()
-}
-/// A `[model.foo]` entry from config.toml, parsed directly from raw TOML
-/// (bypassing deep merge). Scalar fields are `Option` so absent means "inherit
-/// from defaults/prefetched"; the collection fields (`extra_headers`,
+/// A canonical provider-model entry projected from config.toml. Scalar fields
+/// are `Option` so absent means "inherit from provider/global defaults"; the collection fields (`extra_headers`,
 /// `reasoning_efforts`) merge only when non-empty and so cannot express
 /// "override to empty."
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -2622,7 +2060,6 @@ pub struct ConfigModelOverride {
     /// this model's bearer token. Static `api_key` / `env_key` win when both
     /// are set.
     pub auth_provider: Option<String>,
-    pub model_provider: Option<String>,
     pub output_limit: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -2634,7 +2071,7 @@ pub struct ConfigModelOverride {
     #[serde(default)]
     pub env_http_headers: IndexMap<String, String>,
     pub context_window: Option<u64>,
-    /// Per-model auto-compact threshold override (0-100) from `[model.<id>]`.
+    /// Per-model auto-compact threshold override (0-100).
     /// Read directly by `resolve_auto_compact_threshold_percent`; intentionally
     /// NOT merged into `ModelInfo.auto_compact_threshold_percent` so the
     /// resolver can keep user-per-model distinct from GB-per-model.
@@ -2646,20 +2083,16 @@ pub struct ConfigModelOverride {
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
     pub hidden: Option<bool>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
-    /// Aliases must be registered in `config_model_override_parse::ALIASES`;
-    /// serde rejects a table that contains both spellings otherwise.
-    #[serde(alias = "send_compactions_remaining")]
     pub compactions_remaining: Option<CompactionsRemaining>,
     pub compaction_at_tokens: Option<CompactionAtTokens>,
     pub show_model_fingerprint: Option<bool>,
     pub stream_tool_calls: Option<bool>,
+    pub laziness_detector: Option<LazinessDetectorPerModelConfig>,
 }
 impl ConfigModelOverride {
     pub(crate) fn apply(&self, key: &str, base: Option<ModelEntry>) -> ModelEntry {
-        let mut entry = base.unwrap_or_else(|| ModelEntry::fallback(key));
+        let mut entry = base.unwrap_or_else(|| ModelEntry::baseline(key));
         if let Some(ref v) = self.model {
             entry.info.model = v.clone();
         }
@@ -2711,16 +2144,6 @@ impl ConfigModelOverride {
         if let Some(v) = self.hidden {
             entry.info.hidden = v;
         }
-        if self.reasoning_effort.is_some() {
-            entry.info.reasoning_effort = self.reasoning_effort;
-        }
-        if let Some(v) = self.supports_reasoning_effort {
-            entry.info.supports_reasoning_effort = v;
-        } else if !entry.info.supports_reasoning_effort
-            && matches!(entry.info.api_backend, ApiBackend::Messages)
-        {
-            entry.info.supports_reasoning_effort = true;
-        }
         if !self.reasoning_efforts.is_empty() {
             entry.info.reasoning_efforts = self.reasoning_efforts.clone();
         }
@@ -2735,6 +2158,9 @@ impl ConfigModelOverride {
         }
         if self.stream_tool_calls.is_some() {
             entry.info.stream_tool_calls = self.stream_tool_calls;
+        }
+        if let Some(ref detector) = self.laziness_detector {
+            entry.info.laziness_detector = detector.clone();
         }
         if self.api_key.is_some() {
             entry.api_key.clone_from(&self.api_key);
@@ -2789,7 +2215,7 @@ pub struct ModelInfo {
     /// or user config doesn't specify one.
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
-    /// Per-chunk idle timeout for inference streaming (see `ModelEntryConfig`).
+    /// Per-chunk idle timeout for inference streaming.
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
     /// Never show in picker.
@@ -2798,10 +2224,8 @@ pub struct ModelInfo {
     /// `allowed_models` in `resolve_model_catalog`; never persisted.
     #[serde(skip_serializing, default = "default_true")]
     pub user_selectable: bool,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    /// When true, the UI shows effort controls for this model.
-    pub supports_reasoning_effort: bool,
-    /// Per-model reasoning-effort menu (source of truth); legacy fields derived from it.
+    /// The complete reasoning-effort contract for this model. An empty list
+    /// means unsupported; one entry may carry the resolved default marker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
@@ -2819,13 +2243,12 @@ pub struct ModelInfo {
     pub laziness_detector: LazinessDetectorPerModelConfig,
 }
 impl ModelInfo {
-    /// Minimal fallback descriptor for an unknown model slug.
-    /// Used when a configured model ID isn't found in presets or remote models.
-    pub fn fallback(slug: &str) -> Self {
+    /// Neutral descriptor used as the base of a canonical catalog entry.
+    pub fn baseline(routing_model: &str) -> Self {
         ModelInfo {
             user_selectable: true,
             id: None,
-            model: slug.to_owned(),
+            model: routing_model.to_owned(),
             base_url: String::new(),
             name: None,
             description: None,
@@ -2845,8 +2268,6 @@ impl ModelInfo {
             inference_idle_timeout_secs: None,
             max_retries: None,
             hidden: false,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -2855,57 +2276,16 @@ impl ModelInfo {
             laziness_detector: LazinessDetectorPerModelConfig::default(),
         }
     }
-    /// Extract shared model metadata from a flat config entry.
-    pub fn from_config(entry: &ModelEntryConfig) -> Self {
-        ModelInfo {
-            user_selectable: true,
-            id: entry.id.clone(),
-            model: entry.model.clone(),
-            base_url: entry.base_url.clone(),
-            name: entry.name.clone(),
-            description: entry.description.clone(),
-            output_limit: entry.output_limit,
-            temperature: entry.temperature,
-            top_p: entry.top_p,
-            api_backend: entry.api_backend.clone(),
-            auth_scheme: entry.auth_scheme.unwrap_or_default(),
-            extra_headers: entry.extra_headers.clone(),
-            query_params: IndexMap::new(),
-            env_http_headers: IndexMap::new(),
-            context_window: entry.context_window,
-            auto_compact_threshold_percent: entry.auto_compact_threshold_percent,
-            system_prompt_label: entry.system_prompt_label.clone(),
-            use_concise: entry.use_concise,
-            agent_type: entry.agent_type.clone(),
-            inference_idle_timeout_secs: entry.inference_idle_timeout_secs,
-            max_retries: entry.max_retries,
-            hidden: entry.hidden,
-            reasoning_effort: entry.reasoning_effort,
-            supports_reasoning_effort: entry.supports_reasoning_effort,
-            reasoning_efforts: entry.reasoning_efforts.clone(),
-            compactions_remaining: entry.compactions_remaining,
-            compaction_at_tokens: entry.compaction_at_tokens,
-            show_model_fingerprint: entry.show_model_fingerprint,
-            stream_tool_calls: entry.stream_tool_calls,
-            laziness_detector: entry.laziness_detector.clone(),
-        }
+    pub fn default_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_efforts
+            .iter()
+            .find(|option| option.default)
+            .map(|option| option.value)
     }
-    /// Derive the legacy effort gate and an explicitly marked model default
-    /// from `reasoning_efforts`. A configured global fallback is resolved later
-    /// by the catalog so a model-level default always wins.
-    /// The empty-list path leaves both legacy fields untouched.
-    fn derive_reasoning_effort_fields(&mut self) {
-        if self.reasoning_efforts.is_empty() {
-            return;
-        }
-        self.supports_reasoning_effort = true;
-        if self.reasoning_effort.is_none() {
-            let default = self
-                .reasoning_efforts
-                .iter()
-                .find(|opt| opt.default)
-                .map(|opt| opt.value);
-            self.reasoning_effort = default;
+
+    pub fn set_default_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
+        for option in &mut self.reasoning_efforts {
+            option.default = effort == Some(option.value);
         }
     }
 }
@@ -2916,16 +2296,16 @@ pub struct ModelEntry {
     pub info: ModelInfo,
     pub api_key: Option<String>,
     pub env_key: Option<EnvKeys>,
-    /// Named credential helper (`[model.<id>] auth_provider = "<name>"`),
+    /// Named credential helper (`auth_provider = "<name>"` on the model),
     /// resolved against `[auth_provider.<name>]` by `resolve_model_list`.
     /// Config-file models only: the built-in catalog never carries one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_provider: Option<crate::auth::AuthProviderRef>,
 }
 impl ModelEntry {
-    /// Minimal fallback entry for an unknown model slug.
-    pub fn fallback(slug: &str) -> Self {
-        let mut info = ModelInfo::fallback(slug);
+    /// Neutral entry used before provider-model overrides are applied.
+    pub fn baseline(routing_model: &str) -> Self {
+        let mut info = ModelInfo::baseline(routing_model);
         info.base_url.clear();
         Self {
             info,
@@ -2936,14 +2316,6 @@ impl ModelEntry {
     }
     pub fn info(&self) -> &ModelInfo {
         &self.info
-    }
-    pub fn from_config_entry(entry: &ModelEntryConfig) -> Self {
-        Self {
-            info: ModelInfo::from_config(entry),
-            api_key: entry.api_key.clone(),
-            env_key: entry.env_key.clone(),
-            auth_provider: None,
-        }
     }
     /// Non-empty `api_key`, else first non-empty resolved `env_key`.
     /// `None` → fall through to session / global key. Static only: never
@@ -3109,11 +2481,6 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_recap: Option<bool>,
-    /// Two-pass (prefire) compaction: speculatively summarize the history
-    /// prefix in the background, then summarize NOTE₁ + recent tail at
-    /// compaction. `None` = defer to remote settings / env / default (`false`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub two_pass_compaction: Option<bool>,
     /// Write file tool. `None` = defer to remote settings / env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_file: Option<bool>,
@@ -3126,14 +2493,6 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_wake: Option<bool>,
-    /// `summary` (default) | `transcript` | `segments`. `None` = defer to CLI /
-    /// env (`GROW_COMPACTION_MODE`). Parsed via `CompactionMode::parse`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_mode: Option<String>,
-    /// `none` | `minimal` | `balanced` | `verbose` (default). `None` = defer to
-    /// env (`GROW_COMPACTION_DETAIL`). The `segments` verbatim detail level.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_detail: Option<String>,
     /// Feed the summarizer the verbatim conversation instead of the lossy rewrite; `None` = defer to env/remote settings/default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_verbatim_input: Option<bool>,
@@ -3172,39 +2531,13 @@ pub struct Features {
     /// Resolved via [`Config::resolve_mcp_auto_restart`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_auto_restart: Option<bool>,
-    /// Pager-side subscription to the `grow/mcp/server_status` push.
-    ///
-    /// When `true` (default), the pager subscribes to the per-server
-    /// status delta the shell emits via the dispatcher and
-    /// patches the MCP servers modal in-place (no re-fetch round
-    /// trip). When `false`, the pager ignores the push and falls
-    /// back to the legacy `grow/mcp/tools_changed` debounced refetch
-    /// path. `None` = defer to env / default (true).
-    ///
-    /// The pager-side gate
-    /// (`acp_handler::push_server_status_enabled`) uses an
-    /// **env-only** OnceLock cache via
-    /// [`crate::util::config::resolve_mcp_push_server_status(None, None, None)`].
-    /// That function consults `BoolFlag::env` and the default `true`
-    /// — it does NOT read this `Features` field. The shell-side
-    /// `Config::resolve_mcp_push_server_status` does delegate
-    /// through this field, but the pager never holds a `Config`.
-    ///
-    /// Practical consequence: setting
-    /// `[features] mcp_push_server_status = false` in
-    /// `~/.grow/config.toml` will NOT disable the pager's
-    /// subscription on a freshly-launched process. To disable the
-    /// pager subscription, set `GROW_MCP_PUSH_SERVER_STATUS=0` in
-    /// the env before launch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_push_server_status: Option<bool>,
     /// Whether the leader's `ConfigFileWatcher` adds the two narrow
     /// non-recursive watches for `<cwd>/` and `<cwd>/.grow/`.
     ///
     /// When `true` (default), edits to `<cwd>/.mcp.json`,
     /// `<cwd>/.grow/config.toml`, or `<cwd>/.claude.json` flow
-    /// through the watcher → reloader → `ConfigUpdate::
-    /// ProjectMcpServersChanged { cwd }` → `app.rs` ACP-injection
+    /// through the watcher → reloader → project-scoped
+    /// `ConfigUpdate::McpCatalogChanged` → `app.rs` ACP-injection
     /// pipeline and the affected sessions reload their MCP servers
     /// within the debounce window (~ 1 s). When `false`, the leader
     /// skips the cwd watches entirely and the only way to pick up a
@@ -3288,7 +2621,7 @@ pub fn try_resolve_model_credentials(model_id: &str) -> Option<ResolvedCredentia
         .map_err(|e| tracing::warn!(error = %e, "config parse failed for credential resolution"))
         .ok()?;
     let models = resolve_model_list(&cfg);
-    let entry = find_model_by_id(&models, model_id)?;
+    let entry = find_model_by_catalog_id(&models, model_id)?;
     Some(resolve_credentials(entry))
 }
 /// Per-model auth facts (BYOK status + auth scheme) from one effective-config
@@ -3363,12 +2696,14 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
         return f(ModelLookup::ConfigUnavailable);
     };
     let models = resolve_model_list(&cfg);
-    f(ModelLookup::Loaded(find_model_by_id(&models, model_id)))
+    f(ModelLookup::Loaded(find_model_by_catalog_id(
+        &models, model_id,
+    )))
 }
-/// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image
+/// Resolve a standalone `SamplerConfig` for an auxiliary catalog model (image
 /// description, session summary, ...), resolved through the catalog so a
-/// provider/model configuration redirects it to its own endpoint, credentials, and
-/// routing `model`. `None` → caller falls back to the active session's model.
+/// `provider/model` identity selects its endpoint, credentials, and routing
+/// `model`. `None` leaves fallback or failure policy to the caller.
 pub fn resolve_aux_model_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
@@ -3377,7 +2712,7 @@ pub fn resolve_aux_model_sampling_config(
     if model_id.trim().is_empty() {
         return None;
     }
-    let catalog_entry = find_model_by_id(models, model_id).cloned();
+    let catalog_entry = find_model_by_catalog_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
         let credentials = resolve_credentials(entry);
         let sampler = sampling_config_for_model(entry, credentials, alpha_test_key.clone());
@@ -3387,14 +2722,14 @@ pub fn resolve_aux_model_sampling_config(
         if entry.effective_auth_provider().is_some() {
             tracing::warn!(
                 model = %model_id,
-                "aux model uses an auth provider with no cached token; the caller falls back to its session default"
+                "aux model uses an auth provider with no cached token"
             );
             return None;
         }
     }
     tracing::warn!(
         aux_model = %model_id,
-        "auxiliary model is not explicitly configured; falling back to active model",
+        "auxiliary catalog model is unavailable",
     );
     None
 }
@@ -3446,7 +2781,7 @@ pub fn sampling_config_for_model(
         query_params: info.query_params.clone(),
         env_http_headers: info.env_http_headers.clone(),
         context_window: info.context_window.get(),
-        reasoning_effort: info.reasoning_effort,
+        reasoning_effort: info.default_reasoning_effort(),
         force_http1: false,
         max_retries: info.max_retries,
         stream_tool_calls: info.stream_tool_calls.unwrap_or(false),
@@ -3468,7 +2803,7 @@ pub fn sampling_config_for_model(
 ///
 /// * cli-chat-proxy bases get `X-Grow-Token-Auth` and
 ///   `x-authenticateresponse` headers (mirrors the inline match in the legacy
-///   `sampling::Client::new` on `is_cli_chat_proxy_url`).
+///   `sampling::SamplingClient::new` on `is_cli_chat_proxy_url`).
 /// * With the optional non-production feature, matching first-party hosts may
 ///   get an extra access header from the corresponding key argument.
 ///
@@ -3510,23 +2845,17 @@ pub fn to_acp_model_info(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),
                 );
-                if info.supports_reasoning_effort {
-                    map.insert(
-                        "supportsReasoningEffort".to_string(),
-                        serde_json::Value::Bool(true),
-                    );
-                    if let Some(effort) = info.reasoning_effort {
-                        map.insert(
-                            REASONING_EFFORT_META_KEY.to_string(),
-                            reasoning_effort_meta_value(effort),
-                        );
-                    }
-                }
                 if !info.reasoning_efforts.is_empty() {
                     map.insert(
                         REASONING_EFFORTS_META_KEY.to_string(),
                         reasoning_efforts_meta_value(&info.reasoning_efforts),
                     );
+                    if let Some(effort) = info.default_reasoning_effort() {
+                        map.insert(
+                            REASONING_EFFORT_META_KEY.to_string(),
+                            reasoning_effort_meta_value(effort),
+                        );
+                    }
                 }
                 if map.is_empty() { None } else { Some(map) }
             };
@@ -3628,25 +2957,8 @@ reasoning_effort = "low"
             "include_reasoning defaults to None so the harness default applies",
         );
     }
-    #[test]
-    fn laziness_detector_absent_block_deserializes_to_default() {
-        let json = serde_json::json!({
-            "model": "test",
-            "base_url": "https://test.api/v1",
-            "context_window": 200_000,
-        });
-        let entry: ModelEntryConfig =
-            serde_json::from_value(json).expect("ModelEntryConfig deserializes without detector");
-        assert_eq!(
-            entry.laziness_detector,
-            LazinessDetectorPerModelConfig::default()
-        );
-        let info = ModelInfo::from_config(&entry);
-        assert!(!info.laziness_detector.enabled);
-    }
-    #[test]
     fn laziness_detector_fallback_modelinfo_is_disabled() {
-        let info = ModelInfo::fallback("unknown-model");
+        let info = ModelInfo::baseline("unknown-model");
         assert_eq!(
             info.laziness_detector,
             LazinessDetectorPerModelConfig::default(),
@@ -3689,27 +3001,6 @@ reasoning_effort = "low"
         let absent: LazinessDetectorPerModelConfig =
             serde_json::from_value(serde_json::json!({})).expect("absent → None");
         assert_eq!(absent.include_reasoning, None);
-    }
-    #[test]
-    fn subagent_permission_mode_precedence() {
-        let own = PermissionMode::DontAsk;
-        let cases = [
-            (
-                PermissionMode::BypassPermissions,
-                PermissionMode::BypassPermissions,
-            ),
-            (PermissionMode::AcceptEdits, PermissionMode::AcceptEdits),
-            (PermissionMode::Auto, PermissionMode::Auto),
-            (PermissionMode::Default, own.clone()),
-            (PermissionMode::DontAsk, own.clone()),
-        ];
-        for (parent, expected) in cases {
-            assert_eq!(
-                resolve_subagent_permission_mode(own.clone(), &parent),
-                expected,
-                "parent={parent:?}"
-            );
-        }
     }
     #[test]
     fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
@@ -3769,7 +3060,6 @@ reasoning_effort = "low"
                 "https://vendor.example/v1",
                 Some("vendor-key"),
                 None,
-                None,
             ),
         );
         let resolved = resolve_aux_model_sampling_config("grow-build", &catalog, None)
@@ -3793,7 +3083,7 @@ reasoning_effort = "low"
                 ..Default::default()
             },
         );
-        let mut entry = test_model_entry("m", "https://litellm.example/v1", None, None, None);
+        let mut entry = test_model_entry("m", "https://litellm.example/v1", None, None);
         entry.auth_provider = Some(provider.clone());
         let mut catalog = IndexMap::new();
         catalog.insert("proxied-aux".to_string(), entry);
@@ -3952,7 +3242,7 @@ reasoning_effort = "low"
                 w.kind == ConfigWarningKind::InvalidValue
                     && matches!(
                         &w.target,
-                        WarningTarget::ModelProvider { field, .. }
+                        WarningTarget::Model { field, .. }
                             if field.as_deref() == Some("auth_provider")
                     )
             }),
@@ -4134,7 +3424,7 @@ reasoning_effort = "low"
     }
     #[tokio::test]
     async fn resolve_credentials_serves_cached_provider_token() {
-        let mut model = test_model_entry("m", "https://litellm.example/v1", None, None, None);
+        let mut model = test_model_entry("m", "https://litellm.example/v1", None, None);
         let provider = crate::auth::AuthProviderRef::new(
             "resolve-creds-test".into(),
             crate::auth::AuthProviderConfig {
@@ -4161,7 +3451,7 @@ reasoning_effort = "low"
         use test_support::EnvGuard;
         let var = "GROW_TEST_ENVKEY_SHADOW";
         let _guard = EnvGuard::set(var, "env-token");
-        let mut model = test_model_entry("m", "https://litellm.example/v1", None, Some(var), None);
+        let mut model = test_model_entry("m", "https://litellm.example/v1", None, Some(var));
         let provider = crate::auth::AuthProviderRef::new(
             "env-shadow-test".into(),
             crate::auth::AuthProviderConfig {
@@ -4192,7 +3482,6 @@ reasoning_effort = "low"
         base_url: &str,
         api_key: Option<&str>,
         env_key: Option<&str>,
-        _api_base_url: Option<&str>,
     ) -> ModelEntry {
         ModelEntry {
             info: ModelInfo {
@@ -4218,8 +3507,6 @@ reasoning_effort = "low"
                 inference_idle_timeout_secs: None,
                 max_retries: None,
                 hidden: false,
-                reasoning_effort: None,
-                supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -4239,7 +3526,6 @@ reasoning_effort = "low"
             "https://test.api/v1",
             Some("model-specific-key"),
             None,
-            None,
         );
         let sampling_config = sampling_config_for_model(&model, resolve_credentials(&model), None);
         assert_eq!(
@@ -4250,7 +3536,7 @@ reasoning_effort = "low"
     }
     #[test]
     fn sampling_config_uses_fallback_when_no_model_api_key() {
-        let model = test_model_entry("test-model", "https://test.api/v1", None, None, None);
+        let model = test_model_entry("test-model", "https://test.api/v1", None, None);
         let sampling_config = sampling_config_for_model(
             &model,
             ResolvedCredentials {
@@ -4360,7 +3646,7 @@ reasoning_effort = "low"
             std::env::remove_var(primary);
             std::env::set_var(alias, "token-via-lc-alias");
         }
-        let mut model = test_model_entry("m", "https://inference.example/v1", None, None, None);
+        let mut model = test_model_entry("m", "https://inference.example/v1", None, None);
         model.env_key = Some(EnvKeys::new([primary, alias]));
         assert!(
             model.has_own_credentials(),
@@ -4398,7 +3684,6 @@ reasoning_effort = "low"
             "https://llm.example.com/v1",
             None,
             Some(env_var),
-            None,
         );
         assert!(model.has_own_credentials());
         let creds = resolve_credentials(&model);
@@ -4425,7 +3710,6 @@ reasoning_effort = "low"
             "https://messages.example.com/v1",
             Some("sk-ant-test-key"),
             None,
-            None,
         );
         model.info.api_backend = ApiBackend::Messages;
         model.info.auth_scheme = AuthScheme::XApiKey;
@@ -4446,7 +3730,6 @@ reasoning_effort = "low"
             "https://api.example.com/v1",
             Some("sk-openai-test"),
             None,
-            None,
         );
         assert_eq!(model.info.auth_scheme, AuthScheme::Bearer);
         let creds = resolve_credentials(&model);
@@ -4463,7 +3746,6 @@ reasoning_effort = "low"
             "my-model",
             "https://api.example.com/v1",
             Some("sk-external"),
-            None,
             None,
         );
         assert!(config_model.has_own_credentials());
@@ -4486,7 +3768,7 @@ reasoning_effort = "low"
             entry.info.show_model_fingerprint,
             "Some(true) override should enable show_model_fingerprint"
         );
-        let mut base = ModelEntry::fallback("some-model");
+        let mut base = ModelEntry::baseline("some-model");
         base.info.show_model_fingerprint = true;
         let override_absent = ConfigModelOverride::default();
         let entry = override_absent.apply("some-model", Some(base));
@@ -4494,7 +3776,7 @@ reasoning_effort = "low"
             entry.info.show_model_fingerprint,
             "None override should preserve the base entry's show_model_fingerprint"
         );
-        let mut base = ModelEntry::fallback("some-model");
+        let mut base = ModelEntry::baseline("some-model");
         base.info.show_model_fingerprint = true;
         let override_off = ConfigModelOverride {
             show_model_fingerprint: Some(false),
@@ -4569,45 +3851,6 @@ reasoning_effort = "low"
         }
     }
     #[test]
-    fn compaction_mode_precedence_env_over_config_over_remote_over_default() {
-        use chat_state::CompactionMode;
-        assert_eq!(
-            resolve_compaction_mode_from(Some("transcript"), Some("segments"), Some("summary")),
-            CompactionMode::Transcript
-        );
-        assert_eq!(
-            resolve_compaction_mode_from(None, Some("segments"), Some("summary")),
-            CompactionMode::Segments(chat_state::CompactionDetail::default())
-        );
-        assert_eq!(
-            resolve_compaction_mode_from(None, None, Some("segments")),
-            CompactionMode::Segments(chat_state::CompactionDetail::default())
-        );
-        assert_eq!(
-            resolve_compaction_mode_from(Some("garbage"), None, Some("segments")),
-            CompactionMode::Segments(chat_state::CompactionDetail::default())
-        );
-        assert_eq!(
-            resolve_compaction_mode_from(None, None, None),
-            CompactionMode::Summary
-        );
-    }
-    /// Detail shares the env>config>remote>default combinator that the mode
-    /// test exercises; the detail-specific facts are remote settings routing and the
-    /// `Verbose` default (with unrecognized values falling through).
-    #[test]
-    fn compaction_detail_resolves_remote_settings_and_verbose_default() {
-        use chat_state::CompactionDetail;
-        assert_eq!(
-            resolve_compaction_detail_from(None, None, Some("minimal")),
-            CompactionDetail::Minimal
-        );
-        assert_eq!(
-            resolve_compaction_detail_from(Some("garbage"), None, None),
-            CompactionDetail::Verbose
-        );
-    }
-    #[test]
     fn auto_compact_threshold_percent_defaults_when_not_specified() {
         let raw_config: toml::Value = toml::from_str(
             r#"
@@ -4646,60 +3889,21 @@ reasoning_effort = "low"
     }
     #[test]
     fn sampling_config_context_window_from_entry_or_default() {
-        let model = test_model_entry("any-model", "https://api.example.com/v1", None, None, None);
+        let model = test_model_entry("any-model", "https://api.example.com/v1", None, None);
         let config = sampling_config_for_model(&model, resolve_credentials(&model), None);
         assert_eq!(config.context_window, 200_000);
-        let mut model =
-            test_model_entry("any-model", "https://api.example.com/v1", None, None, None);
+        let mut model = test_model_entry("any-model", "https://api.example.com/v1", None, None);
         model.info.context_window = NonZeroU64::new(256_000).unwrap();
         let config = sampling_config_for_model(&model, resolve_credentials(&model), None);
         assert_eq!(config.context_window, 256_000);
     }
     #[test]
     fn sampling_config_uses_model_api_backend() {
-        let mut model =
-            test_model_entry("test-model", "https://api.example.com/v1", None, None, None);
+        let mut model = test_model_entry("test-model", "https://api.example.com/v1", None, None);
         model.info.api_backend = ApiBackend::Responses;
         let sampling_config = sampling_config_for_model(&model, resolve_credentials(&model), None);
         assert_eq!(sampling_config.api_backend, ApiBackend::Responses);
     }
-    #[test]
-    fn model_info_from_config_propagates_use_concise() {
-        let entry = ModelEntryConfig {
-            id: None,
-            model: "test".to_string(),
-            base_url: "https://test.api/v1".to_string(),
-            name: None,
-            description: None,
-            output_limit: None,
-            temperature: None,
-            top_p: None,
-            api_key: None,
-            env_key: None,
-            api_backend: ApiBackend::default(),
-            auth_scheme: None,
-            extra_headers: IndexMap::new(),
-            context_window: NonZeroU64::new(200_000).unwrap(),
-            auto_compact_threshold_percent: None,
-            system_prompt_label: None,
-            use_concise: true,
-            agent_type: default_agent_type(),
-            inference_idle_timeout_secs: None,
-            max_retries: None,
-            hidden: false,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
-            reasoning_efforts: Vec::new(),
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            show_model_fingerprint: false,
-            stream_tool_calls: None,
-            laziness_detector: LazinessDetectorPerModelConfig::default(),
-        };
-        let info = ModelInfo::from_config(&entry);
-        assert!(info.use_concise);
-    }
-    #[test]
     fn agent_selection_config_defaults_to_none() {
         let cfg = Config::default();
         assert!(cfg.agent.name.is_none());
@@ -4764,46 +3968,9 @@ reasoning_effort = "low"
         assert!(cfg.agent.name.is_none());
         assert!(cfg.agent.definition.is_none());
     }
-    #[test]
-    fn model_info_from_config_propagates_agent_type() {
-        let entry = ModelEntryConfig {
-            id: None,
-            model: "test".to_string(),
-            base_url: "https://test.api/v1".to_string(),
-            name: None,
-            description: None,
-            output_limit: None,
-            temperature: None,
-            top_p: None,
-            api_key: None,
-            env_key: None,
-            api_backend: ApiBackend::default(),
-            auth_scheme: None,
-            extra_headers: IndexMap::new(),
-            context_window: NonZeroU64::new(200_000).unwrap(),
-            auto_compact_threshold_percent: None,
-            system_prompt_label: None,
-            use_concise: false,
-            agent_type: "custom-harness".to_string(),
-            inference_idle_timeout_secs: None,
-            max_retries: None,
-            hidden: false,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
-            reasoning_efforts: Vec::new(),
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            show_model_fingerprint: false,
-            stream_tool_calls: None,
-            laziness_detector: LazinessDetectorPerModelConfig::default(),
-        };
-        let info = ModelInfo::from_config(&entry);
-        assert_eq!(info.agent_type, "custom-harness");
-    }
-    #[test]
     fn acp_model_meta_includes_agent_type_when_present() {
         let mut models = IndexMap::new();
-        let mut entry = test_model_entry("test-model", "https://test.api/v1", None, None, None);
+        let mut entry = test_model_entry("test-model", "https://test.api/v1", None, None);
         entry.info.name = Some("Test Model".to_string());
         entry.info.context_window = NonZeroU64::new(256_000).unwrap();
         entry.info.agent_type = "custom-harness".to_string();
@@ -4817,7 +3984,7 @@ reasoning_effort = "low"
     #[test]
     fn acp_model_meta_always_includes_agent_type() {
         let mut models = IndexMap::new();
-        let mut entry = test_model_entry("plain-model", "https://test.api/v1", None, None, None);
+        let mut entry = test_model_entry("plain-model", "https://test.api/v1", None, None);
         entry.info.name = Some("Plain Model".to_string());
         entry.info.context_window = NonZeroU64::new(256_000).unwrap();
         models.insert("plain-model".to_string(), entry);
@@ -4831,42 +3998,9 @@ reasoning_effort = "low"
         );
     }
     #[test]
-    fn acp_model_meta_emits_reasoning_effort_when_supported() {
+    fn acp_model_meta_emits_canonical_reasoning_menu_and_default() {
         let mut models = IndexMap::new();
-        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
-        entry.info.supports_reasoning_effort = true;
-        entry.info.reasoning_effort = Some(ReasoningEffort::High);
-        models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
-            .values()
-            .next()
-            .unwrap()
-            .meta
-            .clone()
-            .unwrap();
-        assert_eq!(meta["supportsReasoningEffort"], true);
-        assert_eq!(meta["reasoningEffort"], "high");
-    }
-    #[test]
-    fn acp_model_meta_supports_without_default_effort() {
-        let mut models = IndexMap::new();
-        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
-        entry.info.supports_reasoning_effort = true;
-        models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
-            .values()
-            .next()
-            .unwrap()
-            .meta
-            .clone()
-            .unwrap();
-        assert_eq!(meta["supportsReasoningEffort"], true);
-        assert!(meta.get("reasoningEffort").is_none());
-    }
-    #[test]
-    fn acp_model_meta_emits_reasoning_efforts_and_derives_legacy() {
-        let mut models = IndexMap::new();
-        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        let mut entry = test_model_entry("m", "https://test.api/v1", None, None);
         entry.info.reasoning_efforts = vec![
             ReasoningEffortOption {
                 id: "deep".to_string(),
@@ -4883,7 +4017,6 @@ reasoning_effort = "low"
                 default: true,
             },
         ];
-        entry.info.derive_reasoning_effort_fields();
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
             .values()
@@ -4894,15 +4027,13 @@ reasoning_effort = "low"
             .unwrap();
         assert_eq!(meta[REASONING_EFFORTS_META_KEY][0]["id"], "deep");
         assert_eq!(meta[REASONING_EFFORTS_META_KEY][0]["value"], "xhigh");
-        assert_eq!(meta["supportsReasoningEffort"], true);
         assert_eq!(meta["reasoningEffort"], "high");
+        assert!(meta.get("supportsReasoningEffort").is_none());
     }
     #[test]
-    fn acp_model_meta_omits_reasoning_efforts_when_list_empty() {
+    fn acp_model_meta_omits_reasoning_fields_when_menu_is_empty() {
         let mut models = IndexMap::new();
-        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
-        entry.info.supports_reasoning_effort = true;
-        entry.info.reasoning_effort = Some(ReasoningEffort::Medium);
+        let entry = test_model_entry("m", "https://test.api/v1", None, None);
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
             .values()
@@ -4912,37 +4043,13 @@ reasoning_effort = "low"
             .clone()
             .unwrap();
         assert!(meta.get(REASONING_EFFORTS_META_KEY).is_none());
-        assert_eq!(meta["supportsReasoningEffort"], true);
-        assert_eq!(meta["reasoningEffort"], "medium");
-    }
-    #[test]
-    fn acp_model_meta_keeps_explicit_scalar_when_list_present() {
-        let mut models = IndexMap::new();
-        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
-        entry.info.reasoning_effort = Some(ReasoningEffort::Low);
-        entry.info.reasoning_efforts = vec![ReasoningEffortOption {
-            id: "high".to_string(),
-            value: ReasoningEffort::High,
-            label: "High".to_string(),
-            description: None,
-            default: true,
-        }];
-        entry.info.derive_reasoning_effort_fields();
-        models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
-            .values()
-            .next()
-            .unwrap()
-            .meta
-            .clone()
-            .unwrap();
-        assert_eq!(meta["supportsReasoningEffort"], true);
-        assert_eq!(meta["reasoningEffort"], "low");
+        assert!(meta.get(REASONING_EFFORT_META_KEY).is_none());
+        assert!(meta.get("supportsReasoningEffort").is_none());
     }
     #[test]
     fn acp_model_meta_leaves_default_unset_for_catalog_fallback() {
         let mut models = IndexMap::new();
-        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        let mut entry = test_model_entry("m", "https://test.api/v1", None, None);
         entry.info.reasoning_efforts = vec![
             ReasoningEffortOption {
                 id: "balanced".to_string(),
@@ -4959,7 +4066,6 @@ reasoning_effort = "low"
                 default: false,
             },
         ];
-        entry.info.derive_reasoning_effort_fields();
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
             .values()
@@ -4968,30 +4074,13 @@ reasoning_effort = "low"
             .meta
             .clone()
             .unwrap();
-        assert_eq!(meta["supportsReasoningEffort"], true);
+        assert!(meta.get("supportsReasoningEffort").is_none());
         assert!(meta.get("reasoningEffort").is_none());
-    }
-    #[test]
-    fn acp_model_meta_omits_reasoning_when_unsupported() {
-        let mut models = IndexMap::new();
-        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
-        entry.info.reasoning_effort = Some(ReasoningEffort::High);
-        models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
-            .values()
-            .next()
-            .unwrap()
-            .meta
-            .clone();
-        if let Some(meta) = meta {
-            assert!(meta.get("supportsReasoningEffort").is_none());
-            assert!(meta.get("reasoningEffort").is_none());
-        }
     }
     #[test]
     fn acp_model_meta_always_has_context_window() {
         let mut models = IndexMap::new();
-        let mut entry = test_model_entry("unknown-model", "https://test.api/v1", None, None, None);
+        let mut entry = test_model_entry("unknown-model", "https://test.api/v1", None, None);
         entry.info.name = Some("Unknown Model".to_string());
         models.insert("unknown-model".to_string(), entry);
         let acp_models = to_acp_model_info(&models);
@@ -5004,16 +4093,16 @@ reasoning_effort = "low"
         let raw: toml::Value = toml::from_str(
             r#"
             [models]
-            disabled_models = ["to-disable"]
-            [model.to-disable]
-            model = "to-disable"
+            disabled_models = ["local/to-disable"]
+            [provider.local.options]
             base_url = "https://api.example.com/v1"
+            [provider.local.models.to-disable]
             context_window = 200000
             "#,
         )
         .unwrap();
         let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap());
-        assert!(!catalog.contains_key("to-disable"));
+        assert!(!catalog.contains_key("local/to-disable"));
     }
     #[test]
     fn invalid_glob_is_rejected_by_validation() {
@@ -5035,42 +4124,6 @@ reasoning_effort = "low"
             "error should name the offending field: {err}"
         );
     }
-    #[test]
-    fn inference_idle_timeout_propagates_to_model_info() {
-        let entry = ModelEntryConfig {
-            id: None,
-            model: "test".to_string(),
-            base_url: "https://test.api/v1".to_string(),
-            name: None,
-            description: None,
-            output_limit: None,
-            temperature: None,
-            top_p: None,
-            api_key: None,
-            env_key: None,
-            api_backend: ApiBackend::default(),
-            auth_scheme: None,
-            extra_headers: IndexMap::new(),
-            context_window: NonZeroU64::new(200_000).unwrap(),
-            auto_compact_threshold_percent: None,
-            system_prompt_label: None,
-            use_concise: false,
-            agent_type: default_agent_type(),
-            inference_idle_timeout_secs: Some(120),
-            max_retries: None,
-            hidden: false,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
-            reasoning_efforts: Vec::new(),
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            show_model_fingerprint: false,
-            stream_tool_calls: None,
-            laziness_detector: LazinessDetectorPerModelConfig::default(),
-        };
-        let info = ModelInfo::from_config(&entry);
-        assert_eq!(info.inference_idle_timeout_secs, Some(120));
-    }
 
     #[test]
     fn parsed_config_has_models_config() {
@@ -5078,13 +4131,19 @@ reasoning_effort = "low"
             r#"
             [models]
             default = "my-enterprise-model"
-            session_summary = "title-model"
+            session_title = "title-model"
             "#,
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
         assert_eq!(cfg.models.default.as_deref(), Some("my-enterprise-model"));
-        assert_eq!(cfg.models.session_summary.as_deref(), Some("title-model"));
+        assert_eq!(cfg.models.session_title.as_deref(), Some("title-model"));
+    }
+    #[test]
+    fn rejects_removed_session_summary_model_key() {
+        let error = toml::from_str::<ModelsConfig>(r#"session_summary = "legacy""#)
+            .expect_err("removed summary key must not silently select the active model");
+        assert!(error.to_string().contains("unknown field"));
     }
     #[test]
     fn config_models_default_beats_optional_remote_setting() {
@@ -5114,7 +4173,6 @@ reasoning_effort = "low"
                 "https://service.example.com/v1",
                 None,
                 None,
-                Some("https://api.example.com/v1"),
             ),
         );
         models.insert(
@@ -5123,7 +4181,6 @@ reasoning_effort = "low"
                 "same-upstream-model",
                 "https://inference.example.com/v1",
                 Some("enterprise-key"),
-                None,
                 None,
             ),
         );
@@ -5257,51 +4314,10 @@ reasoning_effort = "low"
         );
         assert_eq!(r.source, ConfigSource::Remote);
     }
-    /// Precedence: env > config.toml > remote settings > default(false). One test
-    /// covers the full ladder so we do not maintain a matrix of flag cases.
-    #[test]
-    #[serial]
-    fn resolve_two_pass_compaction_precedence() {
-        unsafe { std::env::remove_var("GROW_TWO_PASS_COMPACTION") };
-        let default_cfg = Config::default();
-        let r = default_cfg.resolve_two_pass_compaction();
-        assert!(!r.value, "default is opt-in off");
-        assert_eq!(r.source, ConfigSource::Default);
-        let remote_on = Config {
-            remote_settings: Some(crate::util::config::RemoteSettings {
-                two_pass_compaction_enabled: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let r = remote_on.resolve_two_pass_compaction();
-        assert!(r.value);
-        assert_eq!(r.source, ConfigSource::Remote);
-        let config_over_remote = Config {
-            features: Features {
-                two_pass_compaction: Some(true),
-                ..Default::default()
-            },
-            remote_settings: Some(crate::util::config::RemoteSettings {
-                two_pass_compaction_enabled: Some(false),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let r = config_over_remote.resolve_two_pass_compaction();
-        assert!(r.value);
-        assert_eq!(r.source, ConfigSource::Config);
-        unsafe { std::env::set_var("GROW_TWO_PASS_COMPACTION", "0") };
-        let r = config_over_remote.resolve_two_pass_compaction();
-        assert!(!r.value, "env wins over config + remote");
-        assert_eq!(r.source, ConfigSource::Env);
-        unsafe { std::env::remove_var("GROW_TWO_PASS_COMPACTION") };
-    }
     /// Gate precedence: env > `[doom_loop_recovery]` > remote settings >
     /// default(ON), with the remote layer merged PER-FIELD from the nested
     /// `doom_loop_recovery` object and each layer's `false` an independent
-    /// kill switch. One test covers the full ladder (the
-    /// `resolve_two_pass_compaction_precedence` pattern).
+    /// kill switch.
     #[test]
     #[serial]
     fn resolve_doom_loop_recovery_precedence() {
@@ -5683,24 +4699,22 @@ reasoning_effort = "low"
         assert!(!r.value);
     }
     /// Run the production scan (`deserialize_collecting_unrecognized`) on a
-    /// TOML string, mirroring the [model] removal + default-merge in
+    /// TOML string, mirroring provider-section extraction + default merge in
     /// `new_from_toml_cfg`.
     fn unused_keys_from_toml(toml_str: &str) -> Vec<String> {
         let raw: toml::Value = toml::from_str(toml_str).unwrap();
-        let raw_without_models = {
+        let raw_without_provider_sections = {
             let mut r = raw.clone();
             if let toml::Value::Table(ref mut t) = r {
-                t.remove("model");
+                t.remove("provider");
+                t.remove("auth_provider");
             }
             r
         };
         let mut base = toml::Value::try_from(Config::default()).unwrap();
-        if let toml::Value::Table(ref mut t) = base {
-            t.remove("model");
-        }
-        crate::config::deep_merge_toml(&mut base, &raw_without_models);
+        crate::config::deep_merge_toml(&mut base, &raw_without_provider_sections);
         let (_config, unused) =
-            Config::deserialize_collecting_unrecognized(base, &raw_without_models)
+            Config::deserialize_collecting_unrecognized(base, &raw_without_provider_sections)
                 .expect("config should deserialize");
         unused
     }
@@ -5754,7 +4768,7 @@ reasoning_effort = "low"
             [endpoints]
             deplomyent_key = "test"
             [ui]
-            yoloo = true
+            permission_mdoe = "ask"
             [features]
             telmetry = true
         "#,
@@ -5763,7 +4777,10 @@ reasoning_effort = "low"
             unused.iter().any(|k| k == "endpoints.deplomyent_key"),
             "got: {unused:?}"
         );
-        assert!(unused.iter().any(|k| k == "ui.yoloo"), "got: {unused:?}");
+        assert!(
+            unused.iter().any(|k| k == "ui.permission_mdoe"),
+            "got: {unused:?}"
+        );
         assert!(
             unused.iter().any(|k| k == "features.telmetry"),
             "got: {unused:?}"
@@ -5844,21 +4861,6 @@ reasoning_effort = "low"
             "non-table [permission] must fail loudly"
         );
     }
-    /// Wrong-typed values for the opaque passthrough keys must neither warn
-    /// nor fail config load — an admin typo in a managed layer must not brick
-    /// startup fleet-wide; the out-of-band consumers degrade gracefully.
-    #[test]
-    fn wrong_typed_passthrough_value_neither_warns_nor_fails() {
-        let toml_str = r#"
-            [marketplace]
-            default_skills_installs_purged = "yes"
-        "#;
-        let unused = unused_keys_from_toml(toml_str);
-        assert!(unused.is_empty(), "got: {unused:?}");
-        let raw: toml::Value = toml::from_str(toml_str).unwrap();
-        Config::new_from_toml_cfg(&raw)
-            .expect("wrong-typed passthrough values must not fail config load");
-    }
     /// Exempting `[permission]` and friends must not swallow warnings for
     /// genuinely unknown keys.
     #[test]
@@ -5875,8 +4877,11 @@ reasoning_effort = "low"
         );
         assert_eq!(
             unused,
-            vec!["ui.yollo".to_string()],
-            "exactly the typo'd key must be flagged"
+            vec![
+                "ui.yollo".to_string(),
+                "marketplace.default_skills_installs_purged".to_string(),
+            ],
+            "obsolete and typo'd keys must both be flagged"
         );
     }
     fn empty_config() -> toml::Value {
@@ -5886,168 +4891,8 @@ reasoning_effort = "low"
         unsafe {
             std::env::remove_var("GROW_SUBAGENTS");
             std::env::remove_var("GROW_RESPECT_GITIGNORE");
-            std::env::remove_var("GROW_SESSION_SUMMARY_MODEL");
-            std::env::remove_var("GROW_CURSOR_SKILLS_ENABLED");
-            std::env::remove_var("GROW_CURSOR_RULES_ENABLED");
-            std::env::remove_var("GROW_CURSOR_AGENTS_ENABLED");
-            std::env::remove_var("GROW_CLAUDE_SKILLS_ENABLED");
-            std::env::remove_var("GROW_CLAUDE_RULES_ENABLED");
-            std::env::remove_var("GROW_CLAUDE_AGENTS_ENABLED");
+            std::env::remove_var("GROW_SESSION_TITLE_MODEL");
         }
-    }
-    fn clear_managed_mcp_env_vars() {
-        unsafe {
-            std::env::remove_var("GROW_MANAGED_MCPS_ENABLED");
-            std::env::remove_var("GROW_MANAGED_MCP_GATEWAY_TOOLS_ENABLED");
-        }
-    }
-    fn isolate_compat_env() -> Vec<EnvGuard> {
-        COMPAT_CELLS
-            .into_iter()
-            .map(|cell| EnvGuard::unset(cell.env_var()))
-            .collect()
-    }
-    fn parse_compat(source: &str) -> CompatConfigToml {
-        let raw: toml::Value = toml::from_str(source).unwrap();
-        raw.get("compat").unwrap().clone().try_into().unwrap()
-    }
-    fn remote_settings_with(
-        key: CompatRemoteKey,
-        value: bool,
-    ) -> crate::util::config::RemoteSettings {
-        let mut remote = crate::util::config::RemoteSettings::default();
-        match key {
-            CompatRemoteKey::CursorSkills => remote.cursor_skills_enabled = Some(value),
-            CompatRemoteKey::CursorRules => remote.cursor_rules_enabled = Some(value),
-            CompatRemoteKey::CursorAgents => remote.cursor_agents_enabled = Some(value),
-            CompatRemoteKey::CursorMcps => remote.cursor_mcps_enabled = Some(value),
-            CompatRemoteKey::CursorHooks => remote.cursor_hooks_enabled = Some(value),
-            CompatRemoteKey::ClaudeSkills => remote.claude_skills_enabled = Some(value),
-            CompatRemoteKey::ClaudeRules => remote.claude_rules_enabled = Some(value),
-            CompatRemoteKey::ClaudeAgents => remote.claude_agents_enabled = Some(value),
-            CompatRemoteKey::ClaudeMcps => remote.claude_mcps_enabled = Some(value),
-            CompatRemoteKey::ClaudeHooks => remote.claude_hooks_enabled = Some(value),
-        }
-        remote
-    }
-    #[test]
-    #[serial]
-    fn resolve_compat_defaults_match_registry() {
-        let _env = isolate_compat_env();
-        assert_eq!(
-            resolve_compat_config(&CompatConfigToml::default(), None),
-            CompatConfig::default()
-        );
-    }
-    #[test]
-    fn compat_config_cell_is_tolerant_and_fail_closed_per_cell() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-[compat.cursor]
-skills = false
-rules = "malformed"
-[compat.claude]
-hooks = true
-"#,
-        )
-        .unwrap();
-        let cell = |vendor, surface| {
-            COMPAT_CELLS
-                .into_iter()
-                .find(|cell| cell.vendor() == vendor && cell.surface() == surface)
-                .unwrap()
-        };
-        assert_eq!(
-            compat_config_cell(Ok(&raw), cell(CompatVendor::Cursor, CompatSurface::Skills)),
-            Ok(Some(false))
-        );
-        assert_eq!(
-            compat_config_cell(Ok(&raw), cell(CompatVendor::Cursor, CompatSurface::Rules)),
-            Err(CompatConfigCellError::Malformed)
-        );
-        assert_eq!(
-            compat_config_cell(Ok(&raw), cell(CompatVendor::Claude, CompatSurface::Hooks)),
-            Ok(Some(true))
-        );
-        assert_eq!(
-            compat_config_cell(Err(()), cell(CompatVendor::Claude, CompatSurface::Hooks)),
-            Err(CompatConfigCellError::Unavailable)
-        );
-    }
-    #[test]
-    #[serial]
-    fn remote_keys_are_one_hot_and_false_overrides_default() {
-        let _env = isolate_compat_env();
-        for key in COMPAT_CELLS
-            .into_iter()
-            .filter_map(|cell| cell.remote_key())
-        {
-            let remote = remote_settings_with(key, false);
-            for cell in COMPAT_CELLS {
-                assert_eq!(
-                    remote_compat_value(Some(&remote), cell.remote_key()),
-                    (cell.remote_key() == Some(key)).then_some(false),
-                    "{key:?} mapped to {}.{}",
-                    cell.vendor().as_str(),
-                    cell.surface().as_str()
-                );
-            }
-        }
-        let remote = remote_settings_with(CompatRemoteKey::CursorSkills, false);
-        assert!(CompatConfig::default().cursor.skills);
-        assert!(
-            !resolve_compat_config(&CompatConfigToml::default(), Some(&remote))
-                .cursor
-                .skills
-        );
-    }
-    #[test]
-    #[serial]
-    fn resolve_runtime_fields_headless_defaults() {
-        clear_runtime_env_vars();
-        clear_managed_mcp_env_vars();
-        let raw = empty_config();
-        let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
-        cfg.resolve_runtime_fields(&RuntimeResolutionContext {
-            raw_config: &raw,
-            remote_settings: None,
-            is_headless: true,
-            cli_subagents: None,
-            cli_session_summary_model: None,
-            cli_experimental_memory: false,
-            cli_no_memory: false,
-            todo_gate: false,
-            laziness_debug_log: None,
-        });
-        assert!(
-            !cfg.managed_mcps_enabled,
-            "headless should default managed_mcps to false"
-        );
-        assert!(!cfg.managed_mcp_gateway_tools_enabled);
-    }
-    #[test]
-    #[serial]
-    fn resolve_runtime_fields_managed_gateway_tools_from_remote() {
-        clear_runtime_env_vars();
-        clear_managed_mcp_env_vars();
-        let raw = empty_config();
-        let remote = crate::util::config::RemoteSettings {
-            managed_mcp_gateway_tools_enabled: Some(true),
-            ..Default::default()
-        };
-        let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
-        cfg.resolve_runtime_fields(&RuntimeResolutionContext {
-            raw_config: &raw,
-            remote_settings: Some(&remote),
-            is_headless: false,
-            cli_subagents: None,
-            cli_session_summary_model: None,
-            cli_experimental_memory: false,
-            cli_no_memory: false,
-            todo_gate: false,
-            laziness_debug_log: None,
-        });
-        assert!(cfg.managed_mcp_gateway_tools_enabled);
     }
     #[test]
     #[serial]
@@ -6058,9 +4903,8 @@ hooks = true
         cfg.resolve_runtime_fields(&RuntimeResolutionContext {
             raw_config: &raw,
             remote_settings: None,
-            is_headless: false,
             cli_subagents: None,
-            cli_session_summary_model: None,
+            cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
             todo_gate: false,
@@ -6077,9 +4921,8 @@ hooks = true
         cfg.resolve_runtime_fields(&RuntimeResolutionContext {
             raw_config: &raw,
             remote_settings: None,
-            is_headless: false,
             cli_subagents: Some(true),
-            cli_session_summary_model: None,
+            cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
             todo_gate: false,
@@ -6097,9 +4940,8 @@ hooks = true
         cfg.resolve_runtime_fields(&RuntimeResolutionContext {
             raw_config: &raw,
             remote_settings: None,
-            is_headless: false,
             cli_subagents: None,
-            cli_session_summary_model: None,
+            cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
             todo_gate: false,
@@ -6117,15 +4959,14 @@ hooks = true
         cfg.resolve_runtime_fields(&RuntimeResolutionContext {
             raw_config: &raw,
             remote_settings: None,
-            is_headless: false,
             cli_subagents: None,
-            cli_session_summary_model: Some("custom-ss"),
+            cli_session_title_model: Some("custom-ss"),
             cli_experimental_memory: false,
             cli_no_memory: false,
             todo_gate: false,
             laziness_debug_log: None,
         });
-        assert_eq!(cfg.session_summary_model, Some("custom-ss".to_owned()));
+        assert_eq!(cfg.session_title_model, Some("custom-ss".to_owned()));
     }
     #[test]
     #[serial]
@@ -6140,9 +4981,8 @@ hooks = true
         cfg.resolve_runtime_fields(&RuntimeResolutionContext {
             raw_config: &raw,
             remote_settings: Some(&remote),
-            is_headless: false,
             cli_subagents: None,
-            cli_session_summary_model: None,
+            cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
             todo_gate: false,
@@ -6159,9 +4999,8 @@ hooks = true
         let ctx = RuntimeResolutionContext {
             raw_config: &raw,
             remote_settings: None,
-            is_headless: false,
             cli_subagents: None,
-            cli_session_summary_model: None,
+            cli_session_title_model: None,
             cli_experimental_memory: false,
             cli_no_memory: false,
             todo_gate: false,
@@ -6170,11 +5009,9 @@ hooks = true
         cfg.resolve_runtime_fields(&ctx);
         let first_subagents = cfg.subagents_enabled;
         let first_gitignore = cfg.respect_gitignore;
-        let first_mcps = cfg.managed_mcps_enabled;
         cfg.resolve_runtime_fields(&ctx);
         assert_eq!(cfg.subagents_enabled, first_subagents);
         assert_eq!(cfg.respect_gitignore, first_gitignore);
-        assert_eq!(cfg.managed_mcps_enabled, first_mcps);
     }
 
     #[test]
@@ -6224,8 +5061,6 @@ default = "grow-4.5"
                 inference_idle_timeout_secs: None,
                 max_retries: None,
                 hidden: false,
-                reasoning_effort: None,
-                supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -6371,72 +5206,6 @@ default = "grow-4.5"
         unsafe { std::env::remove_var("GROW_MCP_AUTO_RESTART") };
         assert!(r.value);
         assert_eq!(r.source, ConfigSource::Env);
-    }
-    #[test]
-    #[serial]
-    fn mcp_push_server_status_default_is_true() {
-        unsafe { std::env::remove_var("GROW_MCP_PUSH_SERVER_STATUS") };
-        let r = resolve_mcp_push_server_status(None, None, None, None, None);
-        assert!(r.value, "default-on by spec");
-        assert_eq!(r.source, ConfigSource::Default);
-    }
-    #[test]
-    #[serial]
-    fn mcp_push_server_status_requirement_wins_over_everything() {
-        unsafe { std::env::set_var("GROW_MCP_PUSH_SERVER_STATUS", "true") };
-        let r = resolve_mcp_push_server_status(
-            Some(false),
-            Some(true),
-            Some(true),
-            Some(true),
-            Some(true),
-        );
-        unsafe { std::env::remove_var("GROW_MCP_PUSH_SERVER_STATUS") };
-        assert!(!r.value, "requirement overrides every other layer");
-        assert_eq!(r.source, ConfigSource::Requirement);
-    }
-    #[test]
-    #[serial]
-    fn mcp_push_server_status_cli_wins_over_env_and_below() {
-        unsafe { std::env::set_var("GROW_MCP_PUSH_SERVER_STATUS", "true") };
-        let r =
-            resolve_mcp_push_server_status(None, Some(false), Some(true), Some(true), Some(true));
-        unsafe { std::env::remove_var("GROW_MCP_PUSH_SERVER_STATUS") };
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::Cli);
-    }
-    #[test]
-    #[serial]
-    fn mcp_push_server_status_env_wins_over_config_and_below() {
-        unsafe { std::env::set_var("GROW_MCP_PUSH_SERVER_STATUS", "false") };
-        let r = resolve_mcp_push_server_status(None, None, Some(true), Some(true), Some(true));
-        unsafe { std::env::remove_var("GROW_MCP_PUSH_SERVER_STATUS") };
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::Env);
-    }
-    #[test]
-    #[serial]
-    fn mcp_push_server_status_config_wins_over_managed_and_feature_flag() {
-        unsafe { std::env::remove_var("GROW_MCP_PUSH_SERVER_STATUS") };
-        let r = resolve_mcp_push_server_status(None, None, Some(false), Some(true), Some(true));
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::Config);
-    }
-    #[test]
-    #[serial]
-    fn mcp_push_server_status_managed_wins_over_feature_flag() {
-        unsafe { std::env::remove_var("GROW_MCP_PUSH_SERVER_STATUS") };
-        let r = resolve_mcp_push_server_status(None, None, None, Some(false), Some(true));
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::ManagedConfig);
-    }
-    #[test]
-    #[serial]
-    fn mcp_push_server_status_feature_flag_used_when_no_higher_layer() {
-        unsafe { std::env::remove_var("GROW_MCP_PUSH_SERVER_STATUS") };
-        let r = resolve_mcp_push_server_status(None, None, None, None, Some(false));
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::Remote);
     }
     #[test]
     #[serial]

@@ -510,7 +510,7 @@ impl SessionActor {
                 if self.goal_harness_enabled() && goal_owned {
                     let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                     let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-                    self.persist_behavior_state();
+                    self.record_control_snapshot();
                     let notify = self.goal_notify_sender();
                     notify.emit_goal_updated(
                         &self.goal_tracker.lock(),
@@ -840,10 +840,10 @@ fn acking_persistence_channel() -> (
     tokio::task::spawn_local(async move {
         while let Some(message) = rx.recv().await {
             match message {
-                PersistenceMsg::SessionControlAndAck { respond_to, .. } => {
+                PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
+                    let _ = observed_tx.send(PersistenceMsg::Timeline(event));
                     let _ = respond_to.send(Ok(()));
                 }
-                PersistenceMsg::SessionControl(_) => {}
                 other => {
                     let _ = observed_tx.send(other);
                 }
@@ -1353,7 +1353,6 @@ mod synthetic_prompt_behavior_tests {
                                 true,
                                 None,
                                 None,
-                                None,
                             )
                             .await
                     })
@@ -1436,7 +1435,6 @@ mod synthetic_prompt_behavior_tests {
                                 None,
                                 None,
                                 true,
-                                None,
                                 None,
                                 None,
                             )

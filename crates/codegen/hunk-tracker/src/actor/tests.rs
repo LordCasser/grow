@@ -2954,7 +2954,7 @@ async fn test_too_large_survives_baseline_refresh() {
 // are correctly propagated through the query/API surface.
 
 /// get_file_hunk_data returns Full status for normal text file
-/// Verifies: status=Full, byte_len set, content populated, legacy fields populated
+/// Verifies: status=Full, byte_len set, canonical snapshots populated
 #[tokio::test]
 async fn test_get_file_hunk_data_full_text_file() {
     let mut harness = TestHarness::new();
@@ -3005,18 +3005,6 @@ async fn test_get_file_hunk_data_full_text_file() {
         "Current should have content"
     );
 
-    // Verify legacy fields are populated for backward compatibility
-    assert_eq!(
-        data.baseline_content,
-        Some(baseline_text.to_string()),
-        "Legacy baseline_content should be populated"
-    );
-    assert_eq!(
-        data.current_content,
-        Some(current_text.to_string()),
-        "Legacy current_content should be populated"
-    );
-
     // Verify hunks exist
     assert!(
         !data.hunks.is_empty(),
@@ -3047,10 +3035,6 @@ async fn test_get_file_hunk_data_missing_untracked_path() {
     assert!(data.current.byte_len.is_none());
     assert!(data.baseline.content.is_none());
     assert!(data.current.content.is_none());
-
-    // Legacy fields should be None
-    assert!(data.baseline_content.is_none());
-    assert!(data.current_content.is_none());
 
     // No hunks
     assert!(data.hunks.is_empty());
@@ -3084,10 +3068,6 @@ async fn test_get_file_hunk_data_new_file_missing_baseline() {
         "New file current should be Full"
     );
     assert_eq!(data.current.content, Some(content.to_string()));
-
-    // Legacy: baseline_content should be None, current_content populated
-    assert!(data.baseline_content.is_none());
-    assert_eq!(data.current_content, Some(content.to_string()));
 
     // Should have a hunk for the new file
     assert!(!data.hunks.is_empty());
@@ -3139,10 +3119,6 @@ async fn test_get_file_hunk_data_binary_file() {
     );
     assert!(data.current.byte_len.is_some());
     assert!(data.current.content.is_none());
-
-    // Legacy fields should be None for binary
-    assert!(data.baseline_content.is_none());
-    assert!(data.current_content.is_none());
 
     // No hunks for binary files
     assert!(data.hunks.is_empty());
@@ -3197,10 +3173,6 @@ async fn test_get_file_hunk_data_too_large_file() {
     assert!(data.current.byte_len.is_some());
     assert!(data.current.content.is_none());
 
-    // Legacy fields should be None for TooLarge
-    assert!(data.baseline_content.is_none());
-    assert!(data.current_content.is_none());
-
     // No hunks for TooLarge files
     assert!(data.hunks.is_empty());
 }
@@ -3242,10 +3214,6 @@ async fn test_get_file_hunk_data_mixed_states() {
         "Binary current should have Binary status"
     );
     assert!(data.current.content.is_none());
-
-    // Legacy: baseline_content populated, current_content is None
-    assert_eq!(data.baseline_content, Some(text_content.to_string()));
-    assert!(data.current_content.is_none());
 
     // No hunks (can't diff Full against Binary)
     assert!(data.hunks.is_empty());
@@ -3837,18 +3805,6 @@ async fn test_memory_bounded_multiple_large_files() {
             data.current.byte_len.unwrap(),
             file_size,
             "File {} byte_len should match actual size",
-            i
-        );
-    }
-
-    // VALIDATION EVIDENCE: Legacy content fields must also be None
-    for i in 0..num_files {
-        let file_path = harness.working_dir.join(format!("large_file_{}.txt", i));
-        let data = harness.handle.get_file_hunk_data(file_path).await;
-
-        assert!(
-            data.current_content.is_none(),
-            "File {} legacy current_content must be None for TooLarge - validates no content retained",
             i
         );
     }
@@ -5337,63 +5293,6 @@ async fn test_non_coalescable_commands_processed_directly() {
 
     let hunks = harness.get_all_hunks().await;
     assert!(hunks.is_empty(), "ResetBaseline should clear hunks");
-}
-
-/// `snapshot_turn_delta` returns only the requested turn's files/hunks, not the
-/// whole tracker.
-#[tokio::test]
-async fn test_snapshot_turn_delta_is_per_turn() {
-    let mut harness = TestHarness::new();
-
-    // Two turns touch two different files.
-    harness.agent_write("a.rs", "fn a() {}\n", 0);
-    harness.agent_write("b.rs", "fn b() {}\n", 1);
-    harness.settle().await;
-
-    let delta0 = harness
-        .handle
-        .snapshot_turn_delta(0)
-        .await
-        .expect("actor alive");
-    assert_eq!(delta0.prompt_index, 0);
-    assert_eq!(
-        delta0.file_states.keys().collect::<Vec<_>>(),
-        vec![&harness.abs_path("a.rs")],
-        "turn 0 delta must contain only the file it touched"
-    );
-    assert!(
-        !delta0.hunk_ids.is_empty(),
-        "turn 0 delta must carry the turn's hunk ids"
-    );
-    // Every hunk id in the delta must belong to a file in the delta.
-    let delta0_hunk_ids: std::collections::HashSet<_> = delta0
-        .file_states
-        .values()
-        .flat_map(|s| s.hunks.iter().map(|h| h.id.clone()))
-        .collect();
-    assert_eq!(
-        delta0.hunk_ids, delta0_hunk_ids,
-        "delta hunk_ids must match the hunks of the captured files"
-    );
-
-    let delta1 = harness
-        .handle
-        .snapshot_turn_delta(1)
-        .await
-        .expect("actor alive");
-    assert_eq!(
-        delta1.file_states.keys().collect::<Vec<_>>(),
-        vec![&harness.abs_path("b.rs")],
-        "turn 1 delta must not leak turn 0's file"
-    );
-
-    // An unknown turn yields an empty delta (no files, no hunk ids).
-    let empty = harness
-        .handle
-        .snapshot_turn_delta(99)
-        .await
-        .expect("actor alive");
-    assert!(empty.file_states.is_empty() && empty.hunk_ids.is_empty());
 }
 
 // =========================================================================

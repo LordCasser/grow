@@ -203,7 +203,7 @@ pub fn extract_skill_display_text(text: &str) -> Option<String> {
 
 /// Extract trimmed args from `<command-args>…</command-args>`, if present and non-empty.
 /// Falls back to taking everything after `<command-args>` when the closing tag is
-/// missing (truncated titles stored in `generated_title`).
+/// missing (a truncated generated display title can end mid-tag).
 fn extract_command_args(text: &str) -> Option<&str> {
     let open = "<command-args>";
     let close = "</command-args>";
@@ -238,23 +238,23 @@ pub struct SubstitutionContext<'a> {
 
 /// Apply variable substitutions to skill content.
 ///
-/// Supported variables (Grow-native names + compat aliases):
+/// Supported variables:
 ///
-/// | Variable | Alias | Description |
-/// |----------|-------|-------------|
-/// | `$ARGUMENTS` | | Full arguments string (empty if none) |
-/// | `$ARGUMENTS[N]` | | Nth argument (0-indexed, whitespace-split) |
-/// | `$N` | | Shorthand for `$ARGUMENTS[N]` (no upper bound) |
-/// | `${SKILL_DIR}` | `${CLAUDE_SKILL_DIR}` | Directory containing the SKILL.md |
-/// | `${SESSION_ID}` | `${CLAUDE_SESSION_ID}` | Current session ID |
-/// | `${GROW_PLUGIN_ROOT}` | `${CLAUDE_PLUGIN_ROOT}` | Plugin root dir (plugin-backed skills) |
-/// | `${GROW_PLUGIN_DATA}` | `${CLAUDE_PLUGIN_DATA}` | Plugin data dir (plugin-backed skills) |
+/// | Variable | Description |
+/// |----------|-------------|
+/// | `$ARGUMENTS` | Full arguments string (empty if none) |
+/// | `$ARGUMENTS[N]` | Nth argument (0-indexed, whitespace-split) |
+/// | `$N` | Shorthand for `$ARGUMENTS[N]` (no upper bound) |
+/// | `${SKILL_DIR}` | Directory containing the SKILL.md |
+/// | `${SESSION_ID}` | Current session ID |
+/// | `${GROW_PLUGIN_ROOT}` | Plugin root dir (plugin-backed skills) |
+/// | `${GROW_PLUGIN_DATA}` | Plugin data dir (plugin-backed skills) |
 ///
 /// The body is treated as argument-aware only when it contains an *argument*
 /// token (`$ARGUMENTS`, `$ARGUMENTS[N]`, or `$N`); in that case the args are
 /// expanded inline and the `**ARGUMENTS:** ...` suffix is **not** appended.
 /// Path/metadata tokens (`${SKILL_DIR}`, `${SESSION_ID}`,
-/// `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, and their aliases) are
+/// `${GROW_PLUGIN_ROOT}`, and `${GROW_PLUGIN_DATA}`) are
 /// expanded but do NOT suppress the suffix, so a body that references only a
 /// path token still receives its arguments. If no argument token is present,
 /// arguments are appended as a suffix in the traditional format for backward
@@ -320,23 +320,17 @@ pub fn apply_substitutions(content: &mut String, args: Option<&str>, ctx: &Subst
         args_substituted = true;
     }
 
-    // ${SKILL_DIR} and compat alias ${CLAUDE_SKILL_DIR}
+    // Canonical skill directory.
     if let Some(dir) = ctx.skill_dir {
         if content.contains("${SKILL_DIR}") {
             *content = content.replace("${SKILL_DIR}", dir);
         }
-        if content.contains("${CLAUDE_SKILL_DIR}") {
-            *content = content.replace("${CLAUDE_SKILL_DIR}", dir);
-        }
     }
 
-    // ${SESSION_ID} and compat alias ${CLAUDE_SESSION_ID}
+    // Canonical session identifier.
     if let Some(sid) = ctx.session_id {
         if content.contains("${SESSION_ID}") {
             *content = content.replace("${SESSION_ID}", sid);
-        }
-        if content.contains("${CLAUDE_SESSION_ID}") {
-            *content = content.replace("${CLAUDE_SESSION_ID}", sid);
         }
     }
 
@@ -929,39 +923,9 @@ Step 2: Check for bugs.
         assert_eq!(content, "# Commit\n\nDo the commit.");
     }
 
-    // ── Compat aliases ──────────────────────────────────────────────
-
-    #[test]
-    fn test_claude_skill_dir_alias() {
-        let mut content = "Config at ${CLAUDE_SKILL_DIR}/config.json".to_string();
-        apply_substitutions(
-            &mut content,
-            None,
-            &SubstitutionContext {
-                skill_dir: Some("/skills/deploy"),
-                ..Default::default()
-            },
-        );
-        assert_eq!(content, "Config at /skills/deploy/config.json");
-    }
-
     #[test]
     fn test_session_id() {
         let mut content = "Session: ${SESSION_ID}".to_string();
-        apply_substitutions(
-            &mut content,
-            None,
-            &SubstitutionContext {
-                session_id: Some("abc-123"),
-                ..Default::default()
-            },
-        );
-        assert_eq!(content, "Session: abc-123");
-    }
-
-    #[test]
-    fn test_claude_session_id_alias() {
-        let mut content = "Session: ${CLAUDE_SESSION_ID}".to_string();
         apply_substitutions(
             &mut content,
             None,
@@ -977,21 +941,6 @@ Step 2: Check for bugs.
 
     #[test]
     fn test_plugin_root_and_data_substitution() {
-        let mut content = "Root ${CLAUDE_PLUGIN_ROOT}, data ${CLAUDE_PLUGIN_DATA}".to_string();
-        apply_substitutions(
-            &mut content,
-            None,
-            &SubstitutionContext {
-                plugin_root: Some("/plugins/vdc"),
-                plugin_data: Some("/data/vdc"),
-                ..Default::default()
-            },
-        );
-        assert_eq!(content, "Root /plugins/vdc, data /data/vdc");
-    }
-
-    #[test]
-    fn test_grow_plugin_aliases_substitution() {
         let mut content = "Root ${GROW_PLUGIN_ROOT}, data ${GROW_PLUGIN_DATA}".to_string();
         apply_substitutions(
             &mut content,
@@ -1007,11 +956,11 @@ Step 2: Check for bugs.
 
     #[test]
     fn test_plugin_tokens_unchanged_when_root_none() {
-        let mut content = "Root ${CLAUDE_PLUGIN_ROOT}, data ${CLAUDE_PLUGIN_DATA}".to_string();
+        let mut content = "Root ${GROW_PLUGIN_ROOT}, data ${GROW_PLUGIN_DATA}".to_string();
         apply_substitutions(&mut content, None, &SubstitutionContext::default());
         assert_eq!(
             content,
-            "Root ${CLAUDE_PLUGIN_ROOT}, data ${CLAUDE_PLUGIN_DATA}"
+            "Root ${GROW_PLUGIN_ROOT}, data ${GROW_PLUGIN_DATA}"
         );
     }
 
@@ -1019,7 +968,7 @@ Step 2: Check for bugs.
     fn test_plugin_token_with_args_appends_suffix() {
         // A path token expands, but with no argument token the args must still
         // be appended via the **ARGUMENTS:** suffix (not silently dropped).
-        let mut content = "Run ${CLAUDE_PLUGIN_ROOT}/tool.py".to_string();
+        let mut content = "Run ${GROW_PLUGIN_ROOT}/tool.py".to_string();
         apply_substitutions(
             &mut content,
             Some("--flag"),
@@ -1053,7 +1002,7 @@ Step 2: Check for bugs.
     fn test_argument_token_with_path_token_no_suffix() {
         // When an argument token IS present, args expand inline and the path
         // token also expands; no **ARGUMENTS:** suffix is appended.
-        let mut content = "Run ${CLAUDE_PLUGIN_ROOT}/tool.py $ARGUMENTS".to_string();
+        let mut content = "Run ${GROW_PLUGIN_ROOT}/tool.py $ARGUMENTS".to_string();
         apply_substitutions(
             &mut content,
             Some("--flag"),
@@ -1214,7 +1163,7 @@ Step 2: Check for bugs.
 
     #[test]
     fn extract_skill_truncated_args_no_close_tag() {
-        // generated_title is often truncated mid-args, losing </command-args>.
+        // Generated display titles can truncate mid-args, losing </command-args>.
         let input = "<command-name>implement</command-name> \
                       <command-message>/implement</command-message> \
                       <command-args>there are still 2 issues * the reverse";

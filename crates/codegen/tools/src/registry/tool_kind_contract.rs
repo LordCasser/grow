@@ -19,7 +19,8 @@
 use std::collections::HashMap;
 
 use crate::implementations::{
-    grow_build, grow_build_concise, grow_build_hashline, memory, search_tool, use_tool,
+    context_fetch, grow_build, grow_build_concise, grow_build_hashline, memory, search_tool,
+    use_tool,
 };
 use crate::registry::types::{ToolConfig, ToolRegistryBuilder};
 use crate::types::tool::ToolKind;
@@ -55,7 +56,7 @@ where
 /// - Search class: Search, WebFetch.
 /// - Edit class (ReadWrite): Edit, Write, Delete, Move, DeployApp.
 /// - Execute class (Execute): Execute, BackgroundTaskAction,
-///   WaitTasksAction, KillTaskAction, Task, Monitor, Workflow.
+///   KillTaskAction, Task, Monitor, Workflow.
 /// - Meta (always): Plan, PlanControl, AskUser, Skill, SearchTool,
 ///   CapabilityRequest.
 /// - `Other`: fail-closed — only the All mode keeps it.
@@ -81,7 +82,6 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
         entry::<grow_build::KillTerminalCommandTool>(ToolKind::KillTaskAction),
         entry::<grow_build::TaskOutputTool>(ToolKind::BackgroundTaskAction),
         entry::<grow_build::GetTerminalCommandOutputTool>(ToolKind::BackgroundTaskAction),
-        entry::<grow_build::WaitTasksTool>(ToolKind::WaitTasksAction),
         entry::<grow_build::MonitorTool>(ToolKind::Monitor),
         // ── Grow planning / meta ───────────────────────────────────────────
         entry::<grow_build::TodoWriteTool>(ToolKind::Plan),
@@ -110,6 +110,7 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
         // ── Grow memory ────────────────────────────────────────────────────
         entry::<memory::MemorySearchImpl>(ToolKind::MemorySearch),
         entry::<memory::MemoryGetImpl>(ToolKind::MemoryGet),
+        entry::<context_fetch::ContextFetchImpl>(ToolKind::ContextFetch),
         // ── GrowConcise variants ───────────────────────────────────────────
         entry::<grow_build_concise::ReadFileConciseTool>(ToolKind::Read),
         entry::<grow_build_concise::SearchReplaceConciseTool>(ToolKind::Edit),

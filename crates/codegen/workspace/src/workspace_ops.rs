@@ -26,9 +26,9 @@ pub use workspace_types::rpc::git::{
     DiffStatsSummary, GitBranchesReq, GitCheckoutCommitReq, GitCheckoutReq, GitCollectChangesReq,
     GitCollectChangesResponse, GitCommitReq, GitCurrentCommitReq, GitDiffReq, GitDiscardReq,
     GitFilesReq, GitInfoReq, GitResolveRootReq, GitStageContentReq, GitStageReq, GitStashReq,
-    GitStatusExtReq, GitStatusExtResponse, GitStatusFormat, GitStatusReq, GitSyncBaseReq,
-    GitUnstageReq, IdentityData, PublicBaseData, RepoInfo, UNTRACKED_CONTENT_THRESHOLD,
-    UncommittedChangesData, UntrackedFileData,
+    GitStatusExtReq, GitStatusExtResponse, GitStatusFormat, GitSyncBaseReq, GitUnstageReq,
+    IdentityData, PublicBaseData, RepoInfo, UNTRACKED_CONTENT_THRESHOLD, UncommittedChangesData,
+    UntrackedFileData,
 };
 pub use workspace_types::rpc::hooks::{
     HookEventNameWire, HookRegistryReq, HookRegistryWire, HookSpecWire,
@@ -42,7 +42,6 @@ pub use workspace_types::rpc::hunks::{
     HunkTurnActionReq, HunkWire, SessionStatsWire, SessionSummaryWire, TurnSummaryWire,
 };
 pub use workspace_types::rpc::search::{FuzzyChangeReq, FuzzyCloseReq, FuzzyOpenReq};
-pub use workspace_types::rpc::session::{BeginPromptReq, EndPromptReq, RewindToReq};
 pub use workspace_types::rpc::skills::DiscoverSkillsReq;
 pub use workspace_types::rpc::workspace::WorkspaceInfoReq;
 pub use workspace_types::rpc::worktree::{
@@ -107,15 +106,6 @@ impl WorkspaceOp for ExportGithubReq {
             message: failure.message,
         })
     }
-}
-/// Get all rewind points for the session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetRewindPointsReq {
-    pub session_id: String,
-}
-impl WorkspaceRpc for GetRewindPointsReq {
-    const METHOD: &'static str = "workspace.get_rewind_points";
-    type Response = Vec<crate::session::file_state::RewindPoint>;
 }
 fn hunk_line_info_to_wire(info: &hunk_tracker::types::HunkLineInfo) -> HunkLineInfoWire {
     HunkLineInfoWire {
@@ -882,37 +872,12 @@ fn hook_registry_to_wire(
         serde_json::to_value(registry).map_err(|e| WorkspaceError::Operation(e.to_string()))?;
     serde_json::from_value(value).map_err(|e| WorkspaceError::Operation(e.to_string()))
 }
-/// Inverse of [`hook_registry_to_wire`]. Unknown event keys (a newer peer) are
-/// dropped so one can't fail the whole decode, and matchers are recompiled
-/// fail-closed after the hop.
+/// Inverse of [`hook_registry_to_wire`]. Matchers are recompiled fail-closed
+/// after the hop.
 fn wire_to_hook_registry(
     wire: &HookRegistryWire,
 ) -> WorkspaceResult<hooks::discovery::HookRegistry> {
-    let dropped: Vec<&str> = wire
-        .hooks
-        .keys()
-        .filter_map(|event| match event {
-            HookEventNameWire::Unknown(name) => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
-    if !dropped.is_empty() {
-        tracing::debug!(
-            dropped_count = dropped.len(),
-            dropped_events = ?dropped,
-            "dropping unknown hook event keys from peer wire registry"
-        );
-    }
-    let known = HookRegistryWire {
-        hooks: wire
-            .hooks
-            .iter()
-            .filter(|(event, _)| !matches!(event, HookEventNameWire::Unknown(_)))
-            .map(|(event, specs)| (event.clone(), specs.clone()))
-            .collect(),
-    };
-    let value =
-        serde_json::to_value(&known).map_err(|e| WorkspaceError::Operation(e.to_string()))?;
+    let value = serde_json::to_value(wire).map_err(|e| WorkspaceError::Operation(e.to_string()))?;
     let mut registry: hooks::discovery::HookRegistry =
         serde_json::from_value(value).map_err(|e| WorkspaceError::Operation(e.to_string()))?;
     registry.recompile_matchers();
@@ -1633,7 +1598,6 @@ mod tests {
                 E::Notification => HookEventNameWire::Notification,
                 E::SubagentStart => HookEventNameWire::SubagentStart,
                 E::SubagentStop => HookEventNameWire::SubagentStop,
-                E::SubagentEnd => HookEventNameWire::SubagentEnd,
                 E::PreCompact => HookEventNameWire::PreCompact,
                 E::PostCompact => HookEventNameWire::PostCompact,
             }
@@ -1652,7 +1616,6 @@ mod tests {
             E::Notification,
             E::SubagentStart,
             E::SubagentStop,
-            E::SubagentEnd,
             E::PreCompact,
             E::PostCompact,
         ] {

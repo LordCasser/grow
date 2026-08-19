@@ -150,12 +150,12 @@ pub struct PeekPanelState {
     /// Peeked session's Agent id (path-style when nested). Defaults to
     /// `"grow"` until refresh fills it from the live `AgentView`.
     pub agent_name: Option<String>,
-    /// Whether the peeked agent runs in always-approve (yolo) mode. Shown
+    /// Whether the peeked agent runs in always-approve (always-approve) mode. Shown
     /// as an `always-approve` flag next to the model on the bottom border —
     /// the same signal the dashboard row badge carried.
     pub auto_approve: bool,
     /// Whether the peeked agent is in Auto (LLM classifier) mode. Shown as an
-    /// `auto` flag (mutually exclusive with `always-approve` — yolo wins).
+    /// `auto` flag (mutually exclusive with `always-approve` — always-approve wins).
     pub auto: bool,
     /// Whether the peeked agent is in plan mode. Shown as a `plan` flag on
     /// the bottom border. Set live by the render-time refresh.
@@ -447,13 +447,11 @@ pub fn compute_peek_fields(
 }
 
 /// The peeked row's live config-badge state for the peek box's bottom border:
-/// agent id, model display name, always-approve (yolo), auto (classifier)
-/// mode, and plan mode. Named fields so adjacent bools can't be transposed.
+/// agent id, model display name, permission mode, and plan mode.
 pub struct PeekModeBadge {
     pub agent: Option<String>,
     pub model: Option<String>,
-    pub yolo: bool,
-    pub auto: bool,
+    pub permission_mode: diagnostics::enums::PermissionMode,
     pub plan: bool,
 }
 
@@ -470,8 +468,7 @@ pub fn peek_model_and_mode(
     let default = || PeekModeBadge {
         agent: None,
         model: None,
-        yolo: false,
-        auto: false,
+        permission_mode: diagnostics::enums::PermissionMode::Ask,
         plan: false,
     };
     match row {
@@ -488,8 +485,7 @@ pub fn peek_model_and_mode(
                             .unwrap_or_else(|| "grow".into()),
                     ),
                     model: agent.session.models.current_model_name(),
-                    yolo: agent.session.yolo_mode,
-                    auto: agent.session.is_auto(),
+                    permission_mode: agent.session.permission_mode(),
                     plan,
                 }
             }
@@ -511,30 +507,27 @@ pub fn peek_model_and_mode(
                     .or_else(|| Some("grow".into()));
                 let follows_parent =
                     info.and_then(|info| info.permission_mode.as_deref()) == Some("follow");
-                let (yolo, auto) = if follows_parent {
-                    (
-                        parent_agent.session.yolo_mode,
-                        parent_agent.session.is_auto(),
-                    )
+                let permission_mode = if follows_parent {
+                    parent_agent.session.permission_mode()
                 } else {
                     child
-                        .map(|child| (child.session.yolo_mode, child.session.is_auto()))
+                        .map(|child| child.session.permission_mode())
                         .or_else(|| {
-                            info.map(|info| {
-                                (
-                                    info.effective_permission_mode.as_deref()
-                                        == Some("always-approve"),
-                                    info.effective_permission_mode.as_deref() == Some("auto"),
-                                )
+                            info.and_then(|info| match info.effective_permission_mode.as_deref() {
+                                Some("always-approve") => {
+                                    Some(diagnostics::enums::PermissionMode::AlwaysApprove)
+                                }
+                                Some("auto") => Some(diagnostics::enums::PermissionMode::Auto),
+                                Some("ask") => Some(diagnostics::enums::PermissionMode::Ask),
+                                _ => None,
                             })
                         })
-                        .unwrap_or((false, false))
+                        .unwrap_or(diagnostics::enums::PermissionMode::Ask)
                 };
                 PeekModeBadge {
                     agent,
                     model,
-                    yolo,
-                    auto,
+                    permission_mode,
                     plan: false,
                 }
             }
@@ -585,7 +578,7 @@ fn paint_peek_config_badge(
     // Mirror the chat prompt's flag precedence: plan wins over always-approve
     // wins over auto. Plan mode blocks edits regardless of the underlying
     // permission mode (the gate in shell), so `plan` alone is the
-    // honest badge even when yolo stays armed underneath.
+    // honest badge even when always-approve stays armed underneath.
     if panel.plan_mode {
         flags.push(PromptFlag {
             text: "plan",
@@ -1484,7 +1477,7 @@ mod tests {
             "model shows in question/approval mode: {qbottom:?}",
         );
 
-        // No always-approve flag when the agent isn't in yolo mode.
+        // No always-approve flag when the agent isn't in always-approve mode.
         let mut plain =
             PeekPanelState::new(DashboardRowId::TopLevel(AgentId(0)), fields("Response"));
         plain.model_name = Some("Grow 4 Fast".to_string());
@@ -1492,7 +1485,7 @@ mod tests {
         let plain_bottom = badge_row(&plain, 6);
         assert!(
             !plain_bottom.contains("always-approve"),
-            "no flag without yolo: {plain_bottom:?}",
+            "no flag without always-approve: {plain_bottom:?}",
         );
 
         // Plan mode → a `plan` flag (so all three Shift+Tab cycle states
@@ -1509,25 +1502,27 @@ mod tests {
 
         // Plan + always-approve → `plan` only. Plan mode blocks edits in every
         // permission mode (shell-side gate), so the plan badge is the honest
-        // one; yolo stays armed underneath and reappears once plan exits.
+        // one; always-approve stays armed underneath and reappears once plan exits.
         planp.auto_approve = true;
         planp.auto = true;
-        let plan_yolo_bottom = badge_row(&planp, 6);
+        let plan_always_approve_bottom = badge_row(&planp, 6);
         assert!(
-            plan_yolo_bottom.contains("plan"),
-            "plan flag must show in plan+yolo: {plan_yolo_bottom:?}",
+            plan_always_approve_bottom.contains("plan"),
+            "plan flag must show in plan+always-approve: {plan_always_approve_bottom:?}",
         );
         assert!(
-            !plan_yolo_bottom.contains("always-approve") && !plan_yolo_bottom.contains("auto"),
-            "plan suppresses always-approve and auto: {plan_yolo_bottom:?}",
+            !plan_always_approve_bottom.contains("always-approve")
+                && !plan_always_approve_bottom.contains("auto"),
+            "plan suppresses always-approve and auto: {plan_always_approve_bottom:?}",
         );
 
-        // Yolo without plan → `always-approve` (and it wins over auto).
+        // Always-approve without plan wins over auto.
         planp.plan_mode = false;
-        let yolo_bottom = badge_row(&planp, 6);
+        let always_approve_bottom = badge_row(&planp, 6);
         assert!(
-            yolo_bottom.contains("always-approve") && !yolo_bottom.contains("auto"),
-            "always-approve shows once plan is off and wins over auto: {yolo_bottom:?}",
+            always_approve_bottom.contains("always-approve")
+                && !always_approve_bottom.contains("auto"),
+            "always-approve shows once plan is off and wins over auto: {always_approve_bottom:?}",
         );
     }
 

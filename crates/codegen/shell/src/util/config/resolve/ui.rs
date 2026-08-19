@@ -80,35 +80,6 @@ pub fn resolve_group_tool_verbs(
     )
 }
 
-/// Env override for the collapsed-Edit-blocks default in the TUI.
-pub const ENV_COLLAPSED_EDIT_BLOCKS: &str = "GROW_COLLAPSED_EDIT_BLOCKS";
-
-#[cfg(test)]
-static COLLAPSED_EDIT_BLOCKS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Resolve whether the TUI shows Edit tool calls as a collapsed one-line
-/// `+N/-M` diffstat summary by default (expand for the diff).
-///
-/// Precedence: requirements > env (`GROW_COLLAPSED_EDIT_BLOCKS`) >
-/// `[ui] collapsed_edit_blocks` > managed > remote (GrowthBook) > default
-/// `false` (rollout flag: off keeps the legacy expanded-diff view).
-pub fn resolve_collapsed_edit_blocks(
-    requirements: Option<&TomlValue>,
-    user: Option<&TomlValue>,
-    managed: Option<&TomlValue>,
-    remote: Option<&RemoteSettings>,
-) -> crate::agent::config::Resolved<bool> {
-    resolve_ui_bool(
-        ENV_COLLAPSED_EDIT_BLOCKS,
-        "collapsed_edit_blocks",
-        false,
-        requirements,
-        user,
-        managed,
-        remote.and_then(|r| r.collapsed_edit_blocks),
-    )
-}
-
 /// Resolve whether the opt-in `/toggle-mouse-reporting` command is exposed.
 ///
 /// Precedence: `GROW_MOUSE_REPORTING_TOGGLE` env > `[ui] mouse_reporting_toggle`
@@ -341,98 +312,6 @@ mod group_tool_verbs_tests {
         assert_eq!(r.source, ConfigSource::Config);
         let r = resolve_group_tool_verbs(None, None, Some(&off), Some(&remote(Some(true))));
         assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::ManagedConfig);
-    }
-}
-
-#[cfg(test)]
-mod collapsed_edit_blocks_tests {
-    use super::*;
-    use crate::agent::config::ConfigSource;
-
-    fn guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = super::COLLAPSED_EDIT_BLOCKS_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var(ENV_COLLAPSED_EDIT_BLOCKS) };
-        g
-    }
-
-    fn toml_ui(v: bool) -> TomlValue {
-        toml::from_str(&format!("[ui]\ncollapsed_edit_blocks = {v}\n")).unwrap()
-    }
-
-    fn remote(v: Option<bool>) -> RemoteSettings {
-        RemoteSettings {
-            collapsed_edit_blocks: v,
-            ..RemoteSettings::default()
-        }
-    }
-
-    #[test]
-    fn defaults_off_when_nothing_set() {
-        let _g = guard();
-        let r = resolve_collapsed_edit_blocks(None, None, None, None);
-        assert!(!r.value, "collapsed edit blocks must default OFF");
-        assert_eq!(r.source, ConfigSource::Default);
-    }
-
-    #[test]
-    fn each_layer_can_turn_it_on() {
-        let _g = guard();
-        let on = toml_ui(true);
-        let r = resolve_collapsed_edit_blocks(Some(&on), None, None, None);
-        assert!(r.value);
-        assert_eq!(r.source, ConfigSource::Requirement);
-        unsafe { std::env::set_var(ENV_COLLAPSED_EDIT_BLOCKS, "1") };
-        let r = resolve_collapsed_edit_blocks(None, None, None, None);
-        assert!(r.value, "env enable must beat the false default");
-        assert_eq!(r.source, ConfigSource::Env);
-        unsafe { std::env::remove_var(ENV_COLLAPSED_EDIT_BLOCKS) };
-        let r = resolve_collapsed_edit_blocks(None, Some(&on), None, None);
-        assert!(r.value);
-        assert_eq!(r.source, ConfigSource::Config);
-        let r = resolve_collapsed_edit_blocks(None, None, Some(&on), None);
-        assert!(r.value);
-        assert_eq!(r.source, ConfigSource::ManagedConfig);
-        let r = resolve_collapsed_edit_blocks(None, None, None, Some(&remote(Some(true))));
-        assert!(r.value);
-        assert_eq!(r.source, ConfigSource::Remote);
-    }
-
-    #[test]
-    fn env_overrides_config_and_remote() {
-        let _g = guard();
-        unsafe { std::env::set_var(ENV_COLLAPSED_EDIT_BLOCKS, "0") };
-        let on = toml_ui(true);
-        let r = resolve_collapsed_edit_blocks(None, Some(&on), None, Some(&remote(Some(true))));
-        assert!(!r.value, "env must override config + remote");
-        assert_eq!(r.source, ConfigSource::Env);
-        unsafe { std::env::remove_var(ENV_COLLAPSED_EDIT_BLOCKS) };
-    }
-
-    #[test]
-    fn requirement_beats_env() {
-        let _g = guard();
-        unsafe { std::env::set_var(ENV_COLLAPSED_EDIT_BLOCKS, "1") };
-        let off = toml_ui(false);
-        let r = resolve_collapsed_edit_blocks(Some(&off), None, None, None);
-        assert!(!r.value, "requirement must beat env");
-        assert_eq!(r.source, ConfigSource::Requirement);
-        unsafe { std::env::remove_var(ENV_COLLAPSED_EDIT_BLOCKS) };
-    }
-
-    #[test]
-    fn config_beats_managed_beats_remote() {
-        let _g = guard();
-        let off = toml_ui(false);
-        let on = toml_ui(true);
-        let r =
-            resolve_collapsed_edit_blocks(None, Some(&on), Some(&off), Some(&remote(Some(false))));
-        assert!(r.value);
-        assert_eq!(r.source, ConfigSource::Config);
-        let r = resolve_collapsed_edit_blocks(None, None, Some(&on), Some(&remote(Some(false))));
-        assert!(r.value);
         assert_eq!(r.source, ConfigSource::ManagedConfig);
     }
 }

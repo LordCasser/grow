@@ -1,6 +1,6 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "pre_tool_use": [
       {
         "matcher": "Bash",
         "hooks": [

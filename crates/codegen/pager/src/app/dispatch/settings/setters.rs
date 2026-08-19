@@ -100,9 +100,9 @@ pub(super) fn set_screen_mode_inner(app: &mut AppView, canonical: &str) {
 
 /// Persist `[ui].screen_mode` (`fullscreen` | `minimal`). Restart-required.
 ///
-/// Unset is *displayed* as Fullscreen but is not an explicit on-disk value —
-/// choosing Fullscreen when missing must still write, or legacy pager.toml /
-/// leaky-terminal paths can keep applying after the user confirmed Fullscreen.
+/// Unset is *displayed* as Fullscreen but is not an explicit on-disk value.
+/// Choosing Fullscreen when missing must still write so environment-derived
+/// minimal mode no longer applies after the user confirmed Fullscreen.
 pub(in crate::app::dispatch) fn set_screen_mode(app: &mut AppView, value: String) -> Vec<Effect> {
     let canonical = crate::settings::canonical_screen_mode(Some(&value));
     let prev_raw = app.current_ui.screen_mode.as_deref();
@@ -124,14 +124,7 @@ pub(in crate::app::dispatch) fn set_screen_mode(app: &mut AppView, value: String
 }
 
 fn screen_mode_raw_matches_canonical(raw: Option<&str>, canonical: &str) -> bool {
-    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
-        return false;
-    };
-    match canonical {
-        "minimal" => raw.eq_ignore_ascii_case("minimal"),
-        "fullscreen" => raw.eq_ignore_ascii_case("fullscreen") || raw.eq_ignore_ascii_case("full"),
-        _ => false,
-    }
+    raw == Some(canonical)
 }
 
 /// Set the hunk-tracker mode (registry-driven path).
@@ -355,53 +348,6 @@ pub(in crate::app::dispatch) fn set_group_tool_verbs(app: &mut AppView, new: boo
     app.show_toast(&save_success_toast("Group tool calls", new));
     vec![Effect::PersistSetting {
         key: "group_tool_verbs",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-pub(super) fn set_collapsed_edit_blocks_inner(app: &mut AppView, new: bool) {
-    // Read prev from the cache so a rollback restore walks the same flip.
-    let prev = crate::appearance::cache::load_collapsed_edit_blocks();
-    crate::appearance::cache::set_collapsed_edit_blocks(new);
-    if prev == new {
-        return;
-    }
-    // Re-materialize on-default Edit rows + repaint the live +N/-M suffix
-    // (the flip policy lives on ScrollbackState).
-    for agent in app.agents.values_mut() {
-        agent.scrollback.apply_collapsed_edit_blocks_flip(prev, new);
-        for child in agent.subagent_views.values_mut() {
-            child.scrollback.apply_collapsed_edit_blocks_flip(prev, new);
-        }
-    }
-}
-
-/// Set whether Edit blocks default to the collapsed one-line `+N/-M`
-/// diffstat summary (expand for the diff).
-///
-/// SHELL-OWNED: cache mirror + `[ui].collapsed_edit_blocks` via
-/// `Effect::PersistSetting`. Explicit pager.toml
-/// `[scrollback.blocks.edit]` shape keys override the flag.
-pub(in crate::app::dispatch) fn set_collapsed_edit_blocks(
-    app: &mut AppView,
-    new: bool,
-) -> Vec<Effect> {
-    let prev = crate::appearance::cache::load_collapsed_edit_blocks();
-    if prev == new {
-        return vec![];
-    }
-    set_collapsed_edit_blocks_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "collapsed_edit_blocks",
-        value = new,
-        "setting changed",
-    );
-    app.show_toast(&save_success_toast("Collapsed edit blocks", new));
-    vec![Effect::PersistSetting {
-        key: "collapsed_edit_blocks",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]
@@ -1589,7 +1535,7 @@ pub(in crate::app::dispatch) fn clear_default_model(app: &mut AppView) -> Vec<Ef
 }
 
 // ---------------------------------------------------------------------------
-// Model-family settings: fork_secondary_model and session_summary_model.
+// Model-family settings: fork_secondary_model and session_title_model.
 //
 // SHELL-OWNED. Unlike `default_model`, these do NOT mutate live
 // runtime state — they update `current_ui` mirrors and persist.
@@ -1707,7 +1653,7 @@ pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) ->
     }]
 }
 
-// `session_summary_model` and `default_reasoning_effort` setters were removed
+// `session_title_model` and `default_reasoning_effort` setters were removed
 // alongside their registry entries.
 
 // ---------------------------------------------------------------------------

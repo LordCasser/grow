@@ -35,6 +35,17 @@ fn permission_judgment_error_needs_retry(error: &sampling_types::SamplingError) 
     error.is_retryable() && !error.is_retry_vetoed()
 }
 
+fn permission_sideband_prompt(items: &[ConversationItem]) -> String {
+    let mut purpose_items = Vec::with_capacity(2);
+    if let Some(first) = items.first() {
+        purpose_items.push(first);
+    }
+    if items.len() > 1 {
+        purpose_items.push(&items[items.len() - 1]);
+    }
+    serde_json::to_string(&purpose_items).unwrap_or_else(|_| "permission judgment request".into())
+}
+
 /// Match a provider's unconditional model-capability claim without treating
 /// an open-ended format/size qualifier as a permanent text-only capability.
 /// Provider prose such as "does not support images with animated frames" is
@@ -319,7 +330,12 @@ impl SessionActor {
     ) -> Option<chat_state::ImageRewriteReport> {
         use sampling_types::conversation::{ConversationImageSource, conversation_image_groups};
 
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let materialized = self
+            .chat_state_handle
+            .materialize_timeline(self.session_info.id.to_string())
+            .await?;
+        let input_ref = materialized.input_ref;
+        let conversation = materialized.surface;
         let groups = conversation_image_groups(&conversation);
         if groups.is_empty() {
             return Some(chat_state::ImageRewriteReport::default());
@@ -362,24 +378,133 @@ impl SessionActor {
                     group.item_index,
                     group.image_count(),
                 );
-                let describe = self.image_describe_cache.get_or_describe_urls(
-                    client.clone(),
-                    &model,
+                let cache_key = self.image_describe_cache.key_for_urls(
                     &group.image_urls,
                     outline.as_deref(),
                     &current_query,
                     &source_context,
                     &group.fingerprint,
                 );
-                match tokio::time::timeout(remaining, describe).await {
-                    Ok(Ok(description)) => {
+                if let Some(description) = self.image_describe_cache.get(&cache_key) {
+                    rewrite.replacement = Some(
+                        crate::session::image_describe::render_image_description_block(
+                            &description,
+                        ),
+                    );
+                    continue;
+                }
+                let prompt_text = crate::session::image_describe::build_describe_prompt(
+                    outline.as_deref(),
+                    &current_query,
+                    &source_context,
+                );
+                let request = crate::session::image_describe::build_describe_request(
+                    &model,
+                    prompt_text.clone(),
+                    &group.image_urls,
+                );
+                let mut sideband = match self
+                    .begin_sideband(
+                        chat_state::SidebandPurpose::ImageDescription,
+                        prompt_text,
+                        SidebandInput::Frozen(vec![input_ref.clone()]),
+                        chat_state::SidebandRoute {
+                            model: model.clone(),
+                            backend: sideband_backend(client.api_backend()).into(),
+                        },
+                        None,
+                    )
+                    .await
+                {
+                    Ok(sideband) => sideband,
+                    Err(error) => {
+                        tracing::warn!(%error, model, "failed to start image description Sideband");
+                        continue;
+                    }
+                };
+                if let Err(error) = sideband.attempt(None).await {
+                    tracing::warn!(%error, model, "failed to commit image description attempt");
+                    continue;
+                }
+                let timeout = remaining.min(crate::session::image_describe::DESCRIBE_TIMEOUT);
+                let described: Result<
+                    String,
+                    crate::session::image_describe::DescribeError,
+                > = async {
+                    match tokio::time::timeout(timeout, client.conversation_collect(request)).await {
+                    Ok(Ok(response)) => {
+                        let raw = response.assistant_text();
+                        let description = raw.trim().to_owned();
+                        if description.is_empty() {
+                            sideband
+                                .fail(
+                                    chat_state::SidebandOutcome::Failed,
+                                    "image describe model returned no content",
+                                )
+                                .await
+                                .map_err(|error| {
+                                    crate::session::image_describe::DescribeError::Sideband(
+                                        error.to_string(),
+                                    )
+                                })?;
+                            Err(crate::session::image_describe::DescribeError::EmptyResponse)
+                        } else {
+                            let usage = sideband_usage(&response);
+                            let finish = sideband_finish(&response);
+                            sideband
+                                .complete(raw, None, usage, finish)
+                                .await
+                                .map_err(|error| {
+                                    crate::session::image_describe::DescribeError::Sideband(
+                                        error.to_string(),
+                                    )
+                                })?;
+                            self.image_describe_cache
+                                .insert(cache_key, description.clone());
+                            Ok(description)
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        let info = sampler::SamplingErrorInfo::from(&error);
+                        sideband
+                            .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                            .await
+                            .map_err(|record_error| {
+                                crate::session::image_describe::DescribeError::Sideband(
+                                    record_error.to_string(),
+                                )
+                            })?;
+                        Err(crate::session::image_describe::DescribeError::Sampling(info))
+                    }
+                    Err(_) => {
+                        sideband
+                            .fail(
+                                chat_state::SidebandOutcome::Cancelled,
+                                format!(
+                                    "image describe call timed out after {}s",
+                                    timeout.as_secs()
+                                ),
+                            )
+                            .await
+                            .map_err(|error| {
+                                crate::session::image_describe::DescribeError::Sideband(
+                                    error.to_string(),
+                                )
+                            })?;
+                        Err(crate::session::image_describe::DescribeError::Timeout(timeout))
+                    }
+                    }
+                }
+                .await;
+                match described {
+                    Ok(description) => {
                         rewrite.replacement = Some(
                             crate::session::image_describe::render_image_description_block(
                                 &description,
                             ),
                         );
                     }
-                    Ok(Err(crate::session::image_describe::DescribeError::Sampling(info)))
+                    Err(crate::session::image_describe::DescribeError::Sampling(info))
                         if is_image_input_unsupported(&info, group.image_count()) =>
                     {
                         if let Err(error) = self
@@ -399,20 +524,13 @@ impl SessionActor {
                         );
                         break;
                     }
-                    Ok(Err(error)) => {
+                    Err(error) => {
                         tracing::warn!(
                             %error,
                             model,
                             item_index = group.item_index,
                             "auxiliary image description failed; dropping this image group"
                         );
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            timeout_secs = IMAGE_RECOVERY_TIMEOUT.as_secs(),
-                            "image context recovery reached its total timeout"
-                        );
-                        break;
                     }
                 }
             }
@@ -534,7 +652,6 @@ impl SessionActor {
                         Some(
                             ToolKind::Task
                                 | ToolKind::BackgroundTaskAction
-                                | ToolKind::WaitTasksAction
                                 | ToolKind::KillTaskAction
                                 | ToolKind::Monitor
                                 | ToolKind::Workflow
@@ -822,6 +939,17 @@ impl SessionActor {
         judgment: &workspace::permission::PermissionJudgmentRequest,
         input: crate::config::SubagentClassifierInput,
     ) -> Vec<ConversationItem> {
+        let surface = self.chat_state_handle.get_conversation().await;
+        self.child_permission_judgment_items_from_surface(judgment, input, surface)
+            .await
+    }
+
+    async fn child_permission_judgment_items_from_surface(
+        &self,
+        judgment: &workspace::permission::PermissionJudgmentRequest,
+        input: crate::config::SubagentClassifierInput,
+        surface: Vec<ConversationItem>,
+    ) -> Vec<ConversationItem> {
         if input == crate::config::SubagentClassifierInput::RequestOnly {
             let mut request_only = judgment.clone();
             request_only.prompt_type = workspace::permission::ClassifierPromptType::JustCommand;
@@ -845,16 +973,10 @@ impl SessionActor {
             workspace::permission::build_primary_context_judgment_message(judgment);
         let policy = workspace::permission::primary_context_judgment_system_prompt(judgment);
         let mut items = vec![ConversationItem::system(policy)];
-        items.extend(
-            self.chat_state_handle
-                .get_conversation()
-                .await
-                .into_iter()
-                .filter(|item| match item {
-                    ConversationItem::User(user) => user.permission_evidence.is_some(),
-                    _ => false,
-                }),
-        );
+        items.extend(surface.into_iter().filter(|item| match item {
+            ConversationItem::User(user) => user.permission_evidence.is_some(),
+            _ => false,
+        }));
 
         // Apply the normal 85%-with-headroom budget to the snapshot copy only.
         // Keep the dedicated authorization policy, then spend the remainder
@@ -1010,12 +1132,42 @@ impl SessionActor {
                             };
                             (client, model, classifier_reasoning_effort)
                         };
-                        let items = if is_child_judgment {
-                            session
-                                .child_permission_judgment_items(&judgment, classifier_input)
-                                .await
+                        let (items, input_refs) = if is_child_judgment {
+                            let materialized = if classifier_input
+                                == crate::config::SubagentClassifierInput::RequestOnly
+                            {
+                                None
+                            } else {
+                                Some(
+                                    session
+                                        .chat_state_handle
+                                        .materialize_timeline(session.session_info.id.to_string())
+                                        .await
+                                        .ok_or_else(|| {
+                                            workspace::permission::ClassifierFailure::TransportError(
+                                                "permission sideband could not materialize its parent Timeline"
+                                                    .into(),
+                                            )
+                                        })?,
+                                )
+                            };
+                            let surface = materialized
+                                .as_ref()
+                                .map(|value| value.surface.clone())
+                                .unwrap_or_default();
+                            let items = session
+                                .child_permission_judgment_items_from_surface(
+                                    &judgment,
+                                    classifier_input,
+                                    surface,
+                                )
+                                .await;
+                            let refs = materialized
+                                .map(|value| vec![value.input_ref])
+                                .unwrap_or_default();
+                            (items, refs)
                         } else {
-                            judgment
+                            let items = judgment
                                 .classifier_messages()
                                 .into_iter()
                                 .map(|message| match message.role {
@@ -1026,7 +1178,8 @@ impl SessionActor {
                                         ConversationItem::user(message.text)
                                     }
                                 })
-                                .collect::<Vec<_>>()
+                                .collect::<Vec<_>>();
+                            (items, Vec::new())
                         };
                         let json_output =
                             permission_judgment_json_output(sampling_client.api_backend());
@@ -1036,90 +1189,172 @@ impl SessionActor {
                             reasoning_effort,
                             items,
                             json_output,
+                            input_refs,
                         ))
                     };
-                    let (sampling_client, model, reasoning_effort, items, json_output) =
+                    let (sampling_client, model, reasoning_effort, items, json_output, input_refs) =
                         tokio::time::timeout_at(judgment_deadline, setup)
                             .await
                             .map_err(|_| workspace::permission::ClassifierFailure::Timeout)??;
-                    // One total deadline covers every attempt. Dividing the
-                    // remaining budget by the remaining attempts lets a hung
-                    // first call retry once without doubling the permission
-                    // latency seen by the child.
-                    for attempt in 1..=PERMISSION_JUDGMENT_MAX_ATTEMPTS {
-                        let mut attempt_items = items.clone();
-                        if attempt > 1 {
-                            // The failed provider payload is deliberately not
-                            // added to the branch. Only the failure category is
-                            // carried forward, so untrusted output cannot become
-                            // new permission evidence.
-                            attempt_items
-                                .push(ConversationItem::user(PERMISSION_JUDGMENT_RETRY_MESSAGE));
-                        }
-                        let request = ConversationRequest {
-                            items: attempt_items,
-                            tools: vec![],
-                            tool_choice: None,
-                            model: Some(model.clone()),
-                            temperature: None,
-                            max_output_tokens: Some(PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS),
-                            json_output: Some(json_output.clone()),
-                            reasoning_effort,
-                            ..ConversationRequest::default()
-                        };
-                        let fut = sampling_client.conversation_collect(request);
-                        let attempts_remaining = PERMISSION_JUDGMENT_MAX_ATTEMPTS - attempt + 1;
-                        let remaining = judgment_deadline
-                            .saturating_duration_since(tokio::time::Instant::now());
-                        let attempt_budget = remaining / attempts_remaining as u32;
-                        let response = match tokio::time::timeout(attempt_budget, fut).await {
-                            Ok(Ok(response)) => response,
-                            Ok(Err(error))
-                                if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS
-                                    && permission_judgment_error_needs_retry(&error) =>
-                            {
-                                tracing::warn!(
-                                    attempt,
-                                    max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
-                                    backend = ?sampling_client.api_backend(),
-                                    "permission judgment hit a transient provider error; retransmitting once"
-                                );
-                                continue;
-                            }
-                            Ok(Err(error)) => {
-                                return Err(
+                    let mut sideband = session
+                        .begin_sideband(
+                            chat_state::SidebandPurpose::PermissionJudgment,
+                            permission_sideband_prompt(&items),
+                            if input_refs.is_empty() {
+                                SidebandInput::None
+                            } else {
+                                SidebandInput::Frozen(input_refs)
+                            },
+                            chat_state::SidebandRoute {
+                                model: model.clone(),
+                                backend: sideband_backend(sampling_client.api_backend()).into(),
+                            },
+                            Some(workspace::permission::classifier_output_json_schema()),
+                        )
+                        .await
+                        .map_err(|error| {
+                            workspace::permission::ClassifierFailure::TransportError(
+                                error.to_string(),
+                            )
+                        })?;
+                    // One total deadline covers every attempt. Each attempt is
+                    // durably visible before its provider request is emitted.
+                    let sampled = async {
+                        let mut feedback = None;
+                        for attempt in 1..=PERMISSION_JUDGMENT_MAX_ATTEMPTS {
+                            sideband
+                                .attempt(feedback.take())
+                                .await
+                                .map_err(|error| {
                                     workspace::permission::ClassifierFailure::TransportError(
                                         error.to_string(),
+                                    )
+                                })?;
+                            let mut attempt_items = items.clone();
+                            if attempt > 1 {
+                                // Failed provider output never becomes permission
+                                // evidence; only the programmatic correction does.
+                                attempt_items.push(ConversationItem::user(
+                                    PERMISSION_JUDGMENT_RETRY_MESSAGE,
+                                ));
+                            }
+                            let request = ConversationRequest {
+                                items: attempt_items,
+                                tools: vec![],
+                                tool_choice: None,
+                                model: Some(model.clone()),
+                                temperature: None,
+                                max_output_tokens: Some(PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS),
+                                json_output: Some(json_output.clone()),
+                                reasoning_effort,
+                                ..ConversationRequest::default()
+                            };
+                            let fut = sampling_client.conversation_collect(request);
+                            let attempts_remaining =
+                                PERMISSION_JUDGMENT_MAX_ATTEMPTS - attempt + 1;
+                            let remaining = judgment_deadline
+                                .saturating_duration_since(tokio::time::Instant::now());
+                            let attempt_budget = remaining / attempts_remaining as u32;
+                            let response = match tokio::time::timeout(attempt_budget, fut).await {
+                                Ok(Ok(response)) => response,
+                                Ok(Err(error))
+                                    if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS
+                                        && permission_judgment_error_needs_retry(&error) =>
+                                {
+                                    tracing::warn!(
+                                        attempt,
+                                        max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
+                                        backend = ?sampling_client.api_backend(),
+                                        "permission judgment hit a transient provider error; retransmitting once"
+                                    );
+                                    feedback = Some(format!("transient provider error: {error}"));
+                                    continue;
+                                }
+                                Ok(Err(error)) => {
+                                    return Err(
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            error.to_string(),
+                                        ),
+                                    );
+                                }
+                                Err(_) if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS => {
+                                    tracing::warn!(
+                                        attempt,
+                                        max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
+                                        backend = ?sampling_client.api_backend(),
+                                        "permission judgment attempt timed out; retransmitting once within the total deadline"
+                                    );
+                                    feedback = Some("provider attempt timed out".into());
+                                    continue;
+                                }
+                                Err(_) => {
+                                    return Err(workspace::permission::ClassifierFailure::Timeout);
+                                }
+                            };
+                            let model_text = response.assistant_text();
+                            if !permission_judgment_needs_retry(&model_text) {
+                                return Ok(response);
+                            }
+                            if attempt == PERMISSION_JUDGMENT_MAX_ATTEMPTS {
+                                return Err(
+                                    workspace::permission::ClassifierFailure::TransportError(
+                                        "permission judgment exhausted structured-output validation"
+                                            .into(),
                                     ),
                                 );
                             }
-                            Err(_) if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS => {
-                                tracing::warn!(
-                                    attempt,
-                                    max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
-                                    backend = ?sampling_client.api_backend(),
-                                    "permission judgment attempt timed out; retransmitting once within the total deadline"
-                                );
-                                continue;
-                            }
-                            Err(_) => {
-                                return Err(workspace::permission::ClassifierFailure::Timeout);
-                            }
-                        };
-                        let model_text = response.assistant_text();
-                        if !permission_judgment_needs_retry(&model_text)
-                            || attempt == PERMISSION_JUDGMENT_MAX_ATTEMPTS
-                        {
-                            return Ok(model_text);
+                            tracing::warn!(
+                                attempt,
+                                max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
+                                backend = ?sampling_client.api_backend(),
+                                "permission judgment returned invalid structured output; retransmitting once"
+                            );
+                            feedback = Some("structured output failed local schema validation".into());
                         }
-                        tracing::warn!(
-                            attempt,
-                            max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
-                            backend = ?sampling_client.api_backend(),
-                            "permission judgment returned invalid structured output; retransmitting once"
-                        );
+                        unreachable!("permission judgment attempt loop always returns")
                     }
-                    unreachable!("permission judgment attempt loop always returns")
+                    .await;
+                    match sampled {
+                        Ok(response) => {
+                            let model_text = response.assistant_text();
+                            let structured_output =
+                                serde_json::from_str(&model_text).map_err(|_| {
+                                    workspace::permission::ClassifierFailure::TransportError(
+                                    "validated permission output could not be materialized as JSON"
+                                        .into(),
+                                )
+                                })?;
+                            sideband
+                                .complete(
+                                    model_text.clone(),
+                                    Some(structured_output),
+                                    sideband_usage(&response),
+                                    sideband_finish(&response),
+                                )
+                                .await
+                                .map_err(|error| {
+                                    workspace::permission::ClassifierFailure::TransportError(
+                                        error.to_string(),
+                                    )
+                                })?;
+                            Ok(model_text)
+                        }
+                        Err(error) => {
+                            if let Err(record_error) = sideband
+                                .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                                .await
+                            {
+                                return Err(
+                                    workspace::permission::ClassifierFailure::TransportError(
+                                        format!(
+                                            "{error}; sideband terminal commit failed: {record_error}"
+                                        ),
+                                    ),
+                                );
+                            }
+                            Err(error)
+                        }
+                    }
                 };
                 tokio::pin!(judgment_future);
                 let result = tokio::select! {
@@ -1154,12 +1389,12 @@ impl SessionActor {
     /// visibly instead of switching models.
     pub(super) async fn resolve_aux_sampler_config(
         &self,
-        slug: &str,
+        model_id: &str,
     ) -> Option<sampler::SamplerConfig> {
         let creds = self.chat_state_handle.get_credentials().await;
         let models = self.models_manager.models();
         crate::agent::config::resolve_aux_model_sampling_config(
-            slug,
+            model_id,
             &models,
             creds.alpha_test_key.clone(),
         )
@@ -1522,8 +1757,15 @@ impl SessionActor {
     ///    `send_grow_notification(RetryState::Failed)`.
     pub(crate) async fn run_turn_via_sampler(
         self: &Arc<Self>,
-        request: ConversationRequest,
+        mut request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
+        crate::session::persistence::materialize_prompt_blob_refs(
+            &mut request.items,
+            &self.session_dir,
+        )
+        .map_err(|error| {
+            acp::Error::internal_error().data(format!("failed to resolve prompt artifact: {error}"))
+        })?;
         let request_image_input_key = self.prepare_sampler_for_turn().await;
         let request_image_count = request.image_count();
         let stream_drained_rx = {
@@ -1705,9 +1947,8 @@ impl SessionActor {
     ///
     /// This is the only place per-turn `total_tokens` is refreshed in the
     /// post-sampler-refactor path; without it `state.total_tokens` would
-    /// stay frozen at the `estimate_conversation_tokens` seed from
-    /// `ChatState::new`, freezing `/context` and corrupting the resume
-    /// restore that reads `meta.totalTokens` from `updates.jsonl`.
+    /// stay frozen at the Timeline Surface estimate seeded by `ChatState::new`,
+    /// freezing `/context` and distorting the next compaction decision.
     /// Resetting `estimated_tokens_since_model = 0` here also keeps the
     /// preflight-overflow guard accurate against the next turn's
     /// tool-result deltas.

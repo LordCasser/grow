@@ -122,48 +122,10 @@ impl ListMatcher {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Backward-compatible aliases
-// ---------------------------------------------------------------------------
-
-/// Backward-compatible alias for [`ListMatcher`].
-///
-/// Existing code that constructs `FilterMatcher::substring(...)` or
-/// `FilterMatcher::regex(...)` continues to work via these helper methods.
-/// New code should use [`ListMatcher::new`] directly.
-pub type FilterMatcher = ListMatcher;
-
 impl ListMatcher {
-    /// Build a substring filter matcher (backward-compatible).
+    /// Build a substring filter matcher.
     pub fn substring(query: impl Into<String>) -> Self {
         Self::new(query, QueryKind::Substring, MatchMode::Filter)
-    }
-
-    /// Build a regex filter matcher (backward-compatible).
-    pub fn regex(pattern: impl Into<String>) -> Self {
-        Self::new(pattern, QueryKind::Regex, MatchMode::Filter)
-    }
-
-    /// Whether this is a regex that failed to compile (backward-compatible).
-    pub fn is_regex_error(&self) -> bool {
-        self.is_error()
-    }
-}
-
-/// Active filter state.  Wraps a [`ListMatcher`] with a match count.
-///
-/// Kept for backward compatibility with code that reads `filter().match_count`.
-/// The match count is now derived from `matcher.match_indices.len()`.
-#[derive(Debug, Clone)]
-pub struct ListFilter {
-    /// The unified matcher.
-    pub matcher: ListMatcher,
-}
-
-impl ListFilter {
-    /// Number of items matching the filter.
-    pub fn match_count(&self) -> usize {
-        self.matcher.match_count()
     }
 }
 
@@ -880,7 +842,7 @@ mod tests {
         let mut state = new_streaming(WrapMode::NoWrap, false);
 
         // Filter "alph" → items 0 (alpha) and 2 (alphabet)
-        state.set_filter(Some(FilterMatcher::substring("alph")));
+        state.set_matcher(Some(ListMatcher::substring("alph")));
         state.prepare_layout(&items, 80, 10);
 
         assert_eq!(state.visible_count(), 2);
@@ -973,14 +935,14 @@ mod tests {
         assert_eq!(state.total_height(), 4);
 
         // Filter "alph" → items 0 and 2
-        state.set_filter(Some(FilterMatcher::substring("alph")));
+        state.set_matcher(Some(ListMatcher::substring("alph")));
         state.prepare_layout(&items, 80, 10);
         assert_eq!(state.visible_count(), 2);
         assert_eq!(state.total_height(), 2);
-        assert_eq!(state.filter().unwrap().match_count(), 2);
+        assert_eq!(state.matcher().unwrap().match_count(), 2);
 
         // Clear filter
-        state.set_filter(None);
+        state.set_matcher(None);
         state.prepare_layout(&items, 80, 10);
         assert_eq!(state.visible_count(), 4);
     }
@@ -1384,7 +1346,7 @@ mod tests {
         state.prepare_layout(&items, 80, 10);
         assert_eq!(state.visible_count(), 3);
 
-        state.set_filter(Some(FilterMatcher::substring("alph")));
+        state.set_matcher(Some(ListMatcher::substring("alph")));
         state.prepare_layout(&items, 80, 10);
         assert_eq!(state.visible_count(), 2);
     }
@@ -1424,7 +1386,7 @@ mod tests {
             TestItem::new(4).with_text("row-4"),
         ];
         let mut state = ListPaneState::new(WrapMode::NoWrap, false);
-        state.set_filter(Some(FilterMatcher::substring("row")));
+        state.set_matcher(Some(ListMatcher::substring("row")));
         state.prepare_layout(&items, 80, 10);
         assert_eq!(state.visible_count(), 4);
 
@@ -2152,7 +2114,7 @@ mod tests {
             TestItem::new(3).with_text("gamma"),
         ];
         let mut state = ListPaneState::new(WrapMode::NoWrap, false);
-        state.set_filter(Some(FilterMatcher::substring("alph")));
+        state.set_matcher(Some(ListMatcher::substring("alph")));
         state.prepare_layout(&items, 80, 10);
 
         assert_eq!(state.visible_count(), 2);

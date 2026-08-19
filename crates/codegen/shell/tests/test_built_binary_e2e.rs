@@ -155,7 +155,7 @@ async fn test_headless_session_in_git_repo() {
         .await
         .expect("start mock server");
     let workdir = git_workdir();
-    let result = run_headless(&server, &["-p", "say hello", "--yolo"], workdir.workspace()).await;
+    let result = run_headless(&server, &["-p", "say hello", "--permission-mode", "always-approve"], workdir.workspace()).await;
 
     assert_headless_success(&result, "grow -p in git repo", Some(&server));
     assert_no_crashes(&result.stderr);
@@ -182,7 +182,7 @@ async fn test_headless_session_in_non_git_dir() {
     let workdir = tempfile::tempdir().unwrap();
     std::fs::write(workdir.path().join("test.txt"), "test\n").unwrap();
 
-    let result = run_headless(&server, &["-p", "say hello", "--yolo"], workdir.path()).await;
+    let result = run_headless(&server, &["-p", "say hello", "--permission-mode", "always-approve"], workdir.path()).await;
 
     assert_headless_success(&result, "grow -p in non-git dir", Some(&server));
     assert_no_crashes(&result.stderr);
@@ -200,7 +200,7 @@ async fn test_headless_tools_allowlist_keeps_enabled_web_fetch() {
         &[
             "-p",
             "say hello",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--tools",
             "read_file,grep,list_dir,web_fetch",
         ],
@@ -245,7 +245,7 @@ async fn test_headless_tools_allowlist_does_not_fail_open_for_disabled_web_fetch
         &[
             "-p",
             "say hello",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--tools",
             "read_file,web_fetch",
         ],
@@ -278,7 +278,7 @@ async fn test_headless_terminal_only_allowlist_is_foreground_only() {
 
     let result = run_headless(
         &server,
-        &["-p", "say hello", "--yolo", "--tools", "run_terminal_cmd"],
+        &["-p", "say hello", "--permission-mode", "always-approve", "--tools", "run_terminal_cmd"],
         workdir.workspace(),
     )
     .await;
@@ -317,7 +317,7 @@ async fn test_headless_streaming_json_output() {
         &[
             "-p",
             "say hello",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--output-format",
             "streaming-json",
         ],
@@ -383,7 +383,7 @@ async fn test_headless_streaming_messages_json_output() {
         &[
             "-p",
             "say hello",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--output-format",
             "streaming-messages-json",
         ],
@@ -472,7 +472,7 @@ async fn test_headless_streaming_messages_json_carries_per_response_metadata() {
         &[
             "-p",
             "say hi",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             model,
             "--max-turns",
@@ -576,7 +576,7 @@ async fn test_headless_streaming_messages_json_carries_stop_sequence() {
         &[
             "-p",
             "emit the stop token",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             model,
             "--max-turns",
@@ -653,7 +653,7 @@ async fn test_headless_json_reports_server_cost() {
         &[
             "-p",
             "what is 2+2",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             "--max-turns",
@@ -705,7 +705,7 @@ async fn test_headless_json_reports_usage_on_max_turns() {
         &[
             "-p",
             "read the readme",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             "--max-turns",
@@ -733,7 +733,7 @@ async fn test_headless_streaming_json_usage() {
         &[
             "-p",
             "say hello",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             "--output-format",
@@ -770,7 +770,7 @@ async fn headless_json_schema_chat_completions_uses_response_format() {
         &[
             "-p",
             "extract name and age",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             "--json-schema",
@@ -829,7 +829,7 @@ async fn headless_json_schema_responses_uses_text_format() {
         &[
             "-p",
             "extract name and age",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             "grow-4.5",
             "--json-schema",
@@ -885,7 +885,7 @@ async fn headless_json_schema_messages_backend_uses_structured_output_tool() {
         &[
             "-p",
             "extract name and age",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             "messages-compatible-model",
             "--json-schema",
@@ -967,7 +967,7 @@ async fn headless_json_schema_messages_validates_text_when_tool_not_called() {
         &[
             "-p",
             "extract name and age",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             "messages-compatible-model",
             "--json-schema",
@@ -1014,7 +1014,7 @@ async fn headless_json_schema_messages_retries_on_schema_violation() {
         &[
             "-p",
             "extract name and age",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             "messages-compatible-model",
             "--json-schema",
@@ -1053,7 +1053,7 @@ async fn invalid_json_schema_disables_structured_output_and_surfaces_error() {
         &[
             "-p",
             "extract name and age",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--model",
             CHAT_COMPLETIONS_MODEL,
             // Valid JSON object, but `pattern` is an invalid regex → schema
@@ -1526,7 +1526,7 @@ impl ConfigTestHarness {
 
     async fn run(self) -> HeadlessResult {
         let mut cmd = tokio::process::Command::new(grow_binary());
-        cmd.args(["-p", "say hello", "--yolo"])
+        cmd.args(["-p", "say hello", "--permission-mode", "always-approve"])
             .current_dir(self.sandbox.workspace())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -1560,15 +1560,19 @@ async fn test_headless_managed_config_byok_sends_authorized_requests() {
 deployment_key = "test-deployment-key"
 inference_base_url = "{url}"
 
-[model."grow-4.5"]
+[provider.mock]
 api_backend = "responses"
+
+[provider.mock.options]
 base_url = "{url}"
-context_window = 500000
 env_key = "GROW_TEST_BYOK_TOKEN"
+
+[provider.mock.models.grow-4.5]
+context_window = 500000
 model = "grow-4.5"
 
 [models]
-default = "grow-4.5"
+default = "mock/grow-4.5"
 "#,
             url = server.url()
         ),
@@ -1582,62 +1586,6 @@ default = "grow-4.5"
     assert!(
         server.has_responses_request(),
         "mock server received no /v1/responses request\n{}",
-        server.request_log_summary()
-    );
-}
-
-/// New-server payload — a `reasoning_efforts` menu plus the legacy
-/// `supportsReasoningEffort`/`reasoningEffort` (exactly what CCP emits) — parses
-/// without error and the legacy effort scalar still rides the wire. Proves the
-/// backwards-compat contract end-to-end through the built binary: the unknown
-/// `reasoningEfforts` field never breaks the `/v1/models` parse. On the headless
-/// path the wire effort comes from the legacy scalar, not from the list; the
-/// list→default derivation is unit-tested in `acp_model_meta_*`.
-#[tokio::test]
-#[ignore] // requires pre-built binary; run with --ignored
-async fn headless_reasoning_efforts_payload_parses_and_legacy_effort_rides_wire() {
-    let server = MockInferenceServer::start_with_models(vec![
-        MockModelEntry::new(CHAT_COMPLETIONS_MODEL)
-            .with_api_backend("chat_completions")
-            .with_supports_reasoning_effort(true)
-            .with_reasoning_effort("xhigh")
-            .with_reasoning_efforts(vec![
-                serde_json::json!({ "id": "deep", "value": "xhigh", "label": "Deep", "default": true }),
-                serde_json::json!({ "id": "balanced", "value": "medium", "label": "Balanced" }),
-            ]),
-    ])
-    .await
-    .expect("start mock server");
-    server.set_response("done");
-
-    let workdir = git_workdir();
-    let result = run_headless(
-        &server,
-        &[
-            "-p",
-            "hi",
-            "--yolo",
-            "--model",
-            CHAT_COMPLETIONS_MODEL,
-            "--max-turns",
-            "1",
-        ],
-        workdir.workspace(),
-    )
-    .await;
-
-    assert_headless_success(&result, "grow -p reasoning_efforts list", Some(&server));
-    assert_no_crashes(&result.stderr);
-
-    // The legacy effort scalar rides the chat-completions request unchanged.
-    let effort_on_wire = server.requests().iter().any(|r| {
-        r.body.as_ref().is_some_and(|body| {
-            body.pointer("/reasoning_effort").and_then(|v| v.as_str()) == Some("xhigh")
-        })
-    });
-    assert!(
-        effort_on_wire,
-        "legacy reasoning_effort=xhigh must reach the wire\n{}",
         server.request_log_summary()
     );
 }
@@ -1748,7 +1696,7 @@ async fn test_headless_timeout_exit_kills_pending_background_task() {
         &[
             "-p",
             "start the server",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--background-wait-timeout",
             "1",
         ],
@@ -1789,7 +1737,7 @@ async fn test_headless_no_wait_exit_kills_background_task() {
         &[
             "-p",
             "start the server",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--no-wait-for-background",
         ],
         workdir.workspace(),
@@ -1853,7 +1801,7 @@ async fn test_headless_waits_for_short_background_task_and_exits_clean() {
         &[
             "-p",
             "start it",
-            "--yolo",
+            "--permission-mode", "always-approve",
             "--background-wait-timeout",
             "30",
         ],

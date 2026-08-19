@@ -2,26 +2,37 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// The `reasoning_efforts` menu is settable from the client config TOML, not
-/// just the server: a `[model.<id>]` override renders in `/effort`, independent
-/// of what the server sent.
+/// The provider model's canonical `reasoning_efforts` contract renders in
+/// `/effort`, independent of the inference server's `/models` payload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn reasoning_efforts_from_config_toml_menu() {
-    let content = ContentController::start_with_models(vec![
-        MockModel::new("grow-4.5").with_supports_reasoning_effort(true),
-    ])
-    .await
-    .expect("start content");
+    let content = ContentController::start_with_models(vec![MockModel::new("grow-4.5")])
+        .await
+        .expect("start content");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} turn."));
 
-    // Seed `~/.grow/config.toml` with a per-model reasoning-effort menu.
+    // Seed `~/.grow/config.toml` with a complete provider-model definition.
     let grow_home = content.home().join(".grow");
     std::fs::create_dir_all(&grow_home).expect("create .grow");
-    // Quote the dotted model id: bare `[model.grow-4.5]` is TOML key-path syntax (model.grow-4.5), not the id "grow-4.5".
     std::fs::write(
         grow_home.join("config.toml"),
-        "[model.\"grow-4.5\"]\nreasoning_efforts = [{ value = \"high\", label = \"ConfigHigh\" }]\n",
+        format!(
+            r#"[models]
+default = "mock/grow-4.5"
+
+[provider.mock]
+api_backend = "chat_completions"
+
+[provider.mock.options]
+base_url = "{}"
+
+[provider.mock.models.grow-4.5]
+context_window = 128000
+reasoning_efforts = [{{ value = "high", label = "ConfigHigh" }}]
+"#,
+            content.url()
+        ),
     )
     .expect("write config.toml");
 
@@ -46,7 +57,7 @@ async fn reasoning_efforts_from_config_toml_menu() {
         .expect("config-driven label in /effort dropdown");
     assert!(
         !harness.contains_text("Extended reasoning"),
-        "config list must replace the built-in rows\nscreen:\n{}",
+        "the client must not synthesize undeclared effort rows\nscreen:\n{}",
         harness.screen_contents()
     );
 

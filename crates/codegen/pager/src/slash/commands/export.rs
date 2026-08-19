@@ -170,12 +170,8 @@ mod tests {
     static DEFAULT_BUNDLE_STATE: BundleState = BundleState {
         has_cache: false,
         version: String::new(),
-        personas: Vec::new(),
-        roles: Vec::new(),
         agents: Vec::new(),
         skills: Vec::new(),
-        persona_details: Vec::new(),
-        role_details: Vec::new(),
     };
 
     fn make_ctx(models: &ModelState) -> CommandExecCtx<'_> {

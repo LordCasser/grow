@@ -9,8 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::types::{
     ActiveSubagentSummary, SubagentCompletionSummary, SubagentInspection, SubagentRequest,
-    SubagentResult, SubagentResumeLookup, SubagentSnapshot, SubagentSnapshotStatus,
-    SubagentValidateTypeOutcome,
+    SubagentResult, SubagentSnapshot, SubagentSnapshotStatus, SubagentValidateTypeOutcome,
 };
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
@@ -47,11 +46,7 @@ pub trait ChildControl: 'static {
 /// Data reported when runtime initialization has produced a live child.
 pub struct StartedChild<C> {
     pub child_session_id: String,
-    pub persona: Option<String>,
     pub resumed_from: Option<String>,
-    pub child_cwd: String,
-    pub worktree_path: Option<String>,
-    pub effective_model_id: String,
     /// The resolved agent definition declares `background: true`. Folded into
     /// `Outstanding` accounting (background, never turn-blocking) while the
     /// foreground await budget stays gated on the tool's own
@@ -73,7 +68,6 @@ pub struct ChildRunRequest<C: ChildControl> {
 pub struct ChildRunOutput<D> {
     pub result: SubagentResult,
     pub completion_data: D,
-    pub snapshot_ref: Option<String>,
 }
 
 /// Coordinator-owned delivery decision passed to host presentation.
@@ -187,25 +181,22 @@ impl<C: 'static> ChildReporter<C> {
         response_rx.await.unwrap_or(false)
     }
 
-    /// Resolve an in-memory resume source without sharing coordinator state.
-    pub async fn resume_source(
-        &self,
-        source_id: &str,
-        parent_session_id: &str,
-    ) -> SubagentResumeLookup {
+    /// Observe only whether a source child is still running. Durable parent
+    /// and child Timeline facts are the sole resume-source authority.
+    pub async fn source_is_active(&self, source_id: &str, parent_session_id: &str) -> bool {
         let (respond_to, response_rx) = oneshot::channel();
         if self
             .tx
-            .send(InternalEvent::ResumeSource {
+            .send(InternalEvent::SourceIsActive {
                 source_id: source_id.to_owned(),
                 parent_session_id: parent_session_id.to_owned(),
                 respond_to,
             })
             .is_err()
         {
-            return SubagentResumeLookup::Missing;
+            return false;
         }
-        response_rx.await.unwrap_or(SubagentResumeLookup::Missing)
+        response_rx.await.unwrap_or(false)
     }
 }
 
@@ -215,10 +206,10 @@ pub(super) enum InternalEvent<C> {
         child: StartedChild<C>,
         respond_to: oneshot::Sender<bool>,
     },
-    ResumeSource {
+    SourceIsActive {
         source_id: String,
         parent_session_id: String,
-        respond_to: oneshot::Sender<SubagentResumeLookup>,
+        respond_to: oneshot::Sender<bool>,
     },
 }
 
@@ -244,11 +235,7 @@ pub(super) struct ActiveChild<C> {
     pub(super) definition_background: bool,
     pub(super) explicitly_killed: bool,
     pub(super) child_session_id: String,
-    pub(super) persona: Option<String>,
     pub(super) resumed_from: Option<String>,
-    pub(super) child_cwd: String,
-    pub(super) worktree_path: Option<String>,
-    pub(super) effective_model_id: String,
     pub(super) control: C,
 }
 
@@ -256,13 +243,8 @@ pub(super) struct CompletedChild {
     pub(super) request: SubagentRequest,
     pub(super) started_at: std::time::Instant,
     pub(super) child_session_id: String,
-    pub(super) persona: Option<String>,
     pub(super) resumed_from: Option<String>,
-    pub(super) child_cwd: String,
-    pub(super) worktree_path: Option<String>,
-    pub(super) snapshot_ref: Option<String>,
     pub(super) persisted_output_ref: Option<String>,
-    pub(super) effective_model_id: String,
     pub(super) result: SubagentResult,
 }
 
@@ -323,7 +305,6 @@ pub(super) struct RunningSeed {
     pub(super) subagent_type: String,
     pub(super) started_at_epoch_ms: u64,
     pub(super) duration_ms: u64,
-    pub(super) persona: Option<String>,
     pub(super) parent_session_id: String,
     pub(super) child_session_id: String,
     pub(super) fork_parent_prompt_id: Option<String>,
@@ -564,7 +545,6 @@ pub(super) fn running_seed<C>(child: &ActiveChild<C>) -> RunningSeed {
         subagent_type: child.request.subagent_type.clone(),
         started_at_epoch_ms: instant_to_epoch_ms(child.started_at),
         duration_ms: child.started_at.elapsed().as_millis() as u64,
-        persona: child.persona.clone(),
         parent_session_id: child.request.parent_session_id.clone(),
         child_session_id: child.child_session_id.clone(),
         fork_parent_prompt_id: child.request.parent_prompt_id.clone(),
@@ -592,7 +572,6 @@ pub(super) fn running_inspection(
             },
             started_at_epoch_ms: seed.started_at_epoch_ms,
             duration_ms: seed.duration_ms,
-            persona: seed.persona,
         },
         parent_session_id: seed.parent_session_id,
         child_session_id: seed.child_session_id,
@@ -609,7 +588,6 @@ pub(super) fn pending_snapshot(child: &PendingChild) -> SubagentSnapshot {
         status: SubagentSnapshotStatus::Initializing,
         started_at_epoch_ms: instant_to_epoch_ms(child.started_at),
         duration_ms: child.started_at.elapsed().as_millis() as u64,
-        persona: child.request.runtime_overrides.persona.clone(),
     }
 }
 
@@ -656,7 +634,6 @@ pub(super) fn completed_snapshot(
         status,
         started_at_epoch_ms: instant_to_epoch_ms(child.started_at),
         duration_ms: child.result.duration_ms,
-        persona: child.persona.clone(),
     }
 }
 

@@ -29,7 +29,6 @@ pub enum McpServerTransportConfig {
     StreamableHttp {
         // Not `default`: a missing url must fail to deserialize, not become a
         // fake HTTP server with an empty url.
-        #[serde(alias = "urlTemplate", alias = "url_template")]
         url: String,
         #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
         transport_type: Option<String>,
@@ -79,16 +78,13 @@ pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
     "tool_timeouts",
     "type",
     "url",
-    // Deserialize-only aliases for `url`.
-    "urlTemplate",
-    "url_template",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpSetupConfig {
     #[serde(default)]
     pub fields: Vec<McpSetupField>,
-    #[serde(default, alias = "values")]
+    #[serde(default)]
     pub variables: HashMap<String, McpSetupDerivedValue>,
 }
 
@@ -459,7 +455,7 @@ mod tests {
             "mcpServers": {
                 "acme": {
                     "type": "http",
-                    "urlTemplate": "{{url}}",
+                    "url": "{{url}}",
                     "setup": {
                         "fields": [{
                             "id": "site",
@@ -472,7 +468,7 @@ mod tests {
                                 {"label": "US5", "value": "us5"}
                             ]
                         }],
-                        "values": {
+                        "variables": {
                             "url": {
                                 "from": "site",
                                 "map": {

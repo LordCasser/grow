@@ -29,9 +29,7 @@ pub enum PluginScope {
 }
 
 /// The concrete discovery source a plugin came from.
-///
-/// Maps from `PluginOrigin` in `agent`. Optional on [`PluginInfo`]
-/// so older shells (which don't send it) deserialize to `None`.
+/// Maps from `PluginOrigin` in `agent`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginOrigin {
@@ -39,23 +37,8 @@ pub enum PluginOrigin {
     CliOverride,
     /// Project `.grow/plugins/`.
     ProjectGrow,
-    /// Project `.claude/plugins/`.
-    ProjectClaude,
     /// `$GROW_HOME/plugins/`.
     UserGrow,
-    /// `~/.claude/plugins/`.
-    UserClaude,
-    /// A compat marketplace clone.
-    ClaudeMarketplace {
-        /// Marketplace name from the settings/registry entry.
-        marketplace: String,
-    },
-    /// Compat install from `installed_plugins.json`.
-    ClaudeInstalled {
-        /// Marketplace name from the `name@marketplace` key, when present.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        marketplace: Option<String>,
-    },
     /// Grow's install registry (marketplace or direct git/local install).
     MarketplaceInstall {
         /// Marketplace source display name (None for direct installs).
@@ -67,18 +50,11 @@ pub enum PluginOrigin {
     },
     /// `[plugins].paths` in config.
     ConfigPath,
-    /// Catch-all for variants added after this client was built, so a newer
-    /// shell never breaks an older pager's whole plugins list. Consumers
-    /// must treat it like a missing origin.
-    #[serde(other)]
-    Unknown,
 }
 
 /// Hook event type.
 ///
-/// Maps from `HookEventName` in `hooks`. The source type's
-/// `SubagentEnd` variant (backward-compat alias) is collapsed into
-/// `SubagentStop` during conversion.
+/// Maps from `HookEventName` in `hooks`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
@@ -227,7 +203,7 @@ pub struct HooksListResponse {
 
 /// A single plugin's metadata for display in the pager.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginInfo {
     /// User-facing plugin name.
     pub name: String,
@@ -237,9 +213,6 @@ pub struct PluginInfo {
     pub root: String,
     /// Plugin scope.
     pub scope: PluginScope,
-    /// Deprecated: always `true`. Trust/untrust has been replaced by
-    /// enable/disable. Kept for serialization compatibility; will be removed.
-    pub trusted: bool,
     /// Whether the plugin is enabled (not in [plugins].disabled list).
     pub enabled: bool,
     /// Version from manifest (if available).
@@ -253,7 +226,7 @@ pub struct PluginInfo {
     pub skill_names: Vec<String>,
     /// Number of agent .md files.
     pub agent_count: usize,
-    /// Agent/persona names (filenames without .md extension).
+    /// Agent names (filenames without .md extension).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_names: Vec<String>,
     /// Hook status (active, active_inline, blocked, none).
@@ -265,12 +238,8 @@ pub struct PluginInfo {
     pub mcp_server_count: usize,
     /// MCP server status (active, active_inline, blocked, none).
     pub mcp_status: McpStatus,
-    /// Marketplace source display name (None for non-marketplace installs).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub marketplace_source: Option<String>,
-    /// The concrete discovery source (None when sent by an older shell).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<PluginOrigin>,
+    /// The concrete discovery source.
+    pub origin: PluginOrigin,
     /// Warning when this plugin shadowed another with the same name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
@@ -286,16 +255,6 @@ pub struct PluginsListResponse {
 // ---------------------------------------------------------------------------
 // MCP server types
 // ---------------------------------------------------------------------------
-
-/// Source of an MCP server configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpServerSource {
-    /// Managed by the platform.
-    Managed,
-    /// Locally configured (config.toml, .mcp.json, plugins, etc.).
-    Local,
-}
 
 /// Session-level status of an MCP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,7 +279,6 @@ pub struct McpToolInfo {
 #[serde(rename_all = "camelCase")]
 pub struct McpServerInfo {
     pub name: String,
-    pub source: McpServerSource,
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<McpSessionStatus>,
@@ -422,7 +380,7 @@ pub struct PluginComponents {
     pub agents: Vec<ComponentItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<ComponentItem>,
-    /// `name` = hook event (e.g. "PreToolUse"), `description` = optional matcher.
+    /// `name` = hook event (e.g. "pre_tool_use"), `description` = optional matcher.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<ComponentItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -728,7 +686,6 @@ mod tests {
             id: "user/abc12345/test-plugin".into(),
             root: "/home/user/.grow/plugins/test-plugin".into(),
             scope: PluginScope::User,
-            trusted: true,
             enabled: true,
             version: Some("1.0.0".into()),
             description: Some("A test plugin".into()),
@@ -740,8 +697,7 @@ mod tests {
             hook_count: 3,
             mcp_server_count: 0,
             mcp_status: McpStatus::None,
-            marketplace_source: None,
-            origin: Some(PluginOrigin::UserGrow),
+            origin: PluginOrigin::UserGrow,
             conflict: None,
         };
         let json = serde_json::to_string(&plugin).unwrap();
@@ -759,16 +715,7 @@ mod tests {
         for origin in [
             PluginOrigin::CliOverride,
             PluginOrigin::ProjectGrow,
-            PluginOrigin::ProjectClaude,
             PluginOrigin::UserGrow,
-            PluginOrigin::UserClaude,
-            PluginOrigin::ClaudeMarketplace {
-                marketplace: "mp".into(),
-            },
-            PluginOrigin::ClaudeInstalled { marketplace: None },
-            PluginOrigin::ClaudeInstalled {
-                marketplace: Some("mp".into()),
-            },
             PluginOrigin::MarketplaceInstall {
                 source_name: None,
                 git_url: None,
@@ -778,7 +725,6 @@ mod tests {
                 git_url: Some("https://example.com/r.git".into()),
             },
             PluginOrigin::ConfigPath,
-            PluginOrigin::Unknown,
         ] {
             let json = serde_json::to_string(&origin).unwrap();
             let parsed: PluginOrigin = serde_json::from_str(&json).unwrap();
@@ -787,23 +733,12 @@ mod tests {
     }
 
     #[test]
-    fn plugin_origin_unknown_future_variant_degrades_to_unknown() {
-        let parsed: PluginOrigin =
-            serde_json::from_str(r#"{"type":"some_future_variant"}"#).unwrap();
-        assert_eq!(parsed, PluginOrigin::Unknown);
-        let parsed: PluginOrigin =
-            serde_json::from_str(r#"{"type":"cloud_install","bucket":"b"}"#).unwrap();
-        assert_eq!(parsed, PluginOrigin::Unknown);
-    }
-
-    #[test]
-    fn plugin_info_with_future_origin_variant_still_parses() {
+    fn plugin_info_rejects_unknown_origin_variant() {
         let json = r#"{
             "name": "future-plugin",
             "id": "user/abc12345/future-plugin",
             "root": "/tmp/future-plugin",
             "scope": "user",
-            "trusted": true,
             "enabled": true,
             "version": null,
             "description": null,
@@ -814,31 +749,30 @@ mod tests {
             "mcpStatus": "none",
             "origin": {"type": "some_future_variant", "extra": 1}
         }"#;
-        let parsed: PluginInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.origin, Some(PluginOrigin::Unknown));
-        assert_eq!(parsed.name, "future-plugin");
+        assert!(serde_json::from_str::<PluginInfo>(json).is_err());
     }
 
     #[test]
     fn plugin_origin_tagged_snake_case_format() {
-        let json = serde_json::to_string(&PluginOrigin::ClaudeMarketplace {
-            marketplace: "mp".into(),
+        let json = serde_json::to_string(&PluginOrigin::MarketplaceInstall {
+            source_name: Some("mp".into()),
+            git_url: None,
         })
         .unwrap();
-        assert_eq!(json, r#"{"type":"claude_marketplace","marketplace":"mp"}"#);
-        let json = serde_json::to_string(&PluginOrigin::UserClaude).unwrap();
-        assert_eq!(json, r#"{"type":"user_claude"}"#);
+        assert_eq!(json, r#"{"type":"marketplace_install","source_name":"mp"}"#);
+        assert_eq!(
+            serde_json::to_string(&PluginOrigin::UserGrow).unwrap(),
+            r#"{"type":"user_grow"}"#
+        );
     }
 
     #[test]
-    fn plugin_info_without_origin_field_deserializes_to_none() {
-        // Wire payload from an older shell that predates the origin field.
+    fn plugin_info_requires_origin() {
         let json = r#"{
-            "name": "old-plugin",
-            "id": "user/abc12345/old-plugin",
-            "root": "/tmp/old-plugin",
+            "name": "plugin",
+            "id": "user/abc12345/plugin",
+            "root": "/tmp/plugin",
             "scope": "user",
-            "trusted": true,
             "enabled": true,
             "version": null,
             "description": null,
@@ -848,10 +782,7 @@ mod tests {
             "mcpServerCount": 0,
             "mcpStatus": "none"
         }"#;
-        let parsed: PluginInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.origin, None);
-        assert_eq!(parsed.marketplace_source, None);
-        assert_eq!(parsed.name, "old-plugin");
+        assert!(serde_json::from_str::<PluginInfo>(json).is_err());
     }
 
     #[test]
@@ -892,10 +823,6 @@ mod tests {
             domains: vec!["example.com".into()],
             homepage: Some("https://example.com/demo".into()),
             relative_path: "plugins/demo".into(),
-            skill_count: 1,
-            has_hooks: true,
-            has_agents: false,
-            has_mcp: false,
             install_status: "not_installed".into(),
             installed_version: None,
             components: None,
@@ -1050,7 +977,7 @@ mod tests {
             skills: vec![item("brainstorming", Some("Structured ideation"))],
             mcp_servers: vec![item("notion", None)],
             lsp_servers: vec![item("rust-analyzer", None)],
-            hooks: vec![item("PreToolUse", Some("Bash"))],
+            hooks: vec![item("pre_tool_use", Some("Bash"))],
             ..Default::default()
         };
         let json = serde_json::to_string(&components).unwrap();
@@ -1152,14 +1079,10 @@ pub struct MarketplacePluginEntry {
     #[serde(default)]
     pub homepage: Option<String>,
     pub relative_path: String,
-    pub skill_count: usize,
-    pub has_hooks: bool,
-    pub has_agents: bool,
-    pub has_mcp: bool,
     pub install_status: String,
     pub installed_version: Option<String>,
-    /// Structured inventory from the marketplace catalog. None = no catalog
-    /// data for this plugin (or the sender predates this field).
+    /// Canonical component inventory. `None` means a remote entry had no
+    /// SHA-verified catalog inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<PluginComponents>,
     /// Remote git URL for URL-sourced plugins (not present for local plugins).

@@ -42,7 +42,7 @@ token-estimation = { workspace = true }
 
 [dev-dependencies]
 # The unit tests reuse the pager's test-only view-model constructors
-# (`test_agent_view`, yolo/auto setters), gated behind its test-only
+# (`test_agent_view`, always-approve/auto setters), gated behind its test-only
 # helpers.
 pager = { path = "../pager", features = ["test-support"] }
 

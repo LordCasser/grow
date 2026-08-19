@@ -22,7 +22,7 @@ use crate::config::MemoryFlushConfig;
 use crate::sampling::{ChatRequestMessage, Role};
 // Pure text helpers moved into the memory subsystem (breaks the
 // dream <-> memory_flush module cycle).
-use crate::session::memory::text_utils::{has_markdown_headers, is_no_reply};
+use memory::text_utils::{has_markdown_headers, is_no_reply};
 
 /// Memory log target — matches `::diagnostics::memory_log::TARGET`.
 const LOG: &str = "grow_memory";
@@ -261,8 +261,8 @@ const SEMANTIC_DEDUP_KNN_LIMIT: usize = 3;
 /// matching the pattern used in `search.rs` and `backend.rs`.
 pub async fn is_semantically_duplicate(
     content: &str,
-    index: &crate::session::memory::MemoryIndex,
-    embedding_provider: Option<&dyn crate::session::memory::embedding::EmbeddingProvider>,
+    index: &memory::MemoryIndex,
+    embedding_provider: Option<&dyn memory::embedding::EmbeddingProvider>,
     threshold: f64,
 ) -> bool {
     // Phase 1 (sync): check prerequisites — borrows index, no .await
@@ -610,7 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_no_provider_allows_write() {
-        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
         init_sqlite_vec();
@@ -633,8 +633,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_no_similar_content() {
-        use crate::session::memory::embedding::MockEmbeddingProvider;
-        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use memory::embedding::MockEmbeddingProvider;
+        use memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
         init_sqlite_vec();
@@ -659,8 +659,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_detects_identical_content() {
-        use crate::session::memory::embedding::{EmbeddingProvider, MockEmbeddingProvider};
-        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use memory::embedding::{EmbeddingProvider, MockEmbeddingProvider};
+        use memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
         init_sqlite_vec();
@@ -699,8 +699,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_allows_different_content() {
-        use crate::session::memory::embedding::{EmbeddingProvider, MockEmbeddingProvider};
-        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use memory::embedding::{EmbeddingProvider, MockEmbeddingProvider};
+        use memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
         init_sqlite_vec();

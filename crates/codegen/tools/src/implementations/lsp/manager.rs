@@ -11,7 +11,7 @@ use super::client::LspClient;
 use super::config::LspServerConfig;
 use super::pending::{PendingEdits, PendingPolicy};
 use super::{DiagnosticsNotify, file_uri};
-use crate::util::ProcessScope;
+use tty_utils::ProcessScope;
 
 #[cfg(test)]
 use super::format::{format_locations_labeled, format_symbols};

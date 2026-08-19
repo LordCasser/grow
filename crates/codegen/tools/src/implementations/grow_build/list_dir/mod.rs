@@ -16,9 +16,6 @@
 //! intentionally left identical to `main`; this behavior is documented in the
 //! CHANGELOG rather than via new model-facing wording.
 //!
-//! Under `legacy-0.4.10`, the old depth-threshold algorithm is used instead
-//! (see `versions::legacy_0_4_10` module).
-mod versions;
 use crate::types::output::{ListDirContent, ListDirOutput};
 #[allow(unused_imports)]
 use crate::types::resources::{
@@ -46,32 +43,6 @@ pub struct ListDirParams {
     pub max_output_chars: Option<usize>,
 }
 crate::register_resource!("grow_build", "ListDir", ListDirParams);
-/// Exact historical invalid-directory message for `list_dir` in legacy-0.4.10.
-///
-/// Historical fixture captured from an earlier (0.4.10) revision of this tool.
-///
-/// Historical 0.4.10 collapsed nonexistent paths, file paths, and other
-/// invalid-directory failures into the same generic message.
-fn render_legacy_list_dir_error(path: &Path) -> String {
-    format!("Error: {} is not a valid directory", path.display())
-}
-/// Internal version discriminant for list_dir.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ListDirVersion {
-    Current,
-    Legacy0_4_10,
-}
-impl ListDirVersion {
-    pub(crate) fn from_contract(v: Option<&str>) -> Self {
-        match v {
-            Some("legacy-0.4.10") => Self::Legacy0_4_10,
-            _ => Self::Current,
-        }
-    }
-    pub(crate) fn is_legacy(self) -> bool {
-        self == Self::Legacy0_4_10
-    }
-}
 /// Compute the path shown in the list_dir tool result header.
 /// Special-cases `list_dir(".")`, `list_dir("")`, and `list_dir("./foo")` so the
 /// output does not contain ugly "/./" components (e.g. `/workspace/./`).
@@ -479,11 +450,9 @@ impl tool_runtime::Tool for ListDirTool {
         ctx: tool_runtime::ToolCallContext,
         input: ListDirInput,
     ) -> Result<ListDirOutput, tool_runtime::ToolError> {
-        use crate::types::tool_metadata::{behavior_version, resolve_cwd, shared_resources};
+        use crate::types::tool_metadata::{resolve_cwd, shared_resources};
         let resources = shared_resources(&ctx)?;
         let cwd = resolve_cwd(&ctx, &resources).await?;
-        let is_legacy =
-            ListDirVersion::from_contract(behavior_version(&ctx).as_deref()).is_legacy();
         let (display_cwd, hints_enabled) = {
             let res = resources.lock().await;
             (
@@ -497,11 +466,6 @@ impl tool_runtime::Tool for ListDirTool {
         let meta = tokio::fs::metadata(&path).await;
         let is_dir = meta.as_ref().is_ok_and(|m| m.is_dir());
         if !is_dir {
-            if is_legacy {
-                return Ok(ListDirOutput::Error(render_legacy_list_dir_error(
-                    &display_path,
-                )));
-            }
             return Ok(match &meta {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let msg = crate::util::format_not_found_error(
@@ -530,15 +494,7 @@ impl tool_runtime::Tool for ListDirTool {
                 )),
             });
         }
-        let body = if is_legacy {
-            let max_output_bytes = resources
-                .lock()
-                .await
-                .get::<Params<ListDirParams>>()
-                .and_then(|p| p.0.max_output_chars)
-                .unwrap_or(crate::DEFAULT_TOOL_OUTPUT_BYTES);
-            versions::legacy_0_4_10::render_legacy(&path, max_output_bytes)
-        } else {
+        let body = {
             let (max_output_chars, respect_gitignore, truncation_notice) = {
                 let res = resources.lock().await;
                 let max_output_chars = res
@@ -559,11 +515,7 @@ impl tool_runtime::Tool for ListDirTool {
             )
         };
         let trimmed_body = body.trim_end();
-        let output = if trimmed_body.is_empty() && is_legacy {
-            format!("- {}/\n  no children found", display_path.display())
-        } else {
-            format!("- {}/\n{}", display_path.display(), trimmed_body)
-        };
+        let output = format!("- {}/\n{}", display_path.display(), trimmed_body);
         Ok(ListDirOutput::Content(ListDirContent {
             content: output,
             absolute_root_path: path,
@@ -1138,66 +1090,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn legacy_nonexistent_dir_returns_exact_historical_message() {
-        let tmp = TempDir::new().unwrap();
-        let mut resources = Resources::new();
-        resources.insert(Cwd(tmp.path().to_path_buf()));
-        let tool = ListDirTool;
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let output = tool_runtime::Tool::run(
-            &tool,
-            ctx,
-            ListDirInput {
-                target_directory: "nonexistent".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        let expected = format!(
-            "Error: {} is not a valid directory",
-            tmp.path().join("nonexistent").display()
-        );
-        match output {
-            ListDirOutput::Error(msg) => {
-                assert_eq!(msg, expected);
-            }
-            other => panic!("expected legacy Error for nonexistent dir, got: {other:?}"),
-        }
-    }
-    #[tokio::test]
-    async fn legacy_file_path_returns_exact_historical_message() {
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("a_file.txt"), "content\n").unwrap();
-        let mut resources = Resources::new();
-        resources.insert(Cwd(tmp.path().to_path_buf()));
-        let tool = ListDirTool;
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-        let output = tool_runtime::Tool::run(
-            &tool,
-            ctx,
-            ListDirInput {
-                target_directory: "a_file.txt".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        let expected = format!(
-            "Error: {} is not a valid directory",
-            tmp.path().join("a_file.txt").display()
-        );
-        match output {
-            ListDirOutput::Error(msg) => {
-                assert_eq!(msg, expected);
-            }
-            other => panic!("expected legacy Error for file path, got: {other:?}"),
-        }
-    }
-    #[tokio::test]
-    async fn current_nonexistent_dir_returns_structured_not_found() {
+    async fn nonexistent_dir_returns_structured_not_found() {
         let tmp = TempDir::new().unwrap();
         let mut resources = Resources::new();
         resources.insert(Cwd(tmp.path().to_path_buf()));

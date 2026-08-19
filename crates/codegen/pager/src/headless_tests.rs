@@ -190,7 +190,7 @@ fn drain_records_task_backgrounded_delivered_at_exit() {
         &mut emitter,
         std::time::Instant::now(),
         &mut ttf_logged,
-        false,
+        shell::util::config::PermissionMode::Ask,
         &acp::SessionId::new("sess-1"),
         &mut pending,
         &mut completed,
@@ -202,7 +202,7 @@ fn drain_records_task_backgrounded_delivered_at_exit() {
 }
 
 #[test]
-fn headless_parent_yolo_does_not_approve_child_ask() {
+fn headless_parent_always_approve_does_not_approve_child_ask() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     let request = acp::RequestPermissionRequest::new(
@@ -234,7 +234,7 @@ fn headless_parent_yolo_does_not_approve_child_ask() {
         &mut emitter,
         std::time::Instant::now(),
         &mut ttf_logged,
-        true,
+        shell::util::config::PermissionMode::AlwaysApprove,
         &acp::SessionId::new("root-session"),
         &mut pending,
         &mut completed,

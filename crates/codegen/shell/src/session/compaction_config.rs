@@ -19,9 +19,8 @@ pub enum CompactionOwner {
     Auto,
 }
 
-/// Single publication lease for conversation replacement. Prefire may still
-/// prepare a read-only summary in parallel, but manual and auto compaction can
-/// never both enter the mutating pipeline.
+/// Single publication lease for conversation replacement. Manual and auto
+/// compaction can never both enter the mutating pipeline.
 #[derive(Default)]
 pub struct CompactionLease {
     owner: AtomicU8,
@@ -76,40 +75,18 @@ pub struct PreviousModelInfo {
     pub context_window: u64,
 }
 
-/// Cached result of an **async** (background / prefire) pass-1 sample for
-/// two-pass compaction. Held on the session actor between the background
-/// pass-1 and the synchronous pass-2 apply at compaction time.
-#[derive(Clone, Debug)]
-pub struct AsyncCompactionCache {
-    /// The successor-usable NOTE₁ text (extracted `<summary>` or full pass-1 output).
-    pub note1: String,
-    /// Number of leading conversation items pass-1 summarized (the prefix
-    /// boundary in the LIVE conversation as of pass-1 time). The pass-2 tail is
-    /// `conversation[prefix_len..]`.
-    pub prefix_len: usize,
-    /// Fingerprint of `conversation[..prefix_len]` at pass-1 time. Pass-2 only
-    /// applies NOTE₁ when the current conversation still has this exact prefix.
-    pub fingerprint: u64,
-    /// Model slug pass-1 ran under; invalidated on model switch.
-    pub model_slug: String,
-    /// Wall time pass-1 took (ms) — latency that ran off the critical path
-    /// when prefire finished before compact (not counted in diagnostics TTFT unless
-    /// the user waited on an in-flight pass-1).
-    pub pass1_latency_ms: u64,
-}
-
-/// Cancel gate for an in-flight compact / prefire sample.
+/// Cancel gate for an in-flight compaction sample.
 ///
-/// Holder count (not a bool): prefire and compact can overlap. The first
-/// `enter` installs a token; nested enters reuse it; `in_flight` stays true
-/// until the last scope drops. A normal turn stop is a no-op when idle.
+/// Holder count (not a bool): the first `enter` installs a token; nested enters
+/// reuse it; `in_flight` stays true until the last scope drops. A normal turn
+/// stop is a no-op when idle.
 #[derive(Default)]
 pub struct CompactCancelGate {
     token: RefCell<tokio_util::sync::CancellationToken>,
     holders: AtomicUsize,
 }
 
-/// Decrements the holder count when a compact/prefire scope ends.
+/// Decrements the holder count when a compaction scope ends.
 pub struct CompactCancelScope<'a>(&'a CompactCancelGate);
 
 impl Drop for CompactCancelScope<'_> {
@@ -119,10 +96,9 @@ impl Drop for CompactCancelScope<'_> {
 }
 
 impl CompactCancelGate {
-    /// Start or join a compact/prefire scope. Nested callers share one token,
-    /// including a token already cancelled by stop, so overlapping prefire +
-    /// compact both observe the same abort. A later independent enter after
-    /// holders drain installs a fresh token.
+    /// Start or join a compaction scope. Nested callers share one token,
+    /// including a token already cancelled by stop. A later independent enter
+    /// after holders drain installs a fresh token.
     pub fn enter(&self) -> (tokio_util::sync::CancellationToken, CompactCancelScope<'_>) {
         let prev = self.holders.fetch_add(1, Ordering::AcqRel);
         let token = if prev == 0 {
@@ -150,77 +126,6 @@ impl CompactCancelGate {
     }
 }
 
-/// Prefire two-pass state. `Default` so it drops into existing `CompactionConfig`
-/// struct literals with a single `prefire: PrefireState::default()` field.
-///
-/// `SessionActor` is `!Send` and single-threaded; the `AtomicBool` is only used
-/// for its ergonomic `compare_exchange` (no cross-thread sharing), and the
-/// `RefCell`s need no locking (the `JoinHandle` is from `spawn_local`, so it is
-/// local to this LocalSet and never crosses threads).
-#[derive(Default)]
-pub struct PrefireState {
-    /// Set while a background pass-1 sample is running, so the per-turn trigger
-    /// never spawns a second concurrent job.
-    in_flight: AtomicBool,
-    /// Cached async pass-1 result, ready for pass-2 apply (or `None`).
-    cache: RefCell<Option<AsyncCompactionCache>>,
-    /// Handle to the in-flight background pass-1 task. Pass-2 awaits this when
-    /// compaction fires before prefire finished, so a still-running pass-1 is
-    /// used rather than discarded for a full single-pass.
-    handle: RefCell<Option<tokio::task::JoinHandle<()>>>,
-}
-
-impl PrefireState {
-    /// Try to claim the single in-flight slot. Returns `true` iff this caller
-    /// won the race and should spawn pass-1 (the caller must later call
-    /// [`Self::finish`]).
-    pub fn try_begin(&self) -> bool {
-        self.in_flight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    /// Release the in-flight slot (call exactly once after a `try_begin` win).
-    pub fn finish(&self) {
-        self.in_flight.store(false, Ordering::Release);
-    }
-
-    pub fn is_in_flight(&self) -> bool {
-        self.in_flight.load(Ordering::Acquire)
-    }
-
-    /// Stash the spawned pass-1 task handle so pass-2 can await it if it is
-    /// still running when compaction fires.
-    pub fn set_handle(&self, handle: tokio::task::JoinHandle<()>) {
-        self.handle.replace(Some(handle));
-    }
-
-    /// Take the pass-1 task handle, if any, so the caller can await completion
-    /// before reading the cache. Leaves `None`.
-    pub fn take_handle(&self) -> Option<tokio::task::JoinHandle<()>> {
-        self.handle.borrow_mut().take()
-    }
-
-    pub fn store(&self, cache: AsyncCompactionCache) {
-        self.cache.replace(Some(cache));
-    }
-
-    /// Take the cache, leaving `None`.
-    pub fn take(&self) -> Option<AsyncCompactionCache> {
-        self.cache.borrow_mut().take()
-    }
-
-    /// Drop any cached async pass-1 result (invalidation: model switch, rewind,
-    /// apply, edits).
-    pub fn clear(&self) {
-        self.cache.replace(None);
-    }
-
-    pub fn has_cache(&self) -> bool {
-        self.cache.borrow().is_some()
-    }
-}
-
 pub struct CompactionConfig {
     pub lease: CompactionLease,
     /// Context window usage percentage (0-100) at which auto-compact triggers.
@@ -240,8 +145,6 @@ pub struct CompactionConfig {
     /// Set at turn end; consumed at next turn start for model-switch compaction.
     /// `Cell` because `SessionActor` is `!Send`.
     pub previous_model: Cell<Option<PreviousModelInfo>>,
-    /// The resolved mode; `Segments` carries its detail level inline.
-    pub compaction_mode: chat_state::CompactionMode,
     /// When `true`, feed the summarizer the verbatim conversation instead of the lossy rewrite (the retry loop may still fall back).
     pub verbatim_input: bool,
     pub tool_choice: crate::util::config::CompactionToolChoice,
@@ -253,69 +156,8 @@ pub struct CompactionConfig {
     /// Per-item pruning token budget override; `None` derives 5% of the context
     /// window (lower bound 1 token).
     pub pre_prune_token_budget: Cell<Option<u64>>,
-    /// Prefire two-pass state (background NOTE₁ cache + in-flight guard).
-    /// `Default` (empty cache, not in-flight).
-    pub prefire: PrefireState,
-    /// Sticky once a forked session releases its inherited prefix under compaction pressure (see `run_compact_inner`), so it stops re-pinning it.
-    pub prefix_released: AtomicBool,
     /// User/stop cancel for the current compact generation.
     pub cancel: CompactCancelGate,
-}
-
-#[cfg(test)]
-mod prefire_state_tests {
-    use super::*;
-
-    fn dummy_cache() -> AsyncCompactionCache {
-        AsyncCompactionCache {
-            note1: "NOTE1".to_string(),
-            prefix_len: 3,
-            fingerprint: 42,
-            model_slug: "grow".to_string(),
-            pass1_latency_ms: 5,
-        }
-    }
-
-    /// Pass-2 must be able to await a still-running pass-1 and then read its
-    /// cache — i.e. an in-flight prefire is waited for, not discarded for a full
-    /// single-pass.
-    #[tokio::test]
-    async fn take_handle_awaits_in_flight_pass1_then_cache_is_available() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let state = std::rc::Rc::new(PrefireState::default());
-                let worker = std::rc::Rc::clone(&state);
-                // Background pass-1 that stores its cache only after yielding,
-                // so the cache is absent at the moment pass-2 starts.
-                let handle = tokio::task::spawn_local(async move {
-                    tokio::task::yield_now().await;
-                    worker.store(dummy_cache());
-                    worker.finish();
-                });
-                state.set_handle(handle);
-
-                assert!(!state.has_cache(), "cache absent before pass-1 completes");
-
-                if let Some(h) = state.take_handle() {
-                    let _ = h.await;
-                }
-
-                assert!(state.has_cache(), "cache present after awaiting pass-1");
-                assert_eq!(state.take().unwrap().note1, "NOTE1");
-                assert!(state.take_handle().is_none(), "handle consumed once taken");
-            })
-            .await;
-    }
-
-    /// No prefire spawned → no handle to await (pass-2 falls straight through to
-    /// the single-pass path via the `take()?` that follows in the caller).
-    #[tokio::test]
-    async fn take_handle_is_none_without_a_spawned_pass1() {
-        let state = PrefireState::default();
-        assert!(state.take_handle().is_none());
-        assert!(state.take().is_none());
-    }
 }
 
 #[cfg(test)]

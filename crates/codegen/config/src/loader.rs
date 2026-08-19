@@ -185,19 +185,6 @@ pub enum HookProvenance {
     File,
     /// A plugin-contributed hook.
     Plugin,
-    /// A tier this build doesn't recognize (e.g. a newer peer's provenance over
-    /// the wire). Forward-tolerant so an unknown value degrades to a
-    /// conservative origin instead of failing the whole `HookRegistry` decode.
-    #[serde(other)]
-    Unknown,
-}
-
-/// Defaults to `File` so pre-provenance wire records decode as the most
-/// conservative origin.
-impl Default for HookProvenance {
-    fn default() -> Self {
-        Self::File
-    }
 }
 
 impl HookProvenance {
@@ -210,26 +197,7 @@ impl HookProvenance {
             Self::User => "user",
             Self::File => "file",
             Self::Plugin => "plugin",
-            Self::Unknown => "unknown",
         }
-    }
-}
-
-impl std::str::FromStr for HookProvenance {
-    type Err = std::convert::Infallible;
-
-    /// Inverse of [`HookProvenance::as_str`]. Unrecognized strings map to
-    /// [`HookProvenance::Unknown`] (forward-tolerant), so this never fails.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "system_managed" => Self::SystemManaged,
-            "managed" => Self::Managed,
-            "requirements" => Self::Requirements,
-            "user" => Self::User,
-            "file" => Self::File,
-            "plugin" => Self::Plugin,
-            _ => Self::Unknown,
-        })
     }
 }
 
@@ -706,17 +674,17 @@ mod tests {
         write(
             home.path(),
             "config.toml",
-            "[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"${HOME}/u.sh\"\n",
+            "[[hooks.pre_tool_use]]\nmatcher = \"Bash\"\n[[hooks.pre_tool_use.hooks]]\ntype = \"command\"\ncommand = \"${HOME}/u.sh\"\n",
         );
         write(
             home.path(),
             MANAGED_CONFIG_FILENAME,
-            "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/m.sh\"\n",
+            "[[hooks.pre_tool_use]]\n[[hooks.pre_tool_use.hooks]]\ntype = \"command\"\ncommand = \"/m.sh\"\n",
         );
         write(
             sys.path(),
             REQUIREMENTS_FILENAME,
-            "[[hooks.PostToolUse]]\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"/r.sh\"\n",
+            "[[hooks.post_tool_use]]\n[[hooks.post_tool_use.hooks]]\ntype = \"command\"\ncommand = \"/r.sh\"\n",
         );
 
         let layers = hook_config_layers_at(Some(sys.path()), Some(home.path()));
@@ -726,7 +694,7 @@ mod tests {
         assert_eq!(names, vec!["requirements/system", "user", "managed"]);
         assert_eq!(layers[1].provenance(), HookProvenance::User);
         // Unmerged, and `${HOME}` stays literal (the runner expands, not the loader).
-        let cmd = layers[1].hooks()["PreToolUse"][0]["hooks"][0]["command"]
+        let cmd = layers[1].hooks()["pre_tool_use"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
         assert_eq!(cmd, "${HOME}/u.sh");
@@ -740,7 +708,7 @@ mod tests {
         write(
             home.path(),
             MANAGED_CONFIG_FILENAME,
-            "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/m.sh\"\n",
+            "[[hooks.pre_tool_use]]\n[[hooks.pre_tool_use.hooks]]\ntype = \"command\"\ncommand = \"/m.sh\"\n",
         );
         let layers = hook_config_layers_at(None, Some(home.path()));
         let names: Vec<_> = layers.iter().map(|l| l.source_name().to_string()).collect();

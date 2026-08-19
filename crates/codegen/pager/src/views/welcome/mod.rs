@@ -66,8 +66,6 @@ pub struct WelcomeRenderResult {
     pub post_flush_escapes: Option<crate::terminal::overlay::PostFlush>,
     /// Hit-test rects for each menu item (for click/hover).
     pub menu_rects: Vec<Rect>,
-    /// Hit-test rect for the import-claude banner (for click to open import modal).
-    pub import_banner_rect: Option<Rect>,
     /// Hit areas from the session picker (for mouse hit-testing).
     pub session_picker_hit_areas: Option<crate::views::picker::PickerHitAreas>,
     /// Whether the announcement overflowed (the "expandable" signal).
@@ -257,7 +255,6 @@ pub struct WelcomeRenderParams<'a> {
     pub model_name: &'a str,
     pub flags: &'a [PromptFlag<'a>],
     pub selected: Option<usize>,
-    pub has_claude_import: bool,
     pub mouse_pos: Option<(u16, u16)>,
     pub session_picker: Option<&'a [SessionPickerEntry]>,
     pub session_picker_loading: bool,
@@ -471,18 +468,13 @@ fn render_welcome_done(
         0
     };
 
-    // Menu order: `[Import Claude settings]`, New worktree, Resume session,
-    // Quit — no Changelog row.
-    let (key_w, key_s, key_q, key_i_with_x) = (
+    // Menu order: New worktree, Resume session, Quit.
+    let (key_w, key_s, key_q) = (
         "ctrl+w",
         "ctrl+s",
         if in_vscode_family { "ctrl+d" } else { "ctrl+q" },
-        "ctrl+i  [x]",
     );
-    let mut menu_items: Vec<(&str, &str)> = Vec::with_capacity(4);
-    if p.has_claude_import {
-        menu_items.push((key_i_with_x, "Import Claude settings"));
-    }
+    let mut menu_items: Vec<(&str, &str)> = Vec::with_capacity(3);
     menu_items.push((key_w, "New worktree"));
     menu_items.push((key_s, "Resume session"));
     menu_items.push((key_q, "Quit"));
@@ -519,7 +511,7 @@ fn render_welcome_done(
     });
 
     // Render startup warning in the error area (same slot as auth errors).
-    let import_banner_rect = render_startup_warnings(hero.error, buf, theme, p.startup_warnings);
+    render_startup_warnings(hero.error, buf, theme, p.startup_warnings);
 
     let mut announcement_truncated = false;
     let mut announcement_rect: Option<Rect> = None;
@@ -618,7 +610,6 @@ fn render_welcome_done(
     WelcomeRenderResult {
         post_flush_escapes: None,
         menu_rects,
-        import_banner_rect,
         session_picker_hit_areas: picker_close_button,
         announcement_truncated,
         announcement_rect,
@@ -893,15 +884,6 @@ fn render_startup_warnings(
 ) -> Option<Rect> {
     let w = crate::startup::banner_warning(warnings)?;
 
-    // Skip the import-claude startup warning entirely — the import row in the
-    // menu now carries the call-to-action with the same visual weight as
-    // every other welcome menu item. Showing the warning text in addition to
-    // the menu row would be redundant noise.
-    if w.message.starts_with("Import Claude settings")
-        || w.message.starts_with("Claude settings detected")
-    {
-        return None;
-    }
     let color = match w.severity {
         crate::startup::WarningSeverity::Warning => theme.warning,
         crate::startup::WarningSeverity::Info => theme.gray_dim,
@@ -957,7 +939,6 @@ mod tests {
             model_name: "test",
             flags: &[],
             selected: None,
-            has_claude_import: false,
             mouse_pos: None,
             session_picker,
             session_picker_loading: false,
@@ -1296,19 +1277,6 @@ mod tests {
         assert!(text.contains("New worktree"), "{text}");
         assert!(text.contains("Resume session"), "{text}");
         assert!(text.contains("Quit"), "{text}");
-    }
-
-    #[test]
-    fn home_page_menu_includes_import_row_when_detected() {
-        let trust = TrustState::Done;
-        let mut params = render_params(&trust, None);
-        params.has_claude_import = true;
-        let text = render_done_text(&params);
-        assert!(
-            text.contains("Import Claude settings"),
-            "import row must render when Claude settings were detected:\n{text}"
-        );
-        assert!(text.contains("ctrl+i"), "{text}");
     }
 
     #[test]

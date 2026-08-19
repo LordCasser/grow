@@ -8,7 +8,6 @@ use super::persistence::PersistenceMsg;
 use agent_client_protocol as acp;
 use hunk_tracker::HunkTrackerHandle;
 use sampling_types::ReasoningEffort;
-use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
 /// Coarse lifecycle state of a session as known to the leader/agent.
 ///
@@ -33,10 +32,6 @@ pub enum SessionLiveState {
     /// `Dormant` on the next disk scan.
     DeadFailed,
 }
-/// `_meta` key carrying [`SessionHandle::scheduler_background_loops`] on the
-/// `session/new` and `session/load` responses. Defined here so the shell that
-/// publishes it and the clients that read it share one spelling.
-pub const SCHEDULER_BACKGROUND_LOOPS_META_KEY: &str = "grow/schedulerBackgroundLoops";
 /// Handle for interacting with a session actor.
 /// Note: Permission event receivers are returned separately from `spawn_session_actor`
 /// and should be stored/managed by the caller.
@@ -98,22 +93,12 @@ pub struct SessionHandle {
     /// Per-session tracking prevents cross-client contamination in leader mode
     /// where `MvpAgent.current_model_id` is shared mutable state.
     pub model_id: acp::ModelId,
-    /// Whether this session's scheduled fires run as detached background
-    /// subagents. Copied from the value the spawn resolved for the session's
-    /// [`AgentRebuildSpec`](crate::session::agent_rebuild::AgentRebuildSpec), so
-    /// it is pinned for the session's whole life exactly like the fire side.
-    /// Published to clients on the `session/new` / `session/load` response so
-    /// they describe the fires this session will actually get rather than
-    /// re-resolving a setting that may have flipped since spawn.
-    pub scheduler_background_loops: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// YOLO (auto-approve) mode for this session.
-    /// Per-session tracking prevents cross-client contamination in leader mode
-    /// where one client enabling YOLO could affect another client's sessions.
-    pub yolo_mode: bool,
+    /// Canonical permission mode for this session.
+    pub permission_mode: crate::util::config::PermissionMode,
     /// Explicit origin client metadata captured when the session was created.
     /// Used for per-session User-Agent rendering and for scoping leader-mode
-    /// client behaviors like yolo broadcasts.
+    /// client behaviors like always-approve broadcasts.
     pub origin_client: Option<crate::http::OriginClientInfo>,
     /// Whether the client that created this session advertised
     /// `grow/codeNavigation.enabled`.  Stored per-session so that in leader
@@ -145,7 +130,6 @@ pub struct SessionHandle {
     /// Kept beside `agent_name` so runtime spawn validation matches the tool
     /// description even after an in-session Agent switch.
     pub subagent_filter: agent::config::SubagentFilter,
-    pub managed_mcp_proxy_base_url: String,
     /// Hook registry for this session (snapshot from spawn time).
     pub hook_registry: Option<std::sync::Arc<::hooks::discovery::HookRegistry>>,
     /// Typed workspace operations handle (agent sessions use local ops).
@@ -423,25 +407,6 @@ impl SessionHandle {
         tool_name: String,
         enabled: bool,
     ) -> Result<(), agent_client_protocol::Error> {
-        self.toggle_mcp_tool_with_source(server_name, tool_name, enabled, false)
-            .await
-    }
-    pub async fn toggle_managed_gateway_tool(
-        &self,
-        server_name: String,
-        tool_name: String,
-        enabled: bool,
-    ) -> Result<(), agent_client_protocol::Error> {
-        self.toggle_mcp_tool_with_source(server_name, tool_name, enabled, true)
-            .await
-    }
-    async fn toggle_mcp_tool_with_source(
-        &self,
-        server_name: String,
-        tool_name: String,
-        enabled: bool,
-        is_managed_gateway: bool,
-    ) -> Result<(), agent_client_protocol::Error> {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -449,7 +414,6 @@ impl SessionHandle {
                 server_name,
                 tool_name,
                 enabled,
-                is_managed_gateway,
                 respond_to: tx,
             })
             .is_err()
@@ -458,17 +422,6 @@ impl SessionHandle {
         }
         rx.await
             .map_err(|_| agent_client_protocol::Error::internal_error().data("session closed"))?
-    }
-    pub async fn managed_gateway_disabled_tool_names(&self) -> HashMap<String, HashSet<String>> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCommand::GetManagedGatewayDisabledTools { respond_to: tx })
-            .is_err()
-        {
-            return HashMap::new();
-        }
-        rx.await.unwrap_or_default()
     }
     pub async fn call_mcp_tool(
         &self,

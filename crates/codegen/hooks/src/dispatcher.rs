@@ -260,8 +260,7 @@ pub async fn dispatch_stop(
         tracing::error!(%event, "dispatch_stop called with a non-stop event; ignoring");
         return StopDispatchResult::default();
     }
-    let event = event.canonical();
-    let hooks = registry.hooks_for_canonical(event);
+    let hooks = registry.hooks_for(event);
     if hooks.is_empty() {
         return StopDispatchResult::default();
     }
@@ -364,7 +363,7 @@ pub async fn dispatch_non_blocking(
         event.traits().gate == GateKind::Observe,
         "dispatch_non_blocking called with gate event {event:?}"
     );
-    let hooks = registry.hooks_for_canonical(event);
+    let hooks = registry.hooks_for(event);
     if hooks.is_empty() {
         return Vec::new();
     }
@@ -901,10 +900,7 @@ mod tests {
         let registry = registry_from_specs(vec![
             stop_spec("exit2", "echo 'fix the build' >&2; exit 2"),
             stop_spec("crasher", "exit 1"),
-            stop_spec(
-                "ctx",
-                "echo '{\"hookSpecificOutput\":{\"additionalContext\":\"note\"}}'",
-            ),
+            stop_spec("ctx", "echo '{\"additionalContext\":\"note\"}'"),
         ]);
         let result =
             dispatch_stop(&registry, HookEventName::Stop, &stop_envelope(), &run_ctx()).await;
@@ -918,7 +914,7 @@ mod tests {
     async fn stop_additional_context_only_keeps_working() {
         let registry = registry_from_specs(vec![stop_spec(
             "ctx",
-            "echo '{\"hookSpecificOutput\":{\"additionalContext\":\"run the tests\"}}'",
+            "echo '{\"additionalContext\":\"run the tests\"}'",
         )]);
         let result =
             dispatch_stop(&registry, HookEventName::Stop, &stop_envelope(), &run_ctx()).await;
@@ -966,43 +962,6 @@ mod tests {
         let result =
             dispatch_stop(&registry, HookEventName::Stop, &stop_envelope(), &run_ctx()).await;
         assert!(!result.wants_continuation());
-    }
-
-    #[tokio::test]
-    async fn subagent_stop_consults_alias_specs() {
-        let mut canonical = make_command_spec(
-            "canonical",
-            None,
-            true,
-            "echo '{\"decision\":\"block\",\"reason\":\"from canonical\"}'",
-        );
-        canonical.event = HookEventName::SubagentStop;
-        let mut alias = make_command_spec(
-            "alias",
-            None,
-            true,
-            "echo '{\"decision\":\"block\",\"reason\":\"from alias\"}'",
-        );
-        alias.event = HookEventName::SubagentEnd;
-        let registry = registry_from_specs(vec![canonical, alias]);
-
-        let mut envelope = stop_envelope();
-        envelope.hook_event_name = HookEventName::SubagentStop;
-        envelope.payload = HookPayload::SubagentStop {
-            phase: crate::event::SubagentStopPhase::Gate,
-            subagent_id: "sub-1".into(),
-            subagent_type: "explore".into(),
-            stop_hook_active: Some(false),
-            last_assistant_message: None,
-        };
-        let result = dispatch_stop(
-            &registry,
-            HookEventName::SubagentStop,
-            &envelope,
-            &run_ctx(),
-        )
-        .await;
-        assert_eq!(result.blocks.len(), 2);
     }
 
     #[tokio::test]

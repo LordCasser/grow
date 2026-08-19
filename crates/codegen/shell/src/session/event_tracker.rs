@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use chat_state::{
     ObservationEvent, RequestEvent, RequestUsage, StepEvent, StepId, TimelineEventKind,
-    TimelineWriteError, ToolEvent, TurnEvent, TurnId,
+    TimelineWriteError, ToolEvent, TurnEvent, TurnId, TurnTerminal,
 };
 
 use super::event_types::{CancellationCategory, Event, RedirectKind, TurnOutcomeLabel};
@@ -75,30 +75,8 @@ impl EventTracker {
     /// at producer sites, but it no longer owns a second persistence rail.
     pub fn emit(&self, event: Event) {
         match &event {
-            Event::TurnStarted {
-                origin,
-                model_id,
-                conversation_message_count,
-                prompt_index,
-                prompt_text,
-                redirect_kind,
-                ..
-            } => {
-                // Prompt indexes are rewindable UI coordinates, not durable
-                // identities. A Timeline turn id must never be reused.
-                let id = TurnId(uuid::Uuid::now_v7().as_u128() as u64);
-                self.current_turn.set(Some(id));
-                self.turn_started_at.set(Some(Instant::now()));
-                self.timeline
-                    .record_timeline_event(TimelineEventKind::Turn(TurnEvent::Started {
-                        id,
-                        origin: origin.clone(),
-                        model_id: model_id.clone(),
-                        input_message_count: *conversation_message_count,
-                        prompt_index: *prompt_index,
-                        prompt_text: prompt_text.clone(),
-                        redirect_kind: redirect_kind.map(|value| json_string(&value)),
-                    }));
+            Event::TurnStarted { .. } => {
+                tracing::error!("TurnStarted must go through the durable start_turn boundary")
             }
             Event::LoopStarted { loop_index } => self.start_step(*loop_index),
             Event::ToolCompleted {
@@ -125,6 +103,43 @@ impl EventTracker {
             }
             _ => self.record_observation(event),
         }
+    }
+
+    /// Persist the causal turn boundary before any turn work is admitted.
+    pub async fn start_turn(&self, event: Event) -> Result<(), TimelineWriteError> {
+        let Event::TurnStarted {
+            identity,
+            model_id,
+            conversation_message_count,
+            prompt_index,
+            prompt_text,
+            input_kind,
+            redirect_kind,
+            ..
+        } = event
+        else {
+            return Err(missing_boundary("start_turn requires TurnStarted"));
+        };
+        let prompt_index =
+            prompt_index.ok_or_else(|| missing_boundary("TurnStarted requires prompt_index"))?;
+        let prompt_text =
+            prompt_text.ok_or_else(|| missing_boundary("TurnStarted requires prompt_text"))?;
+        let id = TurnId(uuid::Uuid::now_v7().as_u128() as u64);
+        self.timeline
+            .record_timeline_event_durably(TimelineEventKind::Turn(TurnEvent::Started {
+                id,
+                identity,
+                model_id,
+                input_message_count: conversation_message_count,
+                prompt_index,
+                prompt_text,
+                input_kind,
+                redirect_kind: redirect_kind.map(|value| json_string(&value)),
+            }))
+            .await?;
+        self.current_turn.set(Some(id));
+        self.turn_started_at.set(Some(Instant::now()));
+        Ok(())
     }
 
     fn record_observation(&self, event: Event) {
@@ -177,6 +192,7 @@ impl EventTracker {
     pub async fn emit_turn_ended(
         &self,
         outcome: TurnOutcomeLabel,
+        terminal: TurnTerminal,
         category: Option<CancellationCategory>,
         context: Option<serde_json::Value>,
     ) -> Result<(), TimelineWriteError> {
@@ -214,6 +230,7 @@ impl EventTracker {
                 outcome: json_string(&outcome),
                 duration_ms,
                 tool_count: self.turn_tool_count.get(),
+                terminal,
                 cancellation_category: category.map(|value| json_string(&value)),
                 details: context,
             }))
@@ -473,6 +490,22 @@ fn missing_boundary(message: &'static str) -> TimelineWriteError {
 mod tests {
     use super::*;
 
+    fn test_identity() -> chat_state::TurnIdentity {
+        chat_state::TurnIdentity {
+            origin: "user".into(),
+            turn_kind: "user".into(),
+            goal_id: None,
+            stage_id: None,
+        }
+    }
+
+    fn terminal(stop_reason: &str, completion_kind: &str) -> TurnTerminal {
+        TurnTerminal {
+            stop_reason: stop_reason.into(),
+            completion_kind: completion_kind.into(),
+        }
+    }
+
     #[test]
     fn prior_interrupt_markers_are_one_shot_and_survive_begin_turn() {
         let t = EventTracker::new(chat_state::ChatStateHandle::noop());
@@ -521,25 +554,29 @@ mod tests {
                 reasoning_effort: None,
                 stream_tool_calls: None,
             },
-            Box::new(chat_state::NullChatPersistence),
+            Box::new(chat_state::NullTimelinePersistence),
             event_tx,
             tokio_util::sync::CancellationToken::new(),
         );
         let tracker = EventTracker::new(handle.clone());
         tracker.begin_turn();
-        tracker.emit(Event::TurnStarted {
-            session_id: "session".into(),
-            turn_number: 1,
-            origin: "user".into(),
-            model_id: "model".into(),
-            yolo_mode: false,
-            conversation_message_count: 0,
-            prompt_index: Some(0),
-            prompt_text: Some("prompt".into()),
-            session_relationship: super::super::event_types::SessionRelationship::Primary,
-            schema_version: super::super::event_types::EVENT_SCHEMA_VERSION.into(),
-            redirect_kind: None,
-        });
+        tracker
+            .start_turn(Event::TurnStarted {
+                session_id: "session".into(),
+                turn_number: 1,
+                identity: test_identity(),
+                model_id: "model".into(),
+                permission_mode: diagnostics::enums::PermissionMode::Ask,
+                conversation_message_count: 0,
+                prompt_index: Some(0),
+                prompt_text: Some("prompt".into()),
+                input_kind: chat_state::TurnInputKind::Prompt,
+                session_relationship: super::super::event_types::SessionRelationship::Primary,
+                schema_version: super::super::event_types::EVENT_SCHEMA_VERSION.into(),
+                redirect_kind: None,
+            })
+            .await
+            .unwrap();
         tracker.emit(Event::LoopStarted { loop_index: 0 });
         tracker
             .request_started("request".into(), "model".into(), 0, 0)
@@ -556,7 +593,12 @@ mod tests {
         });
         assert!(tracker.request_completed("request", Some(3), RequestUsage::default(), 1,));
         tracker
-            .emit_turn_ended(TurnOutcomeLabel::Completed, None, None)
+            .emit_turn_ended(
+                TurnOutcomeLabel::Completed,
+                terminal("end_turn", "completed"),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -564,11 +606,110 @@ mod tests {
         let request_rows = snapshot
             .rows
             .iter()
-            .filter(|row| row.category == "request")
+            .filter(|row| row.kind.starts_with("request."))
             .collect::<Vec<_>>();
         assert_eq!(request_rows.len(), 4);
         assert!(request_rows.iter().all(|row| row.turn_id.is_some()));
         assert!(request_rows.iter().all(|row| row.step_index == Some(0)));
         assert_eq!(request_rows.last().unwrap().state, "completed");
+    }
+
+    #[tokio::test]
+    async fn rejected_turn_terminal_keeps_scope_open_for_idempotent_retry() {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence, mut persisted) =
+            chat_state::MockTimelinePersistence::new_with_manual_timeline_ack();
+        let handle = chat_state::ChatStateActor::spawn(
+            vec![],
+            sampling_types::SamplingConfig {
+                base_url: "http://localhost".into(),
+                model: "model".into(),
+                output_limit: None,
+                temperature: None,
+                top_p: None,
+                api_backend: Default::default(),
+                extra_headers: Default::default(),
+                query_params: Default::default(),
+                env_http_headers: Default::default(),
+                context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+                reasoning_effort: None,
+                stream_tool_calls: None,
+            },
+            Box::new(persistence),
+            event_tx,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let tracker = EventTracker::new(handle.clone());
+        tracker.begin_turn();
+        let start = tracker.start_turn(Event::TurnStarted {
+            session_id: "session".into(),
+            turn_number: 1,
+            identity: test_identity(),
+            model_id: "model".into(),
+            permission_mode: diagnostics::enums::PermissionMode::Ask,
+            conversation_message_count: 0,
+            prompt_index: Some(0),
+            prompt_text: Some("prompt".into()),
+            input_kind: chat_state::TurnInputKind::Prompt,
+            session_relationship: super::super::event_types::SessionRelationship::Primary,
+            schema_version: super::super::event_types::EVENT_SCHEMA_VERSION.into(),
+            redirect_kind: None,
+        });
+        let accept_start = async {
+            persisted
+                .next_timeline_ack()
+                .await
+                .unwrap()
+                .send(Ok(()))
+                .unwrap();
+        };
+        let (started, ()) = tokio::join!(start, accept_start);
+        started.unwrap();
+
+        let first_end = tracker.emit_turn_ended(
+            TurnOutcomeLabel::Cancelled,
+            terminal("cancelled", "cancelled"),
+            Some(CancellationCategory::MidTurnAbort),
+            None,
+        );
+        let reject_end = async {
+            persisted
+                .next_timeline_ack()
+                .await
+                .unwrap()
+                .send(Err(std::io::Error::other("simulated disk failure")))
+                .unwrap();
+        };
+        let (failed, ()) = tokio::join!(first_end, reject_end);
+        assert!(matches!(failed, Err(TimelineWriteError::Persistence(_))));
+        assert!(handle.trajectory().await.unwrap().active_turn.is_some());
+
+        let retry_end = tracker.emit_turn_ended(
+            TurnOutcomeLabel::Cancelled,
+            terminal("cancelled", "cancelled"),
+            Some(CancellationCategory::MidTurnAbort),
+            None,
+        );
+        let accept_end = async {
+            persisted
+                .next_timeline_ack()
+                .await
+                .unwrap()
+                .send(Ok(()))
+                .unwrap();
+        };
+        let (retried, ()) = tokio::join!(retry_end, accept_end);
+        retried.unwrap();
+        let snapshot = handle.trajectory().await.unwrap();
+        assert!(snapshot.active_turn.is_none());
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .filter(|row| row.kind.starts_with("turn.") && row.state == "cancelled")
+                .count(),
+            1,
+            "retry must commit one terminal, not duplicate it"
+        );
     }
 }

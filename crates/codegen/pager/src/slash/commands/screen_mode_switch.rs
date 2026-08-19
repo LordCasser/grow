@@ -18,8 +18,7 @@ impl ScreenModeSwitchCommand {
         Self { to_minimal: true }
     }
 
-    /// `/fullscreen` (alias `/full`): offered in minimal, relaunches without
-    /// `--minimal`.
+    /// `/fullscreen`: offered in minimal, relaunches without `--minimal`.
     pub const fn fullscreen() -> Self {
         Self { to_minimal: false }
     }
@@ -36,10 +35,6 @@ impl ScreenModeSwitchCommand {
 impl SlashCommand for ScreenModeSwitchCommand {
     fn name(&self) -> &str {
         self.target_label()
-    }
-
-    fn aliases(&self) -> &[&str] {
-        if self.to_minimal { &[] } else { &["full"] }
     }
 
     fn description(&self) -> &str {

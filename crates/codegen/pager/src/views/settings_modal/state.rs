@@ -857,7 +857,6 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         }
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
-        "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
@@ -907,9 +906,6 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             )),
             "ask" => Some(Action::SetDefaultPermissionMode(
                 crate::app::actions::PermissionModeKind::Ask,
-            )),
-            "default" => Some(Action::SetDefaultPermissionMode(
-                crate::app::actions::PermissionModeKind::Default,
             )),
             _ => None,
         },

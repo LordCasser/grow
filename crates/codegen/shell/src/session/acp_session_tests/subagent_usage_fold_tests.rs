@@ -47,7 +47,7 @@ async fn subagent_usage_fold_attribution_gate() {
                 40
             );
 
-            actor.chat_state_handle.increment_prompt_index();
+            super::support::record_test_prompt(&actor, "next prompt").await;
             for (live, stamped) in [
                 (Some("p-2"), Some("p-1")),
                 (Some("p-1"), None),

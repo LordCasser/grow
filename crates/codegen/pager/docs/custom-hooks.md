@@ -26,7 +26,7 @@ Common use cases:
    ```json
    {
      "hooks": {
-       "SessionStart": [
+       "session_start": [
          {
            "hooks": [
             { "type": "command", "command": "echo \"🚀 Grow session started in $(pwd)\"" }
@@ -37,7 +37,7 @@ Common use cases:
    }
    ```
 
-3. Start (or restart) a Grow session. The hook runs automatically on `SessionStart`.
+3. Start (or restart) a Grow session. The hook runs automatically on `session_start`.
 
    Try it: press `Ctrl+L` on non–VS Code family (or run `/hooks` anywhere — preferred on VS Code / Cursor / Windsurf / Zed) and check the Hooks tab to confirm it's loaded.
 
@@ -48,9 +48,7 @@ Hooks are discovered from several places (all are merged):
 | Scope     | Path                              | Trusted?     | Notes |
 |-----------|-----------------------------------|--------------|-------|
 | Global    | `~/.grow/hooks/*.json`            | Always       | Best for personal hooks |
-| Global    | `~/.claude/settings.json`         | Always       | Claude Code compatibility |
 | Project   | `<project>/.grow/hooks/*.json`    | Requires trust | Per-repo automation |
-| Project   | `<project>/.claude/settings.json` | Requires trust | Claude compatibility |
 | Config    | `config.toml`, `managed_config.toml`, `requirements.toml` | Always | Hooks shipped in your (or your organization's) config |
 | Plugin    | Bundled inside installed plugins  | Per-plugin   | Shared team hooks |
 
@@ -65,7 +63,7 @@ Each `.json` file can define multiple hooks:
 ```json
 {
   "hooks": {
-    "PreToolUse": [
+    "pre_tool_use": [
       {
         "matcher": "Bash",
         "hooks": [
@@ -73,7 +71,7 @@ Each `.json` file can define multiple hooks:
         ]
       }
     ],
-    "PostToolUse": [
+    "post_tool_use": [
       {
         "hooks": [
           { "type": "command", "command": "bin/log-activity.sh" }
@@ -86,18 +84,18 @@ Each `.json` file can define multiple hooks:
 
 Key fields:
 
-- **Event name** (top-level key): `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `SessionEnd`, etc.
+- **Event name** (top-level key): `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `stop`, `Notification`, `session_end`, etc.
 - **matcher** (optional): Regex tested against the event's match value — the tool name on tool events, and per-event values elsewhere (see the user guide's Hooks chapter). Empty = match everything.
 - **type**: `"command"` (run a script or shell one-liner) or `"http"` (POST the event to a URL).
 - **command**: Path to executable (relative to the JSON file) or inline shell command.
-- **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop` gates). Hooks fail open on timeout.
+- **timeout**: Seconds before killing the hook (default: 5, or 600 for `stop`/`subagent_stop` gates). Hooks fail open on timeout.
 
-**Tool name aliases**: Claude-style names like `Bash`, `Edit`, `Read` automatically match Grow's internal names (`run_terminal_cmd`, `search_replace`, `read_file`).
+Matchers use canonical Grow tool names such as `run_terminal_command`, `search_replace`, and `read_file`. Alternate names are not expanded.
 
 ## Writing Hook Scripts
 
 ### Input
-The full event is sent as JSON on **stdin**. Example for a `PreToolUse` hook:
+The full event is sent as JSON on **stdin**. Example for a `pre_tool_use` hook:
 
 ```json
 {
@@ -111,7 +109,7 @@ The full event is sent as JSON on **stdin**. Example for a `PreToolUse` hook:
 }
 ```
 
-### Output (for blocking hooks like PreToolUse)
+### Output (for blocking hooks such as `pre_tool_use`)
 Write JSON to **stdout**:
 
 - Allow: `{"decision": "allow"}`
@@ -119,11 +117,11 @@ Write JSON to **stdout**:
 
 **Exit codes** (behavior differs by hook type):
 - `0` — success / allow (for blocking hooks)
-- `2` — explicit deny (`PreToolUse`) or block-stop with stderr as feedback (`Stop`/`SubagentStop`; see Stop Decision Control in the user guide)
+- `2` — explicit deny (`pre_tool_use`) or block-stop with stderr as feedback (`stop`/`subagent_stop`; see Stop Decision Control in the user guide)
 - Any other (including timeout/crash/missing env var) — **fail-open**: the failure is logged and shown in the hook scrollback, but the tool call is not blocked. To block a tool call, return JSON `{"decision":"deny","reason":"..."}` on stdout.
 
 ### Passive hooks
-For events like `SessionStart` or `PostToolUse`, stdout is ignored. Just exit 0 on success.
+For events like `session_start` or `post_tool_use`, stdout is ignored. Just exit 0 on success.
 
 ### Useful Environment Variables
 

@@ -789,25 +789,18 @@ mod tests {
         assert!(remote_campaign_to_entry(no_id).is_none());
     }
 
-    /// The remote JSON shape accepts `campaign_id` as an alias for `id`, matching
-    /// the TOML `CampaignMeta` contract so the two sides can't drift. The id key
-    /// (either spelling) must be *consumed*, never leak into the flattened patch —
-    /// a leaked key would deep-merge junk into every effective config.
     #[test]
-    fn campaign_id_json_alias_is_accepted_and_does_not_leak_into_patch() {
-        for raw in [
-            r#"[{"campaign_id":"r1","models":{"default":"m"}}]"#,
-            r#"[{"id":"r1","models":{"default":"m"}}]"#,
-        ] {
-            let list: Vec<CampaignOverride> = serde_json::from_str(raw).unwrap();
-            let entry = remote_campaign_to_entry(list.into_iter().next().unwrap())
-                .expect("entry with id survives");
-            assert_eq!(entry.id, "r1");
-            assert!(
-                entry.patch.get("id").is_none() && entry.patch.get("campaign_id").is_none(),
-                "id keys must not leak into the patch: {raw}"
-            );
-        }
+    fn remote_campaign_requires_canonical_id() {
+        let canonical: Vec<CampaignOverride> =
+            serde_json::from_str(r#"[{"id":"r1","models":{"default":"m"}}]"#).unwrap();
+        let entry = remote_campaign_to_entry(canonical.into_iter().next().unwrap())
+            .expect("entry with canonical id survives");
+        assert_eq!(entry.id, "r1");
+        assert!(entry.patch.get("id").is_none());
+
+        let obsolete: Vec<CampaignOverride> =
+            serde_json::from_str(r#"[{"campaign_id":"r1","models":{"default":"m"}}]"#).unwrap();
+        assert!(remote_campaign_to_entry(obsolete.into_iter().next().unwrap()).is_none());
     }
 
     /// Every registry row's `reset` clears the campaign-driven runtime state a

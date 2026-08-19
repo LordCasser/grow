@@ -266,12 +266,12 @@ fn scrub_first_party_credentials(cmd: &mut tokio::process::Command) {
 /// required Windows Job Object drop semantics; Unix needs this synchronous
 /// `killpg` on every unfinished exit path.
 struct AuthHelperProcessGuard {
-    group: tools::util::ProcessGroup,
+    group: tty_utils::ProcessGroup,
     armed: bool,
 }
 
 impl AuthHelperProcessGuard {
-    fn new(group: tools::util::ProcessGroup) -> Self {
+    fn new(group: tty_utils::ProcessGroup) -> Self {
         Self { group, armed: true }
     }
 
@@ -314,7 +314,7 @@ async fn run_capped(
     // whole tree. Enrollment is part of spawning a credential-bearing helper,
     // not advisory: continuing after failure would knowingly leave a process
     // tree outside the cancellation boundary.
-    let mut group = tools::util::ProcessGroup::new()
+    let mut group = tty_utils::ProcessGroup::new()
         .map_err(|e| anyhow::anyhow!("process group setup failed: {e}"))?;
     group
         .attach(&child)
@@ -437,9 +437,9 @@ async fn mint_provider_token(
             cmd.env("GROW_AUTH_PROVIDER_EXPIRES_AT", expires_at.to_rfc3339());
         }
     }
-    tools::util::detach_command(&mut cmd);
+    tty_utils::detach_command(&mut cmd);
     tty_utils::suspend_until_process_group_enrolled(&mut cmd);
-    cmd.envs(tools::util::pager_env());
+    cmd.envs(tty_utils::pager_env());
     // Scrub last so nothing above can reintroduce a first-party credential.
     scrub_first_party_credentials(&mut cmd);
 

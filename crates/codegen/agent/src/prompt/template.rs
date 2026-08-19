@@ -9,7 +9,8 @@ pub(crate) const STANDARD_PROMPT: &str = include_str!("../../prompts/foundation/
 pub(crate) const PRIMARY_AUDIENCE_PROMPT: &str = include_str!("../../prompts/audience/primary.md");
 pub(crate) const SUBAGENT_AUDIENCE_PROMPT: &str =
     include_str!("../../prompts/audience/subagent.md");
-pub(crate) const RUNTIME_CONTEXT_PROMPT: &str = include_str!("../../prompts/runtime/context.md");
+pub(crate) const SESSION_EXTENSIONS_PROMPT: &str =
+    include_str!("../../prompts/extensions/session.md");
 #[cfg(test)]
 pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = MANDATORY_CORE_PROMPT;
 #[cfg(test)]
@@ -49,10 +50,6 @@ mod tests {
 
     fn default_placeholders() -> serde_json::Value {
         serde_json::json!({
-            "os_name": "macos",
-            "shell_path": "/bin/zsh",
-            "working_directory": "/tmp/test",
-            "current_date": "2025-01-15",
             "memory_enabled": false,
             "is_non_interactive": false,
             "system_prompt_label": crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL,
@@ -81,16 +78,6 @@ mod tests {
             .render_with_extra("Use ${{ tools.by_kind.read }} to read files.", &p)
             .unwrap();
         assert_eq!(result, "Use read_file to read files.");
-    }
-
-    #[test]
-    fn test_variable_substitution_agent_fields() {
-        let r = default_renderer();
-        let p = default_placeholders();
-        let result = r
-            .render_with_extra("OS: ${{ os_name }}, Shell: ${{ shell_path }}", &p)
-            .unwrap();
-        assert_eq!(result, "OS: macos, Shell: /bin/zsh");
     }
 
     // ── Conditionals ────────────────────────────────────────────────
@@ -379,7 +366,7 @@ mod tests {
     fn test_full_mode_deterministic() {
         let r = default_renderer();
         let p = default_placeholders();
-        let body = "Agent: ${{ tools.by_kind.read }}, OS: ${{ os_name }}";
+        let body = "Agent: ${{ tools.by_kind.read }}, label: ${{ system_prompt_label }}";
         let a = r.render_with_extra(body, &p).unwrap();
         let b = r.render_with_extra(body, &p).unwrap();
         assert_eq!(a, b, "Full mode rendering must be deterministic");

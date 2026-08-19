@@ -101,6 +101,44 @@ fn timeline_reader_ignores_only_the_uncommitted_final_fragment() {
     assert!(adapter.read_timeline(path).is_err());
 }
 
+#[test]
+fn disk_materialization_derives_surface_and_reference_from_one_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("timeline.jsonl");
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let timeline = chat_state::Timeline::from_seed(vec![
+        sampling_types::ConversationItem::user("first"),
+        sampling_types::ConversationItem::assistant("second"),
+    ])
+    .unwrap();
+    for event in timeline.events() {
+        let mut line = serde_json::to_vec(event).unwrap();
+        line.push(b'\n');
+        JsonlStorageAdapter::append_timeline_line_sync(
+            &path,
+            line,
+            event.seq.get(),
+            AppendDurability::Buffered,
+        )
+        .unwrap();
+    }
+
+    let materialized = adapter
+        .materialize_timeline_from_dir(dir.path(), "source-session")
+        .unwrap();
+    assert_eq!(materialized.input_ref.timeline_id, "source-session");
+    assert_eq!(materialized.input_ref.first_seq, 0);
+    assert_eq!(
+        materialized.input_ref.last_seq,
+        timeline.events().last().unwrap().seq.get()
+    );
+    assert_eq!(
+        serde_json::to_value(&materialized.surface).unwrap(),
+        serde_json::to_value(timeline.surface()).unwrap()
+    );
+    assert_eq!(materialized.surface_revision, timeline.surface_revision());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ordinary_and_durable_appends_keep_every_physical_line_parseable() {
     const N: usize = 100;

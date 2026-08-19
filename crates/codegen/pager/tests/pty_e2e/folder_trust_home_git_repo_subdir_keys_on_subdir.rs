@@ -5,7 +5,7 @@ use workspace::trust::{TRUST_FILE_NAME, TrustStore};
 
 /// Folder-trust home-is-a-git-repo (dotfiles-in-home), Case 1 — the reported bug.
 /// `$HOME` is itself a git repo; the session is launched in a SUBDIR
-/// (`<home>/proj`) that has its own repo-local `.mcp.json`. The trust question
+/// (`<home>/proj`) that has its own repo-local Grow MCP config. The trust question
 /// must render for — and the accepted grant must persist keyed on — the SUBDIR,
 /// NEVER on `$HOME` (the bug resolved the prompt/key up to `$HOME` because the
 /// git up-walk landed on the home repo root).
@@ -18,8 +18,12 @@ async fn folder_trust_home_git_repo_subdir_keys_on_subdir() {
     // own repo-local code-exec config (so the SUBDIR has something to gate).
     git2::Repository::init(content.home()).expect("git init $HOME");
     let proj = content.home().join("proj");
-    std::fs::create_dir_all(&proj).expect("create proj subdir");
-    std::fs::write(proj.join(".mcp.json"), "{}").expect("write proj/.mcp.json");
+    std::fs::create_dir_all(proj.join(".grow")).expect("create project .grow");
+    std::fs::write(
+        proj.join(".grow/config.toml"),
+        "[mcp_servers.fixture]\ncommand = \"/usr/bin/true\"\n",
+    )
+    .expect("write project .grow/config.toml");
 
     let env_refs = trust_env(true);
     let cwd = proj.to_str().expect("utf8 proj path");

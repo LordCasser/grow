@@ -73,7 +73,7 @@ async fn run_with_stop_hook(respond: &str) -> StopHookRun {
         hooks_dir.join("stop.json"),
         serde_json::json!({
             "hooks": {
-                "Stop": [{
+                "stop": [{
                     "hooks": [{
                         "type": "command",
                         "command": format!("sh {}", script_path.display()),
@@ -87,7 +87,7 @@ async fn run_with_stop_hook(respond: &str) -> StopHookRun {
     .expect("write hook config");
 
     let mut cmd = tokio::process::Command::new(grow_binary());
-    cmd.args(["-p", "say hello", "--yolo"])
+    cmd.args(["-p", "say hello", "--permission-mode", "always-approve"])
         .current_dir(sandbox.workspace())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

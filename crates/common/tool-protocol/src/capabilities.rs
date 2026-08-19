@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Per-tool capabilities. Defaults conservatively (no
 /// progress, no cancel, single concurrency, no hooks).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCapabilities {
     /// Streaming declaration. `None` — the default for every tool today —
     /// means the tool never emits partial-result progress.
@@ -24,10 +25,6 @@ pub struct ToolCapabilities {
     /// Lifecycle hooks the tool opts in to receive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookKind>,
-
-    /// Opaque per-tool behaviour version. Bytewise-compared (NOT semver).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub behavior_version: Option<String>,
 
     /// Per-tool override for the progress-frame size cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]

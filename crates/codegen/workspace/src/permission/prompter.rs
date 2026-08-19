@@ -35,24 +35,18 @@ pub const ALLOW_EDITS_SESSION_OPTION_ID: &str = "allow-edits-session";
 ///   pressing "Yes". The shell never persists anything based on this id.
 ///
 /// - **Client-side** (pager): when the user picks this option, the pager
-///   ALSO fires its existing `set_yolo_mode(true)` flow, which:
-///     1. Flips local YOLO state on the active agent
+///   ALSO selects `PermissionMode::AlwaysApprove`, which:
+///     1. Flips local always-approve state on the active agent
 ///     2. Drains any queued permission requests with `AllowOnce` responses
 ///     3. Persists `[ui] permission_mode = "always-approve"` to
 ///        `~/.grow/config.toml` via the `Effect::PersistPermissionMode` effect
-///     4. Sends the existing `grow/yolo_mode_changed` ACP notification so
-///        the agent's permission manager flips its `yolo_mode` flag
+///     4. Sends the canonical `grow/permission_mode_changed` ACP notification so
+///        the agent's permission manager commits the canonical mode
 ///
 /// This split keeps the wire protocol bog-standard ACP (no new methods or
 /// extensions, no new `PermissionOptionKind` variant) while still giving
 /// the user a single click to turn on always-approve mode.
 ///
-/// The option is wire-compatible: clients that don't recognise the id
-/// (e.g. older pager builds, third-party ACP clients) treat it as an
-/// ordinary `AllowAlways` option and the shell still maps the response
-/// to `AllowOnce`. Worst case: the user grants the current call but the
-/// session-wide toggle is not applied. They can still flip it via
-/// `/always-approve`, Ctrl+O, or the settings modal.
 pub const ENABLE_ALWAYS_APPROVE_OPTION_ID: &str = "enable-always-approve";
 
 /// User-facing label for the "enable always-approve mode" option. Kept
@@ -67,11 +61,11 @@ const ENABLE_ALWAYS_APPROVE_LABEL: &str =
 ///
 /// `kind` is `AllowOnce` (not `AllowAlways`) so that:
 ///
-/// - The pager's YOLO auto-approve drain (`handle_permission_request`
-///   and `set_yolo_mode_inner`) seeks the first `AllowOnce` and will pick
+/// - The pager's always-approve auto-approve drain (`handle_permission_request`
+///   and `set_permission_mode_inner_scoped`) seeks the first `AllowOnce` and will pick
 ///   this option. That is safe: those code paths bypass
 ///   `dispatch_permission_select` and send the response directly via
-///   the oneshot, so the `set_yolo_mode(true)` side effect does NOT
+///   the oneshot, so selecting always-approve does NOT
 ///   re-fire on auto-approval. The shell still maps the id to
 ///   `PromptOutcome::AllowOnce` and the action is allowed exactly once.
 ///
@@ -82,11 +76,6 @@ const ENABLE_ALWAYS_APPROVE_LABEL: &str =
 /// set, the cursor preselects THIS option explicitly (also via
 /// `is_enable_always_approve_option`, not by index 0).
 ///
-/// The shell-side `map_selected_outcome` returns
-/// `PromptOutcome::AllowOnce` for this id under the `AllowOnce` kind
-/// branch directly; the `AllowAlways` override is kept as a defensive
-/// guard for older / third-party clients that may have observed an
-/// earlier build where the kind was `AllowAlways`.
 fn enable_always_approve_option() -> acp::PermissionOption {
     acp::PermissionOption::new(
         ENABLE_ALWAYS_APPROVE_OPTION_ID,
@@ -96,11 +85,11 @@ fn enable_always_approve_option() -> acp::PermissionOption {
 }
 
 /// Returns whether the given option is the special "enable always-approve mode"
-/// (global yolo) option that is prepended for GrowTUI / GrowPager.
+/// (global always-approve) option that is prepended for GrowTUI / GrowPager.
 ///
 /// This is the canonical way to identify the option instead of matching on
 /// its human-facing label or assuming position 0. Callers that need to
-/// treat this option specially for default-cursor logic, YOLO draining, etc.
+/// treat this option specially for default-cursor logic, always-approve draining, etc.
 /// should use this helper.
 pub fn is_enable_always_approve_option(opt: &acp::PermissionOption) -> bool {
     opt.option_id.0.as_ref() == ENABLE_ALWAYS_APPROVE_OPTION_ID
@@ -109,7 +98,7 @@ pub fn is_enable_always_approve_option(opt: &acp::PermissionOption) -> bool {
 /// Returns `true` if the given client type should see the prepended
 /// "enable always-approve mode" option. Limited to the two clients
 /// (`GrowTUI`, `GrowPager`) that wire the option id through
-/// to their YOLO toggle. Other clients keep their existing option set.
+/// to their always-approve toggle. Other clients keep their existing option set.
 fn client_supports_enable_always_approve(client_type: ClientType) -> bool {
     matches!(client_type, ClientType::GrowTUI | ClientType::GrowPager)
 }
@@ -126,9 +115,10 @@ fn prepend_enable_always_approve(
     if !client_supports_enable_always_approve(client_type) {
         return base;
     }
-    let mut with_yolo: IndexMap<acp::PermissionOptionId, acp::PermissionOption> = IndexMap::new();
+    let mut with_always_approve: IndexMap<acp::PermissionOptionId, acp::PermissionOption> =
+        IndexMap::new();
     let opt = enable_always_approve_option();
-    with_yolo.insert(opt.option_id.clone(), opt);
+    with_always_approve.insert(opt.option_id.clone(), opt);
     // `IndexMap::extend` preserves order. A duplicate id in `base` would
     // overwrite our entry while keeping our position — but the constants
     // chosen here (`"always-allow"`, `"allow-edits-session"`, `"allow-once"`,
@@ -136,8 +126,8 @@ fn prepend_enable_always_approve(
     // `"allow-always-command"`, `"reject-always-command"`, `"reject-always"`)
     // are all distinct from `ENABLE_ALWAYS_APPROVE_OPTION_ID`, so there is no
     // collision in practice.
-    with_yolo.extend(base);
-    with_yolo
+    with_always_approve.extend(base);
+    with_always_approve
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -154,14 +144,9 @@ pub struct BashCommandSelectedTerms {
 }
 
 /// Delimiter used to qualify MCP tool names as `"<server>__<tool>"`.
-/// Canonical definition lives in `workspace_types` (so both the
-/// permission-validation layer and the MCP transport in `mcp` can
-/// depend on it without dragging the full workspace or rmcp into each
-/// other). Re-exported here for backward-compat with callers that historically
-/// reached `workspace::permission::MCP_TOOL_NAME_DELIMITER`.
 /// Model-callable MCP registration validates this delimiter before permission
 /// handling, so stripping it given a trusted `server_prefix` is unambiguous.
-pub use workspace_types::MCP_TOOL_NAME_DELIMITER;
+use workspace_types::MCP_TOOL_NAME_DELIMITER;
 
 /// Extract the action segment of a qualified MCP tool name using a
 /// trusted `server_prefix`. Returns the full `tool_name` when there is
@@ -184,7 +169,7 @@ pub fn mcp_tool_action<'a>(tool_name: &'a str, server_prefix: Option<&str>) -> &
 /// Pretty-format a single MCP server- or tool-name segment for display:
 /// split on `'_'`, title-case each word, join with spaces. Leaves
 /// non-underscore characters (camelCase, hyphens) intact, so
-/// `"list_issues"` → `"List Issues"`, `"grow_managed_notion"` →
+/// `"list_issues"` → `"List Issues"`, `"notion"` →
 /// `"Grow Managed Notion"`, and `"getMyTaskList"` → `"GetMyTaskList"`.
 pub fn mcp_titleize_segment(name: &str) -> String {
     name.split('_')
@@ -242,9 +227,9 @@ pub struct McpToolPermission {
     /// e.g. `"Always allow:"`. Mirrors `BashCommandPermission::prompt_prefix`.
     pub prompt_prefix: String,
     /// Full tool name as the agent called it
-    /// (e.g. `"grow_managed_notion__notion-fetch"`).
+    /// (e.g. `"notion__notion-fetch"`).
     pub tool_name: String,
-    /// Server component of a valid qualified MCP ID (e.g. `"grow_managed_notion"`).
+    /// Server component of a valid qualified MCP ID (e.g. `"notion"`).
     /// `None` for malformed or unqualified names, in which case the view hides
     /// the scope toggle and only offers tool-scope.
     pub server_prefix: Option<String>,
@@ -518,7 +503,7 @@ impl AcpPrompter {
             return base;
         }
         // Prepend the "enable always-approve mode" option as position 0
-        // for client types that wire the option id through to their YOLO
+        // for client types that wire the option id through to their always-approve
         // toggle. See `ENABLE_ALWAYS_APPROVE_OPTION_ID` doc-comment for
         // the full client/shell split.
         prepend_enable_always_approve(self.client_type, base)
@@ -663,59 +648,48 @@ impl AcpPrompter {
             AccessKind::MCPTool {
                 name: tool_name, ..
             } => {
-                // Toggle-aware clients (pager + TUI) get the
-                // `allow-always-mcp` option carrying `McpToolPermission`
-                // meta. Pager renders the scope toggle; TUI submits
-                // without `McpScopeSelection` meta and the response mapper
-                // defaults to tool-scope. Fallback clients use the legacy
-                // `fallback_options` (`always-allow`) and the manager's
-                // plain `AllowAlways` arm persists tool-scope.
-                match self.client_type {
-                    ClientType::GrowTUI | ClientType::GrowPager => {
-                        let mut options: IndexMap<acp::PermissionOptionId, acp::PermissionOption> =
-                            IndexMap::new();
-                        let server_prefix = parse_mcp_qualified_name(tool_name)
-                            .map(|(_, server, _)| server.to_owned());
-                        options.insert(
-                            acp::PermissionOptionId::new("allow-always-mcp"),
-                            acp::PermissionOption::new(
-                                "allow-always-mcp",
-                                format!("Always allow: {}", tool_name),
-                                acp::PermissionOptionKind::AllowAlways,
-                            )
-                            .meta(
-                                serde_json::to_value(McpToolPermission {
-                                    prompt_prefix: "Always allow:".to_owned(),
-                                    tool_name: tool_name.clone(),
-                                    server_prefix,
-                                })
-                                .ok()
-                                .and_then(|v| v.as_object().cloned()),
-                            ),
-                        );
-                        options.insert(
-                            acp::PermissionOptionId::new("allow-once"),
-                            acp::PermissionOption::new(
-                                "allow-once",
-                                "Yes".to_owned(),
-                                acp::PermissionOptionKind::AllowOnce,
-                            ),
-                        );
-                        options.insert(
-                            acp::PermissionOptionId::new("reject-once"),
-                            acp::PermissionOption::new(
-                                "reject-once",
-                                REJECT_ONCE_LABEL.to_owned(),
-                                acp::PermissionOptionKind::RejectOnce,
-                            ),
-                        );
-                        options
-                    }
-                    ClientType::Generic
-                    | ClientType::GrowWeb
-                    | ClientType::Nebula
-                    | ClientType::Extension => self.fallback_options.clone(),
-                }
+                // Every client receives the same MCP permission contract.
+                // Clients with a scope selector may submit `McpScopeSelection`;
+                // clients without one omit it and deterministically grant only
+                // the concrete tool named by this request.
+                let mut options: IndexMap<acp::PermissionOptionId, acp::PermissionOption> =
+                    IndexMap::new();
+                let server_prefix =
+                    parse_mcp_qualified_name(tool_name).map(|(_, server, _)| server.to_owned());
+                options.insert(
+                    acp::PermissionOptionId::new("allow-always-mcp"),
+                    acp::PermissionOption::new(
+                        "allow-always-mcp",
+                        format!("Always allow: {}", tool_name),
+                        acp::PermissionOptionKind::AllowAlways,
+                    )
+                    .meta(
+                        serde_json::to_value(McpToolPermission {
+                            prompt_prefix: "Always allow:".to_owned(),
+                            tool_name: tool_name.clone(),
+                            server_prefix,
+                        })
+                        .ok()
+                        .and_then(|v| v.as_object().cloned()),
+                    ),
+                );
+                options.insert(
+                    acp::PermissionOptionId::new("allow-once"),
+                    acp::PermissionOption::new(
+                        "allow-once",
+                        "Yes".to_owned(),
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                );
+                options.insert(
+                    acp::PermissionOptionId::new("reject-once"),
+                    acp::PermissionOption::new(
+                        "reject-once",
+                        REJECT_ONCE_LABEL.to_owned(),
+                        acp::PermissionOptionKind::RejectOnce,
+                    ),
+                );
+                options
             }
             AccessKind::CapabilityGrant { .. } => {
                 let mut options = IndexMap::new();
@@ -827,18 +801,7 @@ fn map_selected_outcome(
         .map(|option| match option.kind {
             acp::PermissionOptionKind::AllowOnce => PromptOutcome::AllowOnce,
             acp::PermissionOptionKind::AllowAlways => {
-                // Defensive guard: the "enable always-approve mode"
-                // option is built with kind `AllowOnce` (so the
-                // pager's default-focus picker lands on it). This
-                // branch is dead code in current builds but kept as
-                // a safety net for older / third-party clients that
-                // might echo the id back under `AllowAlways` — the
-                // shell still treats it as a single allow, NEVER as
-                // a per-tool whitelist. The session-wide YOLO flip
-                // is the client's job, not the shell's.
-                if option_id.0.as_ref() == ENABLE_ALWAYS_APPROVE_OPTION_ID {
-                    PromptOutcome::AllowOnce
-                } else if option_id.to_string() == "allow-always-mcp" {
+                if option_id.to_string() == "allow-always-mcp" {
                     if let Some(selection) = meta.and_then(|m| {
                         serde_json::from_value::<McpScopeSelection>(serde_json::Value::Object(
                             m.clone(),
@@ -1239,10 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_response_no_meta_falls_back_to_tool() {
-        // TUI case: option id is `allow-always-mcp` but the renderer
-        // does not build the toggle meta. The prompter must default to
-        // tool-scope using the access-kind name.
+    fn mcp_response_no_meta_defaults_to_tool_scope() {
         let p = prompter(ClientType::GrowTUI);
         let access = AccessKind::MCPTool {
             name: "notion__fetch".to_owned(),
@@ -1257,26 +1217,28 @@ mod tests {
     }
 
     #[test]
-    fn mcp_fallback_client_returns_plain_allow_always() {
-        // non-TUI clients (Generic / GrowWeb / Extension / …) see `fallback_options`. The
-        // legacy `"always-allow"` id maps to plain `PromptOutcome::AllowAlways`;
-        // the manager arm persists tool-scope from there.
-        let p = prompter(ClientType::Generic);
+    fn every_client_uses_the_canonical_mcp_permission_contract() {
         let access = AccessKind::MCPTool {
             name: "linear__list".to_owned(),
             input: serde_json::Value::Null,
         };
-        let opts = p.build_options(&access);
-        assert!(
-            opts.contains_key(&acp::PermissionOptionId::new("always-allow")),
-            "fallback option set must contain legacy `always-allow` id"
-        );
-        assert!(
-            !opts.contains_key(&acp::PermissionOptionId::new("allow-always-mcp")),
-            "fallback clients must NOT see the `allow-always-mcp` option"
-        );
-        let outcome = outcome_for(&opts, "always-allow", None, &access);
-        assert!(matches!(outcome, PromptOutcome::AllowAlways));
+        for client_type in [
+            ClientType::Generic,
+            ClientType::GrowTUI,
+            ClientType::GrowWeb,
+            ClientType::Nebula,
+            ClientType::Extension,
+            ClientType::GrowPager,
+        ] {
+            let opts = prompter(client_type).build_options(&access);
+            assert!(opts.contains_key(&acp::PermissionOptionId::new("allow-always-mcp")));
+            assert!(!opts.contains_key(&acp::PermissionOptionId::new("always-allow")));
+            let outcome = outcome_for(&opts, "allow-always-mcp", None, &access);
+            assert!(matches!(
+                outcome,
+                PromptOutcome::AllowAlwaysMcpTool(ref name) if name == "linear__list"
+            ));
+        }
     }
 
     #[test]
@@ -1317,10 +1279,7 @@ mod tests {
     fn mcp_titleize_segment_handles_snake_camel_kebab() {
         // snake_case → words split + each title-cased
         assert_eq!(mcp_titleize_segment("list_issues"), "List Issues");
-        assert_eq!(
-            mcp_titleize_segment("grow_managed_notion"),
-            "Grow Managed Notion"
-        );
+        assert_eq!(mcp_titleize_segment("notion"), "Grow Managed Notion");
         // single word: just capitalize first letter
         assert_eq!(mcp_titleize_segment("linear"), "Linear");
         // camelCase preserved (no `_` to split on, only first letter touched)
@@ -1412,7 +1371,7 @@ mod tests {
         }
     }
 
-    /// The option has `kind = AllowAlways` (for default-focus / YOLO
+    /// The option has `kind = AllowAlways` (for default-focus / always-approve
     /// drain safety) but `map_selected_outcome` must override that to
     /// `PromptOutcome::AllowOnce` — the shell never persists per-tool
     /// state for this id. Pin the override for every access kind.
@@ -1444,7 +1403,7 @@ mod tests {
         }
     }
 
-    /// The option carries `kind = AllowOnce` so the pager's YOLO
+    /// The option carries `kind = AllowOnce` so the pager's always-approve
     /// auto-approve drain (which sends the first `AllowOnce` response)
     /// picks it safely. Note the pager's `default_selected_permission` +
     /// sticky cursor logic skips this option (see
@@ -1461,7 +1420,7 @@ mod tests {
             opt.kind,
             acp::PermissionOptionKind::AllowOnce,
             "enable-always-approve kind must be AllowOnce so the pager's \
-             YOLO auto-approve drain (first AllowOnce) picks it safely",
+             always-approve auto-approve drain (first AllowOnce) picks it safely",
         );
     }
 

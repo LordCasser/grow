@@ -21,11 +21,10 @@ pub use load::*;
 pub use mcp::*;
 pub use permissions::*;
 pub use persist::*;
-// `remote` extracted to the `config-types` crate (dependency inversion);
-// re-exported so `crate::util::config::{RemoteSettings, GoalRoleModel}` keep working.
+// `remote` extracted to the `config-types` crate (dependency inversion).
 pub use config_types::{
     CampaignOverride, ContextualHintsRemote, DisplayRefreshSettings, DoomLoopRecoverySettings,
-    GoalRoleModel, RemoteSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge,
+    RemoteSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge,
 };
 pub use resolve::*;
 pub use settings_writes::*;

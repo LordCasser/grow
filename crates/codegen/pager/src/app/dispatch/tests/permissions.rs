@@ -19,7 +19,7 @@ fn reset_permission_setting_changes_default_not_active_session() {
         Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
         &mut app,
     );
-    assert!(app.agents[&AgentId(0)].session.is_yolo());
+    assert!(app.agents[&AgentId(0)].session.is_always_approve());
 
     setup_reset_confirm_open(&mut app, "permission_mode");
 
@@ -38,17 +38,17 @@ fn reset_permission_setting_changes_default_not_active_session() {
             ..
         }
     )));
-    assert!(app.agents[&AgentId(0)].session.is_yolo());
-    assert!(!app.default_yolo);
+    assert!(app.agents[&AgentId(0)].session.is_always_approve());
+    assert!(!app.default_permission_mode.is_always_approve());
 }
 
-/// **Security-critical:** YOLO ON must drain the per-agent
+/// **Security-critical:** always-approve ON must drain the per-agent
 /// `permission_queue` with `AllowOnce` responses. If this drain
 /// path regresses (e.g., the setter falls back to `Cancelled`
-/// without an `AllowOnce` lookup), the user enables YOLO and
+/// without an `AllowOnce` lookup), the user enables always-approve and
 /// their queued permissions silently get rejected.
 #[test]
-fn set_yolo_mode_on_drains_permission_queue_with_allow_once() {
+fn set_always_approve_mode_on_drains_permission_queue_with_allow_once() {
     use crate::views::permission_view::{PermissionFocus, PermissionViewState};
     use std::sync::Arc;
 
@@ -110,13 +110,13 @@ fn set_yolo_mode_on_drains_permission_queue_with_allow_once() {
     // Queue is drained.
     assert!(
         app.agents[&AgentId(0)].permission_queue.is_empty(),
-        "YOLO ON must drain the permission_queue",
+        "always-approve ON must drain the permission_queue",
     );
     // Verify the `AllowOnce` response was actually sent (NOT
     // `Cancelled`). The drain semantics use `find(|o| o.kind ==
     // AllowOnce)` — a regression to `Cancelled` here would
     // silently reject every queued permission when the user
-    // enables YOLO, which is the exact security failure mode
+    // enables always-approve, which is the exact security failure mode
     // this test prevents.
     match response_rx.try_recv() {
         Ok(Ok(acp::RequestPermissionResponse {
@@ -135,7 +135,7 @@ fn set_yolo_mode_on_drains_permission_queue_with_allow_once() {
         }
         other => panic!(
             "queue drain must send an `AllowOnce` Selected response, got {other:?} — \
-                 security regression: queued permissions are NOT being auto-approved on YOLO ON",
+                 security regression: queued permissions are NOT being auto-approved on always-approve ON",
         ),
     }
 }
@@ -234,7 +234,7 @@ fn draining_root_request_behind_child_preserves_front_followup_state() {
 }
 
 #[test]
-fn enabling_parent_yolo_preserves_queued_child_ask() {
+fn enabling_parent_always_approve_preserves_queued_child_ask() {
     let mut app = test_app_with_agent();
     let mut response_rx = enqueue_permission_with_enable_always_approve(&mut app);
     app.agents
@@ -252,7 +252,7 @@ fn enabling_parent_yolo_preserves_queued_child_ask() {
         &mut app,
     );
 
-    assert!(app.agents[&AgentId(0)].session.is_yolo());
+    assert!(app.agents[&AgentId(0)].session.is_always_approve());
     assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 1);
     assert!(matches!(
         response_rx.try_recv(),
@@ -316,9 +316,9 @@ fn set_permission_mode_always_approve_blocked_by_policy_pin() {
     use crate::app::actions::PermissionModeKind;
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
-    app.yolo_policy_block = Some(POLICY_WARNING);
+    app.always_approve_policy_block = Some(POLICY_WARNING);
     // Open the settings modal so the blocked path's snapshot refresh is
-    // exercised: the modal must keep showing the live (non-yolo) value.
+    // exercised: the modal must keep showing the live (non-always-approve) value.
     let _ = dispatch(Action::OpenSettings, &mut app);
 
     let effects = dispatch(
@@ -330,7 +330,7 @@ fn set_permission_mode_always_approve_blocked_by_policy_pin() {
         effects.is_empty(),
         "blocked modal commit must not persist, got {effects:?}",
     );
-    assert!(!app.agents[&AgentId(0)].session.is_yolo());
+    assert!(!app.agents[&AgentId(0)].session.is_always_approve());
     assert_eq!(
         app.current_ui.permission_mode, None,
         "canonical mirror must stay untouched"
@@ -340,8 +340,8 @@ fn set_permission_mode_always_approve_blocked_by_policy_pin() {
         panic!("Settings modal must remain open across the blocked dispatch")
     };
     assert!(
-        !state.pager_snapshot.yolo_mode,
-        "modal snapshot must show the live (non-yolo) value after the block",
+        !state.pager_snapshot.permission_mode.is_always_approve(),
+        "modal snapshot must show the live (non-always-approve) value after the block",
     );
     assert_ne!(
         state.ui_snapshot.permission_mode.as_deref(),
@@ -350,7 +350,7 @@ fn set_permission_mode_always_approve_blocked_by_policy_pin() {
     );
     assert_eq!(agent_toast(&app).as_deref(), Some(POLICY_WARNING));
 
-    // Non-yolo kinds still commit under the pin.
+    // Non-always-approve kinds still commit under the pin.
     let effects = dispatch(Action::SetPermissionMode(PermissionModeKind::Ask), &mut app);
     assert!(matches!(
         effects.as_slice(),
@@ -371,7 +371,7 @@ fn set_permission_mode_auto_notifies_without_changing_default() {
         Action::SetPermissionMode(PermissionModeKind::Auto),
         &mut app,
     );
-    assert!(!app.agents[&AgentId(0)].session.is_yolo());
+    assert!(!app.agents[&AgentId(0)].session.is_always_approve());
     assert!(app.agents[&AgentId(0)].session.is_auto());
     assert_eq!(app.current_ui.permission_mode, None);
     assert!(matches!(
@@ -381,25 +381,6 @@ fn set_permission_mode_auto_notifies_without_changing_default() {
             ..
         }]
     ));
-}
-
-#[test]
-fn session_permission_rejects_persisted_default_sentinel() {
-    let mut app = test_app_with_agent();
-
-    let effects = dispatch(
-        Action::SetPermissionMode(PermissionModeKind::Default),
-        &mut app,
-    );
-
-    assert!(effects.is_empty());
-    assert!(!app.agents[&AgentId(0)].session.is_yolo());
-    assert!(!app.agents[&AgentId(0)].session.is_auto());
-    assert_eq!(app.current_ui.permission_mode, None);
-    assert_eq!(
-        agent_toast(&app).as_deref(),
-        Some("Default permission is only available in Settings.")
-    );
 }
 
 /// Feature gate OFF: a SetPermissionMode(Auto) commit (e.g. from the
@@ -459,10 +440,10 @@ fn rollback_permission_mode_unknown_canonical_defaults_to_ask() {
     );
 
     assert!(
-        app.agents[&AgentId(0)].session.is_yolo(),
+        app.agents[&AgentId(0)].session.is_always_approve(),
         "persistent-default rollback must not mutate the active session",
     );
-    assert!(!app.default_yolo);
+    assert!(!app.default_permission_mode.is_always_approve());
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
     // The failure toast is the standard
     // `✗ Could not save permission_mode: …` format. A future
@@ -480,22 +461,22 @@ fn rollback_permission_mode_refreshes_open_modal_snapshots() {
     use crate::views::modal::ActiveModal;
 
     let mut app = test_app_with_agent();
-    // Pre-set yolo=true via the typed setter so the rollback
+    // Pre-set always-approve=true via the typed setter so the rollback
     // captures real prior state.
     let _ = dispatch(
         Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
         &mut app,
     );
     // Open the modal AFTER the optimistic toggle so the open-time
-    // snapshot reflects yolo=true.
+    // snapshot reflects always-approve=true.
     let _ = dispatch(Action::OpenSettings, &mut app);
     let agent = app.agents.get(&AgentId(0)).unwrap();
     let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
         panic!("expected Settings modal");
     };
     assert!(
-        state.pager_snapshot.yolo_mode,
-        "pre-rollback snapshot reflects optimistic state (yolo=true)",
+        state.pager_snapshot.permission_mode.is_always_approve(),
+        "pre-rollback snapshot reflects optimistic state (always-approve=true)",
     );
 
     // Simulate disk-write failure → rollback to "ask".
@@ -513,13 +494,13 @@ fn rollback_permission_mode_refreshes_open_modal_snapshots() {
     let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
         panic!("modal must stay open after rollback");
     };
-    assert!(state.pager_snapshot.yolo_mode);
+    assert!(state.pager_snapshot.permission_mode.is_always_approve());
     assert_eq!(
         state.ui_snapshot.permission_mode.as_deref(),
         Some("ask"),
         "rollback path MUST refresh ui_snapshot.permission_mode to 'ask'",
     );
-    assert!(agent.session.is_yolo());
+    assert!(agent.session.is_always_approve());
 }
 
 #[test]
@@ -537,11 +518,11 @@ fn set_permission_mode_ask_emits_brand_consistent_toast() {
 
     let effects = dispatch(Action::SetPermissionMode(PermissionModeKind::Ask), &mut app);
 
-    assert!(!app.agents[&AgentId(0)].session.is_yolo());
+    assert!(!app.agents[&AgentId(0)].session.is_always_approve());
     assert_eq!(app.current_ui.permission_mode, None);
 
     // Toast brands as "Permission mode" not
-    // "Always-approve". Previously the Ask arm reused `yolo_toast(false)`
+    // "Always-approve". Previously the Ask arm reused `always_approve_toast(false)`
     // which produced "✓ Always-approve: off" — a brand mismatch.
     let toast = app.agents[&AgentId(0)]
         .toast
@@ -560,111 +541,6 @@ fn set_permission_mode_ask_emits_brand_consistent_toast() {
             ..
         }]
     ));
-}
-
-/// Regression test. A `--yolo`
-/// startup sets `agent.session.yolo_mode = true` but leaves
-/// `app.current_ui.permission_mode` at `None`. Without the
-/// LIVE-precedence capture, dispatching `SetPermissionMode(Default)`
-/// would produce `WithRollback("ask")` — diverging the pager from
-/// the shell on disk failure (the ACP suppress-on-failure gate
-/// keeps the shell at YOLO, but the pager would roll back to
-/// non-YOLO). This test pins the LIVE-precedence fix.
-#[test]
-fn set_default_permission_with_live_yolo_does_not_mutate_session() {
-    use crate::app::actions::PermissionModeKind;
-    let mut app = test_app_with_agent();
-    // Simulate `--yolo` startup: agent yolo + default_yolo set,
-    // but `current_ui.permission_mode = None` (config has no
-    // `[ui] permission_mode` setting).
-    app.agents.get_mut(&AgentId(0)).unwrap().session.yolo_mode = true;
-    app.default_yolo = true;
-    app.current_ui.permission_mode = None;
-
-    let effects = dispatch(
-        Action::SetDefaultPermissionMode(PermissionModeKind::Default),
-        &mut app,
-    );
-
-    assert!(app.agents[&AgentId(0)].session.is_yolo());
-    assert!(!app.default_yolo);
-    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("default"));
-
-    // **Rollback contract.** Rollback must target
-    // "always-approve" (the LIVE state at dispatch time), NOT
-    // "ask" (a bool-projected guess from the None mirror).
-    match &effects[0] {
-        Effect::PersistPermissionMode {
-            persist,
-            session_id,
-            ..
-        } => {
-            assert!(session_id.is_none());
-            assert_eq!(
-                *persist,
-                crate::app::actions::PermissionModePersist::WithRollback("always-approve"),
-                "PR 11 R1 Security #8: LIVE yolo state must take precedence over the \
-                     None on-disk mirror when computing the rollback canonical — \
-                     otherwise a `--yolo` startup + Default-commit + disk-failure diverges \
-                     the pager from the shell",
-            );
-        }
-        other => panic!("expected PersistPermissionMode, got {other:?}"),
-    }
-}
-
-/// `apply_setting_rollback("permission_mode",
-/// Enum("default"))` — the rollback arm that preserves the
-/// "default" canonical through a failed-persist. The headline
-/// architectural contract: rolling back to "default" must NOT
-/// collapse onto "ask" via the inner's bool projection.
-#[test]
-fn rollback_permission_mode_default_canonical_preserves_default() {
-    use crate::settings::SettingValue;
-    let mut app = test_app_with_agent();
-    // Pre-flip to YOLO so the rollback has somewhere to roll
-    // back FROM.
-    let _ = dispatch(
-        Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
-        &mut app,
-    );
-    assert!(!app.agents[&AgentId(0)].session.is_yolo());
-    assert!(app.default_yolo);
-    assert_eq!(
-        app.current_ui.permission_mode.as_deref(),
-        Some("always-approve"),
-    );
-
-    // Simulate disk-write failure with `rollback_value =
-    // Enum("default")`.
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::SettingPersistFailed {
-            key: "permission_mode",
-            rollback_value: SettingValue::Enum("default"),
-            error: "simulated".into(),
-        }),
-        &mut app,
-    );
-
-    // Rollback path MUST NOT re-emit any Effect — that would
-    // loop on persistent disk failure.
-    assert!(
-        effects.is_empty(),
-        "rollback path must not re-emit Effects, got {effects:?}",
-    );
-
-    assert!(!app.agents[&AgentId(0)].session.is_yolo());
-    assert!(!app.default_yolo);
-    // Canonical preserved as "default" — the headline
-    // contract. Without the post-inner override in the rollback
-    // arm, the inner's bool-projection write would leave this
-    // at "ask".
-    assert_eq!(
-        app.current_ui.permission_mode.as_deref(),
-        Some("default"),
-        "PR 11 R1 Tests #22: rollback to 'default' canonical must NOT collapse \
-             onto 'ask' — the post-inner override restores the canonical",
-    );
 }
 
 /// Non-empty permission_queue → NeedsInput.

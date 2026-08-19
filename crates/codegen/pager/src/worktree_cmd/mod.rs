@@ -44,7 +44,6 @@ pub struct WorktreeArgs {
 #[derive(Debug, Subcommand, Clone)]
 enum WorktreeCommand {
     /// List tracked worktrees
-    #[command(visible_alias = "ls")]
     List {
         #[arg(long)]
         repo: Option<String>,
@@ -67,7 +66,6 @@ enum WorktreeCommand {
         dry_run: bool,
     },
     /// Garbage-collect orphaned/stale worktrees
-    #[command(alias = "prune")]
     Gc {
         #[arg(long)]
         dry_run: bool,
@@ -522,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn list_accepts_ls_alias() {
+    fn list_parses_json_flag() {
         use clap::Parser;
 
         #[derive(Parser)]
@@ -531,7 +529,7 @@ mod tests {
             command: WorktreeCommand,
         }
 
-        let cli = Cli::parse_from(["test", "ls", "--json"]);
+        let cli = Cli::try_parse_from(["test", "list", "--json"]).unwrap();
         match cli.command {
             WorktreeCommand::List {
                 repo,

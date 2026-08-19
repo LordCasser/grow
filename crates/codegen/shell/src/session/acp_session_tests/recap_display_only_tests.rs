@@ -9,6 +9,31 @@ use super::support::*;
 use super::*;
 use sampling_types::ConversationItem;
 
+fn sideband_persistence_harness() -> (
+    tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+    std::sync::Arc<parking_lot::Mutex<Vec<chat_state::SidebandEvent>>>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (forward_tx, forward_rx) = tokio::sync::mpsc::unbounded_channel();
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = rx.recv().await {
+            match message {
+                PersistenceMsg::SidebandDurablyAndAck { event, respond_to } => {
+                    captured.lock().push(event);
+                    let _ = respond_to.send(Ok(()));
+                }
+                other => {
+                    let _ = forward_tx.send(other);
+                }
+            }
+        }
+    });
+    (tx, forward_rx, events)
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn new_prompt_cancels_in_flight_recap_epoch() {
     let local = tokio::task::LocalSet::new();
@@ -16,7 +41,7 @@ async fn new_prompt_cancels_in_flight_recap_epoch() {
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _prx, _events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             let epoch0 = actor.recap_epoch.get();
@@ -46,7 +71,7 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _prx, _events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             let epoch0 = actor.recap_epoch.get();
@@ -63,7 +88,6 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
                     None,
                     None,
                     respond_to,
-                    None,
                     None,
                 )
                 .await;
@@ -102,7 +126,6 @@ async fn queue_input_synthetic_does_not_bump_recap_epoch() {
                     None,
                     None,
                     respond_to,
-                    None,
                     None,
                 )
                 .await;
@@ -179,8 +202,7 @@ async fn drop_recap_after_cancel_auto_silent_manual_unavailable() {
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, mut persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, mut persistence_rx, _events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             actor.recap_in_flight.set(true);
@@ -236,14 +258,17 @@ async fn auto_recap_below_min_turns_is_noop_and_display_only() {
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, mut persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, mut persistence_rx, _events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            actor.chat_state_handle.replace_conversation(vec![
-                ConversationItem::user("explain the borrow checker"),
-                ConversationItem::assistant("it enforces shared-xor-mutable"),
-            ]);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::user("explain the borrow checker"),
+                    ConversationItem::assistant("it enforces shared-xor-mutable"),
+                ],
+            )
+            .await;
             let before = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
                 before.len(),
@@ -277,14 +302,18 @@ async fn manual_recap_never_mutates_conversation() {
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _prx, _events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            actor.chat_state_handle.replace_conversation(vec![
-                ConversationItem::system("you are a coding agent"),
-                ConversationItem::user("explain the borrow checker"),
-                ConversationItem::assistant("it enforces shared-xor-mutable"),
-            ]);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::system("you are a coding agent"),
+                    ConversationItem::user("explain the borrow checker"),
+                    ConversationItem::assistant("it enforces shared-xor-mutable"),
+                ],
+            )
+            .await;
             let before = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
                 before.len(),
@@ -340,7 +369,7 @@ async fn manual_recap_with_no_turns_emits_unavailable() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             // No main (user) turns — the gate skips before any model call.
-            actor.chat_state_handle.replace_conversation(vec![]);
+            replace_test_surface(&actor.chat_state_handle, vec![]).await;
 
             actor.handle_recap(false).await;
             tokio::task::yield_now().await;
@@ -363,17 +392,20 @@ async fn manual_recap_generation_failure_emits_unavailable() {
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, mut persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, mut persistence_rx, _events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             // One main (user) turn clears the recap gate, so the failure comes
             // from the (unreachable) prepare/model call rather than the gate.
-            actor.chat_state_handle.replace_conversation(vec![
-                ConversationItem::system("you are a coding agent"),
-                ConversationItem::user("explain the borrow checker"),
-                ConversationItem::assistant("it enforces shared-xor-mutable"),
-            ]);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::system("you are a coding agent"),
+                    ConversationItem::user("explain the borrow checker"),
+                    ConversationItem::assistant("it enforces shared-xor-mutable"),
+                ],
+            )
+            .await;
 
             actor.handle_recap(false).await;
             tokio::task::yield_now().await;
@@ -386,52 +418,49 @@ async fn manual_recap_generation_failure_emits_unavailable() {
         .await;
 }
 
-/// When the recap model call is attempted (gate passes) but fails, we still
-/// persist a `RecapRequest` artifact (with `error` set) for offline replay —
-/// same idea as compaction request artifacts on failure.
+/// A failed recap retains one strict Sideband request/attempt/terminal chain;
+/// it never falls back to a second request-artifact mechanism.
 #[tokio::test(flavor = "current_thread")]
-async fn manual_recap_generation_failure_persists_request_artifact() {
+async fn manual_recap_generation_failure_records_sideband() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, mut persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx, events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            actor.chat_state_handle.replace_conversation(vec![
-                ConversationItem::system("you are a coding agent"),
-                ConversationItem::user("explain the borrow checker"),
-                ConversationItem::assistant("it enforces shared-xor-mutable"),
-            ]);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::system("you are a coding agent"),
+                    ConversationItem::user("explain the borrow checker"),
+                    ConversationItem::assistant("it enforces shared-xor-mutable"),
+                ],
+            )
+            .await;
 
             actor.handle_recap(false).await;
             tokio::task::yield_now().await;
 
-            let mut saw_recap_request = false;
-            while let Ok(msg) = persistence_rx.try_recv() {
-                if let PersistenceMsg::RecapRequest(artifact) = msg {
-                    assert_eq!(artifact.trigger, "manual");
-                    assert!(
-                        artifact.error.is_some(),
-                        "failed recap must record error on the artifact"
-                    );
-                    assert!(
-                        artifact.summary.is_none(),
-                        "failed recap must not invent a summary"
-                    );
-                    assert!(
-                        !artifact.chat_history.is_empty(),
-                        "artifact must include the recap request items"
-                    );
-                    saw_recap_request = true;
-                }
-            }
-            assert!(
-                saw_recap_request,
-                "failed recap must enqueue PersistenceMsg::RecapRequest"
-            );
+            let events = events.lock();
+            assert_eq!(events.len(), 3, "request + attempt + failed end");
+            let chat_state::SidebandEventKind::Request(request) = &events[0].kind else {
+                panic!("first Sideband event must be request")
+            };
+            assert_eq!(request.purpose, chat_state::SidebandPurpose::SessionRecap);
+            assert_eq!(request.input_refs.len(), 1);
+            assert!(matches!(
+                events[1].kind,
+                chat_state::SidebandEventKind::Attempt(_)
+            ));
+            assert!(matches!(
+                &events[2].kind,
+                chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Failed,
+                    error: Some(_),
+                })
+            ));
         })
         .await;
 }
@@ -452,9 +481,11 @@ async fn auto_recap_gated_does_not_emit_unavailable() {
 
             // One main turn (below the auto min-turns gate): the auto path is
             // gated and shows no spinner, so it must stay silent.
-            actor
-                .chat_state_handle
-                .replace_conversation(vec![ConversationItem::user("hi, nothing yet")]);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![ConversationItem::user("hi, nothing yet")],
+            )
+            .await;
 
             actor.handle_recap(true).await;
 
@@ -466,28 +497,28 @@ async fn auto_recap_gated_does_not_emit_unavailable() {
         .await;
 }
 
-/// Over-budget recap: the persisted `RecapRequest` is trimmed within budget and
-/// the conversation is left unmutated (display-only). Seeds an oversized item so
-/// the over-budget branch runs deterministically with no network.
+/// Over-budget recap remains display-only and references the frozen parent
+/// Timeline instead of duplicating its request Surface in a side artifact.
 #[tokio::test(flavor = "current_thread")]
-async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() {
+async fn manual_recap_over_budget_is_display_only_and_references_timeline() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, mut persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            // window 8_000 => prompt_budget = 8_000 * 85 / 100 - 4_000 = 2_800.
-            const PROMPT_BUDGET: u64 = 8_000 * 85 / 100 - 4_000;
+            let (persistence_tx, _persistence_rx, events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 8_000, 85, gateway_tx, persistence_tx).await;
 
             // An oversized real user turn (~40 KB => ~10k est tokens) forces the
             // over-budget branch regardless of the harness `total_tokens` arg.
-            actor.chat_state_handle.replace_conversation(vec![
-                ConversationItem::system("you are a coding agent"),
-                ConversationItem::user("x".repeat(40_000)),
-            ]);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::system("you are a coding agent"),
+                    ConversationItem::user("x".repeat(40_000)),
+                ],
+            )
+            .await;
             let before = actor.chat_state_handle.get_conversation().await;
 
             actor.handle_recap(false).await;
@@ -500,34 +531,16 @@ async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() 
                 "an over-budget recap must not mutate the conversation"
             );
 
-            // The model call fails (unreachable base_url) → the error arm persists
-            // the (trimmed) request artifact.
-            let mut saw_recap_request = false;
-            while let Ok(msg) = persistence_rx.try_recv() {
-                if let PersistenceMsg::RecapRequest(artifact) = msg {
-                    let est = chat_state::estimate_conversation_tokens(&artifact.chat_history);
-                    assert!(
-                        est <= PROMPT_BUDGET,
-                        "persisted recap request must be within budget: {est} > {PROMPT_BUDGET}"
-                    );
-                    assert!(
-                        !artifact.chat_history.is_empty(),
-                        "the trimmed recap request must be non-empty"
-                    );
-                    assert!(
-                        matches!(
-                            artifact.chat_history.last(),
-                            Some(ConversationItem::User(_))
-                        ),
-                        "the recap request must end with the appended User instruction"
-                    );
-                    saw_recap_request = true;
-                }
-            }
-            assert!(
-                saw_recap_request,
-                "an over-budget recap must still enqueue a trimmed RecapRequest artifact"
-            );
+            let events = events.lock();
+            let request = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::SidebandEventKind::Request(request) => Some(request),
+                    _ => None,
+                })
+                .expect("over-budget recap must start one Sideband");
+            assert_eq!(request.input_refs.len(), 1);
+            assert!(request.prompt.contains("Write ONE sentence recap body"));
         })
         .await;
 }
@@ -640,7 +653,7 @@ async fn recap_request_rides_parent_prompt_cache() {
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _prx, _events) = sideband_persistence_harness();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             // Register an ordinary tool so the "recap sends the main turn's
             // tools" assertion is non-vacuous. Goal tools are intentionally
@@ -659,11 +672,15 @@ async fn recap_request_rides_parent_prompt_cache() {
             cfg.api_backend = sampling_types::ApiBackend::Responses;
             actor.chat_state_handle.update_sampling_config(cfg);
 
-            actor.chat_state_handle.replace_conversation(vec![
-                ConversationItem::system("you are a coding agent"),
-                ConversationItem::user("explain the borrow checker"),
-                ConversationItem::assistant("it enforces shared-xor-mutable"),
-            ]);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::system("you are a coding agent"),
+                    ConversationItem::user("explain the borrow checker"),
+                    ConversationItem::assistant("it enforces shared-xor-mutable"),
+                ],
+            )
+            .await;
 
             actor.handle_recap(false).await;
 

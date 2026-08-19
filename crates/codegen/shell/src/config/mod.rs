@@ -2,9 +2,9 @@ pub mod reloader;
 pub mod watcher;
 use crate::bundle;
 pub use config_types::{
-    DEFAULT_RECENCY_DECAY, MemoryDreamConfig, MemoryEmbeddingConfig, MemoryFlushConfig,
-    MemoryGcConfig, MemoryIndexConfig, MemoryInitialInjectionConfig, MemorySearchConfig,
-    MemorySessionConfig, MemoryWatcherConfig, MmrConfig, PruningConfig, TemporalDecayConfig,
+    MemoryDreamConfig, MemoryEmbeddingConfig, MemoryFlushConfig, MemoryGcConfig, MemoryIndexConfig,
+    MemoryInitialInjectionConfig, MemorySearchConfig, MemorySessionConfig, MemoryWatcherConfig,
+    MmrConfig, PruningConfig, TemporalDecayConfig,
 };
 use serde::Deserialize;
 /// Full configuration for the memory system.
@@ -232,7 +232,7 @@ pub enum SubagentClassifierInput {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SubagentsConfig {
     /// Whether subagent support is enabled.
     pub enabled: bool,
@@ -269,191 +269,12 @@ pub struct SubagentsConfig {
     /// ```
     #[serde(default)]
     pub toggle: std::collections::HashMap<String, bool>,
-    /// Declarative subagent role definitions.
-    ///
-    /// ```toml
-    /// [subagents.roles.researcher]
-    /// description = "Deep research agent"
-    /// default_capability_mode = "read-only"
-    /// model = "grow-3"
-    ///
-    /// [subagents.roles.implementer]
-    /// description = "Implementation agent with full access"
-    /// default_capability_mode = "all"
-    /// prompt_file = ".grow/prompts/implementer.md"
-    /// ```
-    #[serde(default)]
-    pub roles: std::collections::HashMap<String, SubagentRole>,
-    /// Named persona/SOUL definitions.
-    ///
-    /// ```toml
-    /// [subagents.personas.researcher]
-    /// instructions = "You are a thorough researcher. Always cite sources."
-    ///
-    /// [subagents.personas.concise]
-    /// instructions = "Be extremely concise. No filler words."
-    /// instructions_file = ".grow/personas/concise.md"
-    /// ```
-    #[serde(default)]
-    pub personas: std::collections::HashMap<String, SubagentPersona>,
 }
-pub use crate::agent::subagent::resolution::config::{
-    PersonaIOField, SubagentPersona, SubagentRole,
-};
 impl SubagentsConfig {
-    fn discover_personas_in_dir(&mut self, dir: &std::path::Path) {
-        if !dir.is_dir() {
-            return;
-        }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!(error = %e, "Failed to read personas directory");
-                return;
-            }
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
-                continue;
-            };
-            if self.personas.contains_key(&name) {
-                continue;
-            }
-            match std::fs::read_to_string(&path) {
-                Ok(content) => match toml::from_str::<SubagentPersona>(&content) {
-                    Ok(mut persona) => {
-                        persona.source_dir = path.parent().map(|p| p.to_path_buf());
-                        persona.source_path = Some(path.display().to_string());
-                        tracing::debug!(persona = %name, "Loaded persona from file");
-                        self.personas.insert(name, persona);
-                    }
-                    Err(e) => {
-                        tracing::warn!(persona = %name, error = %e, "Failed to parse persona file");
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to read persona file");
-                }
-            }
-        }
-    }
-    fn discover_roles_in_dir(&mut self, dir: &std::path::Path) {
-        if !dir.is_dir() {
-            return;
-        }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!(error = %e, "Failed to read roles directory");
-                return;
-            }
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
-                continue;
-            };
-            if self.roles.contains_key(&name) {
-                tracing::debug!(role = %name, "Skipping file-based role, higher-priority config takes precedence");
-                continue;
-            }
-            match std::fs::read_to_string(&path) {
-                Ok(content) => match toml::from_str::<SubagentRole>(&content) {
-                    Ok(mut role) => {
-                        role.source_dir = path.parent().map(|p| p.to_path_buf());
-                        tracing::debug!(role = %name, "Loaded role from file");
-                        self.roles.insert(name, role);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            role = %name,
-                            path = %path.display(),
-                            error = %e,
-                            "Failed to parse role file"
-                        );
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "Failed to read role file"
-                    );
-                }
-            }
-        }
-    }
     /// Check if a subagent is enabled.
     /// Returns `true` if the agent is not in the toggle map (default enabled).
     pub fn is_subagent_enabled(&self, name: &str) -> bool {
         self.toggle.get(name).copied().unwrap_or(true)
-    }
-    /// Look up a role by name.
-    pub fn get_role(&self, name: &str) -> Option<&SubagentRole> {
-        self.roles.get(name)
-    }
-    /// Look up a persona by name.
-    pub fn get_persona(&self, name: &str) -> Option<&SubagentPersona> {
-        self.personas.get(name)
-    }
-    /// Discover personas from `.grow/personas/` directory.
-    ///
-    /// File-based personas are loaded from `{cwd}/.grow/personas/*.toml`.
-    /// Each file defines a single `SubagentPersona`. The file stem becomes
-    /// the persona name. Inline config takes precedence.
-    pub fn discover_personas(&mut self, cwd: &std::path::Path) {
-        let dir = cwd.join(".grow").join("personas");
-        self.discover_personas_in_dir(&dir);
-    }
-    /// Validate all role definitions. Returns a list of (role_name, error_message)
-    /// for invalid entries.
-    pub fn validate_roles(&self) -> Vec<(String, String)> {
-        let valid_modes = ["read-only", "read-write", "execute", "all"];
-        let mut errors = Vec::new();
-        for (name, role) in &self.roles {
-            if role.description.is_empty() {
-                errors.push((name.clone(), "description is required".to_string()));
-            }
-            if let Some(ref mode) = role.default_capability_mode
-                && !valid_modes.contains(&mode.as_str())
-            {
-                errors.push((
-                    name.clone(),
-                    format!(
-                        "invalid default_capability_mode \"{mode}\", \
-                         must be one of: {}",
-                        valid_modes.join(", ")
-                    ),
-                ));
-            }
-            if let Some(ref pf) = role.prompt_file
-                && pf.trim().is_empty()
-            {
-                errors.push((
-                    name.clone(),
-                    "prompt_file must not be empty or whitespace".to_string(),
-                ));
-            }
-        }
-        errors
-    }
-    /// Discover roles from `.grow/roles/` directory and merge with inline config.
-    ///
-    /// File-based roles are loaded from `{cwd}/.grow/roles/*.toml`. Each file
-    /// defines a single `SubagentRole` (same schema as inline `[subagents.roles.*]`).
-    /// The file stem becomes the role name.
-    ///
-    /// Precedence: inline config roles override file-based roles with the same name.
-    pub fn discover_roles(&mut self, cwd: &std::path::Path) {
-        let roles_dir = cwd.join(".grow").join("roles");
-        self.discover_roles_in_dir(&roles_dir);
     }
     pub const ENV_MAX_DEPTH: &'static str = "GROW_SUBAGENTS_MAX_DEPTH";
     pub const DEFAULT_MAX_DEPTH: u32 = 1;
@@ -516,20 +337,6 @@ impl SubagentsConfig {
     /// Project files are excluded from this trust-independent base; Task
     /// boundaries overlay them using the parent cwd's authoritative trust verdict.
     pub fn resolve(cli_flag: bool, config: &toml::Value) -> Self {
-        let user_grow_root = config::user_grow_home();
-        Self::resolve_base_with_sources(
-            cli_flag,
-            config,
-            user_grow_root.as_deref(),
-            &bundle::bundled_root(),
-        )
-    }
-    pub(crate) fn resolve_base_with_sources(
-        cli_flag: bool,
-        config: &toml::Value,
-        user_grow_root: Option<&std::path::Path>,
-        bundled_root: &std::path::Path,
-    ) -> Self {
         let mut result: Self = config
             .get("subagents")
             .and_then(|v| v.clone().try_into().ok())
@@ -543,103 +350,15 @@ impl SubagentsConfig {
             true,
         );
         result.enabled = resolved.value;
-        if let Some(root) = user_grow_root {
-            result.discover_roles_in_dir(&root.join("roles"));
-            result.discover_personas_in_dir(&root.join("personas"));
-        }
-        result.discover_roles_in_dir(&bundled_root.join("roles"));
-        result.discover_personas_in_dir(&bundled_root.join("personas"));
-        result
-    }
-    pub(crate) fn effective_definition_maps(
-        roles: &std::collections::HashMap<String, SubagentRole>,
-        personas: &std::collections::HashMap<String, SubagentPersona>,
-        cwd: &std::path::Path,
-        project_trusted: bool,
-    ) -> (
-        std::collections::HashMap<String, SubagentRole>,
-        std::collections::HashMap<String, SubagentPersona>,
-    ) {
-        let mut project = Self::default();
-        if project_trusted {
-            project.discover_roles(cwd);
-            project.discover_personas(cwd);
-        }
-        for (name, role) in roles {
-            if role.source_dir.is_none() || !project.roles.contains_key(name) {
-                project.roles.insert(name.clone(), role.clone());
-            }
-        }
-        for (name, persona) in personas {
-            if persona.source_path.is_none() || !project.personas.contains_key(name) {
-                project.personas.insert(name.clone(), persona.clone());
-            }
-        }
-        (project.roles, project.personas)
-    }
-}
-/// Managed MCP connector fetching config (`[managed_mcps]` in config.toml).
-///
-/// See [`Self::resolve`] for full priority chain.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
-pub struct ManagedMcpsConfig {
-    pub enabled: bool,
-    pub gateway_tools_enabled: bool,
-}
-impl Default for ManagedMcpsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            gateway_tools_enabled: false,
-        }
-    }
-}
-impl ManagedMcpsConfig {
-    /// Priority: env var > TOML > remote > default (enabled interactive, disabled headless).
-    pub fn resolve(
-        config: &toml::Value,
-        remote: Option<&crate::util::config::RemoteSettings>,
-        is_headless: bool,
-    ) -> Self {
-        let mut result: Self = config
-            .get("managed_mcps")
-            .and_then(|v| v.clone().try_into().ok())
-            .unwrap_or(Self {
-                enabled: !is_headless,
-                gateway_tools_enabled: false,
-            });
-        let managed_mcps_table = config.get("managed_mcps").and_then(|v| v.as_table());
-        let has_local_enabled = managed_mcps_table.is_some_and(|t| t.contains_key("enabled"));
-        let resolved = crate::agent::config::resolve_enabled(
-            None,
-            "GROW_MANAGED_MCPS_ENABLED",
-            result.enabled,
-            has_local_enabled,
-            remote.and_then(|r| r.managed_mcps_enabled),
-            !is_headless,
-        );
-        result.enabled = resolved.value;
-        let has_local_gateway_tools =
-            managed_mcps_table.is_some_and(|t| t.contains_key("gateway_tools_enabled"));
-        let gateway_resolved = crate::agent::config::resolve_enabled(
-            None,
-            "GROW_MANAGED_MCP_GATEWAY_TOOLS_ENABLED",
-            result.gateway_tools_enabled,
-            has_local_gateway_tools,
-            remote.and_then(|r| r.managed_mcp_gateway_tools_enabled),
-            false,
-        );
-        result.gateway_tools_enabled = result.enabled && gateway_resolved.value;
         result
     }
 }
 /// Auxiliary model overrides under `[models]`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelOverrideConfig {
     /// `None` = current model.
-    pub session_summary: Option<String>,
+    pub session_title: Option<String>,
     /// Optional fallback used only after the active runtime is proven to reject
     /// image input. The active runtime always receives the first image attempt.
     pub image_description: Option<String>,
@@ -651,7 +370,7 @@ pub struct ModelOverrideConfig {
 impl Default for ModelOverrideConfig {
     fn default() -> Self {
         Self {
-            session_summary: None,
+            session_title: None,
             image_description: None,
             prompt_suggestion: PromptSuggestModelPin::Unpinned,
         }
@@ -702,7 +421,7 @@ impl ModelOverrideConfig {
     /// a model string (no CLI flag; the default and the catalog guard live at
     /// the consumer, `handle_suggest_prompt`).
     pub fn resolve(
-        cli_session_summary_model: Option<&str>,
+        cli_session_title_model: Option<&str>,
         config: &toml::Value,
         remote: Option<&crate::util::config::RemoteSettings>,
     ) -> Self {
@@ -711,22 +430,20 @@ impl ModelOverrideConfig {
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default();
         let mut result = Self {
-            session_summary: non_empty_model_override(parsed_models.session_summary.as_deref()),
+            session_title: non_empty_model_override(parsed_models.session_title.as_deref()),
             image_description: non_empty_model_override(parsed_models.image_description.as_deref()),
             prompt_suggestion: non_empty_model_override(parsed_models.prompt_suggestion.as_deref())
                 .map(PromptSuggestModelPin::Pinned)
                 .unwrap_or_default(),
         };
-        let has_local_ss = models_table
-            .and_then(|m| m.get("session_summary"))
-            .is_some();
+        let has_local_title = models_table.and_then(|m| m.get("session_title")).is_some();
         let has_local_id = models_table
             .and_then(|m| m.get("image_description"))
             .is_some();
         if let Some(remote) = remote {
-            if !has_local_ss {
-                result.session_summary =
-                    non_empty_model_override(remote.session_summary_model.as_deref());
+            if !has_local_title {
+                result.session_title =
+                    non_empty_model_override(remote.session_title_model.as_deref());
             }
             if !has_local_id {
                 result.image_description =
@@ -738,8 +455,8 @@ impl ModelOverrideConfig {
                 result.prompt_suggestion = PromptSuggestModelPin::Pinned(v);
             }
         }
-        if let Ok(v) = std::env::var("GROW_SESSION_SUMMARY_MODEL") {
-            result.session_summary = non_empty_model_override(Some(v.as_str()));
+        if let Ok(v) = std::env::var("GROW_SESSION_TITLE_MODEL") {
+            result.session_title = non_empty_model_override(Some(v.as_str()));
         }
         if let Ok(v) = std::env::var("GROW_IMAGE_DESCRIPTION_MODEL") {
             result.image_description = non_empty_model_override(Some(v.as_str()));
@@ -749,8 +466,8 @@ impl ModelOverrideConfig {
         {
             result.prompt_suggestion = PromptSuggestModelPin::Env(v);
         }
-        if let Some(v) = cli_session_summary_model {
-            result.session_summary = non_empty_model_override(Some(v));
+        if let Some(v) = cli_session_title_model {
+            result.session_title = non_empty_model_override(Some(v));
         }
         result
     }
@@ -796,12 +513,11 @@ impl ToolsConfig {
 pub use config::ConfigLayers;
 pub use config::{
     MDM_REQUIREMENTS_SOURCE, RequirementsLayer, RequirementsSource, ServingIdentity, SyncMarker,
-    claude_managed_settings_probe_path, is_managed_config_hard_stale_for,
-    is_managed_config_stale_for, load_config_file, load_from_disk, load_managed_config,
-    load_merged_requirements, load_system_managed_config, load_toml_file,
-    managed_config_identity_changed_at, managed_deployment_id, managed_policy_compromised_for,
-    mark_managed_config_synced, mark_managed_config_synced_at, normalize_identity,
-    requirements_layers, system_config_dir, user_grow_home,
+    is_managed_config_hard_stale_for, is_managed_config_stale_for, load_config_file,
+    load_from_disk, load_managed_config, load_merged_requirements, load_system_managed_config,
+    load_toml_file, managed_config_identity_changed_at, managed_deployment_id,
+    managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
+    normalize_identity, requirements_layers, system_config_dir, user_grow_home,
 };
 /// Map of "dotted.path" to which config file the value came from.
 pub fn config_origins(
@@ -865,18 +581,13 @@ pub use crate::util::config::load_effective_config_disk_only;
 pub enum RequirementSource {
     Unknown,
     Requirements { path: std::path::PathBuf },
-    ManagedSettings { path: std::path::PathBuf },
     Config { path: std::path::PathBuf },
-    Settings { path: std::path::PathBuf },
 }
 impl RequirementSource {
     pub fn path(&self) -> Option<&std::path::Path> {
         match self {
             Self::Unknown => None,
-            Self::Requirements { path }
-            | Self::ManagedSettings { path }
-            | Self::Config { path }
-            | Self::Settings { path } => Some(path),
+            Self::Requirements { path } | Self::Config { path } => Some(path),
         }
     }
 }
@@ -885,11 +596,7 @@ impl std::fmt::Display for RequirementSource {
         match self {
             Self::Unknown => f.write_str("<unknown>"),
             Self::Requirements { path } => write!(f, "{} (requirements)", path.display()),
-            Self::ManagedSettings { path } => {
-                write!(f, "{} (managed-settings)", path.display())
-            }
             Self::Config { path } => write!(f, "{} (config)", path.display()),
-            Self::Settings { path } => write!(f, "{} (settings)", path.display()),
         }
     }
 }
@@ -910,25 +617,6 @@ impl std::fmt::Display for EnforcedField {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} = {} ({})", self.path, self.value, self.source)
     }
-}
-/// Apply overrides from external `managed-settings.json`.
-/// Called before `apply_requirements()` so requirements.toml can override.
-pub fn apply_managed_settings_features(
-    config: &mut crate::agent::config::Config,
-) -> Vec<EnforcedField> {
-    let ms = workspace::permission::resolution::managed_settings();
-    apply_managed_settings_features_inner(config, &ms.features)
-}
-fn apply_managed_settings_features_inner(
-    config: &mut crate::agent::config::Config,
-    features: &workspace::permission::resolution::ManagedSettingsFeatures,
-) -> Vec<EnforcedField> {
-    let Some(ref path) = features.source_path else {
-        return Vec::new();
-    };
-    let source = RequirementSource::ManagedSettings { path: path.clone() };
-    let mut enforced: Vec<EnforcedField> = Vec::new();
-    enforced
 }
 /// Clamp `AgentConfig` fields per `requirements.toml`. No-op if absent.
 /// System pins win over user pins on conflict.
@@ -1006,23 +694,12 @@ fn apply_requirements_inner(
     enforce_opt!("cli", "show_tips", config.cli.show_tips);
     enforce_val!("memory", "enabled", config.memory.enabled);
     enforce_val!("subagents", "enabled", config.subagents.enabled);
-    enforce_val!("managed_mcps", "enabled", config.managed_mcps.enabled);
     if let Some(val) = req_bool(req, "tools", "respect_gitignore") {
         config
             .requirements
             .respect_gitignore
             .pin(val, source.clone());
         push("tools.respect_gitignore", format!("{val}"));
-    }
-    if let Some(val) = req_bool(req, "ui", "yolo") {
-        if config.ui.yolo != val {
-            config.ui.yolo = val;
-            push("ui.yolo", format!("{val}"));
-        }
-        if !val && config.default_yolo_mode {
-            config.default_yolo_mode = false;
-            push("ui.yolo", "--yolo blocked".to_string());
-        }
     }
     macro_rules! enforce_str {
         ($section:expr, $key:expr, $field:expr) => {
@@ -1283,7 +960,6 @@ pub fn resolve_effective_plugins_config(
             plugins_cfg.disabled.extend(proj.disabled);
         }
     }
-    plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
     plugins_cfg
 }
 pub use config::{deep_merge_toml, expand_env_vars_in_string, expand_env_vars_in_toml};

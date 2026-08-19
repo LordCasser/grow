@@ -124,27 +124,6 @@ pub enum IgnoredFilesMode {
     CopyOnly { skip_patterns: Vec<String> },
 }
 
-/// How to handle BTRFS snapshot optimization on Linux.
-///
-/// On Linux systems where the source repo is on a BTRFS subvolume,
-/// we can use BTRFS snapshots for O(1) worktree creation instead of
-/// file-by-file CoW cloning.
-///
-/// The snapshot creates a complete standalone git repository (not a
-/// linked git worktree), which is immediately usable.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub enum BtrfsMode {
-    /// Auto-detect: use BTRFS snapshot if source is on a BTRFS subvolume.
-    /// Falls back to file-by-file copy if not on BTRFS or not a subvolume.
-    #[default]
-    Auto,
-    /// Force use of BTRFS snapshot. Returns an error if the source is not
-    /// on a BTRFS subvolume.
-    Force,
-    /// Disable BTRFS snapshot optimization. Always use file-by-file copy.
-    Disabled,
-}
-
 /// Strategy for creating the worktree.
 ///
 /// Consolidates the choice of linked vs standalone, BTRFS snapshots,
@@ -366,22 +345,6 @@ impl WorktreeBuilder {
         if standalone {
             self.creation_mode = CreationMode::Standalone;
         }
-        self
-    }
-
-    /// Shorthand for setting the BTRFS snapshot mode (Linux only).
-    ///
-    /// BTRFS snapshots are automatically used by `Linked` and `Standalone`
-    /// modes when the source is on a BTRFS subvolume. This method is only
-    /// needed to *force* or *disable* that auto-detection.
-    pub fn btrfs_mode(self, mode: BtrfsMode) -> Self {
-        // BtrfsMode is now handled inside execute.rs based on CreationMode.
-        // This method is kept for backward compatibility with the CLI.
-        tracing::warn!(
-            ?mode,
-            "WorktreeBuilder::btrfs_mode() is deprecated and has no effect. \
-             BtrfsMode is now handled automatically based on CreationMode."
-        );
         self
     }
 
@@ -2299,43 +2262,6 @@ mod tests {
         assert_eq!(report.files_skipped, 5);
         assert_eq!(report.issues.len(), 2);
         assert!(report.dirty_files.is_none());
-    }
-
-    #[test]
-    fn test_btrfs_mode_default() {
-        let mode = BtrfsMode::default();
-        assert_eq!(mode, BtrfsMode::Auto);
-    }
-
-    #[test]
-    fn test_btrfs_mode_variants() {
-        // Test that all variants can be created and compared
-        assert_eq!(BtrfsMode::Auto, BtrfsMode::Auto);
-        assert_eq!(BtrfsMode::Force, BtrfsMode::Force);
-        assert_eq!(BtrfsMode::Disabled, BtrfsMode::Disabled);
-
-        assert_ne!(BtrfsMode::Auto, BtrfsMode::Force);
-        assert_ne!(BtrfsMode::Auto, BtrfsMode::Disabled);
-        assert_ne!(BtrfsMode::Force, BtrfsMode::Disabled);
-    }
-
-    #[test]
-    fn test_btrfs_mode_debug() {
-        // Test that Debug is implemented
-        let auto = format!("{:?}", BtrfsMode::Auto);
-        let force = format!("{:?}", BtrfsMode::Force);
-        let disabled = format!("{:?}", BtrfsMode::Disabled);
-
-        assert!(auto.contains("Auto"));
-        assert!(force.contains("Force"));
-        assert!(disabled.contains("Disabled"));
-    }
-
-    #[test]
-    fn test_btrfs_mode_clone() {
-        let mode = BtrfsMode::Force;
-        let cloned = mode.clone();
-        assert_eq!(mode, cloned);
     }
 
     #[test]

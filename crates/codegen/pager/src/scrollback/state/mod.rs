@@ -773,11 +773,7 @@ impl ScrollbackState {
             && entry.display_mode == DisplayMode::Collapsed
         {
             entry.display_mode = edit_default_display_mode(
-                self.appearance
-                    .scrollback
-                    .blocks
-                    .edit
-                    .effective_expanded(crate::appearance::cache::load_collapsed_edit_blocks()),
+                self.appearance.scrollback.blocks.edit.expanded_by_default,
                 edit,
             );
         }
@@ -1326,12 +1322,7 @@ impl ScrollbackState {
         started_at: Option<Instant>,
     ) -> bool {
         let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
-        let expanded_by_default = self
-            .appearance
-            .scrollback
-            .blocks
-            .edit
-            .effective_expanded(crate::appearance::cache::load_collapsed_edit_blocks());
+        let expanded_by_default = self.appearance.scrollback.blocks.edit.expanded_by_default;
         let Some(entry) = self.entries.get_mut(&entry_id) else {
             return false;
         };
@@ -1379,43 +1370,6 @@ impl ScrollbackState {
             self.mark_structurally_dirty(entry_id);
         }
         true
-    }
-
-    /// Apply a live `collapsed_edit_blocks` flag flip (settings toggle or
-    /// remote settings update; the cache is already set to the new value).
-    ///
-    /// Entries still sitting on their old policy default re-materialize under
-    /// the new one, so the toggle is visible on the existing transcript; any
-    /// other mode is a user gesture and survives (an explicit fold back to
-    /// the old default is indistinguishable and flips too — same caveat as
-    /// `push`'s materialize gate). Pins win under `respect_manual_folds`. An
-    /// explicit pager.toml `expanded_by_default` makes both defaults equal,
-    /// so the walk naturally no-ops. Heights are rebuilt afterwards: Edit
-    /// rows change height on a mode flip, and the collapsed header's `+N/-M`
-    /// suffix (read live via `effective_line_summary`) needs a repaint even
-    /// without one. Stale group-expansion ids describe the old dense-run
-    /// shape (collapsed Edits participate), so they are dropped like the
-    /// `group_tool_verbs` flip does.
-    pub fn apply_collapsed_edit_blocks_flip(&mut self, old_flag: bool, new_flag: bool) {
-        let edit_cfg = &self.appearance.scrollback.blocks.edit;
-        let old_expanded = edit_cfg.effective_expanded(old_flag);
-        let new_expanded = edit_cfg.effective_expanded(new_flag);
-        let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
-        if old_expanded != new_expanded {
-            for entry in self.entries.values_mut() {
-                let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
-                    continue;
-                };
-                if respect_manual_folds && entry.display_mode_pinned {
-                    continue;
-                }
-                if entry.display_mode == edit_default_display_mode(old_expanded, edit) {
-                    entry.display_mode = edit_default_display_mode(new_expanded, edit);
-                }
-            }
-        }
-        self.clear_group_expansion();
-        self.invalidate_heights();
     }
 
     /// Get the index of an entry by its ID. O(1) average via IndexMap.
@@ -1901,9 +1855,8 @@ impl ScrollbackState {
 
 /// Display mode a freshly materialized Edit block adopts (fresh `push`, or a
 /// kind upgrade in `replace_tool_block`): failed edits collapse; summaries
-/// the one-liner can't truthfully compress expand; otherwise the effective
-/// expanded default decides (`EditBlockConfig::effective_expanded`: explicit
-/// pager.toml shape > the shell's `collapsed_edit_blocks` flag).
+/// the one-liner can't truthfully compress expand; otherwise the resolved
+/// appearance default decides.
 fn edit_default_display_mode(expanded_by_default: bool, edit: &EditToolCallBlock) -> DisplayMode {
     if edit.is_success() && (edit.summary_untrusted || expanded_by_default) {
         DisplayMode::Expanded
@@ -2111,7 +2064,7 @@ mod tests {
     fn edit_state(expanded_by_default: bool) -> ScrollbackState {
         let mut state = ScrollbackState::new();
         let mut appearance = AppearanceConfig::default();
-        appearance.scrollback.blocks.edit.expanded_by_default = Some(expanded_by_default);
+        appearance.scrollback.blocks.edit.expanded_by_default = expanded_by_default;
         state.set_appearance(appearance);
         state
     }
@@ -2274,103 +2227,30 @@ mod tests {
         );
     }
 
-    /// With the pager.toml shape keys unset (the shipped default), the
-    /// shell-owned `collapsed_edit_blocks` flag decides materialization:
-    /// on = collapsed one-liner, off = legacy expanded diff. Untrusted
-    /// summaries still escape the collapse. Spawned thread: the cache is a
-    /// sticky thread-local seeded explicitly here.
+    /// The canonical materialization is collapsed; untrusted summaries still
+    /// expand because their one-line summary cannot be trusted. An explicit
+    /// appearance override can make successful edits start expanded.
     #[test]
-    fn push_defaults_follow_collapsed_edit_blocks_flag_when_shape_unset() {
-        std::thread::spawn(|| {
-            let ok = || EditToolCallBlock::new("f.rs", vec![]);
+    fn push_uses_canonical_edit_default_and_explicit_override() {
+        let ok = || EditToolCallBlock::new("f.rs", vec![]);
+        let mut state = ScrollbackState::new();
+        let id = state.push_block(edit_block(ok()));
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Collapsed
+        );
+        let id = state.push_block(edit_block(ok().with_untrusted_summary()));
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
 
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
-            let mut state = ScrollbackState::new();
-            let id = state.push_block(edit_block(ok()));
-            assert_eq!(
-                state.get_by_id(id).unwrap().display_mode,
-                DisplayMode::Collapsed,
-                "flag on collapses fresh Edits"
-            );
-            let id = state.push_block(edit_block(ok().with_untrusted_summary()));
-            assert_eq!(
-                state.get_by_id(id).unwrap().display_mode,
-                DisplayMode::Expanded,
-                "untrusted summaries expand even with the flag on"
-            );
-
-            crate::appearance::cache::set_collapsed_edit_blocks(false);
-            let mut state = ScrollbackState::new();
-            let id = state.push_block(edit_block(ok()));
-            assert_eq!(
-                state.get_by_id(id).unwrap().display_mode,
-                DisplayMode::Expanded,
-                "flag off keeps the legacy expanded-diff default"
-            );
-
-            // An explicit pager.toml shape beats the flag in both directions.
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
-            let mut state = edit_state(true);
-            let id = state.push_block(edit_block(ok()));
-            assert_eq!(
-                state.get_by_id(id).unwrap().display_mode,
-                DisplayMode::Expanded,
-                "explicit expanded_by_default = true must beat the flag"
-            );
-        })
-        .join()
-        .unwrap();
-    }
-
-    /// A live flag flip re-materializes only entries still on their old
-    /// policy default; a user gesture away from that default survives, and
-    /// an explicit pager.toml shape makes the walk a no-op.
-    #[test]
-    fn collapsed_edit_blocks_flip_rematerializes_only_default_entries() {
-        std::thread::spawn(|| {
-            crate::appearance::cache::set_collapsed_edit_blocks(false);
-            let mut state = ScrollbackState::new();
-            let plain = state.push_block(edit_block(EditToolCallBlock::new("a.rs", vec![])));
-            let failed = state.push_block(edit_block(
-                EditToolCallBlock::new("b.rs", vec![]).with_error("boom"),
-            ));
-            assert_eq!(
-                state.get_by_id(plain).unwrap().display_mode,
-                DisplayMode::Expanded
-            );
-            // User opens the failed edit — a gesture away from its
-            // flag-independent Collapsed default.
-            state
-                .get_by_id_mut(failed)
-                .unwrap()
-                .set_display_mode(DisplayMode::Expanded);
-
-            crate::appearance::cache::set_collapsed_edit_blocks(true);
-            state.apply_collapsed_edit_blocks_flip(false, true);
-            assert_eq!(
-                state.get_by_id(plain).unwrap().display_mode,
-                DisplayMode::Collapsed,
-                "entry on the old default must follow the flip"
-            );
-            assert_eq!(
-                state.get_by_id(failed).unwrap().display_mode,
-                DisplayMode::Expanded,
-                "user gesture must survive the flip"
-            );
-
-            // Explicit shape override: both effective defaults are equal, so
-            // the flip leaves the entry alone.
-            let mut state = edit_state(true);
-            let id = state.push_block(edit_block(EditToolCallBlock::new("c.rs", vec![])));
-            state.apply_collapsed_edit_blocks_flip(true, false);
-            assert_eq!(
-                state.get_by_id(id).unwrap().display_mode,
-                DisplayMode::Expanded,
-                "explicit expanded_by_default pins the default across flips"
-            );
-        })
-        .join()
-        .unwrap();
+        let mut state = edit_state(true);
+        let id = state.push_block(edit_block(ok()));
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
     }
 
     #[test]
@@ -2489,7 +2369,7 @@ mod tests {
         // a previous batch's standalone fallback, …).
         state.push_block(RenderBlock::session_event(
             SessionEvent::CompactionCompleted {
-                tokens_before: Some(100),
+                tokens_before: 100,
                 tokens_after: 10,
                 elapsed_ms: Some(5),
             },

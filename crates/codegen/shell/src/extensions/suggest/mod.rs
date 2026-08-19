@@ -15,23 +15,19 @@ pub(crate) use history_provider::HistoryProvider;
 pub(crate) use path_provider::PathProvider;
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SuggestRequest {
     text: String,
     cursor: usize,
     cwd: String,
     limit: usize,
     generation: u64,
-    #[serde(default)]
     include_ai: bool,
-    #[serde(default)]
     ai_model: Option<String>,
-    #[serde(default)]
     session_id: Option<String>,
     /// Deterministic Tab mode: run only the token providers (path/file).
     /// A history/AI row would make the set mixed — killing the pager's
     /// insta-accept/LCP semantics — and reparse history per keystroke.
-    #[serde(default)]
     token_only: bool,
 }
 
@@ -46,37 +42,26 @@ struct SuggestResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GhostSuggestion {
-    full_text: String,
     suffix: String,
     source: String,
 }
 
-/// One completion row. Wire-compat contract (leader mode and the cloud
-/// bridge mix shell/pager versions):
-/// - `insert_text` is ALWAYS a safe whole-line replacement — range-unaware
-///   pagers `set_text` it, so it must never be a bare token.
-/// - `replace_range` + `token_text` are the additive token-in-place upgrade:
-///   byte offsets `[start, end)` into the request `text` and the text that
-///   replaces that span. Range-aware pagers use them as an ATOMIC pair —
-///   a range without `token_text` (history/AI whole-line rows, where
-///   `insert_text` doubles as the span replacement) degrades to the
-///   equivalent whole-line accept.
+/// One atomic completion edit. `replace_range` is a byte span in the exact
+/// request text and `replacement` is the only text written on acceptance.
+/// Whole-line history/AI rows use `0..text.len()`; path/file rows target the
+/// current shell token. There is no range-less or dual-text wire shape.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompletionItem {
     display: String,
     description: String,
-    insert_text: String,
+    replacement: String,
     source: String,
     priority: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    replace_range: Option<(usize, usize)>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    token_text: Option<String>,
+    replace_range: (usize, usize),
     /// The provider capped its scan/result set: the row set may be
     /// incomplete, so range-aware pagers keep dropdown-only semantics
     /// (absent = `false` for older shells).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
 }
 
@@ -104,16 +89,14 @@ impl SuggestContext {
 pub(crate) struct RankedSuggestion {
     pub(crate) display: String,
     pub(crate) description: String,
-    /// Whole-line replacement (see the [`CompletionItem`] compat contract).
-    pub(crate) insert_text: String,
+    /// The only text written into `replace_range`.
+    pub(crate) replacement: String,
     pub(crate) source: SuggestionSource,
     pub(crate) priority: i32,
     pub(crate) is_ghost_candidate: bool,
     /// Request-text byte range the completion targets (token for path/file,
-    /// whole line for history/AI); `None` keeps whole-line-only semantics.
-    pub(crate) replace_range: Option<(usize, usize)>,
-    /// Replacement for `replace_range` when it differs from `insert_text`.
-    pub(crate) token_text: Option<String>,
+    /// whole line for history/AI).
+    pub(crate) replace_range: (usize, usize),
     /// Provider capped its scan/results — a hidden row could disprove a
     /// sole match or an LCP.
     pub(crate) truncated: bool,
@@ -143,34 +126,21 @@ impl From<RankedSuggestion> for CompletionItem {
         Self {
             display: s.display,
             description: s.description,
-            insert_text: s.insert_text,
+            replacement: s.replacement,
             source: s.source.as_str().to_owned(),
             priority: s.priority,
             replace_range: s.replace_range,
-            token_text: s.token_text,
             truncated: s.truncated,
         }
     }
 }
 
-/// Mark whole-line suggestions (history/AI carry the full command as
-/// `insert_text`) as replacing the entire request text.
+/// Mark whole-line suggestions (history/AI carry the full command as their
+/// replacement) as replacing the entire request text.
 fn stamp_whole_line_range(results: &mut [RankedSuggestion], text_len: usize) {
     results
         .iter_mut()
-        .for_each(|s| s.replace_range = Some((0, text_len)));
-}
-
-/// Convert token-valued suggestions (path/file build `insert_text` as the
-/// token replacing `range`) into the wire pair: the token moves to
-/// `token_text` and `insert_text` becomes the full line with the token
-/// spliced in — the shape range-unaware pagers can safely `set_text`.
-fn splice_token_into_line(results: &mut [RankedSuggestion], text: &str, range: (usize, usize)) {
-    for s in results {
-        let token = std::mem::take(&mut s.insert_text);
-        s.insert_text = format!("{}{}{}", &text[..range.0], token, &text[range.1..]);
-        s.token_text = Some(token);
-    }
+        .for_each(|s| s.replace_range = (0, text_len));
 }
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
@@ -350,9 +320,8 @@ fn aggregate(
     all.sort_by(|a, b| b.priority.cmp(&a.priority));
 
     let ghost = all.iter().find(|s| s.is_ghost_candidate).map(|s| {
-        let suffix = s.insert_text.strip_prefix(prefix).unwrap_or(&s.insert_text);
+        let suffix = s.replacement.strip_prefix(prefix).unwrap_or(&s.replacement);
         GhostSuggestion {
-            full_text: s.insert_text.clone(),
             suffix: suffix.to_owned(),
             source: s.source.as_str().to_owned(),
         }
@@ -391,12 +360,11 @@ mod tests {
         RankedSuggestion {
             display: text.into(),
             description: String::new(),
-            insert_text: text.into(),
+            replacement: text.into(),
             source,
             priority,
             is_ghost_candidate: ghost,
-            replace_range: None,
-            token_text: None,
+            replace_range: (0, 0),
             truncated: false,
         }
     }
@@ -422,7 +390,6 @@ mod tests {
         let path = vec![ranked(0, SuggestionSource::Path, false, "git")];
         let (ghost, _) = aggregate(history, path, vec![], vec![], "git", 10);
         let ghost = ghost.unwrap();
-        assert_eq!(ghost.full_text, "git commit");
         assert_eq!(ghost.suffix, " commit");
         assert_eq!(ghost.source, "history");
     }
@@ -558,19 +525,19 @@ mod tests {
     }
 
     #[test]
-    fn completion_item_serializes_replace_range_and_token_as_camel_case() {
-        let mut s = ranked(10, SuggestionSource::Path, false, "ls | grep");
-        s.replace_range = Some((5, 7));
-        s.token_text = Some("grep".into());
+    fn completion_item_serializes_one_atomic_edit() {
+        let mut s = ranked(10, SuggestionSource::Path, false, "grep");
+        s.replace_range = (5, 7);
         let json = serde_json::to_value(CompletionItem::from(s)).unwrap();
         assert_eq!(json["replaceRange"], serde_json::json!([5, 7]));
-        assert_eq!(json["tokenText"], "grep");
-        // Whole-line compat field for range-unaware pagers.
-        assert_eq!(json["insertText"], "ls | grep");
+        assert_eq!(json["replacement"], "grep");
+        assert_eq!(json["truncated"], false);
+        assert!(json.get("insertText").is_none());
+        assert!(json.get("tokenText").is_none());
     }
 
     #[test]
-    fn completion_item_omits_absent_replace_range_and_token() {
+    fn completion_item_always_carries_range_and_truncation_state() {
         let json = serde_json::to_value(CompletionItem::from(ranked(
             0,
             SuggestionSource::Path,
@@ -578,10 +545,8 @@ mod tests {
             "grep",
         )))
         .unwrap();
-        assert!(json.get("replaceRange").is_none());
-        assert!(json.get("tokenText").is_none());
-        // Additive: `truncated` only serializes when set.
-        assert!(json.get("truncated").is_none());
+        assert_eq!(json["replaceRange"], serde_json::json!([0, 0]));
+        assert_eq!(json["truncated"], false);
     }
 
     #[test]
@@ -599,19 +564,7 @@ mod tests {
             ranked(9, SuggestionSource::History, false, "git checkout"),
         ];
         stamp_whole_line_range(&mut results, 5);
-        assert!(results.iter().all(|s| s.replace_range == Some((0, 5))));
-        // Whole-line items double as their own span replacement.
-        assert!(results.iter().all(|s| s.token_text.is_none()));
-    }
-
-    /// Token-valued suggestions become the wire pair: token in `token_text`,
-    /// `insert_text` rebuilt as the full line (safe for old pagers).
-    #[test]
-    fn splice_token_into_line_builds_compat_pair() {
-        let mut results = vec![ranked(0, SuggestionSource::Path, false, "grep")];
-        splice_token_into_line(&mut results, "ls | gr | wc -l", (5, 7));
-        assert_eq!(results[0].insert_text, "ls | grep | wc -l");
-        assert_eq!(results[0].token_text.as_deref(), Some("grep"));
+        assert!(results.iter().all(|s| s.replace_range == (0, 5)));
     }
 
     /// Equal-priority items must keep their provider-internal order: the

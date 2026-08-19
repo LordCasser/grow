@@ -73,7 +73,7 @@ fn run_jj(cwd: &Path, args: &[&str]) -> Option<String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null());
-    tools::util::detach_std_command(&mut cmd);
+    tty_utils::detach_std_command(&mut cmd);
     let output = cmd.output().ok()?;
 
     if !output.status.success() {

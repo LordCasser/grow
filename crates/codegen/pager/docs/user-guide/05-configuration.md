@@ -8,7 +8,7 @@ Grow reads settings from config files, environment variables, and CLI flags. Thi
 
 Settings resolve highest-priority first:
 
-1. **CLI flags** (e.g. `--yolo`, `--model`, `--sandbox`)
+1. **CLI flags** (e.g. `--permission-mode always-approve`, `--model`, `--sandbox`)
 2. **Environment variables** (e.g. `GROW_API_KEY`, `GROW_MEMORY`)
 3. **config.toml** (`~/.grow/config.toml`)
 4. **Managed / requirements config** (files your org may deploy, e.g. `managed_config.toml` / `requirements.toml`)
@@ -51,10 +51,6 @@ remember_tool_approvals = false        # show per-command "Always allow" options
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # — and finished thoughts among them — into one row (default: true)
-collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
-                                       # back-to-back same-file edits into one row, expand for the
-                                       # diffs (default: false; pager.toml [scrollback.blocks.edit]
-                                       # expanded_by_default/line_summary override its fold shape)
 page_flip_on_send = true               # pin a just-sent prompt at the top of the viewport so the
                                        # response starts on a fresh page (default: true); set false
                                        # so sending never moves the scroll position
@@ -64,7 +60,6 @@ screen_mode = "fullscreen"             # default render mode: "fullscreen" | "mi
 [features]
 lsp_tools = false                      # expose the lsp tool
 codebase_indexing = true               # code graph indexing (default: true)
-two_pass_compaction = false            # prefire two-pass compaction (default: false, opt-in)
 remote_fetch = false                   # disable optional catalog/settings fetches; explicit BYOK
                                        # provider requests are unaffected
 
@@ -163,7 +158,7 @@ Toggle it at runtime with `/vim-mode`, or from `/settings` → **Vim scrollback 
 
 | Value | Behavior |
 |-------|----------|
-| unset | Settings shows **Fullscreen**. There's no sticky preference at startup: legacy `pager.toml` `[terminal] minimal` can still force minimal, and terminals that leak mouse reports (JediTerm/Windows) may auto-open minimal until you set an explicit value. Otherwise the alt-screen policy picks fullscreen vs inline. |
+| unset | Settings shows **Fullscreen**. There's no sticky preference at startup: terminals that leak mouse reports (JediTerm/Windows) may auto-open minimal until you set an explicit value. Otherwise the alt-screen policy picks fullscreen vs inline. |
 | `"fullscreen"` | Sticky non-minimal. Fullscreen-vs-inline still follows the alt-screen policy (`--no-alt-screen`, `[terminal] alt_screen`, terminal auto-detection). |
 | `"minimal"` | Sticky minimal (scrollback-native) mode. |
 
@@ -381,32 +376,6 @@ paths = ["~/my-team-skills"]          # additional directories to scan
 ignore = ["~/my-team-skills/wip"]     # paths to exclude
 disabled = ["wip-skill"]              # skill names to keep listed but inactive
 ```
-
-### Project compatibility
-
-Control optional discovery of Cursor and Claude project configuration. Every cell defaults to `true`. These settings only import project context; Grow never scans or resumes sessions from other agent products.
-
-```toml
-[compat.cursor]
-skills = true     # scan ~/.cursor/skills/ and <cwd>/.cursor/skills/
-rules = true      # scan ~/.cursor/rules/ and <dir>/.cursor/rules/
-agents = true     # scan ~/.cursor/ for named instruction files
-mcps = true       # scan ~/.cursor/mcp.json and <cwd>/.cursor/mcp.json
-hooks = true      # scan ~/.cursor/hooks.json and <cwd>/.cursor/hooks.json
-
-[compat.claude]
-skills = true     # scan ~/.claude/skills/ and <cwd>/.claude/skills/
-rules = true      # scan ~/.claude/rules/ and <dir>/.claude/rules/
-agents = true     # scan ~/.claude/ and <dir>/.claude/CLAUDE*.md
-mcps = true       # scan ~/.claude.json for MCP servers
-hooks = true      # scan ~/.claude/settings.json for hooks
-```
-
-For Claude and Cursor, `rules` and `agents` are independent: turning off named instruction files doesn't disable the home or project rules directory, and turning off rules doesn't disable named files. Claude's `agents` cell gates home-level `~/.claude/` named files and project `<dir>/.claude/CLAUDE*.md`; generic top-level `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` stay recognized. Project rule paths are scanned at every directory from the repo root down to the current one.
-
-Each cell can be set via environment variable or `config.toml`; see the environment-variables reference for the names. Resolution: env var > config.toml > default (on).
-
-`grow inspect` reports the resolved compatibility cells and the origin of discovered project context.
 
 ### Plugins
 
@@ -681,10 +650,9 @@ dim_accent = 0.5                      # dimming factor for collapsed accents (0.
 [scrollback.blocks.edit]
 indent = true                         # indent diff content
 vpad = false                          # vertical padding
-# expanded_by_default = true          # unset: follows [ui] collapsed_edit_blocks in config.toml
-                                      # (flag on = collapsed one-liner); uncomment to pin either shape
+# expanded_by_default = false         # start collapsed; set true to show diffs initially
 dual_line_numbers = false             # two-column line numbers (old + new)
-# line_summary = false                # show +N/-M in the collapsed header; unset follows the same flag
+# line_summary = true                 # show +N/-M in the collapsed header
 hunk_separator = "…"                  # separator between diff hunks (default: "…")
 
 [scrollback.blocks.prompt]
@@ -740,7 +708,7 @@ Common variables are listed below.
 |----------|-------------|
 | `GROW_MEMORY` | Enable (`1`) or disable (`0`) cross-session memory |
 | `GROW_SUBAGENTS` | Enable (`1`) or disable (`0`) subagents |
-| `GROW_WORKFLOWS` | Enable (`1`) or disable (`0`) background workflows and select the `/goal` driver (default on: host-owned workflow driver; off: legacy `update_goal`) |
+| `GROW_WORKFLOWS` | Enable (`1`) or disable (`0`) the Workflow and Deep Research runtimes; Goal keeps its single host-owned orchestration path |
 | `GROW_WEB_FETCH` | Enable (`1`) or disable (`0`) the web_fetch tool |
 | `GROW_WEB_FETCH_ALLOW_LOCAL` | Allow `web_fetch` to explicit loopback hosts only (`localhost` / `127.0.0.0/8` / `::1`). Same as `[toolset.web_fetch] allow_local`. Default off; private/metadata stay blocked. |
 | `GROW_AGENT` | Custom agent definition path or name |

@@ -14,7 +14,7 @@ independent from Agent selection — whether that host is
 ### From a definition file
 
 Agent definitions are **Markdown files with YAML frontmatter**. Project
-definitions live below `.grow/agents/` or `.claude/agents/`. User definitions
+definitions live below `.grow/agents/`. User definitions
 load from `~/.grow/agents/`.
 
 ```rust
@@ -97,8 +97,9 @@ actionable feedback organized by severity.
 ```
 
 With `promptComposition: extend` (the default), the body is appended after
-the mandatory foundation, audience, and standard guidance. Runtime context is
-added last. The author only writes role-specific content.
+the mandatory foundation, audience, and standard guidance. Active Behavior and
+the memory session extension are added after the role. The author only writes
+role-specific content.
 
 ### Full prompt override
 
@@ -121,18 +122,11 @@ Use ${{ tools.search_replace }} to edit files.
 ${%- if tools.run_terminal_cmd %}
 Use ${{ tools.run_terminal_cmd }} for shell commands.
 ${%- endif %}
-
-<user_info>
-OS: ${{ os_name }}
-Shell: ${{ shell_path }}
-Working Directory: ${{ working_directory }}
-Date: ${{ current_date }}
-</user_info>
 ```
 
 With `promptComposition: full`, the body replaces the optional standard/role
 guidance and is rendered through MiniJinja. Mandatory foundation, audience,
-and runtime context remain in force.
+active Behavior, and the memory session extension remain in force.
 
 ### With a completion requirement
 
@@ -163,7 +157,7 @@ authoritative, copy-ready schema example. It exercises every supported field
 in a parser regression test, including prompt assembly, exact tool
 configuration, Skill and AGENTS.md discovery, subagent defaults, MCP
 inheritance and owned servers, hooks, memory, completion requirements, and the
-first-user-message template.
+prompt-composition boundary.
 
 Top-level frontmatter keys use **camelCase**. The records nested below
 `additionalTools` use the `tools` wire names in **snake_case**. The
@@ -195,9 +189,17 @@ promptComposition: extend              promptComposition: full
 1. Mandatory Core                      1. Mandatory Core
 2. Audience                            2. Audience
 3. Standard guidance                   3. Markdown role body
-4. Markdown role body                  4. Runtime Context
-5. Runtime Context
+4. Markdown role body                  4. Active Behavior
+5. Active Behavior                     5. Session Extensions
+6. Session Extensions
 ```
+
+The system prompt does not carry mutable runtime facts. The shell appends one
+typed runtime snapshot as a durable user-role Timeline message at session
+start. Its visible workspace, OS, shell, local date, and optional VCS status
+have one canonical renderer and cannot be replaced by Agent frontmatter.
+Skills, AGENTS.md instructions, and MCP catalogs are separate Timeline-backed
+messages with their own owners.
 
 ### Template Variables (full mode)
 
@@ -212,10 +214,6 @@ promptComposition: extend              promptComposition: full
 | `${{ tools.skill }}` | Resolved name for `skill` |
 | `${{ tools.get_task_output }}` | Resolved name for `get_task_output` |
 | `${{ tools.kill_task }}` | Resolved name for `kill_task` |
-| `${{ os_name }}` | Operating system (e.g. `"macos"`, `"linux"`) |
-| `${{ shell_path }}` | Shell path (e.g. `"/bin/zsh"`) |
-| `${{ working_directory }}` | Workspace path |
-| `${{ current_date }}` | Current date in the user's local timezone (`YYYY-MM-DD`) |
 
 Conditionals: `${%- if tools.todo_write %}...${%- endif %}` — block
 is omitted when the tool is disabled.
@@ -224,8 +222,7 @@ is omitted when the tool is disabled.
 
 Agent definitions are discovered from multiple locations with priority:
 
-1. **Project-level** (highest priority): `.grow/agents/**/*.md`, then
-   `.claude/agents/**/*.md` — walk
+1. **Project-level** (highest priority): `.grow/agents/**/*.md`, walking
    from `cwd` up to the git repository root. Files found closer to
    `cwd` take priority.
 2. **User-level**: `~/.grow/agents/**/*.md`

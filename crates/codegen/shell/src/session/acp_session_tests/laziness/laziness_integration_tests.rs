@@ -18,7 +18,7 @@ use super::*;
 use crate::agent::config::{LazinessDetectorPerModelConfig, ModelInfo};
 
 /// Build a minimal `ModelEntry` configured for laziness detection
-/// with the supplied opt-in flags. Uses `ModelInfo::fallback`
+/// with the supplied opt-in flags. Uses `ModelInfo::baseline`
 /// (the same path the production code falls back to for unknown
 /// model ids) so the test entry mirrors a realistic catalog row.
 fn detector_entry(
@@ -26,7 +26,7 @@ fn detector_entry(
     max_nudges: u32,
     idle_threshold_ms: Option<u64>,
 ) -> crate::agent::config::ModelEntry {
-    let mut info = ModelInfo::fallback("test-laziness-model");
+    let mut info = ModelInfo::baseline("test-laziness-model");
     info.laziness_detector = LazinessDetectorPerModelConfig {
         enabled,
         max_nudges_per_session: max_nudges,
@@ -79,11 +79,11 @@ async fn events_log(actor: &SessionActor) -> String {
     snapshot
         .rows
         .into_iter()
-        .filter(|row| row.category == "observation")
+        .filter(|row| row.class == "audit")
         .filter_map(|row| {
             let event = row.details.get("event")?;
             let mut data = event.get("data")?.as_object()?.clone();
-            data.insert("type".into(), serde_json::Value::String(row.name));
+            data.insert("type".into(), event.get("name")?.clone());
             serde_json::to_string(&data).ok()
         })
         .collect::<Vec<_>>()
@@ -345,7 +345,6 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                         task_wake_fallback: None,
                         respond_to,
                         persist_ack: None,
-                        parsed_prompt_tx: None,
                         queue_meta: None,
                     });
             });

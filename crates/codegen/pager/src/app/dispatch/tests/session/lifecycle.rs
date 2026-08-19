@@ -12,7 +12,7 @@ fn chip_submit_without_session_keeps_chips_and_does_not_send() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.session_id = None;
-        agent.apply_follow_ups("resp-1".into(), vec!["Summarize".into()]);
+        agent.apply_follow_ups("resp-1".into(), "p1", vec!["Summarize".into()]);
         assert!(agent.follow_ups.is_some(), "precondition: chips shown");
     }
     let effects = dispatch(Action::SubmitFollowUp("Summarize".into()), &mut app);
@@ -48,7 +48,6 @@ fn session_created_sets_session_id() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -88,7 +87,6 @@ fn session_created_omits_cta_catalog_when_disabled() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -133,7 +131,6 @@ fn session_created_banner_advertises_resume_in_minimal_mode() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -215,7 +212,6 @@ fn worktree_session_created_sets_session_and_cwd() {
             worktree_path: worktree_path.clone(),
             session_cwd: session_cwd.clone(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -269,7 +265,6 @@ fn worktree_session_preserves_subdirectory_offset() {
             worktree_path: worktree_root.clone(),
             session_cwd: session_cwd.clone(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -398,7 +393,6 @@ fn worktree_session_created_drains_queued_prompts() {
             worktree_path,
             session_cwd: PathBuf::from("/tmp/grow-worktrees/pager-abc"),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -432,7 +426,6 @@ fn session_created_drains_queued_prompts() {
             agent_id: id,
             session_id: acp::SessionId::new("sess-drain-1"),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -469,7 +462,6 @@ fn session_created_with_flag_emits_five_fetches_and_clears_flag() {
             agent_id: id,
             session_id: acp::SessionId::new("s"),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -492,7 +484,6 @@ fn session_created_without_flag_emits_no_extension_fetches() {
             agent_id: id,
             session_id: acp::SessionId::new("s"),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -820,7 +811,6 @@ fn deferred_model_switch_applied_on_session_created() {
             agent_id: id,
             session_id: session_id.clone(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -861,7 +851,6 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
             worktree_path: PathBuf::from("/tmp/worktree"),
             session_cwd: PathBuf::from("/tmp/worktree"),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1487,9 +1476,9 @@ fn bg_task_killed_no_op_for_unknown_session() {
     assert!(app.agents[&AgentId(1)].session.bg_tasks["task-B-1"].pending_kill);
 }
 /// Mutual exclusion: enabling always-approve via the dispatch seam clears
-/// the per-session `auto_mode` display flag (yolo wins).
+/// the per-session `auto_mode` display flag (always-approve wins).
 #[test]
-fn set_yolo_on_clears_session_auto_mode() {
+fn set_always_approve_on_clears_session_auto_mode() {
     use crate::app::actions::PermissionModeKind;
     let mut app = test_app_with_agent();
     dispatch(
@@ -1504,10 +1493,10 @@ fn set_yolo_on_clears_session_auto_mode() {
         Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
         &mut app,
     );
-    assert!(app.agents[&AgentId(0)].session.is_yolo());
+    assert!(app.agents[&AgentId(0)].session.is_always_approve());
     assert!(
         !app.agents[&AgentId(0)].session.is_auto(),
-        "enabling always-approve must clear the per-session auto flag (yolo wins)"
+        "enabling always-approve must clear the per-session auto flag (always-approve wins)"
     );
 }
 /// Selecting a Behavior from the welcome placeholder starts a session and

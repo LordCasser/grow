@@ -10,10 +10,9 @@ description = "Shared test utilities: hermetic git, optional runfiles helpers"
 # plain `cargo` the feature is off and crate_root! falls back to
 # CARGO_MANIFEST_DIR.
 default-bazel = ["bazel"]
-bazel = ["dep:runfiles"]
+bazel = []
 
 [dependencies]
-runfiles = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

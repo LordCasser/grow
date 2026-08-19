@@ -93,18 +93,17 @@ fn prompt_request_meta_omits_screen_mode_when_unset() {
     let meta = prompt_request_meta("p-2", None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
-/// Text-only steering must omit the optional `content` key.
 #[test]
-fn interject_params_omit_content_when_no_blocks() {
+fn text_only_interject_uses_the_canonical_content_channel() {
     let sid = acp::SessionId::new("s1");
     let params = build_interject_params(&sid, "turn-1", "steer", "i1", None);
     let obj = params.as_object().unwrap();
-    assert!(!obj.contains_key("content"), "content key must be absent");
+    assert!(!obj.contains_key("text"), "parallel text channel must be absent");
     assert_eq!(obj["sessionId"], "s1");
     assert_eq!(obj["expectedTurnId"], "turn-1");
-    assert_eq!(obj["text"], "steer");
     assert_eq!(obj["interjectionId"], "i1");
     assert_eq!(obj.len(), 4);
+    assert_eq!(obj["content"][0]["text"], "steer");
 }
 #[test]
 fn picker_drops_local_with_missing_updated_at() {
@@ -112,8 +111,7 @@ fn picker_drops_local_with_missing_updated_at() {
             "sessions": [{
                 "sessionId": "local_no_ts",
                 "cwd": "/Users/me/grow",
-                "summary": "no timestamp",
-                "source": "local"
+                "title": "no timestamp"
             }]
         });
     let entries = parse_session_picker_entries(&payload);
@@ -122,21 +120,18 @@ fn picker_drops_local_with_missing_updated_at() {
             "local rows still require a parseable updatedAt"
         );
 }
-/// Untitled service.example.com chats must stay listed, rendered as "Untitled".
-/// Canary: the empty-summary drop still applies to Build rows.
+/// Current Build rows must carry the canonical title field.
 #[test]
-fn picker_still_drops_build_row_with_empty_summary() {
+fn picker_rejects_build_row_without_canonical_title() {
     let payload = serde_json::json!({
             "sessions": [{
                 "sessionId": "local_empty",
                 "cwd": "/nonexistent/effects-test",
-                "summary": "",
-                "source": "local",
                 "updatedAt": "2026-07-01T00:00:00Z"
             }]
         });
     let entries = parse_session_picker_entries(&payload);
-    assert!(entries.is_empty(), "empty-summary Build rows stay dropped");
+    assert!(entries.is_empty(), "title-less Build rows stay dropped");
 }
 /// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome
 /// lives at `result.outcome`. Probing the top level (the pre-fix code)
@@ -190,53 +185,38 @@ fn parse_kill_outcome_none_for_error_or_malformed() {
 fn parse_subagent_kill_outcome_reads_typed_outcome() {
     assert!(matches!(
             parse_subagent_kill_outcome(
-                r#"{"result":{"subagentId":"sa-1","cancelled":true,"outcome":{"kind":"cancelled"}}}"#
+                r#"{"result":{"subagentId":"sa-1","outcome":{"kind":"cancelled"}}}"#
             ),
             SubagentKillOutcome::StoppedLive
         ));
     assert!(matches!(
             parse_subagent_kill_outcome(
-                r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"already_finished","status":"completed"}}}"#
+                r#"{"result":{"subagentId":"sa-1","outcome":{"kind":"already_finished","status":"completed"}}}"#
             ),
             SubagentKillOutcome::NothingLive { status: Some(s) } if s == "completed"
         ));
     assert!(matches!(
             parse_subagent_kill_outcome(
-                r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"not_found"}}}"#
+                r#"{"result":{"subagentId":"sa-1","outcome":{"kind":"not_found"}}}"#
             ),
             SubagentKillOutcome::NothingLive { status: None }
         ));
 }
-/// An older shell sends no `outcome`; the parser falls back to the legacy
-/// `cancelled` bool (true → `StoppedLive`, false → `NothingLive`).
 #[test]
-fn parse_subagent_kill_outcome_falls_back_to_legacy_bool() {
+fn parse_subagent_kill_outcome_rejects_missing_outcome() {
     assert!(matches!(
-            parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":true}}"#),
-            SubagentKillOutcome::StoppedLive
-        ));
-    assert!(matches!(
-            parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":false}}"#),
-            SubagentKillOutcome::NothingLive { status: None }
-        ));
+        parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1"}}"#),
+        SubagentKillOutcome::RpcFailed
+    ));
 }
-/// An unknown future `kind` deserializes to `Unknown` (via `#[serde(other)]`)
-/// and falls back to the always-present `cancelled` bool — not `RpcFailed`,
-/// which would leave the row stuck.
 #[test]
-fn parse_subagent_kill_outcome_unknown_kind_falls_back_to_legacy_bool() {
+fn parse_subagent_kill_outcome_rejects_unknown_kind() {
     assert!(matches!(
-            parse_subagent_kill_outcome(
-                r#"{"result":{"subagentId":"sa-1","cancelled":true,"outcome":{"kind":"some_future_kind"}}}"#
-            ),
-            SubagentKillOutcome::StoppedLive
-        ));
-    assert!(matches!(
-            parse_subagent_kill_outcome(
-                r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"some_future_kind"}}}"#
-            ),
-            SubagentKillOutcome::NothingLive { status: None }
-        ));
+        parse_subagent_kill_outcome(
+            r#"{"result":{"subagentId":"sa-1","outcome":{"kind":"some_future_kind"}}}"#
+        ),
+        SubagentKillOutcome::RpcFailed
+    ));
 }
 /// Round-trip through the agent's own serializer guards the two sides
 /// against drifting apart.
@@ -248,10 +228,9 @@ fn parse_subagent_kill_outcome_round_trips_agent_serialization() {
     let wire = serde_json::to_string(
             &ExtMethodResult::success(CancelSubagentResponse {
                 subagent_id: "sa-1".into(),
-                cancelled: false,
-                outcome: Some(SubagentCancelOutcomeDto::AlreadyFinished {
+                outcome: SubagentCancelOutcomeDto::AlreadyFinished {
                     status: "failed".into(),
-                }),
+                },
             }),
         )
         .unwrap();
@@ -493,7 +472,7 @@ async fn persist_setting_type_mismatch_errors_simple_mode() {
 }
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// Spawn a fake ACP agent that counts `grow/yolo_mode_changed`
+/// Spawn a fake ACP agent that counts `grow/permission_mode_changed`
 /// notifications. Exits when the channel closes.
 fn spawn_fake_acp_agent(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpAgentMessage>,
@@ -503,7 +482,7 @@ fn spawn_fake_acp_agent(
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let acp_transport::AcpAgentMessage::ExtNotification(args) = msg {
-                if args.request.method.as_ref() == "grow/yolo_mode_changed" {
+                if args.request.method.as_ref() == "grow/permission_mode_changed" {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 }
                 let _ = args.response_tx.send(Ok(()));
@@ -617,7 +596,7 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
     assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
-            "ACP `grow/yolo_mode_changed` notification must fire exactly once \
+            "ACP `grow/permission_mode_changed` notification must fire exactly once \
              on BestEffort path (regardless of disk outcome)",
         );
     assert!(
@@ -726,57 +705,46 @@ async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant()
 }
 /// (Err, WithRollback) → SUPPRESS for all canonicals.
 #[test]
-fn should_send_yolo_acp_with_rollback_suppresses_on_err() {
+fn should_send_always_approve_acp_with_rollback_suppresses_on_err() {
     let result: Result<(), String> = Err("simulated disk failure".to_string());
     assert!(
-            !should_send_yolo_acp_notification(&result, PermissionModePersist::WithRollback("ask")),
+            !should_send_permission_mode_notification(&result, PermissionModePersist::WithRollback("ask")),
             "WithRollback + Err MUST suppress the ACP notification",
         );
     assert!(
-            !should_send_yolo_acp_notification(
+            !should_send_permission_mode_notification(
                 &result,
                 PermissionModePersist::WithRollback("always-approve")
             ),
             "WithRollback + Err MUST suppress regardless of the prior canonical",
         );
-    assert!(
-            !should_send_yolo_acp_notification(
-                &result,
-                PermissionModePersist::WithRollback("default")
-            ),
-            "WithRollback + Err MUST suppress for the 'default' prior canonical too",
-        );
 }
 /// (Ok, WithRollback) → FIRE for all canonicals.
 #[test]
-fn should_send_yolo_acp_with_rollback_fires_on_ok() {
+fn should_send_always_approve_acp_with_rollback_fires_on_ok() {
     let ok: Result<(), String> = Ok(());
     assert!(
-            should_send_yolo_acp_notification(&ok, PermissionModePersist::WithRollback("ask")),
+            should_send_permission_mode_notification(&ok, PermissionModePersist::WithRollback("ask")),
             "WithRollback + Ok must fire the ACP notification (happy path)",
         );
     assert!(
-            should_send_yolo_acp_notification(
+            should_send_permission_mode_notification(
                 &ok,
                 PermissionModePersist::WithRollback("always-approve")
             ),
             "WithRollback + Ok fires regardless of the prior canonical",
         );
-    assert!(
-            should_send_yolo_acp_notification(&ok, PermissionModePersist::WithRollback("default")),
-            "WithRollback + Ok fires for 'default' prior canonical too",
-        );
 }
 #[test]
-fn should_send_yolo_acp_best_effort_fires_on_both_outcomes() {
+fn should_send_always_approve_acp_best_effort_fires_on_both_outcomes() {
     let ok: Result<(), String> = Ok(());
     let err: Result<(), String> = Err("simulated".to_string());
     assert!(
-            should_send_yolo_acp_notification(&ok, PermissionModePersist::BestEffort),
+            should_send_permission_mode_notification(&ok, PermissionModePersist::BestEffort),
             "BestEffort + Ok must notify",
         );
     assert!(
-            should_send_yolo_acp_notification(&err, PermissionModePersist::BestEffort),
+            should_send_permission_mode_notification(&err, PermissionModePersist::BestEffort),
             "BestEffort + Err must STILL notify (cycle_mode contract \
              — the cycle_mode state machine doesn't have a clean \
              single-field rollback)",
@@ -836,50 +804,6 @@ fn route_permission_mode_result_err_with_rollback_on_routes_to_failed() {
         other => {
             panic!("WithRollback + Err must return SettingPersistFailed, got {other:?}")
         }
-    }
-}
-/// Rollback preserves "default" canonical (not collapsed to "ask").
-#[test]
-fn route_permission_mode_result_err_with_rollback_default_routes_to_failed() {
-    let result = route_permission_mode_result(
-        Err("simulated".to_string()),
-        PermissionModePersist::WithRollback("default"),
-        "always-approve",
-    );
-    match result {
-        TaskResult::SettingPersistFailed { key, rollback_value, error } => {
-            assert_eq!(key, "permission_mode");
-            assert_eq!(
-                    rollback_value,
-                    crate::settings::SettingValue::Enum("default"),
-                    "PR 11: prev_canonical='default' must roll back to canonical 'default', \
-                     NOT collapse onto 'ask' through a bool projection",
-                );
-            assert_eq!(error, "simulated");
-        }
-        other => {
-            panic!("WithRollback + Err must return SettingPersistFailed, got {other:?}")
-        }
-    }
-}
-/// Ok path preserves "default" canonical verbatim.
-#[test]
-fn route_permission_mode_result_ok_preserves_default_canonical() {
-    let result = route_permission_mode_result(
-        Ok(()),
-        PermissionModePersist::WithRollback("ask"),
-        "default",
-    );
-    match result {
-        TaskResult::SettingPersisted { key, value } => {
-            assert_eq!(key, "permission_mode");
-            assert_eq!(
-                    value,
-                    crate::settings::SettingValue::Enum("default"),
-                    "PR 11: 'default' canonical must survive the route fn intact",
-                );
-        }
-        other => panic!("Ok must return SettingPersisted, got {other:?}"),
     }
 }
 /// `(Err, BestEffort)` must NOT return `SettingPersisted`.
@@ -1295,51 +1219,31 @@ fn to_meta_omits_ask_user_question_when_enabled() {
     }
 }
 #[test]
-fn to_meta_emits_auto_mode_when_enabled() {
+fn to_meta_emits_canonical_permission_mode() {
     let flags = SessionFlags {
-        auto_mode: true,
-        yolo_mode: false,
+        permission_mode: shell::util::config::PermissionMode::Auto,
         ..Default::default()
     };
-    let meta = flags.to_meta().expect("auto_mode must emit meta");
-    assert_eq!(meta["autoMode"], true);
-    assert_eq!(
-            meta["yoloMode"], false,
-            "yoloMode must be explicitly false, not omitted (absent key falls \
-             back to the shell's connect-time default / leader injection)"
-        );
+    let meta = flags.to_meta().expect("permission mode must emit meta");
+    assert_eq!(meta["permissionMode"], "auto");
 }
-/// yoloMode must ride the meta explicitly for BOTH polarities — absent
-/// key ≠ off (see the emit-site comment in `to_meta`). Pins the
-/// pre-session Always-Approve → Normal cycle not creating a yolo session.
 #[test]
-fn to_meta_always_emits_yolo_mode_explicitly() {
-    for yolo in [false, true] {
+fn to_meta_emits_every_permission_mode_explicitly() {
+    for (mode, expected) in [
+        (shell::util::config::PermissionMode::Ask, "ask"),
+        (shell::util::config::PermissionMode::Auto, "auto"),
+        (
+            shell::util::config::PermissionMode::AlwaysApprove,
+            "always-approve",
+        ),
+    ] {
         let flags = SessionFlags {
-            yolo_mode: yolo,
+            permission_mode: mode,
             ..Default::default()
         };
-        let meta = flags.to_meta().expect("permission seeds must always emit meta");
-        assert_eq!(
-                meta["yoloMode"],
-                serde_json::json!(yolo),
-                "yoloMode must be explicit (yolo={yolo}); meta={meta:?}"
-            );
+        let meta = flags.to_meta().expect("permission mode must always emit meta");
+        assert_eq!(meta["permissionMode"], expected);
     }
-}
-#[test]
-fn to_meta_yolo_suppresses_auto_mode() {
-    let flags = SessionFlags {
-        auto_mode: true,
-        yolo_mode: true,
-        ..Default::default()
-    };
-    let meta = flags.to_meta().expect("yolo must emit meta");
-    assert_eq!(meta["yoloMode"], true);
-    assert_eq!(
-            meta["autoMode"], false,
-            "yolo wins; autoMode must be explicitly false (not omitted)"
-        );
 }
 fn make_session_info(
     model: &str,
@@ -1359,7 +1263,6 @@ fn make_session_info(
             model_fingerprint: None,
             show_model_fingerprint: false,
             api_backend: None,
-            conversation_id: None,
             turns: 0,
             turn_index: 0,
             context: ContextInfo {
@@ -1376,14 +1279,6 @@ fn format_session_info_reports_provider_byok() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false);
     assert!(text.contains("Auth method: provider BYOK"), "{text}");
-}
-#[test]
-fn format_session_info_shows_conversation_id_when_present() {
-    let mut info = make_session_info("auto", None, 1000, 10000);
-    info.data.conversation_id = Some("conv_abc123".into());
-    let text = format_session_info(&info, None, false);
-    assert!(text.contains("Conversation ID: conv_abc123"));
-    assert!(text.contains("Session ID: test-session-id"));
 }
 #[test]
 fn format_session_info_shows_resolved_when_enabled_and_different() {

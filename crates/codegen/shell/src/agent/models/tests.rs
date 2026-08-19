@@ -169,6 +169,5 @@ fn reasoning_efforts_come_from_the_selected_catalog_entry() {
     let manager = ModelsManager::from_config(&two_model_config("local/alpha")).unwrap();
     let efforts = manager.model_reasoning_efforts("local/alpha");
     assert_eq!(efforts.len(), 2);
-    assert!(manager.model_supports_reasoning_effort("local/alpha"));
-    assert!(!manager.model_supports_reasoning_effort("local/beta"));
+    assert!(manager.model_reasoning_efforts("local/beta").is_empty());
 }

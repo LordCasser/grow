@@ -434,7 +434,6 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
         area,
         &meta,
         &SettingValue::Bool(false),
-        15, // max_label_w — kept for API compatibility, no longer used.
         false,
         &theme,
         false, // is_expanded
@@ -530,9 +529,6 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "respect_manual_folds",
             // SHELL-owned group_tool_verbs (Appearance; live cache).
             "group_tool_verbs",
-            // SHELL-owned collapsed_edit_blocks (Appearance; live cache,
-            // default OFF rollout flag).
-            "collapsed_edit_blocks",
             // SHELL-owned display_refresh_auto_cadence (Appearance).
             "display_refresh_auto_cadence",
             // Mouse — scroll + drag selection. The scroll
@@ -560,7 +556,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // SHELL-owned default_model (Models category).
             "default_model",
-            // Models category. `default_reasoning_effort` and `session_summary_model` are
+            // Models category. `default_reasoning_effort` and `session_title_model` are
             // not exposed in the modal.
             "fork_secondary_model",
             // `auto_compact_threshold_percent` (Session category) is
@@ -848,7 +844,6 @@ fn selected_browse_row_label_is_bold() {
         area,
         meta,
         &SettingValue::Bool(false),
-        40,
         true,
         &theme,
         false,
@@ -1305,7 +1300,6 @@ fn render_setting_row_emits_restart_pill_when_required() {
         area,
         &meta,
         &SettingValue::Bool(false),
-        10,    // max_label_w
         false, // is_selected
         &theme,
         true,  // is_expanded — gate on
@@ -1329,7 +1323,6 @@ fn render_setting_row_emits_restart_pill_when_required() {
         area,
         &meta,
         &SettingValue::Bool(true), // edited from default `false`
-        10,
         false,
         &theme,
         false, // is_expanded — off
@@ -1377,7 +1370,6 @@ fn render_setting_row_hides_restart_pill_when_at_default_and_collapsed() {
         area,
         &meta,
         &SettingValue::Bool(false),
-        10,
         false,
         &theme,
         false, // is_expanded
@@ -2193,27 +2185,6 @@ fn picking_enum_esc_dispatches_preview_revert_for_each_key() {
             "Esc must transition back to Browse for key `{key}`",
         );
     }
-}
-
-/// Backwards-compat alias for an earlier test name. Asserts
-/// the same behaviour for the `theme` key only — kept so a future
-/// reader grep'ing the older test name still finds working
-/// coverage. The parameterised version above is the canonical test.
-#[test]
-fn picking_enum_esc_returns_to_browse() {
-    let mut s = make_state();
-    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("grownight"), true);
-    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    match outcome {
-        SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
-            assert_eq!(
-                name, "grownight",
-                "Esc revert must dispatch the original canonical"
-            );
-        }
-        other => panic!("expected Action::PreviewTheme(\"grownight\") on Esc, got {other:?}"),
-    }
-    assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
 
 // -- picker machinery tests --
@@ -4614,7 +4585,6 @@ fn narrow_terminal_drops_value_to_second_line() {
         area,
         &meta,
         &SettingValue::Bool(false),
-        24, // max_label_w — ignored for layout.
         false,
         &theme,
         false,
@@ -4677,7 +4647,6 @@ fn wide_terminal_keeps_value_on_first_line() {
         area,
         &meta,
         &SettingValue::Bool(false),
-        24,
         false,
         &theme,
         false,
@@ -4718,7 +4687,6 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
         area,
         &meta,
         &SettingValue::Bool(false),
-        24,
         false,
         &theme,
         false,
@@ -5343,7 +5311,6 @@ fn bool_off_value_renders_in_dim_color() {
         area,
         &meta,
         &SettingValue::Bool(false),
-        15,
         false,
         &theme,
         false,
@@ -5375,7 +5342,6 @@ fn bool_off_value_renders_in_dim_color() {
         area,
         &meta,
         &SettingValue::Bool(true),
-        15,
         false,
         &theme,
         false,
@@ -5446,7 +5412,6 @@ fn chevron_column_is_at_constant_right_offset() {
         area,
         &bool_meta,
         &SettingValue::Bool(true),
-        10,
         false,
         &theme,
         false,
@@ -5460,7 +5425,6 @@ fn chevron_column_is_at_constant_right_offset() {
         area,
         &enum_meta,
         &SettingValue::Enum("choice_a"),
-        10,
         false,
         &theme,
         false,
@@ -5531,7 +5495,6 @@ fn chevron_column_is_at_constant_right_offset() {
         bool_area,
         &bool_meta,
         &SettingValue::Bool(false),
-        10,
         false,
         &theme,
         false,
@@ -5542,7 +5505,6 @@ fn chevron_column_is_at_constant_right_offset() {
         enum_area,
         &enum_meta,
         &SettingValue::Enum("choice_a"),
-        10,
         false,
         &theme,
         false,
@@ -5597,7 +5559,6 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         area_two,
         &synthetic_enum_chevron_meta(),
         &SettingValue::Enum("choice_a"),
-        10,
         false,
         &theme,
         false,
@@ -5615,7 +5576,6 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         area_one,
         &synthetic_enum_chevron_meta(),
         &SettingValue::Enum("choice_a"),
-        10,
         false,
         &theme,
         false,

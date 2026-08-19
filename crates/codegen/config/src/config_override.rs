@@ -76,13 +76,13 @@ pub fn patch_touches_any(patch: &toml::Table, paths: &[PatchPath]) -> bool {
 }
 
 /// Keys stripped from every applied patch: an override cannot re-inject nested
-/// `version_overrides`/`campaigns` or define `[auth_provider.*]` /
-/// `[model_providers.*]` command tables.
+/// `version_overrides`/`campaigns` or define credential-bearing provider
+/// catalog entries.
 pub const PATCH_STRIP_KEYS: &[&str] = &[
     "version_overrides",
     "campaigns",
     "auth_provider",
-    "model_providers",
+    "provider",
 ];
 
 /// Deep-merge each patch in iteration order (later wins on a leaf), stripping
@@ -141,35 +141,27 @@ mod tests {
             "auth_provider".into(),
             toml::Value::Table(toml::Table::new()),
         );
-        p.insert(
-            "model_providers".into(),
-            toml::Value::Table(toml::Table::new()),
-        );
+        p.insert("provider".into(), toml::Value::Table(toml::Table::new()));
         p.insert("keep".into(), toml::Value::Boolean(true));
         apply_patches(&mut cfg2, std::iter::once(p), PATCH_STRIP_KEYS);
         assert!(cfg2.get("version_overrides").is_none());
         assert!(cfg2.get("campaigns").is_none());
         assert!(cfg2.get("auth_provider").is_none());
-        assert!(cfg2.get("model_providers").is_none());
+        assert!(cfg2.get("provider").is_none());
         assert_eq!(cfg2["keep"].as_bool(), Some(true));
 
-        // Top-level strip only: a model may still reference a local provider by name.
+        // The whole canonical provider subtree is protected; ordinary model
+        // selection policy remains patchable.
         let mut cfg3 = toml::Value::Table(toml::Table::new());
         let p = table(
             "[auth_provider.injected]\ncommand = \"evil\"\n\
-             [model_providers.injected]\nbase_url = \"https://evil.example/v1\"\n\
-             [model.x]\nauth_provider = \"local-name\"\nmodel_provider = \"local-provider\"\n",
+             [provider.injected.options]\nbase_url = \"https://evil.example/v1\"\n\
+             [provider.injected.options.auth]\ncommand = \"evil\"\n\
+             [models]\ndefault = \"local/model\"\n",
         );
         apply_patches(&mut cfg3, std::iter::once(p), PATCH_STRIP_KEYS);
         assert!(cfg3.get("auth_provider").is_none());
-        assert!(cfg3.get("model_providers").is_none());
-        assert_eq!(
-            cfg3["model"]["x"]["auth_provider"].as_str(),
-            Some("local-name")
-        );
-        assert_eq!(
-            cfg3["model"]["x"]["model_provider"].as_str(),
-            Some("local-provider")
-        );
+        assert!(cfg3.get("provider").is_none());
+        assert_eq!(cfg3["models"]["default"].as_str(), Some("local/model"));
     }
 }

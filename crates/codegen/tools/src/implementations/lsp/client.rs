@@ -22,7 +22,7 @@ use super::documents::{Documents, Update, end_position};
 use super::pull::PullDiagnostics;
 use super::refresh::{ProjectInitializationComplete, RefreshTarget};
 use super::{DiagnosticsNotify, LspError, LspMainLoop, file_uri, workspace_open};
-use crate::util::{ProcessGroup, ProcessScope};
+use tty_utils::{ProcessGroup, ProcessScope};
 
 #[cfg(test)]
 use super::config::REQUEST_TIMEOUT;

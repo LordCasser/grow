@@ -1,6 +1,4 @@
-//! Pure conversation-shape helpers, kept crate-neutral so both the session
-//! layer (`shell`) and the `ChatStateActor` can share one definition
-//! of "align the leading System message with a prompt".
+//! Pure conversation-shape helpers used by Timeline-backed context rewrites.
 
 use std::sync::Arc;
 
@@ -19,10 +17,9 @@ pub fn canonical_system_prompt_eq(a: &str, b: &str) -> bool {
 /// changed; a head already equal to `prompt` (modulo trailing newlines) is left
 /// untouched for KV-cache-friendly idempotency.
 ///
-/// Single source of truth for the "align System[0] with the client override"
-/// operation, shared by the cold-load pre-apply (on a loaded history `Vec`,
-/// before spawn persists it) and the atomic `ChatStateActor` head swap that
-/// backs the resident-reconnect path.
+/// Single source of truth for aligning `System[0]` inside an actor-owned
+/// replacement transaction. Startup and attach code must not pre-apply this
+/// to a second conversation copy.
 #[must_use]
 pub fn replace_or_insert_system_head(
     conversation: &mut Vec<ConversationItem>,

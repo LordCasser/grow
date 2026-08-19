@@ -1,10 +1,10 @@
 //! Dashboard dispatchers: attach, overlays, rows, renames, and permissions.
 
-use super::ctx::{show_welcome, surface_yolo_launch_block_notice};
+use super::ctx::{show_welcome, surface_always_approve_launch_block_notice};
 use super::dashboard_diagnostics::{
     log_dashboard_attached, log_dashboard_closed, log_dashboard_launched, log_dashboard_opened,
 };
-use super::modes::yolo_enable_blocked;
+use super::modes::always_approve_enable_blocked;
 use super::permissions::resolve_permission_queue_transition;
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::router::dispatch;
@@ -62,13 +62,9 @@ fn configure_dashboard_state(app: &mut AppView) {
     let bootstrap_commands = app.bootstrap_acp_commands.clone();
     let models = app.models.clone();
     let disable_plugins = app.appearance.disable_plugins;
-    let pending_permission = if app.default_yolo {
-        crate::app::actions::PermissionModeKind::AlwaysApprove
-    } else if app.current_ui.permission_mode.as_deref() == Some("auto") {
-        crate::app::actions::PermissionModeKind::Auto
-    } else {
-        crate::app::actions::PermissionModeKind::Ask
-    };
+    let pending_permission = crate::app::actions::PermissionModeKind::from_runtime(
+        super::modes::inherit_permission_mode(app),
+    );
     let cwd = app.cwd.clone();
     let cwd_has_git_ancestor = app.cwd_has_git_ancestor;
     let has_agents = !app.agents.is_empty();
@@ -259,7 +255,7 @@ pub(super) fn dispatch_exit_dashboard(app: &mut AppView) -> Vec<Effect> {
         if rearm_overlay {
             rearm_session_overlay(app, id);
         }
-        surface_yolo_launch_block_notice(app, id);
+        surface_always_approve_launch_block_notice(app, id);
     } else {
         show_welcome(app);
     }
@@ -340,7 +336,7 @@ pub(super) fn dispatch_dashboard_attach(
             }
             app.active_view = ActiveView::Agent(agent_id);
             log_dashboard_attached(&DashboardRowId::TopLevel(agent_id));
-            surface_yolo_launch_block_notice(app, agent_id);
+            surface_always_approve_launch_block_notice(app, agent_id);
         }
         DashboardRowId::Subagent {
             parent,
@@ -372,7 +368,7 @@ pub(super) fn dispatch_dashboard_attach(
             }
             app.active_view = ActiveView::Agent(parent);
             log_dashboard_attached(&row_id);
-            surface_yolo_launch_block_notice(app, parent);
+            surface_always_approve_launch_block_notice(app, parent);
         }
         DashboardRowId::Roster { session_id } => {
             // A roster row is a leader-hosted session this client is not
@@ -609,7 +605,7 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
     log_dashboard_launched("new_agent_button");
     let (new_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
-    let policy_block = app.yolo_policy_block;
+    let policy_block = app.always_approve_policy_block;
     if let Some(agent) = app.agents.get_mut(&new_id) {
         apply_pending_dispatch_config(
             agent,
@@ -634,7 +630,7 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
         d.attached_agent = Some(new_id);
     }
     app.active_view = ActiveView::Agent(new_id);
-    surface_yolo_launch_block_notice(app, new_id);
+    surface_always_approve_launch_block_notice(app, new_id);
     effects
 }
 
@@ -925,7 +921,7 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
         // worktree agent (base model is seeded via the effect's `model_id`),
         // then carry any pasted images onto the replayed prompt — both mirror
         // `dispatch_dashboard_dispatch`.
-        let policy_block = app.yolo_policy_block;
+        let policy_block = app.always_approve_policy_block;
         if let Some(agent) = app.agents.get_mut(&new_id) {
             apply_pending_dispatch_config(
                 agent,
@@ -1023,7 +1019,7 @@ pub(super) fn dispatch_dashboard_overlay_cycle(app: &mut AppView, delta: i32) ->
         d.focus_row(DashboardRowId::TopLevel(next_id));
     }
     app.active_view = ActiveView::Agent(next_id);
-    surface_yolo_launch_block_notice(app, next_id);
+    surface_always_approve_launch_block_notice(app, next_id);
     vec![]
 }
 
@@ -1128,7 +1124,7 @@ pub(super) fn dispatch_dashboard_dispatch(
     app.project_picker_shown = true;
     let (new_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
     app.project_picker_shown = saved_shown;
-    let policy_block = app.yolo_policy_block;
+    let policy_block = app.always_approve_policy_block;
     if let Some(agent) = app.agents.get_mut(&new_id) {
         agent.session.enqueue_prompt(prompt_text);
         if let Some(entry) = agent.session.pending_prompts.back_mut() {
@@ -1166,7 +1162,7 @@ pub(super) fn dispatch_dashboard_dispatch(
             d.attached_agent = Some(new_id);
         }
         app.active_view = ActiveView::Agent(new_id);
-        surface_yolo_launch_block_notice(app, new_id);
+        surface_always_approve_launch_block_notice(app, new_id);
     } else {
         // Plain Enter (Send) stays on the dashboard, no auto-select.
         // The freshly-created row is left unselected so the overview
@@ -1178,7 +1174,7 @@ pub(super) fn dispatch_dashboard_dispatch(
         // Normal and toasts the new agent, but that toast is invisible while the
         // view stays on the dashboard — mirror it on the dashboard's error slot.
         let enabling = pending_permission.is_always_approve();
-        if let Some(warning) = yolo_enable_blocked(app, enabling)
+        if let Some(warning) = always_approve_enable_blocked(app, enabling)
             && let Some(d) = app.dashboard.as_mut()
         {
             d.set_error_toast(warning);
@@ -1231,10 +1227,6 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
-    // Dashboard commands run before any session exists, so the startup seed is
-    // the only answer available here.
-    let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
-
     // Build the execution context from app-wide state. The dashboard
     // is session-less, so `session_id` is `None`. Offered session-less
     // opt-ins (`/model`, `/effort`, `/behavior`, `/permission`) and
@@ -1316,8 +1308,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             screen_mode: app.screen_mode,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: dashboard_multiline,
-                yolo_mode: pending_permission.is_always_approve(),
-                auto_mode: pending_permission.is_auto(),
+                permission_mode: pending_permission.as_runtime(),
                 current_model_id: app.models.current_model_id_str().map(str::to_owned),
                 available_models: app
                     .models
@@ -1336,7 +1327,6 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 respect_manual_folds: respect_manual_folds_from_app,
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
-                scheduler_background_loops: scheduler_background_loops_seed,
             },
         };
         command.run(&mut ctx, invocation.args)
@@ -1453,7 +1443,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         }
         CommandResult::Action(Action::SetPermissionMode(permission)) => {
             if permission.is_always_approve()
-                && let Some(warning) = yolo_enable_blocked(app, true)
+                && let Some(warning) = always_approve_enable_blocked(app, true)
             {
                 if let Some(d) = app.dashboard.as_mut() {
                     d.dispatch.set_text("");
@@ -1572,22 +1562,20 @@ pub(super) fn apply_pending_dispatch_config(
         agent.plan_mode_pending = Some(true);
     }
 
-    agent.session.yolo_mode = false;
-    agent.session.auto_mode = false;
-    match pending_permission {
-        crate::app::actions::PermissionModeKind::Auto => agent.session.auto_mode = true,
+    agent.session.permission_mode = match pending_permission {
+        crate::app::actions::PermissionModeKind::Auto => shell::util::config::PermissionMode::Auto,
         crate::app::actions::PermissionModeKind::AlwaysApprove => {
             // Backstop: staging is already gated, but this write sits outside
-            // `set_yolo_mode_inner`, so re-check managed policy here.
+            // the session-mode setter, so re-check managed policy here.
             if let Some(warning) = policy_block {
                 agent.show_toast(warning);
+                shell::util::config::PermissionMode::Ask
             } else {
-                agent.session.yolo_mode = true;
+                shell::util::config::PermissionMode::AlwaysApprove
             }
         }
-        crate::app::actions::PermissionModeKind::Default
-        | crate::app::actions::PermissionModeKind::Ask => {}
-    }
+        crate::app::actions::PermissionModeKind::Ask => shell::util::config::PermissionMode::Ask,
+    };
 }
 
 /// Send or queue a reply typed into the peek panel's `❯ reply` input.
@@ -1697,7 +1685,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
             d.attached_agent = Some(agent_id);
         }
         app.active_view = ActiveView::Agent(agent_id);
-        surface_yolo_launch_block_notice(app, agent_id);
+        surface_always_approve_launch_block_notice(app, agent_id);
     }
 
     effects

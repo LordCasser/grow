@@ -19,37 +19,6 @@ use crate::mock_server::MockInferenceServer;
 use crate::process::{TestOutput, TestProcess, TestProcessConfig, TestProcessTree, TestStdin};
 use crate::sandbox::TestSandbox;
 
-/// Env var naming the binary that elects/hosts the leader in a two-binary
-/// (version-skew) test. Falls back to [`grow_binary`]'s resolution.
-pub const LEADER_BINARY_ENV: &str = "GROW_BINARY_LEADER";
-
-/// Env var naming the binary for the second (usually newer) client in a
-/// two-binary test. Falls back to [`grow_binary`]'s resolution.
-pub const CLIENT_BINARY_ENV: &str = "GROW_BINARY_CLIENT";
-
-fn role_binary(env_key: &str) -> PathBuf {
-    if let Ok(path) = std::env::var(env_key) {
-        let path = PathBuf::from(path);
-        assert!(
-            path.exists(),
-            "{env_key} does not exist: {}",
-            path.display()
-        );
-        return path;
-    }
-    grow_binary()
-}
-
-/// Binary for the leader-electing side of a version-skew test.
-pub fn leader_binary() -> PathBuf {
-    role_binary(LEADER_BINARY_ENV)
-}
-
-/// Binary for the client side of a version-skew test.
-pub fn client_binary() -> PathBuf {
-    role_binary(CLIENT_BINARY_ENV)
-}
-
 /// Capture for notifications and reconnect signals.
 #[derive(Default)]
 pub struct Capture {

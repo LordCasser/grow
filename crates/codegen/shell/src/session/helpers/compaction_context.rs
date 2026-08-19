@@ -15,7 +15,7 @@ use std::path::PathBuf;
 pub use chat_state::compaction_utils::{
     BackgroundTaskSummary, CompactionInputs, CompactionServerSummary, CompactionStateContext,
     RunningSubagentSummary, TodoSummary, TodoSummaryStatus, extract_last_user_query,
-    extract_messages_since_last_user, extract_user_query,
+    extract_user_query,
 };
 use compaction::reminder::{
     self, ActiveAgentReminderState, BackgroundTask, RunningSubagent, TodoItem, TodoStatus,
@@ -48,8 +48,8 @@ pub struct SubagentToolNames {
 
 /// Format state info as system reminder, without memory search.
 ///
-/// Use this from sync contexts (e.g., `build_compacted_history`) where
-/// memory re-injection is handled separately by the session actor.
+/// Use this from sync contexts where memory re-injection is handled
+/// separately by the session actor.
 pub fn to_system_reminder_sync(
     ctx: &CompactionStateContext,
     discovered_agents_md: &[PathBuf],
@@ -251,7 +251,6 @@ mod tests {
                 description: "find files".into(),
                 elapsed_ms: 5000,
             }],
-            recent_messages: vec![],
             last_user_query: None,
             agent_edited_paths: vec![],
             running_tasks: vec![],
@@ -295,7 +294,6 @@ mod tests {
                     description: None,
                 },
             ],
-            recent_messages: vec![],
             last_user_query: None,
             agent_edited_paths: vec![],
             running_tasks: vec![],
@@ -328,7 +326,6 @@ mod tests {
                 status: "running".into(),
                 tool_name: Some("run_terminal_command".into()),
             }],
-            recent_messages: vec![],
             last_user_query: None,
             agent_edited_paths: vec![],
             running_subagents: vec![],
@@ -364,7 +361,6 @@ mod tests {
             cwd_generation: 0,
             destination_project_instructions: None,
             todos,
-            recent_messages: vec![],
             last_user_query: None,
             agent_edited_paths: vec![],
             running_tasks: vec![],

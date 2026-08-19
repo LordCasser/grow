@@ -17,7 +17,6 @@ mod ctx;
 mod dashboard;
 mod dashboard_diagnostics;
 pub(crate) mod external_editor;
-mod import_claude;
 mod interject;
 mod jump;
 mod modes;
@@ -35,16 +34,15 @@ mod transcript;
 mod turn;
 
 pub(crate) use modes::{
-    downgrade_displayed_auto_if_gated, effective_auto, sync_follow_subagent_permission_modes,
+    downgrade_displayed_auto_if_gated, inherit_permission_mode,
+    sync_follow_subagent_permission_modes,
 };
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::drain_root_permission_queue;
 pub(crate) use permissions::{resolve_permission_queue_transition, respond_permission};
 pub(crate) use prompt::dispatch_initial_prompt;
 pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
-pub(super) use queue::{
-    apply_turn_start_shim, maybe_drain_queue, maybe_drain_queue_and_note_peek, note_peek_page_flip,
-};
+pub(super) use queue::{apply_turn_start_shim, maybe_drain_queue, note_peek_page_flip};
 pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
 pub(crate) use router::dispatch;
 pub(crate) use settings::ui::refresh_open_settings_modals;

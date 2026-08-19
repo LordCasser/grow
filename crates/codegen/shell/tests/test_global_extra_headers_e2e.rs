@@ -4,7 +4,7 @@
 //! caller-owned `$GROW_HOME` whose `config.toml` sets every global `[models]`
 //! default. Asserts the turn succeeds with all of them set and that the
 //! wire-observable one — `extra_headers` — reaches the `/v1/chat/completions`
-//! request header, for a model with no per-model `[model.<id>]` override.
+//! request header, for a provider model with no per-model header override.
 //!
 //! The scalar defaults (temperature, top_p, output_limit, max_retries,
 //! inference_idle_timeout_secs, stream_tool_calls) are exercised here to prove
@@ -47,7 +47,7 @@ stream_tool_calls = true
     .expect("write config.toml");
 
     let mut cmd = tokio::process::Command::new(grow_binary());
-    cmd.args(["-p", "say hi", "--yolo", "--output-format", "json"])
+    cmd.args(["-p", "say hi", "--permission-mode", "always-approve", "--output-format", "json"])
         .arg("--cwd")
         .arg(workdir.workspace())
         .current_dir(workdir.workspace())

@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::commands::HunkTrackerCommand;
 use crate::types::{
     FileContentEntry, FileHunkData, Hunk, HunkAction, HunkActionError, HunkId, HunkSourceFilter,
-    HunkTrackerSnapshot, HunkTurnDelta, SessionSummary, TrackingMode,
+    HunkTrackerSnapshot, SessionSummary, TrackingMode,
 };
 
 /// Handle to communicate with HunkTrackerActor.
@@ -284,18 +284,6 @@ impl HunkTrackerHandle {
         let _ = self
             .cmd_tx
             .send(HunkTrackerCommand::SnapshotState { reply: reply_tx });
-        reply_rx.await.ok()
-    }
-
-    /// Incremental single-turn delta for `prompt_index`: snapshots of the files
-    /// touched that turn plus its hunk-id set. Per-prompt counterpart to
-    /// [`snapshot_state`](Self::snapshot_state). `None` if the actor is shut down.
-    pub async fn snapshot_turn_delta(&self, prompt_index: usize) -> Option<HunkTurnDelta> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let _ = self.cmd_tx.send(HunkTrackerCommand::SnapshotTurnDelta {
-            prompt_index,
-            reply: reply_tx,
-        });
         reply_rx.await.ok()
     }
 

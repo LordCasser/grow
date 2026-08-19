@@ -244,11 +244,8 @@ fn plugins_list_response() -> extension_types::PluginsListResponse {
     use crate::views::extensions_modal::test_plugin_info;
     extension_types::PluginsListResponse {
         plugins: vec![
-            test_plugin_info("user-tool", Some(extension_types::PluginOrigin::UserGrow)),
-            test_plugin_info(
-                "claude-tool",
-                Some(extension_types::PluginOrigin::UserClaude),
-            ),
+            test_plugin_info("user-tool", extension_types::PluginOrigin::UserGrow),
+            test_plugin_info("custom-tool", extension_types::PluginOrigin::ConfigPath),
         ],
     }
 }
@@ -289,7 +286,7 @@ fn plugins_list_loaded_seeds_all_groups_collapsed_on_first_load() {
 
     assert_eq!(
         plugins_collapsed_keys(&app, id),
-        vec!["origin:user".to_string(), "origin:user-claude".to_string()]
+        vec!["origin:config".to_string(), "origin:user".to_string()]
     );
     let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
     match &modal.plugins_data {
@@ -320,7 +317,7 @@ fn plugins_list_delivery_seeds_once_then_always_preserves() {
 
     assert_eq!(
         plugins_collapsed_keys(&app, id),
-        vec!["origin:user-claude".to_string()],
+        vec!["origin:config".to_string()],
         "post-action refetch must not re-collapse an expanded group"
     );
 
@@ -336,7 +333,7 @@ fn plugins_list_delivery_seeds_once_then_always_preserves() {
 
     assert_eq!(
         plugins_collapsed_keys(&app, id),
-        vec!["origin:user-claude".to_string()],
+        vec!["origin:config".to_string()],
         "reload must not re-collapse groups the user expanded"
     );
 }

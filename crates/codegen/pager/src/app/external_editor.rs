@@ -31,7 +31,7 @@ const PROMPT_EDITOR_STALE: &str =
 
 #[derive(Clone, Debug)]
 pub(crate) enum PendingEditorRequest {
-    /// Edit an agents/personas configuration file, then refresh its modal tab.
+    /// Edit an Agent configuration file, then refresh its modal.
     ConfigFile {
         path: PathBuf,
         refresh_agents_modal: Option<crate::views::agents_modal::AgentsTab>,

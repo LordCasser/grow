@@ -1,16 +1,8 @@
 //! Plugin manifest parsing and validation.
 //!
-//! The canonical manifest location is `plugin.json` at the plugin root.
-//! Fallback locations (checked in order when the root manifest is absent):
-//! 1. `.grow-plugin/plugin.json`
-//! 2. `.claude-plugin/plugin.json`
-//!
-//! If no manifest is found at all, the plugin can still function via
-//! convention-based discovery (skills/, agents/, .mcp.json, hooks/hooks.json),
-//! with the plugin name derived from the directory name.
-//!
-//! The parser is forward-compatible: unknown fields are silently ignored
-//! so that manifests authored for newer upstream versions still load.
+//! Every plugin is rooted by one required `plugin.json`. Component paths may
+//! use the standard directories, but discovery never invents plugin identity
+//! from a directory name or probes alternate manifest locations.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +24,7 @@ fn is_valid_plugin_name(name: &str) -> bool {
 
 /// Author metadata from a plugin manifest.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Author {
     #[serde(default)]
     pub name: Option<String>,
@@ -41,40 +34,25 @@ pub struct Author {
     pub url: Option<String>,
 }
 
-/// A path reference that can be either a single path or multiple paths.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum PathOrPaths {
-    Single(String),
-    Multiple(Vec<String>),
-}
-
-impl PathOrPaths {
-    /// Resolve all contained paths relative to a plugin root.
-    ///
-    /// Paths that escape the plugin root (via `..` components) are rejected
-    /// with a warning and excluded from the result.
-    pub fn resolve(&self, plugin_root: &Path) -> Vec<PathBuf> {
-        let paths = match self {
-            PathOrPaths::Single(p) => vec![plugin_root.join(p)],
-            PathOrPaths::Multiple(ps) => ps.iter().map(|p| plugin_root.join(p)).collect(),
-        };
-        paths
-            .into_iter()
-            .filter(|resolved| {
-                if is_path_contained(resolved, plugin_root) {
-                    true
-                } else {
-                    tracing::warn!(
-                        path = %resolved.display(),
-                        plugin_root = %plugin_root.display(),
-                        "manifest path escapes plugin root; skipping"
-                    );
-                    false
-                }
-            })
-            .collect()
-    }
+/// Resolve component directories relative to a plugin root.
+/// Paths that escape the plugin root are rejected.
+fn resolve_paths(paths: &[String], plugin_root: &Path) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .map(|path| plugin_root.join(path))
+        .filter(|resolved| {
+            if is_path_contained(resolved, plugin_root) {
+                true
+            } else {
+                tracing::warn!(
+                    path = %resolved.display(),
+                    plugin_root = %plugin_root.display(),
+                    "manifest path escapes plugin root; skipping"
+                );
+                false
+            }
+        })
+        .collect()
 }
 
 /// Check whether a resolved path stays within the plugin root.
@@ -131,10 +109,8 @@ pub enum PathOrInline {
 
 /// Parsed plugin manifest from `plugin.json`.
 ///
-/// Forward-compatible: unknown fields are silently ignored via
-/// `#[serde(deny_unknown_fields)]` NOT being set.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginManifest {
     /// User-facing plugin namespace (kebab-case).  Required.
     pub name: String,
@@ -156,11 +132,11 @@ pub struct PluginManifest {
 
     // ── Component path overrides (supplement convention dirs) ──────
     #[serde(default)]
-    pub skills: Option<PathOrPaths>,
+    pub skills: Option<Vec<String>>,
     #[serde(default)]
-    pub commands: Option<PathOrPaths>,
+    pub commands: Option<Vec<String>>,
     #[serde(default)]
-    pub agents: Option<PathOrPaths>,
+    pub agents: Option<Vec<String>>,
     #[serde(default)]
     pub hooks: Option<PathOrInline>,
     #[serde(default)]
@@ -249,7 +225,7 @@ impl PluginManifest {
     ///
     /// Called during discovery. Inline hooks and MCP servers are now
     /// fully supported; this method logs when they are detected.
-    pub fn warn_unsupported_features(&self, plugin_name: &str) {
+    pub fn log_inline_features(&self, plugin_name: &str) {
         if self.inline_hooks().is_some() {
             tracing::info!(plugin = plugin_name, "plugin uses inline hooks in manifest");
         }
@@ -270,12 +246,12 @@ impl PluginManifest {
 
 /// Resolve directories from a manifest field or fall back to a default subdirectory.
 fn resolve_dirs(
-    field: &Option<PathOrPaths>,
+    field: &Option<Vec<String>>,
     plugin_root: &Path,
     default_name: &str,
 ) -> Vec<PathBuf> {
     match field {
-        Some(paths) => paths.resolve(plugin_root),
+        Some(paths) => resolve_paths(paths, plugin_root),
         None => {
             let default = plugin_root.join(default_name);
             if default.is_dir() {
@@ -289,77 +265,32 @@ fn resolve_dirs(
 
 // ── Manifest loading ──────────────────────────────────────────────────
 
-/// Manifest search order within a plugin directory.
-const MANIFEST_PATHS: &[&str] = &[
-    "plugin.json",
-    ".grow-plugin/plugin.json",
-    ".claude-plugin/plugin.json",
-];
-
-/// Result of attempting to load a manifest from a plugin directory.
-#[derive(Debug)]
-pub enum ManifestLoadResult {
-    /// Manifest found and parsed successfully.
-    Found(Box<PluginManifest>),
-    /// No manifest file found — plugin uses convention-based discovery.
-    NotFound,
-}
-
 /// Load a plugin manifest from the given plugin root directory.
-///
-/// Tries manifest files in priority order (see [`MANIFEST_PATHS`]).
-/// If no manifest is found, returns `ManifestLoadResult::NotFound`.
-/// The caller can still create a convention-based plugin from the directory.
-pub fn load_manifest(plugin_root: &Path) -> Result<ManifestLoadResult, ManifestError> {
-    for rel_path in MANIFEST_PATHS {
-        let manifest_path = plugin_root.join(rel_path);
-        if manifest_path.is_file() {
-            let content =
-                std::fs::read_to_string(&manifest_path).map_err(|e| ManifestError::IoError {
-                    path: manifest_path.clone(),
-                    source: e,
-                })?;
-            let manifest: PluginManifest =
-                serde_json::from_str(&content).map_err(|e| ManifestError::ParseError {
-                    path: manifest_path.clone(),
-                    message: e.to_string(),
-                })?;
-            manifest.validate()?;
-            manifest.warn_unsupported_features(&manifest.name);
-            return Ok(ManifestLoadResult::Found(Box::new(manifest)));
-        }
+pub fn load_manifest(plugin_root: &Path) -> Result<Box<PluginManifest>, ManifestError> {
+    let manifest_path = plugin_root.join("plugin.json");
+    if !manifest_path.is_file() {
+        return Err(ManifestError::Missing {
+            path: manifest_path,
+        });
     }
-    Ok(ManifestLoadResult::NotFound)
-}
-
-/// Derive a plugin name from a directory name.
-///
-/// Sanitizes the directory name to match the kebab-case constraint:
-/// lowercase, alphanumeric + hyphens, no leading/trailing hyphens.
-pub fn name_from_dirname(dir: &Path) -> Option<String> {
-    let dirname = dir.file_name()?.to_str()?;
-    let sanitized: String = dirname
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = sanitized.trim_matches('-').to_string();
-    if trimmed.is_empty() || trimmed.len() > MAX_PLUGIN_NAME_LEN {
-        return None;
-    }
-    Some(trimmed)
+    let content =
+        std::fs::read_to_string(&manifest_path).map_err(|source| ManifestError::IoError {
+            path: manifest_path.clone(),
+            source,
+        })?;
+    let manifest: PluginManifest =
+        serde_json::from_str(&content).map_err(|error| ManifestError::ParseError {
+            path: manifest_path,
+            message: error.to_string(),
+        })?;
+    manifest.validate()?;
+    manifest.log_inline_features(&manifest.name);
+    Ok(Box::new(manifest))
 }
 
 /// Perform plugin-token substitution in a string.
 ///
-/// Replaces `${GROW_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`,
-/// `${GROW_PLUGIN_DATA}`, and `${CLAUDE_PLUGIN_DATA}` with the provided values.
+/// Replaces `${GROW_PLUGIN_ROOT}` and `${GROW_PLUGIN_DATA}` with the provided values.
 ///
 /// Delegates to [`tools::util::substitute_plugin_tokens`], the single
 /// source of truth shared with plugin skill/command body substitution.
@@ -379,6 +310,9 @@ pub fn normalize_inline_mcp_servers(value: &serde_json::Value) -> serde_json::Va
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
+    #[error("required plugin manifest not found at {path}")]
+    Missing { path: PathBuf },
+
     #[error("invalid plugin name {name:?}: {reason}")]
     InvalidName { name: String, reason: String },
 
@@ -439,8 +373,8 @@ mod tests {
             "repository": "https://github.com/example/plugin",
             "license": "MIT",
             "keywords": ["ci-cd", "deploy"],
-            "skills": "./custom/skills/",
-            "agents": "./custom-agents/",
+            "skills": ["./custom/skills/"],
+            "agents": ["./custom-agents/"],
             "hooks": "./config/hooks.json",
             "mcpServers": "./mcp-config.json"
         }"#;
@@ -448,12 +382,12 @@ mod tests {
         assert_eq!(manifest.name, "deployment-tools");
         assert_eq!(manifest.version.as_deref(), Some("1.2.0"));
         assert_eq!(manifest.keywords, vec!["ci-cd", "deploy"]);
-        assert!(matches!(manifest.skills, Some(PathOrPaths::Single(_))));
+        assert_eq!(manifest.skills, Some(vec!["./custom/skills/".to_string()]));
         manifest.validate().unwrap();
     }
 
     #[test]
-    fn parse_manifest_ignores_unknown_fields() {
+    fn parse_manifest_rejects_unknown_fields() {
         let json = r#"{
             "name": "my-plugin",
             "marketplace": true,
@@ -461,9 +395,7 @@ mod tests {
             "futureField": {"nested": "value"},
             "outputStyles": "./styles/"
         }"#;
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(manifest.name, "my-plugin");
-        manifest.validate().unwrap();
+        assert!(serde_json::from_str::<PluginManifest>(json).is_err());
     }
 
     #[test]
@@ -472,7 +404,7 @@ mod tests {
             "name": "my-plugin",
             "hooks": {
                 "hooks": {
-                    "PostToolUse": [{"hooks": [{"type": "command", "command": "lint"}]}]
+                    "post_tool_use": [{"hooks": [{"type": "command", "command": "lint"}]}]
                 }
             }
         }"#;
@@ -504,34 +436,8 @@ mod tests {
             "skills": ["./skills-a/", "./skills-b/"]
         }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        match manifest.skills.unwrap() {
-            PathOrPaths::Multiple(paths) => {
-                assert_eq!(paths.len(), 2);
-                assert_eq!(paths[0], "./skills-a/");
-                assert_eq!(paths[1], "./skills-b/");
-            }
-            _ => panic!("expected Multiple"),
-        }
-    }
-
-    #[test]
-    fn name_from_dirname_basic() {
-        assert_eq!(
-            name_from_dirname(Path::new("/home/user/my-plugin")),
-            Some("my-plugin".to_string())
-        );
-        assert_eq!(
-            name_from_dirname(Path::new("/path/to/MyPlugin")),
-            Some("myplugin".to_string())
-        );
-        assert_eq!(
-            name_from_dirname(Path::new("/path/to/my_plugin")),
-            Some("my-plugin".to_string())
-        );
-        assert_eq!(
-            name_from_dirname(Path::new("/path/to/---")),
-            None // all hyphens after trim
-        );
+        let paths = manifest.skills.unwrap();
+        assert_eq!(paths, vec!["./skills-a/", "./skills-b/"]);
     }
 
     #[test]
@@ -540,11 +446,10 @@ mod tests {
         let plugin_root = tmp.path().join("my-plugin");
         std::fs::create_dir_all(&plugin_root).unwrap();
 
-        // No manifest file
-        match load_manifest(&plugin_root).unwrap() {
-            ManifestLoadResult::NotFound => {}
-            _ => panic!("expected NotFound"),
-        }
+        assert!(matches!(
+            load_manifest(&plugin_root),
+            Err(ManifestError::Missing { .. })
+        ));
 
         // Write root plugin.json
         let manifest_path = plugin_root.join("plugin.json");
@@ -554,52 +459,9 @@ mod tests {
         )
         .unwrap();
 
-        match load_manifest(&plugin_root).unwrap() {
-            ManifestLoadResult::Found(m) => {
-                assert_eq!(m.name, "my-plugin");
-                assert_eq!(m.version.as_deref(), Some("0.1.0"));
-            }
-            _ => panic!("expected Found"),
-        }
-    }
-
-    #[test]
-    fn load_manifest_fallback_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin_root = tmp.path().join("fallback-plugin");
-        std::fs::create_dir_all(plugin_root.join(".grow-plugin")).unwrap();
-
-        // Write manifest in .grow-plugin/ fallback location
-        std::fs::write(
-            plugin_root.join(".grow-plugin/plugin.json"),
-            r#"{"name": "fallback-plugin"}"#,
-        )
-        .unwrap();
-
-        match load_manifest(&plugin_root).unwrap() {
-            ManifestLoadResult::Found(m) => assert_eq!(m.name, "fallback-plugin"),
-            _ => panic!("expected Found"),
-        }
-    }
-
-    #[test]
-    fn load_manifest_root_wins_over_fallback() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin_root = tmp.path().join("priority-test");
-        std::fs::create_dir_all(plugin_root.join(".grow-plugin")).unwrap();
-
-        // Write both root and fallback
-        std::fs::write(plugin_root.join("plugin.json"), r#"{"name": "root-wins"}"#).unwrap();
-        std::fs::write(
-            plugin_root.join(".grow-plugin/plugin.json"),
-            r#"{"name": "fallback-loses"}"#,
-        )
-        .unwrap();
-
-        match load_manifest(&plugin_root).unwrap() {
-            ManifestLoadResult::Found(m) => assert_eq!(m.name, "root-wins"),
-            _ => panic!("expected Found"),
-        }
+        let manifest = load_manifest(&plugin_root).unwrap();
+        assert_eq!(manifest.name, "my-plugin");
+        assert_eq!(manifest.version.as_deref(), Some("0.1.0"));
     }
 
     #[test]
@@ -611,11 +473,11 @@ mod tests {
 
     #[test]
     fn substitute_env_vars_replaces_all() {
-        let input = "${GROW_PLUGIN_ROOT}/bin:${CLAUDE_PLUGIN_ROOT}/lib:${GROW_PLUGIN_DATA}/cache";
+        let input = "${GROW_PLUGIN_ROOT}/bin:${GROW_PLUGIN_DATA}/cache";
         let result = substitute_env_vars(input, "/home/user/plugin", "/home/user/.data/plugin");
         assert_eq!(
             result,
-            "/home/user/plugin/bin:/home/user/plugin/lib:/home/user/.data/plugin/cache"
+            "/home/user/plugin/bin:/home/user/.data/plugin/cache"
         );
     }
 
@@ -690,7 +552,7 @@ mod tests {
             repository: None,
             license: None,
             keywords: vec![],
-            skills: Some(PathOrPaths::Single("../outside-skills".to_string())),
+            skills: Some(vec!["../outside-skills".to_string()]),
             commands: None,
             agents: None,
             hooks: None,
@@ -719,7 +581,7 @@ mod tests {
             repository: None,
             license: None,
             keywords: vec![],
-            skills: Some(PathOrPaths::Single("custom-skills".to_string())),
+            skills: Some(vec!["custom-skills".to_string()]),
             commands: None,
             agents: None,
             hooks: None,

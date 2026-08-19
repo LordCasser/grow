@@ -6,6 +6,8 @@ license = "Apache-2.0"
 authors = ["Grow contributors"]
 
 [dependencies]
+chat-state = { path = "../chat-state" }
+memory = { workspace = true }
 # TTY safety — detach subprocesses from the controlling terminal
 dunce = { workspace = true }
 tty-utils = { workspace = true }
@@ -90,6 +92,7 @@ tool-protocol = { workspace = true }
 config = { workspace = true }
 shell = { workspace = true }
 workspace = { workspace = true }
+workspace-types = { workspace = true }
 token-estimation = { workspace = true }
 diagnostics = { workspace = true }
 fast-worktree = { path = "../fast-worktree", features = ["metadata"] }
@@ -276,6 +279,6 @@ jemalloc = []
 sandbox-enforce = ["sandbox/enforce"]
 release-dist = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
-# `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
+# `AgentSession::set_always_approve_mode_for_test`) to sibling crates' test builds — used
 # by `pager-minimal`'s unit tests. Never enabled in production builds.
 test-support = ["pager-render/test-support"]

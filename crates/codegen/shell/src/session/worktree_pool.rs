@@ -1507,9 +1507,9 @@ async fn warm_source_repo(repo_path: &Path) {
         // writes — --no-optional-locks from the helper would prevent fsmonitor,
         // untracked-cache, and split-index data from being persisted.
         let mut cmd = std::process::Command::new("git");
-        tools::util::detach_std_command(&mut cmd);
+        tty_utils::detach_std_command(&mut cmd);
         cmd.stdin(std::process::Stdio::null());
-        cmd.envs(tools::util::pager_env());
+        cmd.envs(tty_utils::pager_env());
         for &(key, val) in tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
             cmd.env(key, val);
         }

@@ -10,9 +10,7 @@ use super::actions;
 use super::session_title_resolve::worktree_resume_failure_message;
 #[allow(unused_imports)]
 use super::{agent, dispatch};
-pub(super) use helpers::{
-    parse_session_load_foreground, parse_session_scheduler_background_loops,
-};
+pub(super) use helpers::parse_session_load_foreground;
 pub(crate) use helpers::{
     EffectMeta, SessionFlags, persist_permission_mode_and_notify, persist_setting,
     sanitize_user_error,
@@ -70,11 +68,7 @@ pub(crate) fn execute(
             preferred_session_id,
         } => {
             let tx = acp_tx.clone();
-            let compat = tools::types::compat::CompatConfig::default();
-            let mcp_servers = shell::util::config::load_mcp_servers(
-                &session_cwd,
-                &compat,
-            );
+            let mcp_servers = shell::util::config::load_mcp_servers(&session_cwd);
             let mcp_count = mcp_servers.len();
             #[allow(unused_mut)]
             let mut meta = session_flags.to_meta();
@@ -131,9 +125,6 @@ pub(crate) fn execute(
                                 agent_id,
                                 session_id: resp.session_id,
                                 models: resp.models,
-                                scheduler_background_loops: parse_session_scheduler_background_loops(
-                                    resp.meta.as_ref(),
-                                ),
                             }
                         }
                         Err(e) => {
@@ -401,10 +392,7 @@ pub(crate) fn execute(
                             };
                         }
                     }
-                    let mcp_servers = shell::util::config::load_mcp_servers(
-                        &session_cwd,
-                        &tools::types::compat::CompatConfig::default(),
-                    );
+                    let mcp_servers = shell::util::config::load_mcp_servers(&session_cwd);
                     let result = acp_send(
                             acp::NewSessionRequest::new(session_cwd.clone())
                                 .mcp_servers(mcp_servers)
@@ -420,9 +408,6 @@ pub(crate) fn execute(
                                 worktree_path: worktree_root,
                                 session_cwd,
                                 models: resp.models,
-                                scheduler_background_loops: parse_session_scheduler_background_loops(
-                                    resp.meta.as_ref(),
-                                ),
                             }
                         }
                         Err(e) => {
@@ -447,10 +432,7 @@ pub(crate) fn execute(
             }
             let cwd = session_cwd.unwrap_or_else(|| cwd.to_path_buf());
             let mcp_started = std::time::Instant::now();
-            let mcp_servers = shell::util::config::load_mcp_servers(
-                &cwd,
-                &tools::types::compat::CompatConfig::default(),
-            );
+            let mcp_servers = shell::util::config::load_mcp_servers(&cwd);
             tracing::info!(
                 elapsed_ms = mcp_started.elapsed().as_millis() as u64,
                 server_count = mcp_servers.len(),
@@ -497,9 +479,6 @@ pub(crate) fn execute(
                                 restore_summary,
                                 restore_degree,
                                 foreground,
-                                scheduler_background_loops: parse_session_scheduler_background_loops(
-                                    resp.meta.as_ref(),
-                                ),
                             }
                         }
                         Err(e) => {
@@ -677,15 +656,9 @@ pub(crate) fn execute(
                                 id: acp::SessionId::new(session_id),
                                 cwd,
                             };
-                            let history_path = shell::session::persistence::session_dir(
-                                    &info,
-                                )
-                                .join("chat_history.jsonl");
                             let first_prompt_preview = extract_first_user_prompt(&info)
                                 .unwrap_or_default();
-                            let (turn_count, tool_call_count) = count_chat_history_stats(
-                                &history_path,
-                            );
+                            let (turn_count, tool_call_count) = count_timeline_stats(&info);
                             CardDetail {
                                 turn_count,
                                 tool_call_count,
@@ -1248,7 +1221,7 @@ pub(crate) fn execute(
                 .spawn(async move {
                     let params = serde_json::json!({
                     "cwd": cwd.to_string_lossy(),
-                    "filter_session_id": session_id,
+                    "session_id": session_id,
                 });
                     let req = acp::ExtRequest::new(
                         "grow/prompt_history",
@@ -1747,16 +1720,18 @@ pub(crate) fn execute(
                     ),
                 );
         }
-        Effect::NotifySessionPermissionMode { canonical, session_id: _ } => {
+        Effect::NotifySessionPermissionMode {
+            canonical,
+            session_id,
+        } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
                 let params = serde_json::json!({
-                    "yolo_mode": canonical == "always-approve",
-                    "auto_mode": canonical == "auto",
-                    "permission_mode": canonical,
+                    "sessionId": session_id,
+                    "permissionMode": canonical,
                 });
                 let notification = acp::ExtNotification::new(
-                    "grow/yolo_mode_changed",
+                    "grow/permission_mode_changed",
                     serde_json::value::to_raw_value(&params)
                         .expect("serialize session permission mode")
                         .into(),
@@ -2938,15 +2913,9 @@ pub(crate) fn execute(
             tasks
                 .spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                            let storage = shell::session::memory::MemoryStorage::new(
-                                &cwd,
-                                None,
-                            );
+                            let storage = memory::MemoryStorage::new(&cwd, None);
                             storage
-                                .append_to_memory(
-                                    shell::session::memory::MemoryScope::Global,
-                                    &text,
-                                )
+                                .append_to_memory(memory::MemoryScope::Global, &text)
                         })
                         .await
                         .map_err(|e| format!("task join error: {e}"))
@@ -3221,12 +3190,8 @@ pub(crate) fn execute(
                                     TaskResult::BundleStatusReady {
                                         has_cache: r.has_cache,
                                         version: r.version,
-                                        personas: r.personas,
-                                        roles: r.roles,
                                         agents: r.agents,
                                         skills: r.skills,
-                                        persona_details: r.persona_details,
-                                        role_details: r.role_details,
                                     }
                                 }
                                 Err(_) => {
@@ -3876,18 +3841,11 @@ fn format_session_info(
         .map(|profile| format!("\n  Sandbox: {profile}"))
         .unwrap_or_default();
     let turn_line = format!("\n  Turn: {}", info.data.turn_index);
-    let conversation_line = info
-        .data
-        .conversation_id
-        .as_deref()
-        .filter(|id| !id.is_empty())
-        .map(|id| format!("\n  Conversation ID: {id}"))
-        .unwrap_or_default();
     let version_display = version::display_version(
         update::channel_label(),
     );
     format!(
-        "{title_line}  Shell version: {version_display}\n  Auth method: provider BYOK\n  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
+        "{title_line}  Shell version: {version_display}\n  Auth method: provider BYOK\n  Session ID: {session_id}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
     )
 }
 /// Build the single text content block for a plain `Effect::SendPrompt`.
@@ -3938,9 +3896,8 @@ fn prompt_request_meta(
     }
     serde_json::Value::Object(map)
 }
-/// Build the `grow/interject` params. The optional structured `content`
-/// (text + images) is omitted ENTIRELY when `None` so the legacy wire
-/// shape stays byte-identical. Extracted from the spawn for testability.
+/// Build the one current `grow/steer` shape. Text-only steering is represented
+/// by a text content block, never a second top-level text channel.
 fn build_interject_params(
     session_id: &acp::SessionId,
     expected_turn_id: &str,
@@ -3948,17 +3905,16 @@ fn build_interject_params(
     interjection_id: &str,
     blocks: Option<&[acp::ContentBlock]>,
 ) -> serde_json::Value {
-    let mut params = serde_json::json!({
+    let content = blocks.map_or_else(
+        || vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+        <[acp::ContentBlock]>::to_vec,
+    );
+    serde_json::json!({
         "sessionId": session_id.0.to_string(),
         "expectedTurnId": expected_turn_id,
-        "text": text,
         "interjectionId": interjection_id,
-    });
-    if let Some(blocks) = blocks {
-        params["content"] = serde_json::to_value(blocks)
-            .expect("serialize interject content");
-    }
-    params
+        "content": content,
+    })
 }
 #[cfg(test)]
 mod tests;

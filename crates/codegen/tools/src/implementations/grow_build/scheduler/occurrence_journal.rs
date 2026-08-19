@@ -179,9 +179,14 @@ impl<'de> Deserialize<'de> for OccurrenceJournal {
 impl OccurrenceJournal {
     fn decode_json(value: serde_json::Value) -> Self {
         let (entries, task_ids, block_all, overflowed, is_malformed) = match value {
-            serde_json::Value::Array(entries) => (entries, Vec::new(), false, false, false),
             serde_json::Value::Object(mut object) => {
-                let (entries, bad_entries) = parse_json_array(object.remove("entries"));
+                let has_unknown_fields = object.keys().any(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "entries" | "quarantinedTaskIds" | "blockAllOneShots" | "overflowed"
+                    )
+                });
+                let (entries, bad_entries) = parse_required_json_array(object.remove("entries"));
                 let (task_values, bad_task_ids) =
                     parse_json_array(object.remove("quarantinedTaskIds"));
                 let bad_task_element = task_values.iter().any(|value| !value.is_string());
@@ -196,7 +201,12 @@ impl OccurrenceJournal {
                     task_ids,
                     block_all,
                     overflowed,
-                    bad_entries || bad_task_ids || bad_task_element || bad_block || bad_overflow,
+                    has_unknown_fields
+                        || bad_entries
+                        || bad_task_ids
+                        || bad_task_element
+                        || bad_block
+                        || bad_overflow,
                 )
             }
             _ => (Vec::new(), Vec::new(), true, false, true),
@@ -243,6 +253,13 @@ fn parse_json_array(value: Option<serde_json::Value>) -> (Vec<serde_json::Value>
         serde_json::Value::Array(values) => (values, false),
         _ => (Vec::new(), true),
     })
+}
+
+fn parse_required_json_array(value: Option<serde_json::Value>) -> (Vec<serde_json::Value>, bool) {
+    match value {
+        Some(serde_json::Value::Array(values)) => (values, false),
+        _ => (Vec::new(), true),
+    }
 }
 
 fn parse_json_bool(value: Option<serde_json::Value>) -> (bool, bool) {

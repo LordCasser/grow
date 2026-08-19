@@ -358,7 +358,6 @@ pub struct PrepareWorktreeResult {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status")]
 pub enum WorktreeStatus {
-    // === EXISTING VARIANTS (unchanged for backward compatibility) ===
     #[serde(rename = "progress")]
     Progress {
         #[serde(rename = "sessionId")]
@@ -375,11 +374,10 @@ pub enum WorktreeStatus {
         /// Working directory root of the source repo/worktree (via `workdir()`).
         /// Clients strip this prefix from `source_path` to compute the
         /// subdirectory offset inside the new worktree.
-        #[serde(rename = "sourceGitRoot", skip_serializing_if = "Option::is_none")]
-        source_git_root: Option<String>,
-        /// NEW optional field -- only present when dirty copying is used
-        #[serde(rename = "copiedChanges", skip_serializing_if = "Option::is_none")]
-        copied_changes: Option<CopiedChangesSummary>,
+        #[serde(rename = "sourceGitRoot")]
+        source_git_root: String,
+        #[serde(rename = "copiedChanges")]
+        copied_changes: CopiedChangesSummary,
     },
     #[serde(rename = "error")]
     Error {
@@ -388,7 +386,6 @@ pub enum WorktreeStatus {
         message: String,
     },
 
-    // === NEW VARIANTS (additive -- old clients ignore unknown status values) ===
     /// Emitted when analyzing the source worktree for dirty state
     #[serde(rename = "analyzing")]
     Analyzing {
@@ -423,7 +420,6 @@ pub enum WorktreeStatus {
         current_file: Option<String>,
     },
 
-    // === BACKGROUND IGNORED FILE COPY VARIANTS ===
     /// Background ignored file copy started
     #[serde(rename = "copyingIgnored")]
     CopyingIgnored {
@@ -899,6 +895,15 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
     };
 
     let worktree_path_str = resolve_worktree_path(req, &git_root);
+    let source_git_root = match find_git_root_from_path(source_path) {
+        Ok(root) => root.to_string_lossy().into_owned(),
+        Err(error) => {
+            return WorktreeStatus::Error {
+                session_id,
+                message: format!("Failed to resolve source worktree root: {error}"),
+            };
+        }
+    };
 
     tracing::info!(
         target: WORKTREE_LOG,
@@ -1093,17 +1098,12 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
         "CREATE_OK: worktree created successfully"
     );
 
-    // source_path was shadowed as a String for the spawn_blocking closure above.
-    let source_git_root = find_git_root_from_path(Path::new(&req.source_path))
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-
     WorktreeStatus::Created {
         session_id: req.session_id.clone(),
         worktree_path: absolute_path,
         commit: report.commit,
         source_git_root,
-        copied_changes: Some(copied_changes),
+        copied_changes,
     }
 }
 
@@ -1115,16 +1115,9 @@ pub async fn remove_worktree(
     req: &RemoveWorktreeRequest,
     copy_context: &BackgroundCopyContext,
 ) -> Result<RemoveWorktreeResponse> {
-    let resolved = match (&req.worktree_path, &req.id_or_path) {
-        (Some(_), Some(_)) => {
-            anyhow::bail!("exactly one of worktreePath or idOrPath must be set, not both")
-        }
-        (Some(path), None) => path.clone(),
-        (None, Some(id)) => match resolve_worktree_by_id_or_path(id)? {
-            Some(p) => p.display().to_string(),
-            None => anyhow::bail!("worktree not found: {id}"),
-        },
-        (None, None) => anyhow::bail!("either worktreePath or idOrPath must be set"),
+    let resolved = match resolve_worktree_by_id_or_path(&req.id_or_path)? {
+        Some(path) => path.display().to_string(),
+        None => anyhow::bail!("worktree not found: {}", req.id_or_path),
     };
     let worktree_path = Path::new(&resolved);
 
@@ -1569,7 +1562,15 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
         "FORK_START: creating worktree from existing worktree"
     );
 
-    let git_root = find_git_root_from_path(source_path).ok();
+    let source_git_root = match find_git_root_from_path(source_path) {
+        Ok(root) => root.to_string_lossy().into_owned(),
+        Err(error) => {
+            return WorktreeStatus::Error {
+                session_id,
+                message: format!("Failed to resolve source worktree root: {error}"),
+            };
+        }
+    };
 
     let worktree_path_str = if let Some(resolved) = pinned_dest_path {
         resolved
@@ -1811,8 +1812,8 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
         session_id: req.new_session_id.clone(),
         worktree_path: absolute_path,
         commit: report.commit,
-        source_git_root: git_root.map(|p| p.to_string_lossy().to_string()),
-        copied_changes: Some(copied_changes),
+        source_git_root,
+        copied_changes,
     }
 }
 
@@ -2300,7 +2301,7 @@ pub struct ResumeSessionInWorktreeResponse {
     pub effective_cwd: String,
     pub remote_restored: bool,
     pub parent_session_id: String,
-    pub chat_messages_copied: usize,
+    pub surface_items_copied: usize,
     pub updates_copied: usize,
     /// Whether working-tree state was restored.
     #[serde(default)]

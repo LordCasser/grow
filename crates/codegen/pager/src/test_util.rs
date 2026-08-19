@@ -18,8 +18,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         forked_from: None,
         pending_prompts: std::collections::VecDeque::new(),
         next_queue_id: 0,
-        yolo_mode: false,
-        auto_mode: false,
+        permission_mode: shell::util::config::PermissionMode::Ask,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -135,10 +134,10 @@ impl GrowHomeFixture {
         std::fs::create_dir_all(&dir).unwrap();
         let mut v = serde_json::json!({
             "info": { "id": id, "cwd": cwd },
-            "session_summary": "auto summary",
             "created_at": "2026-07-01T00:00:00Z",
             "updated_at": "2026-07-01T00:00:00Z",
             "num_messages": 1,
+            "session_format_version": shell::session::persistence::SESSION_FORMAT_VERSION,
             "current_model_id": "grow-build",
         });
         if let Some(map) = extra.as_object() {

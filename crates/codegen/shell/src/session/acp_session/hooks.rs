@@ -58,16 +58,8 @@ fn classify(outcome: ReverseOutcome) -> (ClientHookResponse, ClientHookGateOutco
         ReverseOutcome::Responded(raw) => {
             match serde_json::from_str::<ClientHookResponse>(raw.get()) {
                 Ok(resp) => {
-                    // An unknown `decision` fails open like Continue, but is almost always a
-                    // client bug (typo / version skew), so surface it rather than allow silently.
                     let label = match resp.decision {
                         ClientHookDecision::Deny => ClientHookGateOutcome::Denied,
-                        ClientHookDecision::Other => {
-                            tracing::warn!(
-                                "grow/hooks/run returned an unknown decision value; failing open"
-                            );
-                            ClientHookGateOutcome::UnknownDecision
-                        }
                         ClientHookDecision::Continue => ClientHookGateOutcome::Proceeded,
                     };
                     (resp, label)
@@ -123,8 +115,7 @@ fn dispatch_params(dispatch: &ClientHookDispatch<'_>) -> Option<Arc<RawValue>> {
 impl SessionActor {
     /// Build a [`HookEventEnvelope`] with this session's common fields filled (session id,
     /// cwd, workspace root, timestamp). Single source of truth for envelope shape; every
-    /// fire site goes through here. The event name is canonicalized so alias
-    /// fire sites (`SubagentEnd`) serialize the canonical `hookEventName`.
+    /// fire site goes through here.
     pub(super) fn make_hook_envelope(
         &self,
         hook_event_name: HookEventName,
@@ -132,7 +123,7 @@ impl SessionActor {
         payload: HookPayload,
     ) -> HookEventEnvelope {
         HookEventEnvelope {
-            hook_event_name: hook_event_name.canonical(),
+            hook_event_name,
             session_id: self.session_id_string(),
             cwd: self.session_info.cwd.clone(),
             workspace_root: self.hook_workspace_root(),
@@ -148,11 +139,10 @@ impl SessionActor {
     /// Whether any hook source could consume `event`, letting the hot path skip
     /// building a payload when nothing is listening. Deliberately coarse: any
     /// on-disk registry activates every event (see
-    /// `has_enabled_hooks_for_canonical` for the precise check the stop gate
+    /// `has_enabled_hooks` for the precise check the stop gate
     /// uses), while client hooks are checked per event.
     pub(super) fn hook_event_active(&self, event: HookEventName) -> bool {
-        self.hook_registry.borrow().is_some()
-            || self.client_hooks.borrow().contains_key(&event.canonical())
+        self.hook_registry.borrow().is_some() || self.client_hooks.borrow().contains_key(&event)
     }
 
     /// Build the envelope for an observe-only event, fire observe client hooks for it, and
@@ -317,7 +307,7 @@ impl SessionActor {
         let Some(groups) = self
             .client_hooks
             .borrow()
-            .get(&envelope.hook_event_name.canonical())
+            .get(&envelope.hook_event_name)
             .cloned()
         else {
             return out;
@@ -408,7 +398,7 @@ impl SessionActor {
     /// runs even when no on-disk hook registry exists. No-op when nothing is registered.
     pub(super) fn notify_client_hooks(&self, envelope: &HookEventEnvelope) {
         let hooks = self.client_hooks.borrow();
-        let Some(groups) = hooks.get(&envelope.hook_event_name.canonical()) else {
+        let Some(groups) = hooks.get(&envelope.hook_event_name) else {
             return;
         };
         let match_value = envelope.payload.match_value();
@@ -450,12 +440,12 @@ mod tests {
         assert_eq!(cont.decision, ClientHookDecision::Continue);
         assert!(matches!(outcome, ClientHookGateOutcome::Proceeded));
 
-        // Unknown decision fails open (proceeds) but reports a distinct outcome.
+        // Unknown decisions are malformed and fail open.
         let (unknown, outcome) = classify(ReverseOutcome::Responded(raw(
             serde_json::json!({ "decision": "maybe_later" }),
         )));
-        assert_ne!(unknown.decision, ClientHookDecision::Deny);
-        assert!(matches!(outcome, ClientHookGateOutcome::UnknownDecision));
+        assert_eq!(unknown.decision, ClientHookDecision::Continue);
+        assert!(matches!(outcome, ClientHookGateOutcome::Malformed));
 
         // Every failure mode falls open to Continue, but reports a distinct outcome.
         let (malformed, outcome) = classify(ReverseOutcome::Responded(raw(

@@ -357,17 +357,15 @@ enum BackgroundDispatchKind {
     Subagent,
 }
 
-/// Categorise an assistant tool call as background-dispatching. Order
-/// matters: production traces ship the renamed `background` key
-/// before the legacy `is_background` alias. (F26)
+/// Categorise an assistant tool call as background-dispatching from the
+/// canonical terminal-tool input contract. (F26)
 fn background_kind(name: &str, arguments: &str) -> Option<BackgroundDispatchKind> {
     match name {
         "spawn_subagent" => Some(BackgroundDispatchKind::Subagent),
         "monitor" => Some(BackgroundDispatchKind::Terminal),
         "run_terminal_command" => {
             let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
-            let truthy = v.get("background").and_then(serde_json::Value::as_bool) == Some(true)
-                || v.get("is_background").and_then(serde_json::Value::as_bool) == Some(true);
+            let truthy = v.get("is_background").and_then(serde_json::Value::as_bool) == Some(true);
             truthy.then_some(BackgroundDispatchKind::Terminal)
         }
         _ => None,
@@ -1470,9 +1468,8 @@ mod tests {
         let items = vec![
             assistant_with_tool_calls(vec![
                 tc("s1", "spawn_subagent", "{}"),
-                tc("b1", "run_terminal_command", r#"{"background":true}"#),
-                tc("b2", "run_terminal_command", r#"{"is_background":true}"#),
-                tc("b3", "run_terminal_command", r#"{"background":false}"#),
+                tc("b1", "run_terminal_command", r#"{"is_background":true}"#),
+                tc("b2", "run_terminal_command", r#"{"is_background":false}"#),
                 tc("m1", "monitor", "{}"),
                 tc("s2", "spawn_subagent", "{}"),
             ]),

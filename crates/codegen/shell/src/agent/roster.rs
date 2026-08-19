@@ -67,7 +67,7 @@ pub struct RosterEntry {
     /// default" (or the session predates per-session effort persistence).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
-    pub yolo: bool,
+    pub permission_mode: diagnostics::enums::PermissionMode,
     pub activity: RosterActivity,
     /// `true` while a resident actor hosts the session (vs. read from disk).
     pub resident: bool,
@@ -134,7 +134,7 @@ pub(crate) fn merge_roster(
             || summary.source_workspace_dir.is_some(),
         model_id: Some(summary.current_model_id.0.to_string()),
         reasoning_effort: summary.reasoning_effort,
-        yolo: false,
+        permission_mode: diagnostics::enums::PermissionMode::Ask,
         activity: RosterActivity::Dormant,
         resident: false,
         last_change_unix_ms: summary.last_change_unix_ms(),
@@ -162,7 +162,9 @@ mod merge_roster_tests {
             default_model_id(),
         )
         .expect("summary");
-        s.generated_title = title.map(String::from);
+        s.title = title.map(String::from);
+        s.title_source = title.map(|_| chat_state::SessionTitleSource::User);
+        s.title_event_seq = title.map(|_| 1);
         s.last_active_at = chrono::DateTime::from_timestamp_millis(last_active_ms);
         s
     }
@@ -175,7 +177,7 @@ mod merge_roster_tests {
             is_worktree: false,
             model_id: Some("grow-4".into()),
             reasoning_effort: None,
-            yolo: false,
+            permission_mode: diagnostics::enums::PermissionMode::Ask,
             activity,
             resident: true,
             last_change_unix_ms,

@@ -76,8 +76,8 @@ impl StaticShellSnapshot {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .kill_on_drop(true);
-            crate::util::detach_command(&mut cmd);
-            cmd.envs(crate::util::pager_env());
+            tty_utils::detach_command(&mut cmd);
+            cmd.envs(tty_utils::pager_env());
             #[allow(clippy::disallowed_methods)] // probe killed on drop
             let mut child = cmd.spawn().ok()?;
 

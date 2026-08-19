@@ -636,7 +636,7 @@ fn render_prompt_info(
             theme.accent_system
         };
         segs.push((behavior_label.to_string(), base.fg(behavior_color)));
-        let (permission_label, permission_style) = if agent.session.is_yolo() {
+        let (permission_label, permission_style) = if agent.session.is_always_approve() {
             ("always-approve", base.fg(theme.warning))
         } else if agent.session.is_auto() {
             ("auto", base.fg(theme.accent_system))
@@ -1096,11 +1096,16 @@ mod tests {
             "workflow flag: {:?}",
             render(&a)
         );
-        minimal_api::set_yolo_mode_for_test(&mut a.session, true);
-        minimal_api::set_auto_mode_for_test(&mut a.session, true);
+        minimal_api::set_permission_mode_for_test(
+            &mut a.session,
+            shell::util::config::PermissionMode::AlwaysApprove,
+        );
         let text = render(&a);
-        assert!(text.contains("always-approve"), "yolo flag: {text:?}");
-        minimal_api::set_yolo_mode_for_test(&mut a.session, false);
+        assert!(text.contains("always-approve"), "always-approve flag: {text:?}");
+        minimal_api::set_permission_mode_for_test(
+            &mut a.session,
+            shell::util::config::PermissionMode::Auto,
+        );
         let text = render(&a);
         assert!(text.contains("auto"), "auto flag: {text:?}");
     }

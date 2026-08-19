@@ -697,15 +697,6 @@ pub fn parse_canonical_effort_token(token: &str) -> Option<ReasoningEffort> {
 }
 
 pub const REASONING_EFFORT_META_KEY: &str = "reasoningEffort";
-pub const SUPPORTS_REASONING_EFFORT_META_KEY: &str = "supportsReasoningEffort";
-
-pub fn supports_reasoning_effort_meta(
-    meta: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> bool {
-    meta.and_then(|m| m.get(SUPPORTS_REASONING_EFFORT_META_KEY))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
 
 /// Returns `None` on type-mismatch or unknown variant (logs a warn so we don't
 /// overwrite the user's persisted pref on the next save).
@@ -813,41 +804,22 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffortOption {
     }
 }
 
-/// Parse a JSON array of reasoning-effort options element-by-element, skipping
-/// (and warning on) any entry whose `value` fails to parse (forward-compat for
-/// tiers a newer server introduces). The single home for the skip-invalid rule,
-/// shared by the meta reader and the remote `/models` parser.
-pub fn parse_reasoning_effort_options(arr: &[serde_json::Value]) -> Vec<ReasoningEffortOption> {
-    arr.iter()
-        .filter_map(
-            |el| match serde_json::from_value::<ReasoningEffortOption>(el.clone()) {
-                Ok(opt) => Some(opt),
-                Err(err) => {
-                    tracing::warn!(value = %el, error = %err, "reasoningEfforts: skipping invalid entry");
-                    None
-                }
-            },
-        )
-        .collect()
-}
-
 /// Parse the per-model reasoning-effort menu from a model's ACP `meta`. Returns
-/// `None` when the key is absent, is not an array, or yields no usable options
-/// after skip-invalid — so "absent" and "present-but-unusable" collapse to the
-/// same fallback path in every consumer.
+/// `None` when the key is absent or the complete menu is invalid. A model either
+/// publishes one coherent menu or does not support selectable reasoning effort;
+/// consumers never invent or partially salvage a second capability contract.
 pub fn parse_reasoning_efforts_meta(
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<Vec<ReasoningEffortOption>> {
     let raw = meta?.get(REASONING_EFFORTS_META_KEY)?;
-    let arr = match raw.as_array() {
-        Some(arr) => arr,
-        None => {
-            tracing::warn!(value = %raw, "meta.reasoningEfforts: expected array, ignoring");
-            return None;
+    match serde_json::from_value::<Vec<ReasoningEffortOption>>(raw.clone()) {
+        Ok(options) if !options.is_empty() => Some(options),
+        Ok(_) => None,
+        Err(err) => {
+            tracing::warn!(value = %raw, error = %err, "meta.reasoningEfforts: invalid menu");
+            None
         }
-    };
-    let options = parse_reasoning_effort_options(arr);
-    (!options.is_empty()).then_some(options)
+    }
 }
 
 pub fn reasoning_efforts_meta_value(opts: &[ReasoningEffortOption]) -> serde_json::Value {
@@ -1032,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_reasoning_efforts_meta_skips_invalid_value() {
+    fn parse_reasoning_efforts_meta_rejects_partially_invalid_menu() {
         let meta = json!({
             REASONING_EFFORTS_META_KEY: [
                 { "value": "high" },
@@ -1043,16 +1015,13 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap();
-        let parsed = parse_reasoning_efforts_meta(Some(&meta)).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].value, ReasoningEffort::High);
-        assert_eq!(parsed[1].value, ReasoningEffort::Low);
+        assert!(parse_reasoning_efforts_meta(Some(&meta)).is_none());
     }
 
     #[test]
     fn parse_reasoning_efforts_meta_present_but_unusable_is_none() {
-        // Explicit empty, non-array, and all-entries-skip-invalidated all collapse
-        // to `None` so consumers fall back exactly as they do for an absent key.
+        // Empty, non-array, and invalid menus all mean the model does not
+        // publish a selectable reasoning-effort capability.
         for meta in [
             json!({ REASONING_EFFORTS_META_KEY: [] }),
             json!({ REASONING_EFFORTS_META_KEY: "nope" }),

@@ -120,14 +120,6 @@ impl ListPaneState {
         self.matcher.as_ref()
     }
 
-    /// Backward-compatible accessor: returns a `ListFilter` view when a
-    /// Filter-mode matcher is active.
-    pub fn filter(&self) -> Option<ListFilter> {
-        self.matcher
-            .as_ref()
-            .map(|m| ListFilter { matcher: m.clone() })
-    }
-
     /// Map visible index → physical index.
     ///
     /// When no filter is active, returns `vi` unchanged (identity).
@@ -507,11 +499,6 @@ impl ListPaneState {
     pub fn set_matcher(&mut self, matcher: Option<ListMatcher>) {
         self.matcher = matcher;
         self.filter_dirty = true;
-    }
-
-    /// Set or clear the filter (backward-compatible).
-    pub fn set_filter(&mut self, matcher: Option<ListMatcher>) {
-        self.set_matcher(matcher);
     }
 
     // =======================================================================

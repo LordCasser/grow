@@ -202,28 +202,22 @@ pub fn scheduler_tool_error(error: SchedulerError) -> tool_runtime::ToolError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ScheduledTask {
     pub id: String,
     pub interval_secs: u64,
     pub prompt: String,
-    #[serde(default = "default_recurring")]
     pub recurring: bool,
-    #[serde(default)]
     pub durable: bool,
-    #[serde(default)]
-    pub foreground: bool,
     pub created_at: DateTime<Utc>,
     pub last_fired_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
-    #[serde(default)]
     pub last_subagent_id: Option<String>,
-    #[serde(default)]
     pub iterations_since_fresh: u32,
     /// Set when the prompt is patched: the next fire starts a fresh
     /// transcript instead of resuming the old task's. The anchor itself is
     /// kept until then so the in-flight guard can still see a running
     /// iteration.
-    #[serde(default)]
     pub chain_reset_pending: bool,
 }
 
@@ -232,10 +226,6 @@ pub const LOOP_FRESH_CHAIN_EVERY: u32 = 10;
 pub const LOOP_COMPLETION_OUTPUT_CAP: usize = 4_000;
 
 const MAX_SCHEDULER_TRANSITIONS: usize = 50;
-
-fn default_recurring() -> bool {
-    true
-}
 
 impl ScheduledTask {
     pub fn new(interval_secs: u64, prompt: String, recurring: bool, durable: bool) -> Self {
@@ -263,7 +253,6 @@ impl ScheduledTask {
             prompt,
             recurring,
             durable,
-            foreground: false,
             created_at,
             last_fired_at: None,
             expires_at: if recurring {
@@ -392,12 +381,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_state_defaults_recurring_and_durable_fields() {
+    fn incomplete_task_state_is_rejected() {
         let json = r#"{"id":"abc123","intervalSecs":300,"prompt":"check",
                        "createdAt":"2026-01-01T00:00:00Z",
                        "lastFiredAt":null,"expiresAt":null}"#;
-        let task: ScheduledTask = serde_json::from_str(json).unwrap();
-        assert!(task.recurring && !task.durable);
+        assert!(serde_json::from_str::<ScheduledTask>(json).is_err());
     }
 
     #[test]

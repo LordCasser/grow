@@ -17,26 +17,26 @@ pub(crate) fn task_model_error_for_catalog(
     available: &IndexMap<String, ModelEntry>,
 ) -> Option<String> {
     let is_available = |entry: &ModelEntry| entry.info.user_selectable && !entry.info.hidden;
-    if config::find_model_by_id(available, requested).is_some_and(&is_available) {
+    if config::find_model_by_catalog_id(available, requested).is_some_and(&is_available) {
         return None;
     }
 
-    let mut slugs = available
+    let mut catalog_ids = available
         .iter()
         .filter(|(_, entry)| is_available(entry))
-        .map(|(slug, _)| slug.as_str())
+        .map(|(id, _)| id.as_str())
         .collect::<Vec<_>>();
-    slugs.sort_unstable();
-    let guidance = if slugs.is_empty() {
-        "No valid model slugs are currently available. Omit `model` to inherit the parent model."
+    catalog_ids.sort_unstable();
+    let guidance = if catalog_ids.is_empty() {
+        "No valid model IDs are currently available. Omit `model` to inherit the parent model."
             .to_string()
     } else {
         format!(
-            "Valid model slugs: {}. Omit `model` to inherit the parent model.",
-            slugs.join(", ")
+            "Valid model IDs: {}. Omit `model` to inherit the parent model.",
+            catalog_ids.join(", ")
         )
     };
-    Some(format!("Unknown Task.model slug '{requested}'. {guidance}"))
+    Some(format!("Unknown Task.model ID '{requested}'. {guidance}"))
 }
 
 /// Thread-safe model manager.
@@ -263,15 +263,19 @@ impl ModelsManager {
         self.inner.catalog.write().models.insert(id.into(), entry);
     }
 
-    /// Whether the given model supports reasoning effort according to the catalog.
-    pub fn model_supports_reasoning_effort(&self, model_id: &str) -> bool {
+    pub fn model_offers_reasoning_effort(&self, model_id: &str, effort: ReasoningEffort) -> bool {
         self.inner
             .catalog
             .read()
             .models
             .get(model_id)
-            .map(|e| e.info().supports_reasoning_effort)
-            .unwrap_or(false)
+            .is_some_and(|entry| {
+                entry
+                    .info()
+                    .reasoning_efforts
+                    .iter()
+                    .any(|option| option.value == effort)
+            })
     }
 
     pub fn model_default_reasoning_effort(&self, model_id: &str) -> Option<ReasoningEffort> {
@@ -280,7 +284,7 @@ impl ModelsManager {
             .read()
             .models
             .get(model_id)
-            .and_then(|e| e.info().reasoning_effort)
+            .and_then(|entry| entry.info().default_reasoning_effort())
     }
 
     /// The raw catalog `reasoning_efforts` list for `model_id` with no fallback,
@@ -321,9 +325,8 @@ impl ModelsManager {
     /// Catalog opt-in to display the served-checkpoint fingerprint for this model.
     pub fn model_show_model_fingerprint(&self, model_id: &str) -> bool {
         let cat = self.inner.catalog.read();
-        let models = &cat.models;
-        resolve_catalog_key(models, &acp::ModelId::new(model_id))
-            .and_then(|key| models.get(key.0.as_ref()))
+        cat.models
+            .get(model_id)
             .map(|e| e.info().show_model_fingerprint)
             .unwrap_or(false)
     }
@@ -338,11 +341,9 @@ impl ModelsManager {
             .clone()
     }
 
-    /// Whether `model_id` resolves in the current catalog — as a config key
+    /// Whether the exact `provider/model` identity exists in the catalog.
     pub fn model_in_catalog(&self, model_id: &str) -> bool {
-        let cat = self.inner.catalog.read();
-        let models = &cat.models;
-        resolve_catalog_key(models, &acp::ModelId::new(model_id)).is_some()
+        self.inner.catalog.read().models.contains_key(model_id)
     }
 
     // ── Mutations ───────────────────────────────────────────────────
@@ -393,10 +394,10 @@ impl ModelsManager {
     }
 
     /// Build the live provider config for one session's selected catalog ID.
-    /// Resolution accepts either the catalog slug or the provider model ID.
+    /// `model_id` is the exact `provider/model` catalog identity.
     pub fn sampling_config_for_model(&self, model_id: &str) -> Option<SamplingConfig> {
         let state = self.inner.catalog.read();
-        let model = config::find_model_by_id(&state.models, model_id)?;
+        let model = config::find_model_by_catalog_id(&state.models, model_id)?;
         Some(sampling_config_for_model(
             model,
             resolve_credentials(model),

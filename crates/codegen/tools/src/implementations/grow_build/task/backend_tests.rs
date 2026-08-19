@@ -130,7 +130,6 @@ async fn channel_backend_query_found() {
                 },
                 started_at_epoch_ms: 1000,
                 duration_ms: 200,
-                persona: Some("reviewer".to_string()),
             }))
             .unwrap();
     });
@@ -142,7 +141,6 @@ async fn channel_backend_query_found() {
     assert_eq!(snap.subagent_type, "explore");
     assert_eq!(snap.started_at_epoch_ms, 1000);
     assert_eq!(snap.duration_ms, 200);
-    assert_eq!(snap.persona.as_deref(), Some("reviewer"));
     match &snap.status {
         super::super::types::SubagentSnapshotStatus::Completed {
             output,

@@ -23,8 +23,8 @@ use common::{create_test_client, test_sampler_config};
 use sampler::RetryPolicy;
 use sampling_types::doom_loop::{DoomLoopSignalKind, SAMPLE_CHECK_EVENT_DATA_CUMULATIVE};
 use shell::sampling::{
-    ApiBackend, Client, ConversationItem, ConversationRequest, RequestId, SamplerActor,
-    SamplerHandle,
+    ApiBackend, ConversationItem, ConversationRequest, RequestId, SamplerActor, SamplerHandle,
+    SamplingClient,
 };
 use test_support::sse::{
     responses_api_doom_loop_check_events, responses_api_doom_loop_terminal_only_events,
@@ -37,10 +37,10 @@ const MODEL: &str = "test-model";
 
 /// A sampling client with the doom-loop check enabled (default tunables:
 /// `max_threshold` 8, `max_retries` 2).
-fn doom_loop_client(base_url: &str) -> Client {
+fn doom_loop_client(base_url: &str) -> SamplingClient {
     let mut config = test_sampler_config(base_url, ApiBackend::Responses, &[]);
     config.doom_loop_recovery = Some(Default::default());
-    Client::new(config).unwrap()
+    SamplingClient::new(config).unwrap()
 }
 
 /// A sampler actor (the rung that owns retry/recovery) with the given
@@ -557,14 +557,21 @@ async fn headless_config_enables_doom_loop_check_header() {
     .expect("write config.toml");
 
     let mut cmd = tokio::process::Command::new(test_support::grow_binary());
-    cmd.args(["-p", "say hi", "--yolo", "--output-format", "json"])
-        .arg("--cwd")
-        .arg(workdir.workspace())
-        .current_dir(workdir.workspace())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+    cmd.args([
+        "-p",
+        "say hi",
+        "--permission-mode",
+        "always-approve",
+        "--output-format",
+        "json",
+    ])
+    .arg("--cwd")
+    .arg(workdir.workspace())
+    .current_dir(workdir.workspace())
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
 
     let result = test_support::run_headless_in_sandbox(cmd, sandbox).await;
     test_support::assert_headless_success(&result, "doom-loop header e2e", Some(&server));

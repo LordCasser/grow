@@ -493,22 +493,10 @@ pub struct FileContentEntry {
 pub struct FileHunkData {
     /// Hunks for this file (each hunk includes its own patch fragment)
     pub hunks: Vec<Arc<Hunk>>,
-
-    // === Explicit content status (new fields) ===
     /// Baseline content with explicit status (git HEAD)
     pub baseline: FileContentView,
     /// Current content with explicit status (on disk)
     pub current: FileContentView,
-
-    // === Legacy fields for backward compatibility ===
-    // These are populated from FileContentView for existing callers.
-    // Will be deprecated once all callers migrate to baseline/current views.
-    /// Baseline content (git HEAD) - legacy, use `baseline.content` instead
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_content: Option<String>,
-    /// Current content (on disk) - legacy, use `current.content` instead
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_content: Option<String>,
 }
 
 // ============================================================================
@@ -523,8 +511,7 @@ use crate::actor::state::FileContentState;
 /// Preserves the full FileContentState (including Binary/TooLarge) for correctness
 /// in fork and cross-session sync flows.
 ///
-/// `Serialize`/`Deserialize` let the rewind checkpoint store persist this to disk
-/// (see [`HunkTurnDelta`]).
+/// `Serialize`/`Deserialize` support session snapshot and fork transfer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileHunkStateSnapshot {
     /// Content at git HEAD or session start (baseline for diffing).
@@ -558,23 +545,6 @@ pub struct HunkTrackerSnapshot {
     pub turn_index: HashMap<usize, HashSet<HunkId>>,
     /// Session-level stats (accepted/rejected counts).
     pub session_stats: SessionStats,
-}
-
-/// Incremental, single-turn slice of hunk-tracker state, captured per
-/// `prompt_index` for the rewind checkpoint store: snapshots of the turn's
-/// touched files plus its hunk-id set, never a whole-tracker copy. Restore
-/// composes deltas (ascending, last write per path wins) into a
-/// [`HunkTrackerSnapshot`].
-///
-/// `Serialize`/`Deserialize` let the checkpoint store persist a delta to disk.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HunkTurnDelta {
-    /// The turn this delta belongs to.
-    pub prompt_index: usize,
-    /// Snapshots of the files touched in this turn (those owning the turn's hunks).
-    pub file_states: HashMap<PathBuf, FileHunkStateSnapshot>,
-    /// The hunk IDs attributed to this turn (`turn_index[prompt_index]`).
-    pub hunk_ids: HashSet<HunkId>,
 }
 
 impl HunkTrackerSnapshot {

@@ -167,19 +167,19 @@ mod tests {
     /// Single-letter `/p` ties many `p*` commands at the same nucleo score;
     /// ordering is entirely secondary tiebreaks (display/builtin/MRU/etc.).
     #[test]
-    fn query_p_ties_personas_and_pager_headless_at_same_score() {
+    fn query_p_ties_prompts_and_pager_headless_at_same_score() {
         let mut matcher = FuzzyMatcher::new();
-        let items = ["personas", "pager-headless", "plan", "plugins"];
+        let items = ["prompts", "pager-headless", "plan", "plugins"];
         let hits = matcher.rank(&items, "p", items.len(), |item| item);
         let score_of = |name: &str| -> Option<u32> {
             hits.iter()
                 .find(|&&(idx, _)| items[idx] == name)
                 .map(|&(_, s)| s)
         };
-        let personas = score_of("personas").expect("personas matches p");
+        let prompts = score_of("prompts").expect("prompts matches p");
         let pager = score_of("pager-headless").expect("pager-headless matches p");
-        assert_eq!(personas, pager, "expected equal fuzzy scores for /p case");
-        assert!(personas > 0);
+        assert_eq!(prompts, pager, "expected equal fuzzy scores for /p case");
+        assert!(prompts > 0);
         // Matcher limit=1 secondary sort is ascending key text → pager-headless wins.
         let top1 = matcher.rank(&items, "p", 1, |item| item);
         assert_eq!(items[top1[0].0], "pager-headless");

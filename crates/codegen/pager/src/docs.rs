@@ -1,8 +1,7 @@
 //! In-app how-to documentation data (embedded markdown).
 //!
 //! Single source of truth: two static arrays (`USER_GUIDE`, `REFERENCE_DOCS`)
-//! hold every doc. All lookups are zero-allocation; `DocEntry` exists only for
-//! backward compatibility with the TUI doc picker.
+//! hold every doc. All lookups and picker entries borrow those arrays.
 
 /// A compile-time document entry. All fields are `&'static str`.
 #[derive(Debug)]
@@ -11,25 +10,6 @@ pub struct Doc {
     pub title: &'static str,
     pub description: &'static str,
     pub content: &'static str,
-}
-
-/// Owned variant for the TUI doc picker (backward compat).
-#[derive(Debug, Clone)]
-pub struct DocEntry {
-    pub title: String,
-    pub description: String,
-    /// Embedded markdown content.
-    pub content: &'static str,
-}
-
-impl From<&Doc> for DocEntry {
-    fn from(d: &Doc) -> Self {
-        Self {
-            title: d.title.into(),
-            description: d.description.into(),
-            content: d.content,
-        }
-    }
 }
 
 // ── Static doc tables ────────────────────────────────────────────────────────
@@ -123,7 +103,7 @@ pub static USER_GUIDE: &[Doc] = &[
     ),
     guide!(
         "16-subagents.md",
-        "Subagents and Personas",
+        "Subagents",
         "Spawning parallel child agents with specialized roles"
     ),
     guide!(
@@ -189,20 +169,19 @@ static REFERENCE_DOCS: &[Doc] = &[
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
+/// Every bundled document in display order.
+pub fn all_docs() -> impl Iterator<Item = &'static Doc> {
+    USER_GUIDE.iter().chain(REFERENCE_DOCS.iter())
+}
+
 /// Find a doc by title (case-insensitive). Returns the static entry.
 pub fn find_doc(title: &str) -> Option<&'static Doc> {
-    USER_GUIDE
-        .iter()
-        .chain(REFERENCE_DOCS.iter())
-        .find(|d| d.title.eq_ignore_ascii_case(title))
+    all_docs().find(|d| d.title.eq_ignore_ascii_case(title))
 }
 
 /// All doc titles, zero allocation.
 pub fn all_titles() -> impl Iterator<Item = &'static str> {
-    USER_GUIDE
-        .iter()
-        .chain(REFERENCE_DOCS.iter())
-        .map(|d| d.title)
+    all_docs().map(|d| d.title)
 }
 
 /// Returns the content of a how-to document by exact title match (case-insensitive).
@@ -213,15 +192,6 @@ pub fn get_howto_doc(title: &str) -> Option<&'static str> {
 /// Returns a list of available how-to titles for the model to choose from.
 pub fn list_howto_titles() -> Vec<String> {
     all_titles().map(String::from).collect()
-}
-
-/// Returns all docs as owned `DocEntry` values for the TUI doc picker.
-pub fn default_howto_entries() -> Vec<DocEntry> {
-    USER_GUIDE
-        .iter()
-        .chain(REFERENCE_DOCS.iter())
-        .map(DocEntry::from)
-        .collect()
 }
 
 /// Extract user-guide docs to `<grow_home>/docs/user-guide/`.
@@ -300,8 +270,8 @@ mod tests {
     }
 
     #[test]
-    fn default_howto_entries_includes_all_user_guide_docs() {
-        let entries = default_howto_entries();
+    fn all_docs_includes_all_user_guide_docs() {
+        let entries: Vec<_> = all_docs().collect();
         assert_eq!(entries.len(), USER_GUIDE.len() + REFERENCE_DOCS.len());
         for (i, doc) in USER_GUIDE.iter().enumerate() {
             assert_eq!(entries[i].title, doc.title, "Entry {} title mismatch", i);

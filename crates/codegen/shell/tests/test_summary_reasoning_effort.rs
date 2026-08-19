@@ -56,18 +56,24 @@ async fn test_fresh_session_persists_reasoning_effort() {
             .expect("start mock server");
         let workdir = git_workdir();
 
-        // Configure the mock catalog's model with an explicit effort via the
-        // user config override (the same path a remote settings catalog entry or
-        // `--effort` would populate).
+        // Configure the canonical provider model with an explicit default.
         let sandbox = TestSandbox::new();
         let grow_dir = sandbox.grow_home();
         std::fs::write(
             grow_dir.join("config.toml"),
-            r#"
-[model.test-model]
-supports_reasoning_effort = true
-reasoning_effort = "high"
+            format!(
+                r#"[models]
+default = "mock/test-model"
+
+[provider.mock.options]
+base_url = "{}"
+
+[provider.mock.models.test-model]
+context_window = 200000
+reasoning_efforts = [{{ value = "high", default = true }}]
 "#,
+                server.url()
+            ),
         )
         .expect("write config.toml");
 

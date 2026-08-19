@@ -76,43 +76,6 @@ pub fn resolve_mcp_auto_restart(
     .value
 }
 
-/// Resolve `mcp.push_server_status` for a session.
-///
-/// Thin wrapper around the canonical
-/// [`crate::agent::config::resolve_mcp_push_server_status`] that
-/// mirrors [`resolve_mcp_liveness_watchers`].
-///
-/// Pulls each layer from its TOML / runtime source:
-///
-/// | Layer        | Source                                                          |
-/// |--------------|-----------------------------------------------------------------|
-/// | requirement  | `[features] mcp_push_server_status` in `requirements.toml`      |
-/// | cli          | (none — no CLI flag)                                            |
-/// | env          | `GROW_MCP_PUSH_SERVER_STATUS` (handled by `BoolFlag::env`)      |
-/// | config       | `[features] mcp_push_server_status` in `~/.grow/config.toml`    |
-/// | managed      | `[features] mcp_push_server_status` in `managed_config.toml`    |
-/// | feature_flag | (none yet — remote settings plumbing TBD)                            |
-/// | default      | `true`                                                          |
-///
-/// Returns the resolved boolean.
-pub fn resolve_mcp_push_server_status(
-    requirements: Option<&TomlValue>,
-    user: Option<&TomlValue>,
-    managed: Option<&TomlValue>,
-) -> bool {
-    fn from_toml(v: Option<&TomlValue>) -> Option<bool> {
-        v?.get("features")?.get("mcp_push_server_status")?.as_bool()
-    }
-    crate::agent::config::resolve_mcp_push_server_status(
-        from_toml(requirements),
-        /* cli          */ None,
-        from_toml(user),
-        from_toml(managed),
-        /* feature_flag */ None,
-    )
-    .value
-}
-
 /// Resolve `mcp.recursive_config_watch` for the leader's
 /// `ConfigFileWatcher` spawn path.
 ///

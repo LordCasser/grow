@@ -54,13 +54,13 @@ async fn endline_wakeups_close_with_markers() {
     content.set_response("STATUS_FALLBACK");
 
     let binary = pager_binary().expect("resolve pager binary");
-    // --yolo skips the bash permission prompt; --trust skips the folder-trust gate.
+    // --permission-mode always-approve skips the bash permission prompt; --trust skips the folder-trust gate.
     let mut harness = PtyHarness::spawn_with_content_in_dir(
         &binary,
         ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

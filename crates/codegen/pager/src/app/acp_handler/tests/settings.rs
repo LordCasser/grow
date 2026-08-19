@@ -1,134 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    /// Build an `grow/settings/update` carrying only the scheduler flag.
-    fn scheduler_background_loops_update(value: bool) -> acp::ExtNotification {
-        acp::ExtNotification::new(
-            "grow/settings/update",
-            std::sync::Arc::from(
-                serde_json::value::to_raw_value(&serde_json::json!({
-                    "scheduler_background_loops": value
-                }))
-                .unwrap(),
-            ),
-        )
-    }
-
-    /// Drain the `/loop` instruction the pager actually stored for a session.
-    fn loop_instruction(app: &mut AppView, args: &str) -> String {
-        use crate::app::actions::Action;
-
-        // `/loop` is `required_tools()`-gated and the registry fails closed
-        // until the toolset is advertised, so a bare test agent never reaches
-        // the command.
-        if let Some(agent) = app.agents.get_mut(&AgentId(0)) {
-            agent
-                .prompt
-                .slash_controller
-                .registry_mut()
-                .set_available_tools(
-                    [tools::implementations::grow_build::SCHEDULER_CREATE_TOOL_NAME]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                );
-        }
-        let effects =
-            crate::app::dispatch::dispatch(Action::SendPrompt(format!("/loop {args}")), app);
-        let blocks = effects
-            .iter()
-            .find_map(|e| match e {
-                Effect::SendPromptBlocks { blocks, .. } => Some(blocks),
-                _ => None,
-            })
-            .expect("/loop must enqueue an instruction and drain it");
-        match &blocks[0] {
-            acp::ContentBlock::Text(text) => text.text.clone(),
-            other => panic!("expected a text prompt block, got {other:?}"),
-        }
-    }
-
-    /// `/loop`'s wording must describe THIS session's fires. The shell pins the
-    /// fire mode when a session's actor spawns, so a mid-session settings push
-    /// carrying the opposite value must not change the instruction: describing
-    /// detached fires as in-session drops the self-contained state those fires
-    /// need.
-    #[test]
-    fn loop_fire_mode_follows_session_not_later_settings_push() {
-        use crate::app::actions::{Action, TaskResult};
-        use tools::implementations::grow_build::{
-            LoopFireMode, loop_schedule_instruction,
-        };
-
-        let mut app = make_app_with_agent("sess-loop");
-        // Seed says detached; only the session's own answer can produce the
-        // in-session wording asserted below.
-        app.scheduler_background_loops_seed = true;
-        crate::app::dispatch::dispatch(
-            Action::TaskComplete(TaskResult::SessionCreated {
-                agent_id: AgentId(0),
-                session_id: acp::SessionId::new("sess-loop"),
-                models: None,
-                scheduler_background_loops: Some(false),
-            }),
-            &mut app,
-        );
-
-        assert!(handle_ext_notification(
-            &scheduler_background_loops_update(true),
-            &mut app
-        ));
-
-        assert_eq!(
-            loop_instruction(&mut app, "5m check ci"),
-            loop_schedule_instruction("5m check ci", LoopFireMode::InSession),
-            "a pushed flip must not re-describe fires this session already pinned"
-        );
-    }
-
-    /// The value is session-scoped, not frozen for the process: resuming a
-    /// session adopts the mode that resume's spawn pinned.
-    #[test]
-    fn loop_fire_mode_adopts_the_loaded_session_value() {
-        use crate::app::actions::{Action, TaskResult};
-        use tools::implementations::grow_build::{
-            LoopFireMode, loop_schedule_instruction,
-        };
-
-        let mut app = make_app_with_agent("sess-loop-load");
-        // Opposite of both the seed and the pre-resume value, so only the load
-        // response can produce the detached wording asserted below.
-        app.scheduler_background_loops_seed = false;
-        crate::app::dispatch::dispatch(
-            Action::TaskComplete(TaskResult::SessionCreated {
-                agent_id: AgentId(0),
-                session_id: acp::SessionId::new("sess-loop-load"),
-                models: None,
-                scheduler_background_loops: Some(false),
-            }),
-            &mut app,
-        );
-        crate::app::dispatch::dispatch(
-            Action::TaskComplete(TaskResult::SessionLoaded {
-                agent_id: AgentId(0),
-                session_id: acp::SessionId::new("sess-loop-load"),
-                models: None,
-                code_restored: false,
-                restore_summary: None,
-                restore_degree: None,
-                foreground: None,
-                scheduler_background_loops: Some(true),
-            }),
-            &mut app,
-        );
-
-        assert_eq!(
-            loop_instruction(&mut app, "5m check ci"),
-            loop_schedule_instruction("5m check ci", LoopFireMode::Detached),
-            "resume must adopt the value its own spawn pinned"
-        );
-    }
-
     #[test]
     fn settings_update_clearing_group_tool_verbs_reverts_to_default() {
         // Expected values come from the same chain the handler resolves, so the
@@ -184,102 +56,6 @@
         crate::appearance::cache::set_group_tool_verbs(true);
     }
 
-    #[test]
-    fn settings_update_clearing_collapsed_edit_blocks_reverts_to_default() {
-        // Expected values come from the same chain the handler resolves, so the
-        // test holds regardless of host config/env (a local `[ui]` or env
-        // override legitimately beats the remote tier on both legs).
-        let requirements = shell::config::load_merged_requirements();
-        let user_config = shell::config::load_from_disk().ok();
-        let managed_config = shell::config::load_managed_config().ok();
-        let resolve = |remote_val: Option<bool>| {
-            let remote = shell::util::config::RemoteSettings {
-                collapsed_edit_blocks: remote_val,
-                ..Default::default()
-            };
-            shell::util::config::resolve_collapsed_edit_blocks(
-                requirements.as_ref(),
-                user_config.as_ref(),
-                managed_config.as_ref(),
-                Some(&remote),
-            )
-            .value
-        };
-        let expect_on = resolve(Some(true));
-        let expect_cleared = resolve(None);
-        let mut app = make_app_with_agent("sess-1");
-
-        // remote settings enable arrives (the team rollout path).
-        assert!(handle_ext_notification(
-            &collapsed_edit_blocks_settings_update(Some(true)),
-            &mut app
-        ));
-        assert_eq!(
-            crate::appearance::cache::load_collapsed_edit_blocks(),
-            expect_on,
-            "remote Some(true) must re-resolve into the cache"
-        );
-
-        // remote settings clears the remote tier (field absent → None). Seed the
-        // cache opposite to the expected outcome — the latched remote enable —
-        // so only a real re-resolve can pass; the update must revert it to the
-        // local/default resolution instead of skipping the field. An old
-        // payload without the field takes this same path.
-        crate::appearance::cache::set_collapsed_edit_blocks(!expect_cleared);
-        assert!(handle_ext_notification(
-            &collapsed_edit_blocks_settings_update(None),
-            &mut app
-        ));
-        assert_eq!(
-            crate::appearance::cache::load_collapsed_edit_blocks(),
-            expect_cleared,
-            "cleared remote tier must re-resolve the full chain, not stay latched"
-        );
-        // Restore default (off) for other tests that share the process cache.
-        crate::appearance::cache::set_collapsed_edit_blocks(false);
-    }
-
-    /// A remote collapsed_edit_blocks flip re-materializes on-default Edit
-    /// rows in the live transcript (the same policy the settings toggle
-    /// applies via `apply_collapsed_edit_blocks_flip`).
-    #[test]
-    fn settings_update_collapsed_edit_blocks_flip_refolds_live_edits() {
-        use crate::scrollback::types::DisplayMode;
-
-        crate::appearance::cache::set_collapsed_edit_blocks(false);
-        let mut app = make_app_with_agent("sess-1");
-        let id = {
-            let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
-            sb.push_block(crate::scrollback::block::RenderBlock::ToolCall(
-                crate::scrollback::blocks::tool::ToolCallBlock::Edit(
-                    crate::scrollback::blocks::tool::EditToolCallBlock::new("f.rs", vec![]),
-                ),
-            ))
-        };
-        assert_eq!(
-            app.agents[&AgentId(0)].scrollback.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded,
-            "flag off materializes expanded"
-        );
-
-        assert!(handle_ext_notification(
-            &collapsed_edit_blocks_settings_update(Some(true)),
-            &mut app
-        ));
-        if !crate::appearance::cache::load_collapsed_edit_blocks() {
-            // A host-level env/config override outranked the remote value, so
-            // no real flip occurred and the re-fold didn't run — nothing to
-            // assert on this machine (CI runs with clean layers).
-            return;
-        }
-        assert_eq!(
-            app.agents[&AgentId(0)].scrollback.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Collapsed,
-            "remote enable must collapse the on-default Edit row"
-        );
-        // Restore default (off) for other tests that share the process cache.
-        crate::appearance::cache::set_collapsed_edit_blocks(false);
-    }
 
     /// The live-refresh flip mirrors `set_group_tool_verbs_inner`'s stale
     /// group-expansion cleanup: a previously expanded verb slot must not
@@ -339,7 +115,7 @@
         let mut app = make_app_two_agents();
         app.auto_mode_gate = true;
         for agent in app.agents.values_mut() {
-            agent.session.auto_mode = true;
+            agent.session.permission_mode = shell::util::config::PermissionMode::Auto;
         }
         // Active tab's mirror is NOT "auto" — the old bug's skip condition.
         app.current_ui.permission_mode = Some("ask".into());
@@ -357,7 +133,7 @@
         assert!(!app.auto_mode_gate, "gate must be off after kill-switch");
         for (id, agent) in &app.agents {
             assert!(
-                !agent.session.auto_mode,
+                !agent.session.is_auto(),
                 "agent {id:?} auto_mode must be cleared by the kill-switch"
             );
         }
@@ -368,17 +144,20 @@
         // The kill-switch must tell live sessions to leave Auto, else the agent
         // keeps classifier-approving while the UI shows "Ask". The notification is
         // CLIENT-scoped, so exactly ONE fires regardless of how many tabs were in
-        // auto; it omits `yolo_mode` so a sibling always-approve tab is preserved.
+        // auto; it omits `always_approve_mode` so a sibling always-approve tab is preserved.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = AppView::new(tx, ModelState::default(), Vec::new());
         // Two auto agents + one always-approve sibling, all with live sessions.
         app.agents.insert(AgentId(0), make_agent(Some("sess-0")));
         app.agents.insert(AgentId(1), make_agent(Some("sess-1")));
-        app.agents.insert(AgentId(2), make_agent(Some("sess-yolo")));
+        app.agents.insert(AgentId(2), make_agent(Some("sess-always-approve")));
         app.auto_mode_gate = true;
-        app.agents.get_mut(&AgentId(0)).unwrap().session.auto_mode = true;
-        app.agents.get_mut(&AgentId(1)).unwrap().session.auto_mode = true;
-        app.agents.get_mut(&AgentId(2)).unwrap().session.yolo_mode = true;
+        app.agents.get_mut(&AgentId(0)).unwrap().session.permission_mode =
+            shell::util::config::PermissionMode::Auto;
+        app.agents.get_mut(&AgentId(1)).unwrap().session.permission_mode =
+            shell::util::config::PermissionMode::Auto;
+        app.agents.get_mut(&AgentId(2)).unwrap().session.permission_mode =
+            shell::util::config::PermissionMode::AlwaysApprove;
 
         let killswitch = acp::ExtNotification::new(
             "grow/settings/update",
@@ -393,30 +172,31 @@
         assert!(!app.auto_mode_gate, "gate must be off after kill-switch");
         // Sibling always-approve is untouched — the kill-switch clears only auto.
         assert!(
-            app.agents[&AgentId(2)].session.is_yolo(),
-            "sibling always-approve must stay yolo after the auto kill-switch"
+            app.agents[&AgentId(2)].session.is_always_approve(),
+            "sibling always-approve must stay always-approve after the auto kill-switch"
         );
 
-        let mut leave_auto_notifs = 0;
+        let mut leave_auto_sessions = std::collections::BTreeSet::new();
         while let Ok(msg) = rx.try_recv() {
             if let acp_transport::AcpAgentMessage::ExtNotification(args) = msg {
-                if args.request.method.as_ref() != "grow/yolo_mode_changed" {
+                if args.request.method.as_ref() != "grow/permission_mode_changed" {
                     continue;
                 }
                 let params: serde_json::Value =
                     serde_json::from_str(args.request.params.get()).unwrap();
-                assert_eq!(params["auto_mode"], serde_json::json!(false));
-                assert_eq!(params["permission_mode"], serde_json::json!("ask"));
-                assert!(
-                    params.get("yolo_mode").is_none(),
-                    "yolo_mode must be omitted so a sibling always-approve session is preserved"
+                assert_eq!(params["permissionMode"], serde_json::json!("ask"));
+                leave_auto_sessions.insert(
+                    params["sessionId"]
+                        .as_str()
+                        .expect("session-scoped notification")
+                        .to_string(),
                 );
-                leave_auto_notifs += 1;
             }
         }
         assert_eq!(
-            leave_auto_notifs, 1,
-            "exactly one client-scoped leave-auto notification, regardless of agent count"
+            leave_auto_sessions,
+            std::collections::BTreeSet::from(["sess-0".to_string(), "sess-1".to_string()]),
+            "only Auto sessions receive a session-scoped Ask transition"
         );
     }
 
@@ -446,16 +226,16 @@
         assert!(!app.show_resolved_model, "other settings fields still apply");
     }
 
-    /// User-owned mode must not re-arm default_yolo or rewrite UI from remote.
+    /// User-owned mode must not re-arm default_always_approve or rewrite UI from remote.
     #[test]
-    fn permission_mode_user_claim_blocks_default_yolo_rearm() {
+    fn permission_mode_user_claim_blocks_default_always_approve_rearm() {
         let mut app = make_app_with_agent("sess-user-claim");
         app.auto_mode_gate = true;
         app.permission_mode_from_soft_default = false;
         app.current_ui.permission_mode = Some("ask".into());
-        app.default_yolo = false;
+        app.default_permission_mode = shell::util::config::PermissionMode::Ask;
 
-        let apply_yolo = acp::ExtNotification::new(
+        let apply_always_approve = acp::ExtNotification::new(
             "grow/settings/update",
             serde_json::value::to_raw_value(&serde_json::json!({
                 "permission_mode": "always-approve",
@@ -463,10 +243,10 @@
             .unwrap()
             .into(),
         );
-        let _ = handle_ext_notification(&apply_yolo, &mut app);
+        let _ = handle_ext_notification(&apply_always_approve, &mut app);
         assert!(
-            !app.default_yolo,
-            "user-claimed mode must not re-arm default_yolo from remote always-approve"
+            !app.default_permission_mode.is_always_approve(),
+            "user-claimed mode must not re-arm default_always_approve from remote always-approve"
         );
         assert_eq!(
             app.current_ui.permission_mode.as_deref(),
@@ -484,7 +264,7 @@
         let mut app = make_app_with_agent("sess-omit-pm");
         app.permission_mode_from_soft_default = true;
         app.current_ui.permission_mode = Some("auto".into());
-        app.default_yolo = false;
+        app.default_permission_mode = shell::util::config::PermissionMode::Ask;
         app.auto_mode_gate = true;
 
         let unrelated = acp::ExtNotification::new(
@@ -506,8 +286,8 @@
             "origin must stay SoftDefault when field is omitted"
         );
         assert!(
-            !app.default_yolo,
-            "omitted permission_mode must not recompute default_yolo"
+            !app.default_permission_mode.is_always_approve(),
+            "omitted permission_mode must not recompute default_always_approve"
         );
     }
 
@@ -550,7 +330,7 @@
     }
 
     /// Soft-origin recompute with injected TOML (deterministic — no host
-    /// config): remote always-approve arms default_yolo + UI, keeps the soft
+    /// config): remote always-approve arms default_always_approve + UI, keeps the soft
     /// latch, and persists nothing.
     #[test]
     fn permission_mode_soft_default_applies_remote_always_approve() {
@@ -558,14 +338,14 @@
         app.auto_mode_gate = true;
         app.permission_mode_from_soft_default = true;
         app.current_ui.permission_mode = None;
-        app.default_yolo = false;
+        app.default_permission_mode = shell::util::config::PermissionMode::Ask;
 
         super::super::settings::apply_soft_default_permission_mode(
             &mut app,
             None,
             Some("always-approve"),
         );
-        assert!(app.default_yolo, "remote always-approve must arm default_yolo");
+        assert!(app.default_permission_mode.is_always_approve(), "remote always-approve must arm default_always_approve");
         assert_eq!(
             app.current_ui.permission_mode.as_deref(),
             Some("always-approve"),
@@ -588,10 +368,10 @@
         app.auto_mode_gate = true;
         app.permission_mode_from_soft_default = true;
         app.current_ui.permission_mode = Some("always-approve".into());
-        app.default_yolo = true;
+        app.default_permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
 
         super::super::settings::apply_soft_default_permission_mode(&mut app, None, None);
-        assert!(!app.default_yolo, "remote null must disarm a soft always-approve");
+        assert!(!app.default_permission_mode.is_always_approve(), "remote null must disarm a soft always-approve");
         assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
         assert!(app.permission_mode_from_soft_default);
         assert!(
@@ -605,21 +385,21 @@
     fn permission_mode_soft_default_respects_pin_and_gate() {
         let mut app = make_app_with_agent("sess-pin-pm");
         app.permission_mode_from_soft_default = true;
-        app.yolo_policy_block = Some("pinned");
-        app.default_yolo = false;
+        app.always_approve_policy_block = Some("pinned");
+        app.default_permission_mode = shell::util::config::PermissionMode::Ask;
         super::super::settings::apply_soft_default_permission_mode(
             &mut app,
             None,
             Some("always-approve"),
         );
-        assert!(!app.default_yolo, "policy pin must block a remote always-approve");
+        assert!(!app.default_permission_mode.is_always_approve(), "policy pin must block a remote always-approve");
         assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
 
         let mut app = make_app_with_agent("sess-gate-pm");
         app.permission_mode_from_soft_default = true;
         app.auto_mode_gate = false;
         super::super::settings::apply_soft_default_permission_mode(&mut app, None, Some("auto"));
-        assert!(!app.default_yolo);
+        assert!(!app.default_permission_mode.is_always_approve());
         assert_eq!(
             app.current_ui.permission_mode.as_deref(),
             Some("ask"),

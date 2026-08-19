@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::cpu_profile::{ControlError, ProfileArtifactFormat};
+use crate::cpu_profile::ControlError;
 
 const MAX_MESSAGE_SIZE: u32 = 64 * 1024 * 1024; // 64MB
 
@@ -116,37 +116,28 @@ pub enum ClientMode {
 ///
 /// These capabilities are used by the leader to customize behavior for each client,
 /// such as injecting settings into session requests.
-pub const LEADER_PROTOCOL_VERSION: u32 = 1;
+pub const LEADER_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientCapabilities {
-    /// Auto-approve all tool executions without confirmation (YOLO mode).
-    /// When true, the leader will inject `yoloMode: true` into session/new requests.
-    #[serde(default)]
-    pub yolo_mode: bool,
-
-    /// Classifier permission mode (auto). When true and not yolo, the leader
-    /// injects `autoMode: true` into session/new and session/load `_meta`.
-    #[serde(default)]
-    pub auto_mode: bool,
+    /// Permission mode injected into session/new and session/load requests.
+    pub permission_mode: ::diagnostics::enums::PermissionMode,
 
     /// Default model ID to use for new sessions.
     /// When set, the leader will inject `modelId` into session/new requests
     /// (only if the request doesn't already specify a modelId).
-    #[serde(default)]
     pub default_model: Option<String>,
 
     /// Client binary version (e.g., "0.1.150").
     /// Used by the leader to detect version mismatches after client auto-updates.
     /// If the client version differs from the leader's version, a warning is logged.
-    #[serde(default)]
     pub client_version: Option<String>,
 
     /// Whether this client has advertised `grow/codeNavigation.enabled`.
     /// When true, the leader injects `codeNavEnabled: true` into `session/new`
     /// and `session/load` requests so the agent can gate code-nav startup on a
     /// per-client basis rather than reading from shared last-initialized state.
-    #[serde(default)]
     pub code_nav_enabled: bool,
 
     /// Whether the client handles terminal ACP messages (create, output, kill, etc.).
@@ -154,32 +145,12 @@ pub struct ClientCapabilities {
     /// `session/load` so the agent routes terminal commands to the client via ACP
     /// instead of running them locally. Per-client so a TUI (`terminal: false`) and
     /// a web client (`terminal: true`) sharing the same leader get independent routing.
-    #[serde(default)]
     pub terminal: bool,
 
     /// Whether the client handles filesystem ACP read/write messages.
     /// Same per-client isolation rationale as `terminal`.
-    #[serde(default)]
     pub fs_read: bool,
-    #[serde(default)]
     pub fs_write: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct LeaderCapabilities {
-    #[serde(default)]
-    pub control_v1: bool,
-    #[serde(default)]
-    pub runtime_cpu_profile: bool,
-    #[serde(default)]
-    pub profile_formats: Vec<ProfileArtifactFormat>,
-    /// Whether the leader supports [`ControlCommand::RelaunchForUpdate`] — a
-    /// disruptive, bounded-grace relaunch onto a freshly-installed binary
-    /// (driven by `grow update`). Old leaders default to `false`, so a new
-    /// client falls back to advising a manual restart (graceful degradation).
-    #[serde(default)]
-    pub relaunch_v1: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -208,7 +179,7 @@ pub enum ControlCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlPayload {
     LeaderInfo {
         pid: u32,
@@ -219,28 +190,25 @@ pub enum ControlPayload {
         profiling_supported: bool,
         profiling_compiled_in: bool,
         cpu_profile_active: bool,
-        #[serde(default)]
         cpu_profile_stopping: bool,
         profile_started_at: Option<String>,
-        profile_formats: Vec<ProfileArtifactFormat>,
     },
     CpuProfileStatus {
         active: bool,
-        #[serde(default)]
         stopping: bool,
         started_at: Option<String>,
-        svg_path: Option<PathBuf>,
+        artifact_path: Option<PathBuf>,
         frequency_hz: Option<i32>,
     },
     CpuProfileStarted {
         pid: u32,
-        svg_path: PathBuf,
+        artifact_path: PathBuf,
         frequency_hz: i32,
         started_at: String,
     },
     CpuProfileStopped {
         pid: u32,
-        svg_path: PathBuf,
+        artifact_path: PathBuf,
         started_at: String,
         stopped_at: String,
     },
@@ -258,13 +226,13 @@ pub enum ControlPayload {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientMessage {
     Register {
         client_type: String,
         /// Client mode determines how leader handles this client's communication
         mode: ClientMode,
-        #[serde(default)]
+        protocol_version: u32,
         capabilities: ClientCapabilities,
     },
     Acp {
@@ -286,7 +254,6 @@ pub enum ClientMessage {
 /// |---------|---------------|-------|
 /// | `AutoUpdate` | **Yes** — when `run_auto_update_checker` triggers shutdown | |
 /// | `Manual` | **Yes** — default for SIGTERM, test cancellation, all other paths | |
-/// | `IdleTimeout` | **No** — reserved for a future idle-timeout feature | |
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShutdownReason {
@@ -294,21 +261,12 @@ pub enum ShutdownReason {
     /// Clients should reconnect immediately via `connect_or_spawn`; the new binary
     /// will be picked up automatically.
     AutoUpdate,
-    /// Reserved for a future idle-timeout feature (no active clients for a configurable
-    /// duration). **Not emitted in the current implementation.**
-    IdleTimeout,
     /// Unspecified or externally-triggered shutdown (SIGTERM, programmatic cancel, etc.).
     Manual,
 }
 
-/// Old leaders that predate `ready` are already initialised, so default to `true`.
-fn default_ready() -> bool {
-    true
-}
-
-/// New fields must use `#[serde(default)]` — the leader and client can run different binary versions.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
     /// Registration confirmation.
     ///
@@ -319,14 +277,10 @@ pub enum ServerMessage {
     Registered {
         client_id: u64,
         /// Whether the leader is fully initialised and ready to forward ACP traffic.
-        #[serde(default = "default_ready")]
         ready: bool,
-        #[serde(default)]
-        leader_protocol_version: Option<u32>,
-        #[serde(default)]
-        leader_binary_version: Option<String>,
-        #[serde(default)]
-        leader_capabilities: Option<LeaderCapabilities>,
+        leader_protocol_version: u32,
+        leader_binary_version: String,
+        runtime_cpu_profile: bool,
     },
     Acp {
         payload: String,
@@ -385,6 +339,7 @@ mod tests {
         let msg = ClientMessage::Register {
             client_type: "test".into(),
             mode: ClientMode::Stdio,
+            protocol_version: LEADER_PROTOCOL_VERSION,
             capabilities: ClientCapabilities::default(),
         };
 
@@ -474,37 +429,19 @@ mod tests {
     }
 
     #[test]
-    fn registered_serde_compatibility_without_optional_metadata() {
+    fn registered_rejects_missing_protocol_metadata() {
         let json = r#"{"type":"registered","client_id":7}"#;
-        let msg: ServerMessage = serde_json::from_str(json).unwrap();
-
-        assert!(matches!(
-            msg,
-            ServerMessage::Registered {
-                client_id: 7,
-                // `ready` defaults to `true` via `default_ready()` — old leaders
-                // that predate the field are already initialised.
-                ready: true,
-                leader_protocol_version: None,
-                leader_binary_version: None,
-                leader_capabilities: None,
-            }
-        ));
+        assert!(serde_json::from_str::<ServerMessage>(json).is_err());
     }
 
     #[test]
-    fn registered_serde_compatibility_with_all_optional_metadata() {
+    fn registered_roundtrips_required_protocol_metadata() {
         let msg = ServerMessage::Registered {
             client_id: 7,
             ready: true,
-            leader_protocol_version: Some(LEADER_PROTOCOL_VERSION),
-            leader_binary_version: Some("1.2.3".into()),
-            leader_capabilities: Some(LeaderCapabilities {
-                control_v1: true,
-                runtime_cpu_profile: true,
-                profile_formats: vec![ProfileArtifactFormat::Svg],
-                relaunch_v1: true,
-            }),
+            leader_protocol_version: LEADER_PROTOCOL_VERSION,
+            leader_binary_version: "1.2.3".into(),
+            runtime_cpu_profile: true,
         };
 
         let json = serde_json::to_string(&msg).unwrap();
@@ -514,38 +451,15 @@ mod tests {
             ServerMessage::Registered {
                 client_id: 7,
                 ready: true,
-                leader_protocol_version: Some(LEADER_PROTOCOL_VERSION),
-                leader_binary_version: Some(_),
-                leader_capabilities: Some(LeaderCapabilities {
-                    control_v1: true,
-                    runtime_cpu_profile: true,
-                    profile_formats,
-                    relaunch_v1: true,
-                }),
-            } if profile_formats == vec![ProfileArtifactFormat::Svg]
+                leader_protocol_version: LEADER_PROTOCOL_VERSION,
+                leader_binary_version: _,
+                runtime_cpu_profile: true,
+            }
         ));
     }
 
     #[test]
-    fn profile_artifact_format_serde_names_are_stable() {
-        // Wire compat contract: `svg` must stay decodable (old leaders
-        // advertise it), and `folded` is the name new binaries will start
-        // advertising once the fleet can decode it. Renaming either variant
-        // breaks the Registered handshake across version skew.
-        assert_eq!(
-            serde_json::to_string(&ProfileArtifactFormat::Svg).unwrap(),
-            "\"svg\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ProfileArtifactFormat::Folded).unwrap(),
-            "\"folded\""
-        );
-        let decoded: ProfileArtifactFormat = serde_json::from_str("\"svg\"").unwrap();
-        assert_eq!(decoded, ProfileArtifactFormat::Svg);
-    }
-
-    #[test]
-    fn control_payload_serde_defaults_new_stopping_flags() {
+    fn control_payload_rejects_missing_stopping_flags() {
         let leader_info_json = r#"{
             "type":"leader_info",
             "pid":123,
@@ -556,39 +470,18 @@ mod tests {
             "profiling_supported":true,
             "profiling_compiled_in":true,
             "cpu_profile_active":false,
-            "profile_started_at":null,
-            "profile_formats":["svg"]
+            "profile_started_at":null
         }"#;
         let status_json = r#"{
             "type":"cpu_profile_status",
             "active":false,
             "started_at":null,
-            "svg_path":null,
+            "artifact_path":null,
             "frequency_hz":null
         }"#;
 
-        let leader_info: ControlPayload = serde_json::from_str(leader_info_json).unwrap();
-        let status: ControlPayload = serde_json::from_str(status_json).unwrap();
-
-        assert!(matches!(
-            leader_info,
-            ControlPayload::LeaderInfo {
-                cpu_profile_active: false,
-                cpu_profile_stopping: false,
-                profile_started_at: None,
-                ..
-            }
-        ));
-        assert!(matches!(
-            status,
-            ControlPayload::CpuProfileStatus {
-                active: false,
-                stopping: false,
-                started_at: None,
-                svg_path: None,
-                frequency_hz: None,
-            }
-        ));
+        assert!(serde_json::from_str::<ControlPayload>(leader_info_json).is_err());
+        assert!(serde_json::from_str::<ControlPayload>(status_json).is_err());
     }
 
     #[test]
@@ -624,9 +517,6 @@ mod tests {
     fn shutdown_reason_variants_serialize_correctly() {
         let auto = serde_json::to_string(&ShutdownReason::AutoUpdate).unwrap();
         assert_eq!(auto, "\"auto_update\"");
-
-        let idle = serde_json::to_string(&ShutdownReason::IdleTimeout).unwrap();
-        assert_eq!(idle, "\"idle_timeout\"");
 
         let manual = serde_json::to_string(&ShutdownReason::Manual).unwrap();
         assert_eq!(manual, "\"manual\"");

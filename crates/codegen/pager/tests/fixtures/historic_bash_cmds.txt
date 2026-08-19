@@ -41,13 +41,13 @@ cd /tmp && sleep 1 && timeout 30 cargo check 2>&1 | tail -50
 python3 -c 'print("hello && world | not pipe")' && echo ok
 ### END
 ### CMD 11
-cd /tmp/compaction-repro && GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -p 'reply with exactly: ok' --model example-model --always-approve --no-leader > /tmp/compaction-repro/headless2.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless2.log
+cd /tmp/compaction-repro && GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -p 'reply with exactly: ok' --model example-model --permission-mode always-approve --no-leader > /tmp/compaction-repro/headless2.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless2.log
 ### END
 ### CMD 12
-cd /tmp/compaction-repro && GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -p 'reply with exactly: ok' --always-approve --no-leader > /tmp/compaction-repro/headless1.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless1.log
+cd /tmp/compaction-repro && GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -p 'reply with exactly: ok' --permission-mode always-approve --no-leader > /tmp/compaction-repro/headless1.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless1.log
 ### END
 ### CMD 13
-cd /Users/alice/Documents/code/project && DYLD_INSERT_LIBRARIES=/opt/homebrew/opt/libfaketime/lib/faketime/libfaketime.1.dylib FAKETIME="@2026-06-11 23:58:30" FAKETIME_DONT_FAKE_MONOTONIC=1 /tmp/pager-under-test-dr --no-leader --always-approve 2>/tmp/ftroll.err
+cd /Users/alice/Documents/code/project && DYLD_INSERT_LIBRARIES=/opt/homebrew/opt/libfaketime/lib/faketime/libfaketime.1.dylib FAKETIME="@2026-06-11 23:58:30" FAKETIME_DONT_FAKE_MONOTONIC=1 /tmp/pager-under-test-dr --no-leader --permission-mode always-approve 2>/tmp/ftroll.err
 ### END
 ### CMD 14
 ! kubectl oidc-login get-token --oidc-issuer-url https://login.example.com --oidc-client-id example-client-id --oidc-extra-scope "openid profile email groups offline_access" >/dev/null && echo OIDC_OK
@@ -56,7 +56,7 @@ cd /Users/alice/Documents/code/project && DYLD_INSERT_LIBRARIES=/opt/homebrew/op
 ssh -t -L 8000:localhost:8000 user@build-host.example.internal 'cd /home/user/project && export PATH=$HOME/.cargo/bin:$PATH && ./scripts/login.sh'
 ### END
 ### CMD 16
-cd /Users/alice/Documents/code/project && DYLD_INSERT_LIBRARIES=/opt/homebrew/opt/libfaketime/lib/faketime/libfaketime.1.dylib FAKETIME_TIMESTAMP_FILE=/tmp/ftfile FAKETIME_NO_CACHE=1 FAKETIME_DONT_FAKE_MONOTONIC=1 /tmp/pager-under-test-dr --no-leader --always-approve 2>/tmp/ftdbg.err
+cd /Users/alice/Documents/code/project && DYLD_INSERT_LIBRARIES=/opt/homebrew/opt/libfaketime/lib/faketime/libfaketime.1.dylib FAKETIME_TIMESTAMP_FILE=/tmp/ftfile FAKETIME_NO_CACHE=1 FAKETIME_DONT_FAKE_MONOTONIC=1 /tmp/pager-under-test-dr --no-leader --permission-mode always-approve 2>/tmp/ftdbg.err
 ### END
 ### CMD 17
 ! kubectl --context kind-local -n example-system get secret example-db-password -o jsonpath='{.data.EXAMPLE_DB_PASSWORD}' | base64 -d
@@ -74,16 +74,16 @@ curl -LsSf "http://file-server.example.internal/cicd/example/install.sh?nocache"
 cat ~/.grow/config.toml | grep composer
 ### END
 ### CMD 22
-GROW_DEBUG_CONTEXT_WINDOW=100000 GROW_AUTO_COMPACT_THRESHOLD_PERCENT=5 /tmp/pager-under-test -r 019e0000-0000-7000-8000-000000000001 -p 'reply with exactly: again' --model example-model --always-approve --no-leader > /tmp/compaction-repro/headless5.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless5.log
+GROW_DEBUG_CONTEXT_WINDOW=100000 GROW_AUTO_COMPACT_THRESHOLD_PERCENT=5 /tmp/pager-under-test -r 019e0000-0000-7000-8000-000000000001 -p 'reply with exactly: again' --model example-model --permission-mode always-approve --no-leader > /tmp/compaction-repro/headless5.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless5.log
 ### END
 ### CMD 23
-GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -r 019e0000-0000-7000-8000-000000000001 -p 'now reply with exactly: done' --model example-model --always-approve --no-leader > /tmp/compaction-repro/headless3.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless3.log
+GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -r 019e0000-0000-7000-8000-000000000001 -p 'now reply with exactly: done' --model example-model --permission-mode always-approve --no-leader > /tmp/compaction-repro/headless3.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless3.log
 ### END
 ### CMD 24
-GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -r 019e0000-0000-7000-8000-000000000001 -p 'reply with exactly: final' --model example-model --always-approve --no-leader > /tmp/compaction-repro/headless4.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless4.log
+GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -r 019e0000-0000-7000-8000-000000000001 -p 'reply with exactly: final' --model example-model --permission-mode always-approve --no-leader > /tmp/compaction-repro/headless4.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless4.log
 ### END
 ### CMD 25
-GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -p 'reply with exactly: ok' --model example-model --always-approve --no-leader > /tmp/compaction-repro/headless1.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless1.log
+GROW_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -p 'reply with exactly: ok' --model example-model --permission-mode always-approve --no-leader > /tmp/compaction-repro/headless1.log 2>&1; echo EXIT=$? >> /tmp/compaction-repro/headless1.log
 ### END
 ### CMD 26
 cd /Users/alice/Documents/code/project-wt/fix-prompt-wheel-history && \\
@@ -95,8 +95,8 @@ strings target/debug/pager | grep -c slash-mru-writer   # must print >=1\
 SSH_CONNECTION='10.0.0.1 51234 10.0.0.2 22' \\
 ### END
 ### CMD 29
-DYLD_FORCE_FLAT_NAMESPACE=1 DYLD_INSERT_LIBRARIES=/opt/homebrew/lib/faketime/libfaketime.1.dylib FAKETIME_TIMESTAMP_FILE=/tmp/ft.rc FAKETIME_NO_CACHE=1 FAKETIME_DONT_FAKE_MONOTONIC=1 /tmp/pager-date-test --model grow-build --always-approve --no-leader
+DYLD_FORCE_FLAT_NAMESPACE=1 DYLD_INSERT_LIBRARIES=/opt/homebrew/lib/faketime/libfaketime.1.dylib FAKETIME_TIMESTAMP_FILE=/tmp/ft.rc FAKETIME_NO_CACHE=1 FAKETIME_DONT_FAKE_MONOTONIC=1 /tmp/pager-date-test --model grow-build --permission-mode always-approve --no-leader
 ### END
 ### CMD 30
-DYLD_FORCE_FLAT_NAMESPACE=1 DYLD_INSERT_LIBRARIES=/opt/homebrew/lib/faketime/libfaketime.1.dylib FAKETIME_TIMESTAMP_FILE=/tmp/ft.rc FAKETIME_NO_CACHE=1 FAKETIME_DONT_FAKE_MONOTONIC=1 /tmp/pager-date-test --always-approve --no-leader
+DYLD_FORCE_FLAT_NAMESPACE=1 DYLD_INSERT_LIBRARIES=/opt/homebrew/lib/faketime/libfaketime.1.dylib FAKETIME_TIMESTAMP_FILE=/tmp/ft.rc FAKETIME_NO_CACHE=1 FAKETIME_DONT_FAKE_MONOTONIC=1 /tmp/pager-date-test --permission-mode always-approve --no-leader
 ### END

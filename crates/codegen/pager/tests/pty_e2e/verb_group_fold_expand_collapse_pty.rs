@@ -78,14 +78,14 @@ async fn verb_group_fold_expand_collapse_pty() {
     content.set_response(DONE_SENTINEL);
 
     let binary = pager_binary().expect("resolve pager binary");
-    // --yolo auto-approves the scripted write tool (mirrors the background-task
+    // --permission-mode always-approve auto-approves the scripted write tool (mirrors the background-task
     // e2e, the other tool-running PTY test).
     let mut harness = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

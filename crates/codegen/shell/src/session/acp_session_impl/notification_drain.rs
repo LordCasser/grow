@@ -231,7 +231,6 @@ impl SessionActor {
         // (e.g. `rewindable`) without overlapping borrows.
         let (
             persist_ack,
-            parsed_prompt_tx,
             prompt_id,
             prompt_blocks,
             client_identifier,
@@ -248,7 +247,6 @@ impl SessionActor {
             let running_display = SessionActor::running_display_from_item(front);
             (
                 front.persist_ack.take(),
-                front.parsed_prompt_tx.take(),
                 front.prompt_id.clone(),
                 front.prompt_blocks.clone(),
                 front.client_identifier.clone(),
@@ -311,7 +309,6 @@ impl SessionActor {
             Some(start_rx),
             completion_tx,
             persist_ack,
-            parsed_prompt_tx,
         ));
         drop(state);
 
@@ -423,7 +420,7 @@ impl SessionActor {
         };
         for event in tools::implementations::grow_build::monitor::types::drain_owned(
             buffer,
-            Some(self.session_info.id.0.as_ref()),
+            self.session_info.id.0.as_ref(),
         ) {
             Self::push_pending_notification(
                 state,
@@ -561,7 +558,6 @@ impl SessionActor {
             task_wake_fallback: None,
             respond_to,
             persist_ack: None,
-            parsed_prompt_tx: None,
             queue_meta: None,
         });
 

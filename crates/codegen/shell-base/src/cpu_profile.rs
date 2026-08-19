@@ -19,17 +19,6 @@ const AUTO_PATH_RETRY_LIMIT: u32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProfileArtifactFormat {
-    /// Legacy: kept so new clients can still decode adverts from old leaders.
-    /// New binaries no longer produce SVG (that required inferno, CDDL-1.0).
-    Svg,
-    /// Folded stacks (`thread;frame;… count` per line). Not advertised yet —
-    /// see `platform::profile_formats()` for the two-phase wire migration.
-    Folded,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ControlErrorCode {
     RuntimeProfilingUnsupported,
     ProfileAlreadyActive,
@@ -109,19 +98,19 @@ pub enum CpuProfileStatus {
     Inactive,
     Active {
         started_at: String,
-        svg_path: PathBuf,
+        artifact_path: PathBuf,
         frequency_hz: i32,
     },
     Stopping {
         started_at: String,
-        svg_path: PathBuf,
+        artifact_path: PathBuf,
         frequency_hz: i32,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpuProfileStopResult {
-    pub svg_path: PathBuf,
+    pub artifact_path: PathBuf,
     pub started_at: String,
     pub stopped_at: String,
 }
@@ -131,7 +120,7 @@ pub trait ProfilerEngine: std::fmt::Debug + Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedSvgPath {
+struct ResolvedArtifactPath {
     path: PathBuf,
 }
 
@@ -139,7 +128,7 @@ struct ResolvedSvgPath {
 struct ActiveCpuProfile {
     started_at: String,
     frequency_hz: i32,
-    svg_path: PathBuf,
+    artifact_path: PathBuf,
     engine: Box<dyn ProfilerEngine>,
 }
 
@@ -147,7 +136,7 @@ struct ActiveCpuProfile {
 struct StoppingCpuProfile {
     started_at: String,
     frequency_hz: i32,
-    svg_path: PathBuf,
+    artifact_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +156,7 @@ impl CpuProfileStopHandle {
         self.active.engine.stop()?;
 
         Ok(CpuProfileStopResult {
-            svg_path: self.active.svg_path,
+            artifact_path: self.active.artifact_path,
             started_at: self.active.started_at,
             stopped_at,
         })
@@ -223,13 +212,6 @@ impl CpuProfileManager {
         platform::runtime_cpu_profile_supported()
     }
 
-    pub fn profile_formats(&self) -> &[ProfileArtifactFormat] {
-        if self.force_unsupported {
-            return &[];
-        }
-        platform::profile_formats()
-    }
-
     pub fn start(
         &mut self,
         options: CpuProfileStartOptions,
@@ -255,19 +237,19 @@ impl CpuProfileManager {
 
         let frequency_hz = validate_frequency(options.frequency_hz)?;
         let started_at = now_timestamp();
-        let resolved_path = resolve_svg_path(options.output.as_deref(), &started_at)?;
+        let resolved_path = resolve_artifact_path(options.output.as_deref(), &started_at)?;
         let engine = platform::start_profiler(frequency_hz, &resolved_path.path)?;
 
         let status = CpuProfileStatus::Active {
             started_at: started_at.clone(),
-            svg_path: resolved_path.path.clone(),
+            artifact_path: resolved_path.path.clone(),
             frequency_hz,
         };
 
         self.active = Some(ActiveCpuProfile {
             started_at,
             frequency_hz,
-            svg_path: resolved_path.path,
+            artifact_path: resolved_path.path,
             engine,
         });
 
@@ -299,7 +281,7 @@ impl CpuProfileManager {
         self.stopping = Some(StoppingCpuProfile {
             started_at: active.started_at.clone(),
             frequency_hz: active.frequency_hz,
-            svg_path: active.svg_path.clone(),
+            artifact_path: active.artifact_path.clone(),
         });
         let _ = self.stop_completion_tx.send(false);
 
@@ -319,7 +301,7 @@ impl CpuProfileManager {
         if let Some(active) = self.active.as_ref() {
             return CpuProfileStatus::Active {
                 started_at: active.started_at.clone(),
-                svg_path: active.svg_path.clone(),
+                artifact_path: active.artifact_path.clone(),
                 frequency_hz: active.frequency_hz,
             };
         }
@@ -327,7 +309,7 @@ impl CpuProfileManager {
         if let Some(stopping) = self.stopping.as_ref() {
             return CpuProfileStatus::Stopping {
                 started_at: stopping.started_at.clone(),
-                svg_path: stopping.svg_path.clone(),
+                artifact_path: stopping.artifact_path.clone(),
                 frequency_hz: stopping.frequency_hz,
             };
         }
@@ -398,13 +380,13 @@ fn validate_frequency(frequency_hz: Option<i32>) -> Result<i32, ControlError> {
     Ok(frequency_hz)
 }
 
-fn resolve_svg_path(
+fn resolve_artifact_path(
     output: Option<&Path>,
     started_at: &str,
-) -> Result<ResolvedSvgPath, ControlError> {
+) -> Result<ResolvedArtifactPath, ControlError> {
     let path = match output {
         Some(output) => derive_output_path(output, started_at)?,
-        None => derive_default_svg_path(started_at)?,
+        None => derive_default_artifact_path(started_at)?,
     };
 
     if let Some(parent) = path.parent() {
@@ -425,29 +407,19 @@ fn resolve_svg_path(
         ));
     }
 
-    Ok(ResolvedSvgPath { path })
+    Ok(ResolvedArtifactPath { path })
 }
 
 fn derive_output_path(output: &Path, started_at: &str) -> Result<PathBuf, ControlError> {
-    // Honor explicit artifact paths (`.folded`/`.txt`). An explicit `.svg`
-    // path — from old client invocations or muscle memory — keeps its
-    // location but is redirected to `.folded`: the artifact is folded stacks
-    // now, and writing text into an `.svg`-named file would just corrupt it.
+    // Honor explicit folded-stack artifact paths.
     if output
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("folded") || ext.eq_ignore_ascii_case("txt"))
     {
         return Ok(output.to_path_buf());
     }
-    if output
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
-    {
-        return Ok(output.with_extension("folded"));
-    }
-
     if is_directory_target(output) {
-        return derive_unique_svg_path(output, "leader", started_at);
+        return derive_unique_artifact_path(output, "leader", started_at);
     }
 
     let base_name = output
@@ -456,7 +428,7 @@ fn derive_output_path(output: &Path, started_at: &str) -> Result<PathBuf, Contro
         .filter(|name| !name.is_empty())
         .unwrap_or("profile");
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
-    derive_unique_svg_path(parent, base_name, started_at)
+    derive_unique_artifact_path(parent, base_name, started_at)
 }
 
 fn is_directory_target(path: &Path) -> bool {
@@ -467,11 +439,11 @@ fn is_directory_target(path: &Path) -> bool {
             .ends_with(std::path::MAIN_SEPARATOR)
 }
 
-fn derive_default_svg_path(started_at: &str) -> Result<PathBuf, ControlError> {
-    derive_unique_svg_path(&grow_home().join(DEFAULT_PROFILE_DIR), "leader", started_at)
+fn derive_default_artifact_path(started_at: &str) -> Result<PathBuf, ControlError> {
+    derive_unique_artifact_path(&grow_home().join(DEFAULT_PROFILE_DIR), "leader", started_at)
 }
 
-fn derive_unique_svg_path(
+fn derive_unique_artifact_path(
     directory: &Path,
     base_name: &str,
     started_at: &str,
@@ -540,17 +512,17 @@ impl CpuProfileManager {
 
         let frequency_hz = validate_frequency(options.frequency_hz)?;
         let started_at = now_timestamp();
-        let resolved_path = resolve_svg_path(options.output.as_deref(), &started_at)?;
+        let resolved_path = resolve_artifact_path(options.output.as_deref(), &started_at)?;
         self.active = Some(ActiveCpuProfile {
             started_at: started_at.clone(),
             frequency_hz,
-            svg_path: resolved_path.path.clone(),
+            artifact_path: resolved_path.path.clone(),
             engine,
         });
 
         Ok(CpuProfileStatus::Active {
             started_at,
-            svg_path: resolved_path.path,
+            artifact_path: resolved_path.path,
             frequency_hz,
         })
     }
@@ -565,15 +537,13 @@ mod platform {
 
     struct PprofProfilerEngine {
         guard: pprof::ProfilerGuard<'static>,
-        // Named `svg_path` historically; now points at a `.folded` artifact.
-        // The wire protocol keeps the `svg_path` field name for compat.
-        svg_path: PathBuf,
+        artifact_path: PathBuf,
     }
 
     impl std::fmt::Debug for PprofProfilerEngine {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("PprofProfilerEngine")
-                .field("svg_path", &self.svg_path)
+                .field("artifact_path", &self.artifact_path)
                 .finish_non_exhaustive()
         }
     }
@@ -622,7 +592,7 @@ mod platform {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&self.svg_path)
+                .open(&self.artifact_path)
                 .map_err(|err| {
                     let code = if err.kind() == std::io::ErrorKind::AlreadyExists {
                         ControlErrorCode::OutputPathCollision
@@ -631,8 +601,8 @@ mod platform {
                     };
                     ControlError::with_details(
                         code,
-                        format!("failed to create profile {}", self.svg_path.display()),
-                        serde_json::json!({ "path": self.svg_path.display().to_string(), "error": err.to_string() }),
+                        format!("failed to create profile {}", self.artifact_path.display()),
+                        serde_json::json!({ "path": self.artifact_path.display().to_string(), "error": err.to_string() }),
                     )
                 })?;
 
@@ -640,8 +610,8 @@ mod platform {
                 .map_err(|err| {
                     ControlError::with_details(
                         ControlErrorCode::ArtifactWriteFailed,
-                        format!("failed to write profile {}", self.svg_path.display()),
-                        serde_json::json!({ "path": self.svg_path.display().to_string(), "error": err.to_string() }),
+                        format!("failed to write profile {}", self.artifact_path.display()),
+                        serde_json::json!({ "path": self.artifact_path.display().to_string(), "error": err.to_string() }),
                     )
                 })
         }
@@ -655,18 +625,9 @@ mod platform {
         cfg!(unix)
     }
 
-    pub(super) fn profile_formats() -> &'static [ProfileArtifactFormat] {
-        // Advertise nothing for now: old clients deserialize this enum
-        // strictly inside the Registered handshake, so a new variant (e.g.
-        // `folded`) would break their connect entirely. Start advertising
-        // `Folded` once binaries that know the variant have saturated the
-        // fleet. The artifact itself is already folded stacks.
-        &[]
-    }
-
     pub(super) fn start_profiler(
         frequency_hz: i32,
-        svg_path: &Path,
+        artifact_path: &Path,
     ) -> Result<Box<dyn ProfilerEngine>, ControlError> {
         let guard = pprof::ProfilerGuardBuilder::default()
             .frequency(frequency_hz)
@@ -682,7 +643,7 @@ mod platform {
 
         Ok(Box::new(PprofProfilerEngine {
             guard,
-            svg_path: svg_path.to_path_buf(),
+            artifact_path: artifact_path.to_path_buf(),
         }))
     }
 }
@@ -699,13 +660,9 @@ mod platform {
         false
     }
 
-    pub(super) fn profile_formats() -> &'static [ProfileArtifactFormat] {
-        &[]
-    }
-
     pub(super) fn start_profiler(
         _frequency_hz: i32,
-        _svg_path: &Path,
+        _artifact_path: &Path,
     ) -> Result<Box<dyn ProfilerEngine>, ControlError> {
         Err(ControlError::new(
             ControlErrorCode::RuntimeProfilingUnsupported,
@@ -725,17 +682,20 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeProfilerEngine {
         stop_calls: Arc<Mutex<Vec<PathBuf>>>,
-        svg_path: PathBuf,
+        artifact_path: PathBuf,
         stop_error: Option<ControlError>,
     }
 
     impl ProfilerEngine for FakeProfilerEngine {
         fn stop(self: Box<Self>) -> Result<(), ControlError> {
-            self.stop_calls.lock().unwrap().push(self.svg_path.clone());
+            self.stop_calls
+                .lock()
+                .unwrap()
+                .push(self.artifact_path.clone());
             if let Some(err) = self.stop_error {
                 return Err(err);
             }
-            fs::write(&self.svg_path, "main;work 42\n").unwrap();
+            fs::write(&self.artifact_path, "main;work 42\n").unwrap();
             Ok(())
         }
     }
@@ -744,11 +704,14 @@ mod tests {
         ControlError::new(code, message)
     }
 
-    fn test_active_profile(svg_path: PathBuf, engine: Box<dyn ProfilerEngine>) -> ActiveCpuProfile {
+    fn test_active_profile(
+        artifact_path: PathBuf,
+        engine: Box<dyn ProfilerEngine>,
+    ) -> ActiveCpuProfile {
         ActiveCpuProfile {
             started_at: now_timestamp(),
             frequency_hz: DEFAULT_FREQUENCY_HZ,
-            svg_path,
+            artifact_path,
             engine,
         }
     }
@@ -766,15 +729,11 @@ mod tests {
         {
             assert!(manager.profiling_compiled_in());
             assert!(manager.runtime_cpu_profile());
-            // Empty until the fleet can decode `Folded`; see
-            // `platform::profile_formats()` for the wire-migration plan.
-            assert_eq!(manager.profile_formats(), &[] as &[ProfileArtifactFormat]);
         }
         #[cfg(not(unix))]
         {
             assert!(!manager.profiling_compiled_in());
             assert!(!manager.runtime_cpu_profile());
-            assert!(manager.profile_formats().is_empty());
         }
     }
 
@@ -793,7 +752,7 @@ mod tests {
         let path = tmp.path().join("existing.folded");
         fs::write(&path, "already here").unwrap();
 
-        let err = resolve_svg_path(Some(&path), &now_timestamp()).unwrap_err();
+        let err = resolve_artifact_path(Some(&path), &now_timestamp()).unwrap_err();
         assert_eq!(err.code, ControlErrorCode::OutputPathCollision);
     }
 
@@ -801,7 +760,7 @@ mod tests {
     fn directory_output_derives_filename() {
         let tmp = TempDir::new().unwrap();
         let started_at = now_timestamp();
-        let resolved = resolve_svg_path(Some(tmp.path()), &started_at).unwrap();
+        let resolved = resolve_artifact_path(Some(tmp.path()), &started_at).unwrap();
         assert_eq!(resolved.path.parent(), Some(tmp.path()));
         assert_eq!(
             resolved.path.extension().and_then(|ext| ext.to_str()),
@@ -821,7 +780,8 @@ mod tests {
     fn basename_output_derives_filename() {
         let tmp = TempDir::new().unwrap();
         let started_at = now_timestamp();
-        let resolved = resolve_svg_path(Some(&tmp.path().join("profile")), &started_at).unwrap();
+        let resolved =
+            resolve_artifact_path(Some(&tmp.path().join("profile")), &started_at).unwrap();
         let name = resolved.path.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("profile-"));
         assert!(name.contains(&started_at));
@@ -829,11 +789,13 @@ mod tests {
     }
 
     #[test]
-    fn explicit_svg_output_redirects_to_folded() {
+    fn non_folded_extension_is_treated_as_a_basename() {
         let tmp = TempDir::new().unwrap();
         let resolved =
-            resolve_svg_path(Some(&tmp.path().join("profile.svg")), &now_timestamp()).unwrap();
-        assert_eq!(resolved.path, tmp.path().join("profile.folded"));
+            resolve_artifact_path(Some(&tmp.path().join("profile.svg")), &now_timestamp()).unwrap();
+        let name = resolved.path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("profile.svg-"));
+        assert!(name.ends_with(".folded"));
     }
 
     #[test]
@@ -845,7 +807,7 @@ mod tests {
             .join(candidate_filename("leader", &started_at, 0));
         fs::write(&first, "collision").unwrap();
 
-        let resolved = resolve_svg_path(Some(tmp.path()), &started_at).unwrap();
+        let resolved = resolve_artifact_path(Some(tmp.path()), &started_at).unwrap();
         assert_ne!(resolved.path, first);
         assert_eq!(
             resolved.path.file_name().unwrap().to_string_lossy(),
@@ -857,7 +819,7 @@ mod tests {
     fn missing_parent_directory_is_created() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("nested").join("profile.folded");
-        let resolved = resolve_svg_path(Some(&path), &now_timestamp()).unwrap();
+        let resolved = resolve_artifact_path(Some(&path), &now_timestamp()).unwrap();
         assert_eq!(resolved.path, path);
         assert!(resolved.path.parent().unwrap().is_dir());
     }
@@ -878,11 +840,11 @@ mod tests {
     #[test]
     fn supported_manager_lifecycle_works() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let stop_calls = Arc::new(Mutex::new(Vec::new()));
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: stop_calls.clone(),
-            svg_path: svg_path.clone(),
+            artifact_path: artifact_path.clone(),
             stop_error: None,
         });
 
@@ -890,7 +852,7 @@ mod tests {
         let status = manager
             .start_with_engine_for_test(
                 CpuProfileStartOptions {
-                    output: Some(svg_path.clone()),
+                    output: Some(artifact_path.clone()),
                     frequency_hz: Some(1000),
                 },
                 engine,
@@ -899,11 +861,11 @@ mod tests {
 
         match status {
             CpuProfileStatus::Active {
-                svg_path: status_path,
+                artifact_path: status_path,
                 frequency_hz,
                 ..
             } => {
-                assert_eq!(status_path, svg_path);
+                assert_eq!(status_path, artifact_path);
                 assert_eq!(frequency_hz, 1000);
             }
             CpuProfileStatus::Inactive | CpuProfileStatus::Stopping { .. } => {
@@ -914,11 +876,11 @@ mod tests {
         assert!(matches!(manager.status(), CpuProfileStatus::Active { .. }));
 
         let stop_result = manager.stop().unwrap();
-        assert_eq!(stop_result.svg_path, svg_path);
+        assert_eq!(stop_result.artifact_path, artifact_path);
         assert!(stop_result.stopped_at >= stop_result.started_at);
         assert_eq!(
             stop_calls.lock().unwrap().as_slice(),
-            std::slice::from_ref(&svg_path)
+            std::slice::from_ref(&artifact_path)
         );
         assert!(matches!(manager.status(), CpuProfileStatus::Inactive));
     }
@@ -926,11 +888,11 @@ mod tests {
     #[test]
     fn duplicate_start_is_rejected() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let stop_calls = Arc::new(Mutex::new(Vec::new()));
         let engine = Box::new(FakeProfilerEngine {
             stop_calls,
-            svg_path: svg_path.clone(),
+            artifact_path: artifact_path.clone(),
             stop_error: None,
         });
 
@@ -938,7 +900,7 @@ mod tests {
         manager
             .start_with_engine_for_test(
                 CpuProfileStartOptions {
-                    output: Some(svg_path.clone()),
+                    output: Some(artifact_path.clone()),
                     frequency_hz: Some(1000),
                 },
                 engine,
@@ -971,19 +933,19 @@ mod tests {
     #[test]
     fn finalize_on_shutdown_stops_active_profile() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let stop_calls = Arc::new(Mutex::new(Vec::new()));
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: stop_calls.clone(),
-            svg_path: svg_path.clone(),
+            artifact_path: artifact_path.clone(),
             stop_error: None,
         });
 
         let mut manager = CpuProfileManager::new();
-        manager.active = Some(test_active_profile(svg_path.clone(), engine));
+        manager.active = Some(test_active_profile(artifact_path.clone(), engine));
 
         let result = manager.finalize_on_shutdown().unwrap().unwrap();
-        assert_eq!(result.svg_path, svg_path);
+        assert_eq!(result.artifact_path, artifact_path);
         assert_eq!(stop_calls.lock().unwrap().len(), 1);
         assert!(matches!(manager.status(), CpuProfileStatus::Inactive));
     }
@@ -991,23 +953,23 @@ mod tests {
     #[test]
     fn take_stop_handle_marks_profile_as_stopping_until_completed() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: Arc::new(Mutex::new(Vec::new())),
-            svg_path: svg_path.clone(),
+            artifact_path: artifact_path.clone(),
             stop_error: None,
         });
 
         let mut manager = CpuProfileManager::new();
-        manager.active = Some(test_active_profile(svg_path.clone(), engine));
+        manager.active = Some(test_active_profile(artifact_path.clone(), engine));
 
         let stop_handle = manager.take_stop_handle().unwrap();
         assert!(matches!(
             manager.status(),
             CpuProfileStatus::Stopping {
-                svg_path: status_path,
+                artifact_path: status_path,
                 ..
-            } if status_path == svg_path
+            } if status_path == artifact_path
         ));
 
         let err = manager
@@ -1026,17 +988,17 @@ mod tests {
 
         let stop_result = stop_handle.finish().unwrap();
         manager.complete_stop();
-        assert_eq!(stop_result.svg_path, svg_path);
+        assert_eq!(stop_result.artifact_path, artifact_path);
         assert!(matches!(manager.status(), CpuProfileStatus::Inactive));
     }
 
     #[test]
     fn stop_failure_keeps_stopping_state_until_completed() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: Arc::new(Mutex::new(Vec::new())),
-            svg_path: svg_path.clone(),
+            artifact_path: artifact_path.clone(),
             stop_error: Some(fake_error(
                 ControlErrorCode::ArtifactWriteFailed,
                 "failed to write artifact",
@@ -1044,7 +1006,7 @@ mod tests {
         });
 
         let mut manager = CpuProfileManager::new();
-        manager.active = Some(test_active_profile(svg_path.clone(), engine));
+        manager.active = Some(test_active_profile(artifact_path.clone(), engine));
 
         let stop_handle = manager.take_stop_handle().unwrap();
         let err = stop_handle.finish().unwrap_err();
@@ -1061,28 +1023,28 @@ mod tests {
     #[test]
     fn stop_clears_stopping_state_on_success() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: Arc::new(Mutex::new(Vec::new())),
-            svg_path: svg_path.clone(),
+            artifact_path: artifact_path.clone(),
             stop_error: None,
         });
 
         let mut manager = CpuProfileManager::new();
-        manager.active = Some(test_active_profile(svg_path.clone(), engine));
+        manager.active = Some(test_active_profile(artifact_path.clone(), engine));
 
         let result = manager.stop().unwrap();
-        assert_eq!(result.svg_path, svg_path);
+        assert_eq!(result.artifact_path, artifact_path);
         assert!(matches!(manager.status(), CpuProfileStatus::Inactive));
     }
 
     #[test]
     fn stop_clears_stopping_state_on_error() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: Arc::new(Mutex::new(Vec::new())),
-            svg_path,
+            artifact_path,
             stop_error: Some(fake_error(
                 ControlErrorCode::ArtifactWriteFailed,
                 "failed to write artifact",
@@ -1103,15 +1065,15 @@ mod tests {
     #[test]
     fn take_shutdown_stop_handle_returns_none_when_stop_already_in_progress() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: Arc::new(Mutex::new(Vec::new())),
-            svg_path: svg_path.clone(),
+            artifact_path: artifact_path.clone(),
             stop_error: None,
         });
 
         let mut manager = CpuProfileManager::new();
-        manager.active = Some(test_active_profile(svg_path, engine));
+        manager.active = Some(test_active_profile(artifact_path, engine));
         let _stop_handle = manager.take_stop_handle().unwrap();
 
         assert_eq!(
@@ -1124,34 +1086,34 @@ mod tests {
     #[test]
     fn status_surfaces_stopping_state() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: Arc::new(Mutex::new(Vec::new())),
-            svg_path: svg_path.clone(),
+            artifact_path: artifact_path.clone(),
             stop_error: None,
         });
 
         let mut manager = CpuProfileManager::new();
-        manager.active = Some(test_active_profile(svg_path.clone(), engine));
+        manager.active = Some(test_active_profile(artifact_path.clone(), engine));
         let _stop_handle = manager.take_stop_handle().unwrap();
 
         assert!(matches!(
             manager.status(),
             CpuProfileStatus::Stopping {
-                svg_path: status_path,
+                artifact_path: status_path,
                 frequency_hz: DEFAULT_FREQUENCY_HZ,
                 ..
-            } if status_path == svg_path
+            } if status_path == artifact_path
         ));
     }
 
     #[test]
     fn stop_preserves_engine_error() {
         let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
+        let artifact_path = tmp.path().join("profile.folded");
         let engine = Box::new(FakeProfilerEngine {
             stop_calls: Arc::new(Mutex::new(Vec::new())),
-            svg_path,
+            artifact_path,
             stop_error: Some(fake_error(
                 ControlErrorCode::ArtifactWriteFailed,
                 "failed to write artifact",

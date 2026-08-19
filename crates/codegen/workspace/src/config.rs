@@ -113,7 +113,7 @@ pub struct WorkspaceConfig {
     pub event_buffer_capacity: usize,
     /// Pluggable [`SessionContext`] / [`ToolRegistryBuilder`] producer.
     pub session_factory: Arc<dyn SessionContextFactory>,
-    /// Global hook sources (e.g. `~/.claude/settings.json`, `~/.grow/hooks/`).
+    /// Global hook sources (for example `$GROW_HOME/hooks/`).
     pub hook_global_sources: Vec<HookSourceConfig>,
     /// Project-scoped hook sources (e.g. `<project>/.grow/hooks/`).
     pub hook_project_sources: Vec<HookSourceConfig>,
@@ -194,13 +194,13 @@ impl std::fmt::Debug for AgentSessionConfig {
             .finish()
     }
 }
-/// A single hook source: either a JSON settings file or a directory of
-/// `*.json` hook files. Maps 1:1 to [`hooks::discovery::HookSource`]
+/// A single hook source: either one canonical JSON hook file or a directory of
+/// such files. Maps 1:1 to [`hooks::discovery::HookSource`]
 /// but uses owned `PathBuf` so the config struct is `'static`.
 #[derive(Debug, Clone)]
 pub enum HookSourceConfig {
-    /// A single JSON settings file (e.g. `~/.claude/settings.json`).
-    SettingsFile(PathBuf),
+    /// A single explicitly configured JSON hook file.
+    HookFile(PathBuf),
     /// A directory of `*.json` hook files (e.g. `~/.grow/hooks/`).
     Directory(PathBuf),
 }

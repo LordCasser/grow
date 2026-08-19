@@ -4,44 +4,6 @@ use shell::sampling::types::{ReasoningEffort, ReasoningEffortOption};
 
 use crate::slash::command::ArgItem;
 
-/// Effort levels in the built-in fallback menu (strongest first). `none`/`minimal`
-/// are still accepted by `ReasoningEffort::from_str` for power users.
-pub(crate) const EFFORT_LEVELS: &[ReasoningEffort] = &[
-    ReasoningEffort::Xhigh,
-    ReasoningEffort::High,
-    ReasoningEffort::Medium,
-    ReasoningEffort::Low,
-];
-
-pub(crate) fn effort_description(level: ReasoningEffort) -> &'static str {
-    match level {
-        ReasoningEffort::None => "No reasoning",
-        ReasoningEffort::Minimal => "Minimal reasoning",
-        ReasoningEffort::Low => "Faster, lighter reasoning",
-        ReasoningEffort::Medium => "Balanced reasoning",
-        ReasoningEffort::High => "Heavy reasoning",
-        ReasoningEffort::Xhigh => "Extended reasoning",
-        ReasoningEffort::Max => "Maximum reasoning",
-    }
-}
-
-/// The built-in menu used when the server sends no `reasoningEfforts`. Reproduces
-/// the historical rows: labels are the lowercase level (via `Display`),
-/// descriptions from `effort_description`. The active row is matched by value
-/// against the session effort at render time, so `default` is left unset here.
-pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
-    EFFORT_LEVELS
-        .iter()
-        .map(|&level| ReasoningEffortOption {
-            id: level.as_str().to_string(),
-            value: level,
-            label: level.to_string(),
-            description: Some(effort_description(level).to_string()),
-            default: false,
-        })
-        .collect()
-}
-
 /// Build effort rows for autocomplete from a per-model option list.
 ///
 /// - `mark_active` + `current_effort` mark the current session effort with `(active)`.

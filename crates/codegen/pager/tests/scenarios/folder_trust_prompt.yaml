@@ -2,7 +2,7 @@ name: folder-trust-prompt
 description: >
   Full session e2e for the client-side folder-trust prompt. With the feature on
   (`GROW_FOLDER_TRUST=1`) and the pager running in a git repo that ships a
-  repo-local `.mcp.json`, `decide` returns `Prompt` so the trust question renders
+  repo-local `.grow/config.toml`, `decide` returns `Prompt` so the trust question renders
   BEFORE any session starts. Accepting it (`y`) persists the grant, lets the
   session proceed, and a submitted prompt streams the mock assistant response —
   proving repo-local loading was gated until the user answered.
@@ -20,7 +20,7 @@ environment:
 workspace:
   git_init: true
   files:
-    ".mcp.json": "{\"mcpServers\": {}}"
+    ".grow/config.toml": "[mcp_servers.fixture]\ncommand = \"/usr/bin/true\"\n"
 mock:
   response: "FOLDER_TRUST_SESSION_OK assistant reply streamed after the folder was trusted."
 steps:

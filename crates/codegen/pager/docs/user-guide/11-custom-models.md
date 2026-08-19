@@ -74,7 +74,6 @@ api_key = "sk-..."
 Available shared options include:
 
 - `base_url`
-- `api_base_url`
 - `api_key`
 - `env_key` (a string or ordered array of environment-variable names)
 - `extra_headers`
@@ -130,7 +129,7 @@ output_limit = 8192
 
 A model may override shared provider options when required. Common model fields include `model`,
 `name`, `description`, `context_window`, `temperature`, `top_p`, `output_limit`,
-`reasoning_effort`, `reasoning_efforts`, `extra_headers`, `query_params`, and
+`reasoning_efforts`, `extra_headers`, `query_params`, and
 `env_http_headers`.
 
 ### Reasoning effort
@@ -172,9 +171,9 @@ Bare strings are accepted when labels and an explicit default are unnecessary:
 reasoning_efforts = ["none", "high", "max"]
 ```
 
-`reasoning_effort = "high"` sets a model default but does not by itself define a safe cycle menu.
-Prefer `reasoning_efforts` for BYOK models: it derives support, and `default = true` marks the
-model-specific default. That model default overrides `[models].default_reasoning_effort`. When no
+`reasoning_efforts` is the complete model capability contract; there is no separate support flag or
+scalar model default. `default = true` marks the model-specific default, which overrides
+`[models].default_reasoning_effort`. When no
 model default is marked, Grow uses the global default only if the model lists it; otherwise it
 leaves reasoning effort unset for the upstream service. `Ctrl+X E`, `/effort`, and `/model` all use
 the same model-declared list. The selected value is stored with the session, so reopening a session
@@ -182,7 +181,7 @@ restores its last effort before any configured default is considered.
 
 ## Auxiliary models
 
-Session summaries inherit the active session model when their setting is absent. Image reading is
+Session-title Sidebands inherit the active session model when their setting is absent. Image reading is
 different: when `image_description` is absent, images returned by `read_file` and rendered pages of
 scanned or mixed PDFs remain multimodal tool-result content for the active model (text-layer PDFs
 default to Markdown text extraction and never enter the image route). Setting `image_description`
@@ -201,7 +200,7 @@ Prompt suggestions are disabled unless explicitly assigned a configured catalog 
 ```toml
 [models]
 default = "primary/main"
-session_summary = "fast/summary"
+session_title = "fast/summary"
 image_description = "vision/describe"
 prompt_suggestion = "fast/suggest"
 ```

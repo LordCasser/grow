@@ -36,18 +36,9 @@ pub struct SessionNotification {
     pub meta: Option<serde_json::Value>,
 }
 
-/// Immutable ownership stamped on a terminal turn record. It lets crash
-/// recovery reconcile runtime-owned regular turns without parsing prompt ids
-/// or inferring ownership from the currently selected Behavior.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TurnIdentity {
-    pub origin: String,
-    pub turn_kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stage_id: Option<u64>,
-}
+/// The client projection uses the same immutable turn ownership identity as
+/// Timeline; it does not define a second terminal schema.
+pub use chat_state::TurnIdentity;
 
 /// Wire usage for ACP `_meta.usage` and `TurnCompleted.usage`.
 ///
@@ -394,18 +385,10 @@ pub fn attach_result_usage_fail_closed(result: &mut serde_json::Value, usage: &s
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "status")]
 pub enum HookRunStatusDto {
-    Success {
-        elapsed_ms: u64,
-    },
+    Success { elapsed_ms: u64 },
     Skipped,
-    Failed {
-        error: String,
-        elapsed_ms: u64,
-        /// Stop-gate block (the hook's decision, not a failure). Rides `failed`
-        /// so old pagers keep rendering it. TODO: promote to a dedicated status.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        blocked: bool,
-    },
+    Blocked { detail: String, elapsed_ms: u64 },
+    Failed { error: String, elapsed_ms: u64 },
 }
 
 /// A single hook run entry (wire format).
@@ -448,7 +431,7 @@ pub enum SubagentPermissionOutcome {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", tag = "sessionUpdate")]
+#[serde(rename_all = "snake_case", tag = "sessionUpdate", deny_unknown_fields)]
 pub enum SessionUpdate {
     /// A diff review request containing one or more file diffs for user review.
     DiffReview {
@@ -470,9 +453,8 @@ pub enum SessionUpdate {
     },
     /// Auto-compact completed successfully
     AutoCompactCompleted {
-        /// Tokens used before compaction. `None` on payloads from older shells.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tokens_before: Option<u64>,
+        /// Tokens used before compaction.
+        tokens_before: u64,
         /// Tokens used after compaction
         tokens_after: u64,
         /// How long the compaction took (milliseconds)
@@ -576,12 +558,6 @@ pub enum SessionUpdate {
         /// List of (plugin_name, old_version, new_version).
         updates: Vec<(String, String, String)>,
     },
-    /// Session summary was generated for a new session.
-    /// Sent after the first user prompt when the LLM generates a title.
-    SessionSummaryGenerated {
-        /// The generated session summary/title
-        session_summary: String,
-    },
     /// A short "where was I" recap of the session so far.
     ///
     /// Emitted by the `grow/recap` ext method: on demand via the `/recap`
@@ -617,15 +593,7 @@ pub enum SessionUpdate {
         created_at: String,
     },
     /// Task completed notification
-    TaskCompleted {
-        task_snapshot: TaskSnapshot,
-        /// Advisory: an auto-wake prompt follows this completion. The
-        /// first-party TUI no longer consumes it (remaining background work
-        /// is surfaced by its persistent "watching" status row); kept for
-        /// wire compatibility and other clients. Missing reads as `false`.
-        #[serde(default)]
-        will_wake: bool,
-    },
+    TaskCompleted { task_snapshot: TaskSnapshot },
     /// A subagent session has been spawned.
     ///
     /// Sent on the PARENT session's notification channel so the client
@@ -664,12 +632,6 @@ pub enum SessionUpdate {
         /// `follow` again against the live parent mode.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effective_permission_mode: Option<String>,
-        /// Named persona applied to this subagent.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        persona: Option<String>,
-        /// Role that supplied defaults for this subagent (e.g. "researcher").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        role: Option<String>,
         /// Effective model ID used by the subagent (may differ from the parent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
@@ -762,17 +724,10 @@ pub enum SessionUpdate {
         /// Total wall-clock duration in milliseconds.
         duration_ms: u64,
         /// Total tokens consumed by the subagent's context window.
-        #[serde(default)]
         tokens_used: u64,
         /// Final output text from the subagent (if completed).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
-        /// Advisory: an auto-wake prompt follows this completion. The
-        /// first-party TUI no longer consumes it (remaining background work
-        /// is surfaced by its persistent "watching" status row); kept for
-        /// wire compatibility and other clients. Missing reads as `false`.
-        #[serde(default)]
-        will_wake: bool,
     },
     /// Task backgrounded notification — a bash command transitioned to background execution.
     /// Sent for both direct `is_background=true` tasks and foreground→background transitions.
@@ -810,8 +765,7 @@ pub enum SessionUpdate {
         prompt: String,
         human_schedule: String,
         next_fire_at: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        subagent_id: Option<String>,
+        subagent_id: String,
     },
     /// A scheduled task was deleted/cancelled.
     ScheduledTaskDeleted { task_id: String },
@@ -1085,11 +1039,6 @@ pub enum SessionUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_sequence: Option<String>,
     },
-    /// Catch-all for unrecognized session update types.
-    /// Allows forward/backward compatibility when variants are added or removed.
-    /// All fields from the unrecognized variant are discarded during deserialization.
-    #[serde(other)]
-    Unknown,
 }
 
 /// Metadata for a single memory file, sent to the pager for the memory modal.
@@ -1172,218 +1121,9 @@ pub struct DiffContent {
     pub diff: acp::Diff,
 }
 
-/// A compaction segment to persist under `compaction/segment_NNN.md`. Storage
-/// assigns the resume-safe index and renders the markdown (it owns the index
-/// the header/metadata embed), so the caller supplies the render inputs.
-#[derive(Debug, Clone)]
-pub struct CompactionSegmentFile {
-    pub items: Vec<sampling_types::ConversationItem>,
-    /// Curated summary, analysis tags already stripped.
-    pub summary: String,
-    pub detail: chat_state::CompactionDetail,
-    /// ISO-8601, for the segment metadata.
-    pub timestamp: String,
-}
-
-/// On-disk artifact capturing the exact compaction request sent to the model
-/// plus the response (or final error) it produced.
-///
-/// Stored at `{session_dir}/compaction_requests/{request_id}.json` for local
-/// prompt iteration — it contains the exact `chat_history`, prompt
-/// variant, any `/compact <text>` user context, the model used, and the
-/// resulting summary (or error). Replay the request locally to A/B test
-/// alternate prompt wordings against the same input.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct CompactionRequestFile {
-    /// Schema version for forward compatibility.
-    pub schema_version: u32,
-    /// Unique artifact identifier (filename stem).
-    pub request_id: String,
-    /// ISO 8601 timestamp of when the compaction call started.
-    pub created_at: String,
-    /// What kicked off the compaction: `"manual"` (user ran `/compact`) or `"auto"`.
-    pub trigger: String,
-    /// Which prompt template was used: `"short"` (concise self-summarization)
-    /// or `"detailed"` (10-section structured prompt for grow-build and similar agents).
-    pub prompt_variant: String,
-    /// The model id that ran the summarization.
-    pub model: String,
-    /// User-provided context from `/compact <text>`, if any.
-    pub user_context: Option<String>,
-    /// The full `ConversationItem` list sent to the model, with the
-    /// summarization prompt already appended as the final user message.
-    /// Replaying this against any model reproduces the exact request.
-    pub chat_history: Vec<crate::sampling::ConversationItem>,
-    /// Tool definitions attached to the request (same effective set as the
-    /// turn loop, for prompt-prefix/KV-cache alignment). Empty for artifacts
-    /// written before tools were attached. Backend-hosted tools are not
-    /// recorded (not serializable; IC-side concept).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<crate::sampling::ToolSpec>,
-    /// Generated summary text, on success. `None` if all retries failed.
-    pub summary: Option<String>,
-    /// Most recent error message captured during the retry loop, if any.
-    ///
-    /// `None` on a first-attempt success. May co-occur with `summary` when a
-    /// transient failure was eventually retried successfully — the field then
-    /// documents the recovered flake and `summary` carries the final result.
-    /// On total failure (all retries exhausted, or a deterministic error)
-    /// `summary` is `None` and this field carries the final error.
-    pub error: Option<String>,
-    /// Number of attempts the retry loop made before settling on the final outcome.
-    pub attempts: u32,
-    /// Per-attempt diagnostics (one per retry-loop iteration), in order —
-    /// records each rejected/degraded attempt so retries aren't bumped
-    /// invisibly. Empty on artifacts written before schema v2.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attempt_details: Vec<chat_state::compaction_utils::CompactionAttempt>,
-}
-
-/// On-disk artifact capturing the exact recap request sent to the model plus
-/// the response (or final error) it produced.
-///
-/// Stored at `{session_dir}/recap_requests/{request_id}.json` so recap prompt
-/// and model output can be replayed locally.
-/// Recap never mutates the conversation; this file is the only durable
-/// record of what was sent for `/recap` or auto return-from-away recap.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct RecapRequestFile {
-    /// Schema version for forward compatibility.
-    pub schema_version: u32,
-    /// Unique artifact identifier (filename stem).
-    pub request_id: String,
-    /// ISO 8601 timestamp of when the recap model call started.
-    pub created_at: String,
-    /// What kicked off the recap: `"manual"` (`/recap`) or `"auto"`
-    /// (return-from-away).
-    pub trigger: String,
-    /// The model id used for the recap side-call.
-    pub model: String,
-    /// Whether reasoning/thinking blocks were stripped from the prefix
-    /// (Anthropic Messages backend only; other backends keep reasoning
-    /// verbatim for prompt-cache warmth).
-    pub strip_reasoning: bool,
-    /// Reminder tag used in the recap instruction (`system-reminder` or
-    /// the alternate `system_reminder` form).
-    pub reminder_tag: String,
-    /// The full `ConversationItem` list sent to the model, with the recap
-    /// instruction already appended as the final user message. Replaying
-    /// this against any model reproduces the exact request.
-    pub chat_history: Vec<crate::sampling::ConversationItem>,
-    /// Cleaned one-line recap body shown to the user, on success.
-    /// `None` if the model call failed or returned empty after cleaning.
-    pub summary: Option<String>,
-    /// Raw `assistant_text()` from the model before `clean_recap_text`.
-    /// Useful for diagnosing garble (tool-call XML / CJK junk) that cleaning
-    /// only partially trims. `None` when the call never returned a response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_response: Option<String>,
-    /// Error message if preparation or the model call failed, or if the
-    /// cleaned summary was empty.
-    pub error: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn recap_request_file_roundtrips() {
-        let artifact = RecapRequestFile {
-            schema_version: 1,
-            request_id: "artifact-1".into(),
-            created_at: "2026-06-30T00:00:00Z".into(),
-            trigger: "auto".into(),
-            model: "v9-zingster".into(),
-            strip_reasoning: false,
-            reminder_tag: "system-reminder".into(),
-            chat_history: vec![],
-            summary: Some("We fixed the flaky test in queue_worker.".into()),
-            raw_response: Some("We fixed the flaky test in queue_worker.".into()),
-            error: None,
-        };
-        let json = serde_json::to_string(&artifact).unwrap();
-        let parsed: RecapRequestFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.schema_version, 1);
-        assert_eq!(parsed.trigger, "auto");
-        assert_eq!(
-            parsed.summary.as_deref(),
-            Some("We fixed the flaky test in queue_worker.")
-        );
-        assert!(parsed.error.is_none());
-    }
-
-    #[test]
-    fn compaction_request_file_v2_roundtrips_attempt_details() {
-        use chat_state::compaction_utils::CompactionAttempt;
-        let artifact = CompactionRequestFile {
-            schema_version: 2,
-            request_id: "req-1".into(),
-            created_at: "2026-06-15T00:00:00Z".into(),
-            trigger: "auto".into(),
-            prompt_variant: "detailed".into(),
-            model: "grow".into(),
-            user_context: None,
-            chat_history: vec![],
-            tools: vec![],
-            summary: Some("the accepted summary".into()),
-            error: None,
-            attempts: 2,
-            attempt_details: vec![
-                // A rejected degraded attempt: the loop captures the raw text.
-                CompactionAttempt {
-                    attempt: 1,
-                    outcome: "degenerate".into(),
-                    summary_chars: 22,
-                    summary: Some("Now I will do X, Y, Z.".into()),
-                    error: None,
-                },
-                // The accepted retry: text lives in the top-level `summary`.
-                CompactionAttempt {
-                    attempt: 2,
-                    outcome: "success".into(),
-                    summary_chars: 4096,
-                    summary: None,
-                    error: None,
-                },
-            ],
-        };
-        let json = serde_json::to_string(&artifact).unwrap();
-        let parsed: CompactionRequestFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.schema_version, 2);
-        assert_eq!(parsed.attempt_details.len(), 2);
-        assert_eq!(parsed.attempt_details[0].outcome, "degenerate");
-        assert_eq!(
-            parsed.attempt_details[0].summary.as_deref(),
-            Some("Now I will do X, Y, Z.")
-        );
-        assert_eq!(parsed.attempt_details[1].outcome, "success");
-        assert_eq!(parsed.attempt_details[1].summary, None);
-    }
-
-    #[test]
-    fn compaction_request_file_v1_without_attempt_details_defaults_empty() {
-        // A pre-schema-v2 artifact carries no `attempt_details` key — it must
-        // still deserialize, defaulting the new field to empty.
-        let json = serde_json::json!({
-            "schema_version": 1,
-            "request_id": "req-old",
-            "created_at": "2026-06-01T00:00:00Z",
-            "trigger": "manual",
-            "prompt_variant": "detailed",
-            "model": "grow",
-            "user_context": null,
-            "chat_history": [],
-            "summary": "ok",
-            "error": null,
-            "attempts": 1
-        });
-        let parsed: CompactionRequestFile = serde_json::from_value(json).unwrap();
-        assert!(parsed.attempt_details.is_empty());
-        assert!(parsed.tools.is_empty());
-    }
 
     #[test]
     fn subagent_progress_serializes_snake_case_tag() {
@@ -1482,8 +1222,6 @@ mod tests {
             capability_mode: None,
             permission_mode: None,
             effective_permission_mode: None,
-            persona: None,
-            role: None,
             model: None,
             resumed_from: None,
             workflow_run_id: None,
@@ -1514,45 +1252,12 @@ mod tests {
             duration_ms: 200,
             tokens_used: 50_000,
             output: None,
-            will_wake: false,
         })
         .unwrap();
         // All three should have distinct tags
         assert_eq!(spawned["sessionUpdate"], "subagent_spawned");
         assert_eq!(progress["sessionUpdate"], "subagent_progress");
         assert_eq!(finished["sessionUpdate"], "subagent_finished");
-    }
-
-    #[test]
-    fn subagent_finished_without_tokens_used_backward_compat() {
-        // Old JSONL entries written before the tokens_used field was added
-        // must deserialize successfully with tokens_used defaulting to 0.
-        // modelUsage on older wire is ignored (subagent accounting uses
-        // RecordSubagentUsage only).
-        let json = r#"{
-            "sessionUpdate": "subagent_finished",
-            "subagent_id": "sa-old",
-            "child_session_id": "cs-old",
-            "status": "completed",
-            "tool_calls": 3,
-            "turns": 1,
-            "duration_ms": 5000,
-            "modelUsage": { "m": { "inputTokens": 1 } }
-        }"#;
-        let update: SessionUpdate = serde_json::from_str(json).unwrap();
-        match update {
-            SessionUpdate::SubagentFinished {
-                subagent_id,
-                tokens_used,
-                output,
-                ..
-            } => {
-                assert_eq!(subagent_id, "sa-old");
-                assert_eq!(tokens_used, 0, "missing field must default to 0");
-                assert_eq!(output, None);
-            }
-            other => panic!("expected SubagentFinished, got {other:?}"),
-        }
     }
 
     #[test]
@@ -1567,7 +1272,6 @@ mod tests {
             duration_ms: 10_000,
             tokens_used: 75_000,
             output: Some("done".into()),
-            will_wake: false,
         };
         let json_str = serde_json::to_string(&update).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
@@ -1578,28 +1282,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_variant_deserializes_from_removed_git_branch_update() {
-        let json = r#"{"sessionUpdate": "git_branch_update", "branch": "main"}"#;
-        let update: SessionUpdate = serde_json::from_str(json).unwrap();
-        assert_eq!(update, SessionUpdate::Unknown);
-    }
-
-    #[test]
-    fn unknown_variant_deserializes_from_arbitrary_future_variant() {
-        let json = r#"{"sessionUpdate": "some_future_feature", "data": 42}"#;
-        let update: SessionUpdate = serde_json::from_str(json).unwrap();
-        assert_eq!(update, SessionUpdate::Unknown);
-    }
-
-    #[test]
-    fn unknown_variant_in_session_notification_envelope() {
+    fn unknown_variant_in_session_notification_envelope_is_rejected() {
         let json = r#"{
             "sessionId": "sess-123",
             "update": {"sessionUpdate": "git_branch_update", "branch": "main"}
         }"#;
-        let notification: SessionNotification = serde_json::from_str(json).unwrap();
-        assert_eq!(notification.session_id.0.as_ref(), "sess-123");
-        assert_eq!(notification.update, SessionUpdate::Unknown);
+        assert!(serde_json::from_str::<SessionNotification>(json).is_err());
     }
 
     #[test]
@@ -1650,8 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_flush_completed_without_path_backward_compat() {
-        // Old format without path field should deserialize with path=None
+    fn memory_flush_completed_allows_absent_path_when_nothing_was_written() {
         let json = r#"{"sessionUpdate": "memory_flush_completed", "result": "written"}"#;
         let update: SessionUpdate = serde_json::from_str(json).unwrap();
         assert_eq!(
@@ -1682,19 +1369,6 @@ mod tests {
         let json_str = serde_json::to_string(&update).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
         assert_eq!(update, parsed);
-    }
-
-    #[test]
-    fn unknown_serializes_with_stable_tag() {
-        let json = serde_json::to_value(&SessionUpdate::Unknown).unwrap();
-        assert_eq!(json["sessionUpdate"], "unknown");
-    }
-
-    #[test]
-    fn unknown_roundtrips_through_json() {
-        let json_str = serde_json::to_string(&SessionUpdate::Unknown).unwrap();
-        let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(parsed, SessionUpdate::Unknown);
     }
 
     #[test]
@@ -1805,9 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_delta_chunk_unknown_extra_fields_dont_break_deserialization() {
-        // Forward-compat: if a future shell adds new optional fields,
-        // older deserializers must still accept the message.
+    fn tool_call_delta_chunk_rejects_unknown_fields() {
         let json = r#"{
             "sessionUpdate": "tool_call_delta_chunk",
             "tool_call_id": "call_x",
@@ -1816,21 +1488,7 @@ mod tests {
             "arguments_delta": "...",
             "future_field": "ignored"
         }"#;
-        let update: SessionUpdate = serde_json::from_str(json).expect("parses with extra field");
-        match update {
-            SessionUpdate::ToolCallDeltaChunk {
-                tool_call_id,
-                tool_index,
-                name,
-                arguments_delta,
-            } => {
-                assert_eq!(tool_call_id.as_deref(), Some("call_x"));
-                assert_eq!(tool_index, 7);
-                assert_eq!(name.as_deref(), Some("future_tool"));
-                assert_eq!(arguments_delta.as_deref(), Some("..."));
-            }
-            other => panic!("expected ToolCallDeltaChunk, got {other:?}"),
-        }
+        assert!(serde_json::from_str::<SessionUpdate>(json).is_err());
     }
 
     fn goal_update() -> SessionUpdate {
@@ -1887,7 +1545,7 @@ mod tests {
         let obsolete = serde_json::json!({
             "sessionUpdate": "goal_updated",
             "goal_id": "g-old",
-            "objective": "legacy",
+            "objective": "obsolete",
             "status": "active",
             "phase": "idle",
             "tokens_used": 0,
@@ -1929,16 +1587,15 @@ mod tests {
         assert_eq!(json["model_id"], "grow-3");
         assert!(
             json.get("reasoning_effort").is_none(),
-            "reasoning_effort: None must be skipped on the wire so old pagers \
-             and third-party ACP clients see a smaller, no-extra-keys payload"
+            "reasoning_effort: None must be omitted because absence is the \
+             canonical representation of no override"
         );
     }
 
     /// `ModelChanged` round-trips through JSON: a follower client deserializes
     /// the exact same value the agent serialized. Pins the field order /
-    /// case so an accidental rename doesn't silently degrade to `Unknown`
-    /// (the `#[serde(other)]` catch-all would swallow that on the pager side
-    /// and break multi-client model sync without any test failing).
+    /// case so an accidental rename fails loudly instead of breaking
+    /// multi-client model sync without any signal.
     #[test]
     fn model_changed_roundtrips_through_json() {
         let original = SessionUpdate::ModelChanged {

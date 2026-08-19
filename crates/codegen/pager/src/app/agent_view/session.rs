@@ -231,7 +231,6 @@ impl AgentView {
             inline_media_hits: InlineMediaHitAreas::default(),
             extensions_modal: None,
             agents_modal: None,
-            persona_detail: None,
             btw_state: None,
             minimal_btw_lifecycle: None,
             btw_focused: false,
@@ -301,7 +300,6 @@ impl AgentView {
             active_subagent: None,
             is_subagent_view: false,
             hit_subagent_frame_close: Default::default(),
-            scheduler_background_loops: None,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
             leader_key_started_at: None,
@@ -713,7 +711,7 @@ impl AgentView {
     /// gap during a running inference turn resolved into an explicit
     /// [`WaitingReason`] so the spinner names *what* we're waiting on.
     ///
-    /// The tracker already returns `Waiting(TaskOutput/TasksComplete/Sleep)`,
+    /// The tracker already returns `Waiting(TaskOutput/Sleep)`,
     /// and `Waiting(Subagent)` for a foreground `task` call from the moment it's
     /// issued. This fills in the remaining gap: if no tracker activity but a
     /// foreground subagent is registered as running, it's still `Subagent`
@@ -779,7 +777,7 @@ impl AgentView {
             TurnActivity::Waiting(WaitingReason::TaskOutput {
                 task_ids, waits, ..
             }) => {
-                let subject = self.subject_for_wait_tasks(&task_ids);
+                let subject = self.subject_for_task_output(&task_ids);
                 TurnActivity::Waiting(WaitingReason::TaskOutput {
                     task_ids,
                     subject,
@@ -795,7 +793,7 @@ impl AgentView {
     /// full `task_ids` length (`"first + N more"` with `N = task_ids.len()-1`)
     /// so partial resolution still reads as multi-task. Unknown ids → `None`
     /// (spinner falls back to the generic label).
-    fn subject_for_wait_tasks(&self, task_ids: &[String]) -> Option<String> {
+    fn subject_for_task_output(&self, task_ids: &[String]) -> Option<String> {
         use crate::acp::tracker::{MAX_ACTIVITY_SUBJECT_CHARS, clamp_activity_subject};
         if task_ids.is_empty() {
             return None;
@@ -1469,8 +1467,6 @@ mod resolve_turn_activity_tests {
                 child_session_id: Arc::from("child-session-xyz"),
                 description: Arc::from("explore the auth module"),
                 subagent_type: Arc::from("explore"),
-                persona: None,
-                role: None,
                 model: None,
                 context_source: None,
                 resumed_from: None,

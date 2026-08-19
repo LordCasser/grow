@@ -229,8 +229,11 @@ mod tests {
         let reloaded = adapter
             .load_session_without_updates(&info)
             .await
-            .expect("reload")
-            .chat_history;
+            .expect("reload");
+        let reloaded = chat_state::Timeline::from_events(reloaded.timeline_events)
+            .expect("valid repaired Timeline")
+            .surface()
+            .to_vec();
         assert_eq!(reloaded.len(), 4);
         assert!(!reloaded.iter().any(|i| matches!(
             i,
@@ -264,8 +267,11 @@ mod tests {
         let reloaded = adapter
             .load_session_without_updates(&info)
             .await
-            .expect("reload")
-            .chat_history;
+            .expect("reload");
+        let reloaded = chat_state::Timeline::from_events(reloaded.timeline_events)
+            .expect("valid original Timeline")
+            .surface()
+            .to_vec();
         assert_eq!(reloaded.len(), 5);
     }
 

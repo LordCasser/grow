@@ -11,9 +11,9 @@
 //! 3. `ModelContextWindowExceeded` + compaction still over the window → turn
 //!    fails with a diagnostic (bounded sampling, no re-loop).
 //! 5. `prune_tool_results` errors → fail-open: the summary path still runs.
-//! Plus a layering test: pruning rewrites only the history snapshot
-//! (`ReplaceHistory`), emits no chat-state UI events, and leaves the append
-//! log (updates.jsonl analogue) carrying the original content.
+//! Plus a layering test: pruning appends exactly one Surface replacement,
+//! emits no chat-state UI events, and leaves the original Timeline fact
+//! available behind the shadowing edge for rewind.
 //!
 //! Scenario 4 (`context_window_exceeded_triggers_compaction`, compaction
 //! success → continue resample) is the existing regression test in
@@ -199,7 +199,6 @@ async fn run_user_turn(
             None,
             None,
             false,
-            None,
             None,
             None,
         ),
@@ -657,6 +656,17 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
                 crate::session::compaction_config::SUPPRESS_STICKY,
                 "convergence failure must sticky-suppress AUTO"
             );
+            let trajectory = actor.chat_state_handle.trajectory().await.unwrap();
+            let compaction_terminal = trajectory
+                .rows
+                .iter()
+                .rev()
+                .find(|row| row.kind.starts_with("compaction.") && row.state != "started")
+                .expect("compaction must have a terminal Timeline fact");
+            assert_eq!(
+                compaction_terminal.state, "completed",
+                "the Surface replacement committed; only the enclosing turn fails"
+            );
         }));
     });
 }
@@ -702,34 +712,37 @@ fn pre_prune_error_fails_open_to_summary() {
                 source: trigger.source,
             };
 
-            // Phase A: force `PruneToolResults` to fail deterministically.
-            // Poll-driven handshake on the chat-state command queue: the
-            // spawned task's first poll runs synchronously through the
-            // ladder's sync checks and queues `GetConversation` before it
-            // parks on the reply — and it fires `started` in that same poll,
-            // so when the main task wakes, `GetConversation` is already
-            // queued. Main then queues an empty `ReplaceConversation`
-            // *synchronously* (no await in between), so the FIFO order is
-            // `GetConversation → ReplaceConversation → PruneToolResults`:
-            // the plan is built from the non-empty snapshot, and the prune
-            // hits `PruneError::EmptyConversation`.
-            let started = std::sync::Arc::new(tokio::sync::Notify::new());
+            // Phase A: an already-open compaction transaction rejects the
+            // pre-prune replacement deterministically. This exercises the
+            // same `PruneError::Timeline` fail-open arm without relying on an
+            // unsafe external full-Surface overwrite race.
             let (mut trace_rx, _guard) = capture_trace_events();
-            let plan_task = {
-                let actor = actor.clone();
-                let started = started.clone();
-                tokio::task::spawn_local(async move {
-                    started.notify_waiters();
-                    actor.maybe_pre_prune(&trigger_phase_a).await
-                })
-            };
-            started.notified().await;
-            actor.chat_state_handle.replace_conversation(vec![]);
-
-            let pruned = plan_task
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Started {
+                        id: "pre-prune-conflict".into(),
+                        source_items: actor.chat_state_handle.get_conversation_len().await,
+                        prompt_index: actor.chat_state_handle.get_prompt_index().await,
+                    },
+                ))
                 .await
-                .expect("maybe_pre_prune must not propagate the prune error")
+                .unwrap();
+            let pruned = actor
+                .maybe_pre_prune(&trigger_phase_a)
+                .await
                 .expect("maybe_pre_prune must not error");
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Failed {
+                        id: "pre-prune-conflict".into(),
+                        duration_ms: 1,
+                        error: "test conflict".into(),
+                    },
+                ))
+                .await
+                .unwrap();
             assert!(!pruned, "prune error must fail open (no summary skip)");
             // Pin the Err arm: the fail-open warn must have been logged (if
             // the interleave ever degraded to the empty-plan rung, this fails
@@ -760,9 +773,9 @@ fn pre_prune_error_fails_open_to_summary() {
             // Phase B: the fallback path still runs the summary. Re-seed the
             // conversation, switch pre-prune off (so the ladder short-circuits
             // and the summary is the only path), and run a real compaction.
-            actor
-                .chat_state_handle
-                .replace_conversation_for_compaction(vec![
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
                     ConversationItem::system("test system prompt"),
                     ConversationItem::user("u0"),
                     ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
@@ -771,7 +784,9 @@ fn pre_prune_error_fails_open_to_summary() {
                         arguments: "{}".into(),
                     }]),
                     ConversationItem::tool_result("call-0", big_tool_text()),
-                ]);
+                ],
+            )
+            .await;
             actor.chat_state_handle.record_token_usage(40_000);
             actor.compaction.pre_prune.set(false);
             let _ = actor.chat_state_handle.get_conversation_len().await;
@@ -983,166 +998,6 @@ fn pre_prune_blocked_by_account_and_turn_suppress() {
     });
 }
 
-/// Review fix B: while the fork's inherited parent transcript is still
-/// pinned (`prefix_released == false`), pre-prune must never touch items
-/// inside `conversation[..inherited_prefix_len]` — `preserve_inherited_prefix`
-/// re-pins that region verbatim at compaction time. Only the child's own
-/// oversized tool results may be pruned. `prefix_released` takes precedence
-/// over `inherited_prefix_len`.
-#[test]
-fn pre_prune_never_touches_inherited_fork_prefix() {
-    use std::sync::atomic::Ordering;
-    run_with_session_stack(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let local = tokio::task::LocalSet::new();
-        rt.block_on(local.run_until(async {
-            let server = MockInferenceServer::start().await.unwrap();
-            // The fork hint covers the four parent items.
-            let (actor, _gateway_rx) = actor_with_sampler_cw_ex(
-                &server,
-                sampling_types::ApiBackend::Messages,
-                100_000,
-                Some(4),
-            )
-            .await;
-            // 40% threshold → target 40K tokens; default budget 5% = 5K tokens
-            // (20KB). The parent's 40KB tool result (≈10K tokens) is a prune
-            // candidate by size but lives inside the inherited prefix.
-            actor.compaction.threshold_percent.set(40);
-            let parent_tool_text = "x".repeat(40_000);
-            actor
-                .chat_state_handle
-                .replace_system_head("parent system prompt")
-                .await
-                .expect("system head must be replaceable");
-            actor
-                .chat_state_handle
-                .push_user_message(ConversationItem::user("parent u"));
-            actor.chat_state_handle.push_assistant_response(
-                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
-                    id: "call-parent".into(),
-                    name: "grep".to_string(),
-                    arguments: "{}".into(),
-                }]),
-            );
-            actor
-                .chat_state_handle
-                .push_tool_result(ConversationItem::tool_result(
-                    "call-parent",
-                    parent_tool_text.clone(),
-                ));
-            // Child turns (the prunable suffix): one oversized 200KB result.
-            actor
-                .chat_state_handle
-                .push_user_message(ConversationItem::user("child u"));
-            actor.chat_state_handle.push_assistant_response(
-                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
-                    id: "call-child".into(),
-                    name: "grep".to_string(),
-                    arguments: "{}".into(),
-                }]),
-            );
-            actor
-                .chat_state_handle
-                .push_tool_result(ConversationItem::tool_result("call-child", big_tool_text()));
-            actor.chat_state_handle.record_token_usage(60_000);
-            let _ = actor.chat_state_handle.get_conversation_len().await;
-
-            let trigger = compaction::AutoCompactTriggerInfo {
-                tokens_used: 60_000,
-                context_window: 100_000,
-                percentage: 60,
-                source: "test",
-            };
-            let (mut trace_rx, _guard) = capture_trace_events();
-            let pruned = actor
-                .maybe_pre_prune(&trigger)
-                .await
-                .expect("maybe_pre_prune must not error");
-            assert!(
-                pruned,
-                "pruning the child's own oversized tool result must resolve the pressure"
-            );
-            let conversation = actor.chat_state_handle.get_conversation().await;
-            let tool_texts = tool_result_texts(&conversation);
-            assert_eq!(tool_texts.len(), 2);
-            assert_eq!(
-                &tool_texts[0], &parent_tool_text,
-                "the inherited prefix's tool result must be preserved verbatim"
-            );
-            assert_ne!(
-                &tool_texts[1],
-                &big_tool_text(),
-                "the child's oversized tool result must be pruned"
-            );
-            assert!(
-                tool_texts[1].len() <= 20_000,
-                "pruned content must fit the 5K-token budget (20KB)"
-            );
-            let mut raw_events = Vec::new();
-            while let Ok(e) = trace_rx.try_recv() {
-                raw_events.push(e);
-            }
-            let events = diagnostic_events(&raw_events);
-            let pruned_event = events
-                .iter()
-                .find(|(name, _)| name == "auto_compact_pruned")
-                .expect("auto_compact_pruned diagnostics event must fire");
-            assert_eq!(
-                pruned_event.1["pruned_count"], 1,
-                "exactly the child's tool result must be pruned"
-            );
-
-            // Phase 2: `prefix_released` wins over `inherited_prefix_len` —
-            // after release the whole conversation (parent item included) is
-            // prunable again.
-            actor
-                .compaction
-                .prefix_released
-                .store(true, Ordering::Relaxed);
-            actor
-                .chat_state_handle
-                .replace_conversation_for_compaction(vec![
-                    ConversationItem::system("parent system prompt"),
-                    ConversationItem::user("parent u"),
-                    ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
-                        id: "call-parent".into(),
-                        name: "grep".to_string(),
-                        arguments: "{}".into(),
-                    }]),
-                    ConversationItem::tool_result("call-parent", parent_tool_text.clone()),
-                    ConversationItem::user("child u"),
-                    ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
-                        id: "call-child".into(),
-                        name: "grep".to_string(),
-                        arguments: "{}".into(),
-                    }]),
-                    ConversationItem::tool_result("call-child", big_tool_text()),
-                ]);
-            let _ = actor.chat_state_handle.get_conversation_len().await;
-            let pruned = actor
-                .maybe_pre_prune(&trigger)
-                .await
-                .expect("maybe_pre_prune must not error");
-            assert!(pruned, "the released prefix must now be prunable");
-            let conversation = actor.chat_state_handle.get_conversation().await;
-            let tool_texts = tool_result_texts(&conversation);
-            assert_ne!(
-                &tool_texts[0], &parent_tool_text,
-                "after release the former prefix item must be pruned too"
-            );
-            assert_ne!(
-                &tool_texts[1],
-                &big_tool_text(),
-                "the child's tool result must be pruned too"
-            );
-        }));
-    });
-}
-
 // ─── Display / logging layering ────────────────────────────────────────────
 
 /// Pruning appends a content-only Timeline replacement and refreshes the
@@ -1156,7 +1011,7 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
         .unwrap();
     let local = tokio::task::LocalSet::new();
     rt.block_on(local.run_until(async {
-        let (persistence, mut recv) = chat_state::MockChatPersistence::new();
+        let (persistence, mut recv) = chat_state::MockTimelinePersistence::new();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<chat_state::ChatStateEvent>();
         let conversation = vec![
             ConversationItem::system("test system prompt"),
@@ -1205,48 +1060,39 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
             .expect("prune must succeed");
         assert_eq!(report.pruned_count, 1);
 
-        // Persistence: exactly one snapshot rewrite carrying the pruned
-        // content; the append log gained no new records (updates.jsonl keeps
-        // the original content for rewind replay).
+        // Persistence: exactly one Timeline replacement carrying the pruned
+        // content. The original node remains addressable for rewind.
         let records = recv.drain();
-        let replaces: Vec<&Vec<ConversationItem>> = records
+        let replacements: Vec<&chat_state::MessageEvent> = records
             .iter()
             .filter_map(|r| match r {
-                chat_state::PersistenceRecord::ReplaceHistory(items) => Some(items),
+                chat_state::PersistenceRecord::Timeline(event) => event.messages(),
                 _ => None,
             })
+            .filter(|event| event.cause == chat_state::MessageCause::ToolResultPrune)
             .collect();
-        assert_eq!(replaces.len(), 1, "exactly one history snapshot rewrite");
-        let snapshot_tool_texts = tool_result_texts(replaces[0]);
+        assert_eq!(replacements.len(), 1, "exactly one Surface replacement");
+        let snapshot_tool_texts = tool_result_texts(&replacements[0].items);
         assert_eq!(snapshot_tool_texts.len(), 1);
         assert_ne!(
             &snapshot_tool_texts[0],
             &big_tool_text(),
             "snapshot must carry the pruned content"
         );
-        assert!(
-            records
-                .iter()
-                .all(|r| !matches!(r, chat_state::PersistenceRecord::Message(_))),
-            "no append-log records may be written by pruning"
+        assert_eq!(
+            records.len(),
+            1,
+            "pruning writes no duplicate persistence rail"
         );
-        // The original content remains observable through the append log
-        // written at push time (the rewind-replay source). Assert via the
-        // chat-state event channel contrast below + the fact the snapshot
-        // still keeps head/tail: replay semantics are "restore from
-        // updates.jsonl, which never saw the prune".
 
         // No chat-state UI events from the prune command itself.
         assert!(
             event_rx.try_recv().is_err(),
             "prune must emit no chat-state events"
         );
-        // Contrast: a compaction replace DOES emit reset/token events, proving
-        // the channel is live and the silence above is meaningful. The
-        // replace command is fire-and-forget, so barrier on a round-trip
-        // before draining events.
-        handle.replace_conversation_for_compaction(vec![ConversationItem::system("s")]);
-        let _ = handle.get_conversation_len().await;
+        // Contrast: a durable context replacement emits reset/token events,
+        // proving the channel is live and the silence above is meaningful.
+        replace_test_surface(&handle, vec![ConversationItem::system("s")]).await;
         let mut saw_reset = false;
         let mut saw_tokens = false;
         while let Ok(event) = event_rx.try_recv() {

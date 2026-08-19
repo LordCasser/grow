@@ -41,7 +41,7 @@ fn messages(partials: bool) -> MessagesReducer {
         session_id: "sess-1".into(),
         model: Some("grow-4".into()),
         cwd: "/repo".into(),
-        permission_mode: Some("bypassPermissions".into()),
+        permission_mode: Some("always-approve".into()),
         mcp_servers: vec![McpServer {
             name: "linear".into(),
             status: "connected".into(),

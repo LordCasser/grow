@@ -872,7 +872,7 @@ fn running_status_shims_only_while_submitting() {
         agent.session.state = AgentState::TurnSubmitting;
         agent.session.current_prompt_id = Some("pid-run".into());
         agent.prompt_status_query_for = Some("pid-run".into());
-        agent.apply_follow_ups("pid-run".into(), vec!["follow up".into()]);
+        agent.apply_follow_ups("resp-1".into(), "pid-run", vec!["follow up".into()]);
     }
 
     let effects = dispatch(
@@ -915,7 +915,7 @@ fn running_status_skips_shim_when_turn_already_running() {
         agent.session.state = AgentState::TurnRunning;
         agent.session.current_prompt_id = Some("pid-run".into());
         agent.prompt_status_query_for = Some("pid-run".into());
-        agent.apply_follow_ups("pid-run".into(), vec!["follow up".into()]);
+        agent.apply_follow_ups("resp-1".into(), "pid-run", vec!["follow up".into()]);
     }
 
     let effects = dispatch(
@@ -1105,10 +1105,7 @@ fn switch_model_complete_reports_already_using_and_skips_persist_when_unchanged(
 
     let agent = app.agents.get_mut(&id).unwrap();
     let mut meta = serde_json::Map::new();
-    meta.insert(
-        "supportsReasoningEffort".into(),
-        serde_json::Value::Bool(true),
-    );
+    meta.insert("reasoningEfforts".into(), serde_json::json!(["high"]));
     agent.session.models.available.insert(
         model_id.clone(),
         acp::ModelInfo::new(model_id.clone(), "Grow 4.5".to_string()).meta(Some(meta)),
@@ -1156,10 +1153,7 @@ fn switch_model_complete_resolves_effort_from_catalog_meta_session_only() {
     let model_id = acp::ModelId::new(std::sync::Arc::from("byok-model-47"));
 
     let mut meta = serde_json::Map::new();
-    meta.insert(
-        "supportsReasoningEffort".into(),
-        serde_json::Value::Bool(true),
-    );
+    meta.insert("reasoningEfforts".into(), serde_json::json!(["xhigh"]));
     meta.insert(
         "reasoningEffort".into(),
         serde_json::Value::String("xhigh".into()),
@@ -1218,7 +1212,7 @@ fn switch_to_non_reasoning_model_clears_session_effort() {
         .models
         .reasoning_effort = Some(ReasoningEffort::High);
 
-    // The new model does NOT have supportsReasoningEffort in its meta.
+    // The new model does not publish a reasoningEfforts menu.
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -1427,7 +1421,6 @@ fn no_deferred_switch_means_no_extra_effect() {
             agent_id: id,
             session_id: "new-session".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1449,36 +1442,16 @@ fn bundle_status_ready_populates_state() {
         Action::TaskComplete(TaskResult::BundleStatusReady {
             has_cache: true,
             version: Some("v2".into()),
-            personas: vec!["researcher".into(), "auditor".into()],
-            roles: vec!["reviewer".into()],
             agents: vec!["default".into()],
             skills: vec!["commit".into(), "code-review".into()],
-            persona_details: vec![crate::app::bundle::PersonaDetail {
-                name: "researcher".into(),
-                description: Some("thorough researcher".into()),
-                has_inputs: true,
-                has_outputs: false,
-                source_path: None,
-                scope_label: None,
-            }],
-            role_details: vec![crate::app::bundle::RoleDetail {
-                name: "reviewer".into(),
-                description: "code reviewer".into(),
-            }],
         }),
         &mut app,
     );
 
     assert!(app.bundle_state.has_cache);
     assert_eq!(app.bundle_state.version, "v2");
-    assert_eq!(app.bundle_state.personas, vec!["researcher", "auditor"]);
-    assert_eq!(app.bundle_state.roles, vec!["reviewer"]);
     assert_eq!(app.bundle_state.agents, vec!["default"]);
     assert_eq!(app.bundle_state.skills, vec!["commit", "code-review"]);
-    assert_eq!(app.bundle_state.persona_details.len(), 1);
-    assert_eq!(app.bundle_state.persona_details[0].name, "researcher");
-    assert_eq!(app.bundle_state.role_details.len(), 1);
-    assert_eq!(app.bundle_state.role_details[0].name, "reviewer");
 }
 
 #[test]
@@ -1504,9 +1477,9 @@ fn catalog_entry_ready_opens_viewer() {
 
     dispatch(
         Action::TaskComplete(TaskResult::CatalogEntryReady {
-            kind: "persona".into(),
-            name: "researcher".into(),
-            content: "instructions = \"deep research\"".into(),
+            kind: "agent".into(),
+            name: "review".into(),
+            content: "# Review".into(),
         }),
         &mut app,
     );
@@ -1879,13 +1852,13 @@ fn rollback_reverts_thread_local_cache_too() {
     .unwrap();
 }
 
-/// `set_yolo_mode_inner` is the backstop: even a (stale) rollback
-/// value of "always-approve" must not re-enable yolo under the pin.
+/// `set_always_approve_mode_inner` is the backstop: even a (stale) rollback
+/// value of "always-approve" must not re-enable always-approve under the pin.
 #[test]
 fn rollback_to_always_approve_blocked_by_policy_pin() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
-    app.yolo_policy_block = Some(POLICY_WARNING);
+    app.always_approve_policy_block = Some(POLICY_WARNING);
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SettingPersistFailed {
@@ -1898,10 +1871,10 @@ fn rollback_to_always_approve_blocked_by_policy_pin() {
 
     assert!(effects.is_empty(), "rollback path never re-emits effects");
     assert!(
-        !app.agents[&AgentId(0)].session.is_yolo(),
+        !app.agents[&AgentId(0)].session.is_always_approve(),
         "inner backstop must hold on the rollback path"
     );
-    assert!(!app.default_yolo);
+    assert!(!app.default_permission_mode.is_always_approve());
 }
 
 /// Notice fires once per relaxed run; survives search, re-arms on a cwd-scoped browse.

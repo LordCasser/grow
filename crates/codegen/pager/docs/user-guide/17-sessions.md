@@ -25,17 +25,19 @@ Grow stores each session in its own directory, grouped by working directory. It 
 
 ```
 ~/.grow/sessions/<encoded-cwd>/<session-id>/
-  summary.json            # metadata: summary/title, timestamps, model ID, message counts
+  summary.json            # materialized index metadata and title projection
   timeline.jsonl          # authoritative causal ledger for runtime recovery
+  sidebands/<id>/timeline.jsonl  # independent auxiliary-model ledgers
   updates.jsonl           # derived ACP replay/display stream
-  chat_history.jsonl      # derived model-message diagnostic cache
-  plan.json               # TODO/task list state
+  prompts/                # immutable content-addressed oversized-prompt blobs
+  resources_state.json    # tool-runtime Resources (separate transactional domain)
   rewind_points.jsonl     # file snapshots for /rewind undo
-  signals.json            # session signals (token usage, tool/turn counters)
-  subagents/              # per-subagent metadata (meta.json); the child sessions live in the normal sessions tree
+  artifacts/              # immutable content-addressed artifacts referenced by Timeline facts
 ```
 
-`summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `timeline.jsonl` is the only authoritative conversation log used to recover model context and lifecycle state. `updates.jsonl` and `chat_history.jsonl` are rebuildable projections and never participate in recovery decisions.
+`summary.json` is a rebuildable index entry. It records the model, timestamps, lineage, and the latest canonical title projection; it owns neither conversation content nor title identity. `timeline.jsonl` is the parent causal ledger used to recover model context and lifecycle state. Auxiliary model work lives only in its linked Sideband ledger. `updates.jsonl` is a client replay/display stream and never participates in model-context recovery. `prompts/` contains immutable blobs referenced from Timeline by `artifact:prompt:blake3:<hash>`; local paths are materialized only in the outgoing model request. A fork validates and copies only the blobs referenced by its selected Surface, while state export/import transfers the exact referenced blob set. `resources_state.json` belongs to the tool runtime (Todo, scheduler, citation counters, and similar transactional state); it is not a second conversation history and is never copied into a fork.
+
+A subagent has its own session directory with its own `summary.json`, `timeline.jsonl`, Sidebands, prompt blobs, and artifacts. The parent Timeline stores only spawn/end facts and an exact reference to the child result; the child Timeline stores its seed-source and terminal result. Session state export/import operates on one session entity at a time, so archiving a full delegation tree requires exporting each referenced child identity as well. A parent can be imported before a child, but resume and other dereferencing operations remain unavailable until the child is present and the causal link validates.
 
 ---
 
@@ -143,7 +145,7 @@ When you run `/rewind` or `/undo` (or press **Esc Esc** within 800ms while idle 
 1. Shows a list of rewind points (one per user prompt)
 2. Lets you select which point to rewind to
 3. Restores all files to their state at that point
-4. Truncates the conversation history to that point
+4. Appends a branch-selection event so the chosen earlier Surface becomes active
 
 File snapshots are recorded at each prompt, so you can go back to any previous state.
 
@@ -161,6 +163,8 @@ File snapshots are recorded at each prompt, so you can go back to any previous s
 ```
 
 The optional `context` argument lets you provide additional instructions about what to preserve during compaction.
+
+Compaction does not delete the conversation. Grow freezes the current Timeline Surface and its stable `SurfaceId`s, preserves the recent user turn and verbatim tail, summarizes one older closed range in a linked `compaction-summary` Sideband, and shadows exactly that range with one summary node. The summary event records the complete stable-ID shadow set before the actor accepts the revision-guarded replacement. The replacement also includes an immutable reference for the read-only `context_fetch` tool: when a missing detail matters, the agent can reproject a small page of the original shadowed items without restoring the whole range or expanding the active Surface. The original messages remain immutable and can still be inspected in `grow trajectory`, found by session search, and expanded by cross-compaction rewind. There is no whole-history compaction mode or transcript/segment archive path alongside this mechanism.
 
 ### Auto-Compact
 
@@ -283,7 +287,7 @@ Open the causal ledger for the most recent session in the current directory:
 grow trajectory
 ```
 
-Pass a session ID to inspect another session, or use `--no-open` to print the local URL without launching a browser. The page tails `timeline.jsonl` and exposes category, visibility, and text filters plus a canonical event inspector. The server only accepts loopback bind addresses; it is a read-only debugger and never mutates the session.
+Pass a session ID to inspect another session, or use `--no-open` to print the local URL without launching a browser. The page incrementally tails the main and Sideband timelines, shows aligned Input / Model / Tools lanes, pages backward through long ledgers, and exposes layer, actor, class, producer, visibility, and text filters plus a canonical event inspector. Each launch uses a random URL token, rejects non-loopback bind addresses and non-local Host headers, and never mutates the session.
 
 ### Persistence Format
 
@@ -293,19 +297,21 @@ Grow stores runtime causality as newline-delimited JSON (JSONL). Each line in `t
 - Deterministic recovery by folding one ordered ledger
 - Easy debugging through `grow trajectory` (each line is valid JSON)
 
-The smaller state files -- `summary.json`, `plan.json`, and `signals.json` -- are plain JSON rather than JSONL. `timeline.jsonl` is the source of truth for session content and agent execution; `updates.jsonl` remains the client replay stream. `grow sessions search` additionally maintains a local SQLite FTS5 index over session titles and prompts for fast keyword search.
+`summary.json` is plain JSON rather than JSONL. `timeline.jsonl` is the source of truth for session content, agent execution, Behavior/Goal control, and recoverable analytics snapshots; `updates.jsonl` remains the client replay stream. `grow sessions search` additionally maintains a local SQLite FTS5 index over session titles and prompts for fast keyword search.
 
 ### Session Metadata
 
 `summary.json` records, among other fields:
 
 - `info` -- the session ID and working directory
-- `session_summary` and `generated_title` -- the session summary and its model-generated title
+- `title`, `title_source`, and `title_event_seq` -- a rebuildable cache of the latest canonical `session/title` Timeline event
 - `created_at` and `updated_at` -- creation and last-update timestamps
-- `num_messages` and `num_chat_messages` -- update and chat-message counts
+- `num_messages` -- client replay-update count
 - `current_model_id` -- the model in use
 - `parent_session_id` -- the source session for a fork or restore
 - `agent_name` -- the agent definition active when the session was last saved
+
+`summary.json` does not own the title. Generated titles, fallbacks, and `/rename` all append `session/title` events; title generation runs as a separately inspectable Sideband. The summary fields above are only a list/search cache and are repaired from Timeline on load.
 
 ### Disk Usage
 

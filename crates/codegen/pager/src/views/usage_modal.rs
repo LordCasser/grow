@@ -294,17 +294,6 @@ pub fn session_info_rows(
         label: "Session ID".to_string(),
         value: info.session_id.clone(),
     });
-    if let Some(id) = info
-        .data
-        .conversation_id
-        .as_deref()
-        .filter(|id| !id.is_empty())
-    {
-        rows.push(SessionInfoRow {
-            label: "Conversation ID".to_string(),
-            value: id.to_string(),
-        });
-    }
     rows.push(SessionInfoRow {
         label: "Working directory".to_string(),
         value: info.cwd.clone(),
@@ -583,7 +572,6 @@ mod tests {
                 model_fingerprint: Some("fp-123".into()),
                 show_model_fingerprint: false,
                 api_backend: Some("backend-1".into()),
-                conversation_id: Some("conv-9".into()),
                 turns: 3,
                 turn_index: 2,
                 context: ContextInfo {
@@ -621,7 +609,6 @@ mod tests {
         // coding slug shows the fingerprint even without the catalog flag
         assert!(labels.contains(&"Model hash"));
         assert!(labels.contains(&"API backend"));
-        assert!(labels.contains(&"Conversation ID"));
         assert!(labels.contains(&"Turn"));
         assert!(labels.contains(&"Context"));
         let session_id = rows
@@ -632,17 +619,12 @@ mod tests {
     }
 
     #[test]
-    fn session_info_rows_skips_empty_title_and_conversation() {
+    fn session_info_rows_skips_empty_title_and_absent_backend() {
         let mut info = info_response();
-        info.data.conversation_id = Some(String::new());
         info.data.api_backend = None;
         let rows = session_info_rows(&info, Some("   "), false);
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
         assert!(!labels.contains(&"Title"), "blank title must be omitted");
-        assert!(
-            !labels.contains(&"Conversation ID"),
-            "empty conversation id must be omitted"
-        );
         assert!(
             !labels.contains(&"API backend"),
             "absent backend must be omitted"

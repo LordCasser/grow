@@ -23,10 +23,9 @@ pub(super) fn serialize_finite_cost<S: serde::Serializer>(
 /// Map a Grow permission mode to the Messages `permissionMode` enum, clamping Grow-only values to `default`.
 pub(super) fn messages_permission_mode(mode: Option<&str>) -> &'static str {
     match mode {
-        Some("acceptEdits") => "acceptEdits",
-        Some("bypassPermissions") => "bypassPermissions",
-        Some("plan") => "plan",
-        Some("dontAsk") => "dontAsk",
+        // Grow's canonical mode is projected only at this Claude Messages
+        // protocol boundary.
+        Some("always-approve") => "bypassPermissions",
         _ => "default",
     }
 }

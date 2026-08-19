@@ -37,14 +37,7 @@ pub use agent::prompt::skills::SkillsConfig;
 /// locks across `.await` points, so contention is not a concern.
 pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Value> {
     let cwd_str = root_cwd.to_string_lossy();
-    // Workspace discovery is out of scope for per-vendor compat gating;
-    // use the all-on default to preserve prior behavior.
-    let skills = agent::prompt::skills::list_skills(
-        Some(&cwd_str),
-        config,
-        agent::prompt::skills::CompatConfig::default(),
-    )
-    .await;
+    let skills = agent::prompt::skills::list_skills(Some(&cwd_str), config).await;
 
     skills
         .into_iter()
@@ -66,14 +59,10 @@ pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Valu
 // AGENTS.md discovery
 // ---------------------------------------------------------------------------
 
-/// Discover project-instruction files (AGENTS.md, Claude.md, rules) from the workspace root up to the git root.
+/// Discover project AGENTS.md and `.grow/rules` files from the workspace root up to the git root.
 pub async fn discover_agents_md(root_cwd: &Path) -> Vec<Value> {
     let cwd_str = root_cwd.to_string_lossy();
-    let files = agent::prompt::agents_md::read_agents_config_with_paths(
-        &cwd_str,
-        tools::types::compat::CompatConfig::default(),
-    )
-    .await;
+    let files = agent::prompt::agents_md::read_agents_config_with_paths(&cwd_str).await;
 
     files
         .into_iter()
@@ -197,8 +186,7 @@ fn toml_to_json(v: &toml::Value) -> Value {
 ///
 /// Delegates to
 /// [`resolution::resolve_permissions_with_provenance`] which
-/// merges rules from requirements.toml, managed-settings.json,
-/// managed_config.toml, config.toml, and `.claude/settings.json`.
+/// merges rules from requirements.toml, managed_config.toml, and config.toml.
 ///
 /// `project_trusted` gates project-tier permission sources (same contract as
 /// env/hooks/plugins).
@@ -354,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn discover_agents_md_receives_normalized_rule_content() {
         let tmp = tempfile::tempdir().unwrap();
-        let rules_dir = tmp.path().join(".cursor").join("rules");
+        let rules_dir = tmp.path().join(".grow").join("rules");
         fs::create_dir_all(&rules_dir).unwrap();
         fs::write(
             rules_dir.join("xyzzy-discover-agents-md-test.md"),
@@ -368,7 +356,7 @@ mod tests {
             .find(|f| {
                 f["file_path"]
                     .as_str()
-                    .is_some_and(|p| p.ends_with("/.cursor/rules/xyzzy-discover-agents-md-test.md"))
+                    .is_some_and(|p| p.ends_with("/.grow/rules/xyzzy-discover-agents-md-test.md"))
             })
             .expect("should discover the rules file");
         let content = rule["content"].as_str().unwrap();
@@ -552,15 +540,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_permissions_with_settings_file_returns_object() {
+    async fn load_permissions_with_project_config_returns_object() {
         let tmp = tempfile::tempdir().unwrap();
-        // Create a minimal .claude/settings.json with a permission rule
-        // so the test always exercises the non-null path.
-        let claude_dir = tmp.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let grow_dir = tmp.path().join(".grow");
+        fs::create_dir_all(&grow_dir).unwrap();
         fs::write(
-            claude_dir.join("settings.json"),
-            r#"{"permissions":{"allow":["Bash(git status)"]}}"#,
+            grow_dir.join("config.toml"),
+            "[permission]\nallow = [\"Bash(git status)\"]\n",
         )
         .unwrap();
 

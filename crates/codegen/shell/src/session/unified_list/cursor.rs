@@ -65,7 +65,10 @@ type SortKey = (
 );
 
 fn row_sort_key(row: &UnifiedRow) -> SortKey {
-    (Reverse(row.sort_timestamp()), row.legacy.session_id.clone())
+    (
+        Reverse(row.sort_timestamp()),
+        row.session.session_id.clone(),
+    )
 }
 
 fn boundary_sort_key(boundary: &BoundaryKey) -> SortKey {
@@ -78,27 +81,27 @@ fn boundary_sort_key(boundary: &BoundaryKey) -> SortKey {
 fn boundary_of(row: &UnifiedRow) -> BoundaryKey {
     BoundaryKey {
         updated_at: row.updated_at.clone().unwrap_or_default(),
-        session_id: row.legacy.session_id.clone(),
+        session_id: row.session.session_id.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::merge::MergedSession;
-    use crate::session::unified_list::{facet_registry, merged_session_to_row};
+    use crate::session::listing::SessionListing;
+    use crate::session::unified_list::{facet_registry, session_listing_to_row};
 
     fn row(id: &str, timestamp: &str) -> UnifiedRow {
-        merged_session_to_row(
-            MergedSession {
+        session_listing_to_row(
+            SessionListing {
                 session_id: id.to_owned(),
-                summary: id.to_owned(),
+                title: id.to_owned(),
                 updated_at: timestamp.to_owned(),
                 created_at: timestamp.to_owned(),
                 cwd: "/repo".to_owned(),
                 num_messages: 1,
                 last_active_at: Some(timestamp.to_owned()),
-                ..MergedSession::default()
+                ..SessionListing::default()
             },
             facet_registry(),
         )
@@ -115,7 +118,7 @@ mod tests {
         assert_eq!(
             first
                 .iter()
-                .map(|row| row.legacy.session_id.as_str())
+                .map(|row| row.session.session_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["new", "mid"]
         );
@@ -123,7 +126,7 @@ mod tests {
         assert_eq!(
             second
                 .iter()
-                .map(|row| row.legacy.session_id.as_str())
+                .map(|row| row.session.session_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["old"]
         );

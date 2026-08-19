@@ -710,13 +710,7 @@ pub async fn run_leader(
 
             // Config hot-reload watcher
             let cwd_for_watcher = std::env::current_dir().unwrap_or_default();
-            let mut watch_paths = crate::config::find_project_configs(&cwd_for_watcher);
-            watch_paths.extend(crate::util::config::mcp_json_candidate_paths(
-                &cwd_for_watcher,
-            ));
-            if let Some(home) = dirs::home_dir() {
-                watch_paths.push(home.join(".claude.json"));
-            }
+            let watch_paths = crate::config::find_project_configs(&cwd_for_watcher);
             let (config_update_tx, mut config_update_rx) =
                 mpsc::unbounded_channel::<crate::config::reloader::ConfigUpdate>();
 
@@ -784,42 +778,23 @@ pub async fn run_leader(
                 use crate::config::reloader::ConfigUpdate;
                 while let Some(update) = config_update_rx.recv().await {
                     match update {
-                        ConfigUpdate::McpServersChanged => {
-                            info!("MCP server config change detected — reloading active sessions");
+                        ConfigUpdate::McpCatalogChanged { project_root } => {
+                            info!(
+                                project_root = ?project_root,
+                                "MCP catalog change detected — reloading matching sessions"
+                            );
                             let line = internal_reload_request_line(
-                                "config-reload-mcp",
-                                "grow/internal/reload_all_mcp_servers",
-                                serde_json::json!({}),
+                                "config-reload-mcp-catalog",
+                                "grow/internal/reload_mcp_catalog",
+                                serde_json::json!({
+                                    "projectRoot": project_root
+                                        .as_ref()
+                                        .map(|root| root.to_string_lossy().into_owned())
+                                }),
                             );
                             let mut tx = acp_tx_for_config.lock().await;
                             if let Err(e) = tx.write_all(line.as_bytes()).await {
                                 warn!(error = %e, "failed to inject MCP reload into ACP stream");
-                            }
-                        }
-                        ConfigUpdate::ProjectMcpServersChanged { cwd } => {
-                            // Scope the reload to
-                            // sessions whose cwd matches `cwd` (or is
-                            // a descendant). The actual filtering
-                            // happens in
-                            // `handle_reload_project_mcp_servers`
-                            // (extensions/session_admin.rs) — this
-                            // arm just injects the ACP method with
-                            // the cwd as a param.
-                            info!(
-                                cwd = %cwd.display(),
-                                "project MCP config change detected — reloading matching sessions"
-                            );
-                            let line = internal_reload_request_line(
-                                "config-reload-project-mcp",
-                                "grow/internal/reload_project_mcp_servers",
-                                serde_json::json!({ "cwd": cwd.to_string_lossy() }),
-                            );
-                            let mut tx = acp_tx_for_config.lock().await;
-                            if let Err(e) = tx.write_all(line.as_bytes()).await {
-                                warn!(
-                                    error = %e,
-                                    "failed to inject project MCP reload into ACP stream"
-                                );
                             }
                         }
                         ConfigUpdate::ModelsChanged => {
@@ -858,15 +833,9 @@ pub async fn run_leader(
                                 "Skills config change detected by watcher"
                             );
                         }
-                        ConfigUpdate::Compat(_compat) => {
-                            info!(
-                                "Compat config change detected by watcher \
-                                 (applies on next agent rebuild)"
-                            );
-                        }
                         ConfigUpdate::Ui {
                             theme,
-                            yolo,
+                            permission_mode,
                             fork_secondary_model,
                         } => {
                             info!("UI config change detected by watcher");
@@ -877,7 +846,7 @@ pub async fn run_leader(
                                     "section": "ui",
                                     "changes": {
                                         "theme": theme,
-                                        "yolo": yolo,
+                                        "permission_mode": permission_mode,
                                         "fork_secondary_model": fork_secondary_model,
                                     }
                                 }
@@ -960,14 +929,14 @@ mod tests {
         assert_eq!(msg["id"], "config-reload-models");
         assert_eq!(msg["jsonrpc"], "2.0");
 
-        // Params must pass through verbatim (project-MCP reload carries cwd).
+        // Params must pass through verbatim (catalog reload carries its scope).
         let line = internal_reload_request_line(
-            "config-reload-project-mcp",
-            "grow/internal/reload_project_mcp_servers",
-            serde_json::json!({ "cwd": "/repo/x" }),
+            "config-reload-mcp-catalog",
+            "grow/internal/reload_mcp_catalog",
+            serde_json::json!({ "projectRoot": "/repo/x" }),
         );
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(msg["params"]["cwd"], "/repo/x");
+        assert_eq!(msg["params"]["projectRoot"], "/repo/x");
     }
 
     #[tokio::test]

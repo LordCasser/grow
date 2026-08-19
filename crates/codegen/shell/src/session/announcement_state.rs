@@ -1,4 +1,4 @@
-//! Persisted announcement tracking state for session resumption.
+//! Announcement tracking projected from the canonical session Timeline.
 //!
 //! Tracks which MCP servers and skills have already been announced
 //! via `<system-reminder>` messages so that resumed sessions don't
@@ -7,14 +7,22 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// Persisted announcement tracking state.
+const TIMELINE_ANNOUNCEMENT_VERSION: u32 = 1;
+const TIMELINE_ANNOUNCEMENT_SCOPE: &str = "runtime";
+const TIMELINE_ANNOUNCEMENT_NAME: &str = "announcement_snapshot";
+
+#[derive(Serialize, Deserialize)]
+struct TimelineAnnouncementSnapshot {
+    version: u32,
+    state: AnnouncementState,
+}
+
+/// Runtime announcement tracking state.
 ///
-/// Restored on session resume so the fresh actor "remembers" what was
-/// already announced.  The existing delta/fingerprint comparison logic
-/// then correctly handles changes (new/removed/updated servers or skills)
-/// without creating duplicates.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+/// The latest matching Timeline observation is the only recovery source. The
+/// existing delta/fingerprint comparison logic then handles changes without
+/// re-injecting unchanged MCP or skill listings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnnouncementState {
     /// Fingerprints of MCP servers that have been announced.
     /// Maps server_name → `McpServerFingerprint`.
@@ -27,6 +35,60 @@ pub struct AnnouncementState {
     /// Names of skills already announced via system-reminder.
     /// Uses the skill's `dedup_key()` (which is the skill name).
     pub announced_skill_names: HashSet<String>,
+}
+
+impl AnnouncementState {
+    pub fn timeline_kind(&self) -> std::io::Result<chat_state::TimelineEventKind> {
+        let data = serde_json::to_value(TimelineAnnouncementSnapshot {
+            version: TIMELINE_ANNOUNCEMENT_VERSION,
+            state: self.clone(),
+        })
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: TIMELINE_ANNOUNCEMENT_SCOPE.into(),
+                name: TIMELINE_ANNOUNCEMENT_NAME.into(),
+                turn: None,
+                step: None,
+                data: Some(data),
+            },
+        ))
+    }
+
+    pub fn latest_from_timeline(
+        events: &[chat_state::TimelineEvent],
+    ) -> std::io::Result<Option<Self>> {
+        let mut latest = None;
+        for observation in events.iter().filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Observation(observation)
+                if observation.scope == TIMELINE_ANNOUNCEMENT_SCOPE
+                    && observation.name == TIMELINE_ANNOUNCEMENT_NAME =>
+            {
+                Some(observation)
+            }
+            _ => None,
+        }) {
+            let snapshot: TimelineAnnouncementSnapshot =
+                serde_json::from_value(observation.data.clone().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Timeline announcement observation has no payload",
+                    )
+                })?)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            if snapshot.version != TIMELINE_ANNOUNCEMENT_VERSION {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "unsupported Timeline announcement version {}; expected {}",
+                        snapshot.version, TIMELINE_ANNOUNCEMENT_VERSION
+                    ),
+                ));
+            }
+            latest = Some(snapshot.state);
+        }
+        Ok(latest)
+    }
 }
 
 /// Serializable MCP server fingerprint for persistence.
@@ -79,7 +141,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serde_round_trip() {
+    fn timeline_round_trip_uses_latest_snapshot() {
         let state = AnnouncementState {
             mcp_server_fingerprints: HashMap::from([(
                 "github".to_string(),
@@ -91,10 +153,16 @@ mod tests {
             )]),
             announced_skill_names: HashSet::from(["commit".to_string(), "review".to_string()]),
         };
-        let json = serde_json::to_string(&state).unwrap();
-        let loaded: AnnouncementState = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.mcp_server_fingerprints.len(), 1);
-        assert_eq!(loaded.announced_skill_names.len(), 2);
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(AnnouncementState::default().timeline_kind().unwrap())
+            .unwrap();
+        timeline.record(state.timeline_kind().unwrap()).unwrap();
+
+        let loaded = AnnouncementState::latest_from_timeline(timeline.events())
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, state);
         let fp = &loaded.mcp_server_fingerprints["github"];
         assert_eq!(fp.tool_count, 5);
         assert_eq!(fp.description_hash, 12345678);
@@ -102,10 +170,17 @@ mod tests {
     }
 
     #[test]
-    fn backward_compat_empty_json() {
-        let loaded: AnnouncementState = serde_json::from_str("{}").unwrap();
-        assert!(loaded.mcp_server_fingerprints.is_empty());
-        assert!(loaded.announced_skill_names.is_empty());
+    fn unsupported_timeline_snapshot_version_fails_closed() {
+        let mut kind = AnnouncementState::default().timeline_kind().unwrap();
+        let chat_state::TimelineEventKind::Observation(observation) = &mut kind else {
+            unreachable!();
+        };
+        observation.data.as_mut().unwrap()["version"] = serde_json::json!(2);
+        let mut timeline = chat_state::Timeline::default();
+        timeline.record(kind).unwrap();
+
+        let error = AnnouncementState::latest_from_timeline(timeline.events()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

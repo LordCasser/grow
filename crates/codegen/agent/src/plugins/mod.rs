@@ -1,4 +1,4 @@
-//! Plugin system — discover, load, and manage plugins (including compat layouts).
+//! Plugin system — discover, load, and manage canonical Grow plugins.
 //!
 //! A plugin is a self-contained directory that bundles skills, agents,
 //! MCP server configs, and hooks into a namespaced unit.  Plugins can
@@ -17,7 +17,6 @@ pub mod hooks_adapter;
 pub mod install_registry;
 pub mod local_refresh;
 pub mod manifest;
-pub mod marketplace;
 pub mod registry;
 pub mod trust;
 

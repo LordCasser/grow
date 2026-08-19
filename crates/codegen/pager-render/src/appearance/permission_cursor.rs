@@ -209,7 +209,7 @@ pub fn last_used_permission() -> DefaultSelectedPermission {
 }
 
 /// Record the kind the user just confirmed. Callers must skip the special
-/// enable-always-approve (YOLO) and allow-edits-session options — neither
+/// enable-always-approve (always-approve) and allow-edits-session options — neither
 /// represents a per-prompt choice that should steer a later prompt's cursor.
 pub fn set_last_used_permission(kind: DefaultSelectedPermission) {
     LAST_USED.with(|c| c.set(kind));
@@ -226,9 +226,9 @@ pub fn set_last_used_permission(kind: DefaultSelectedPermission) {
 /// 3. the global "Always allow on all sessions" (enable-always-approve) row,
 ///    matched by identity via `is_enable_always_approve_option` — not by list
 ///    position, so the intent lives in the code rather than the option order,
-/// 4. index 0 (clients that don't get the YOLO row prepended).
+/// 4. index 0 (clients that don't get the always-approve row prepended).
 ///
-/// The YOLO row is skipped while a concrete target kind is in play, so a
+/// The always-approve row is skipped while a concrete target kind is in play, so a
 /// configured / sticky preselection never lands on it.
 pub fn resolve_initial_cursor(options: &[acp::PermissionOption]) -> usize {
     let target = match last_used_permission() {
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_unset_lands_on_yolo_row() {
+    fn resolve_unset_lands_on_always_approve_row() {
         std::thread::spawn(|| {
             // Force the config cache to the default without touching disk/env.
             set_default_selected_permission(DefaultSelectedPermission::AlwaysAllowAllSessions);
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_sticky_skips_yolo_row() {
+    fn resolve_sticky_skips_always_approve_row() {
         std::thread::spawn(|| {
             set_default_selected_permission(DefaultSelectedPermission::AlwaysAllowAllSessions);
             set_last_used_permission(DefaultSelectedPermission::AllowOnce);
@@ -409,7 +409,7 @@ mod tests {
                 opt("allow-once", acp::PermissionOptionKind::AllowOnce),
                 opt("reject-once", acp::PermissionOptionKind::RejectOnce),
             ];
-            // Sticky AllowOnce must skip the YOLO row (also AllowOnce kind) and
+            // Sticky AllowOnce must skip the always-approve row (also AllowOnce kind) and
             // land on the plain allow-once row (index 1).
             assert_eq!(resolve_initial_cursor(&options), 1);
         })
@@ -431,7 +431,7 @@ mod tests {
                 opt("reject-always", acp::PermissionOptionKind::RejectAlways),
             ];
             // The prompt offers only `RejectAlways`; a sticky reject must still
-            // find it (index 2) rather than falling back to the YOLO row.
+            // find it (index 2) rather than falling back to the always-approve row.
             assert_eq!(resolve_initial_cursor(&options), 2);
         })
         .join()
@@ -439,14 +439,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_without_yolo_row_falls_back_to_index_0() {
+    fn resolve_without_always_approve_row_falls_back_to_index_0() {
         std::thread::spawn(|| {
             set_default_selected_permission(DefaultSelectedPermission::AlwaysAllowAllSessions);
             let options = [
                 opt("allow-once", acp::PermissionOptionKind::AllowOnce),
                 opt("reject-once", acp::PermissionOptionKind::RejectOnce),
             ];
-            // No sticky, default config, no YOLO row (non-TUI client) → index 0.
+            // No sticky, default config, no always-approve row (non-TUI client) → index 0.
             assert_eq!(resolve_initial_cursor(&options), 0);
         })
         .join()

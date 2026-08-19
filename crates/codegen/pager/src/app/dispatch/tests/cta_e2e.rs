@@ -1265,7 +1265,10 @@ mod cta_e2e {
         let mut entry = cta_entry("figma", "not_installed");
         entry.keywords = vec!["figma".into()];
         // MCP-bearing plugin: install enters AwaitingMcps and polls for readiness.
-        entry.has_mcp = true;
+        entry.components = Some(extension_types::PluginComponents {
+            mcp_servers: vec![extension_types::ComponentItem::new("figma", None)],
+            ..Default::default()
+        });
         entry
     }
 
@@ -1431,8 +1434,9 @@ mod cta_e2e {
     fn skills_only_install_settles_installed_without_fetch() {
         let mut app = app_matched();
         let id = AgentId(0);
-        // Skills-only plugin: clear has_mcp so connect captures expects_mcp=false.
-        app.agents.get_mut(&id).unwrap().plugin_cta.candidates[0].has_mcp = false;
+        // Skills-only plugin: canonical inventory contains no MCP servers.
+        app.agents.get_mut(&id).unwrap().plugin_cta.candidates[0].components =
+            Some(extension_types::PluginComponents::default());
         connect(&mut app);
         let effects = dispatch(
             Action::TaskComplete(TaskResult::CtaPluginInstallDone {

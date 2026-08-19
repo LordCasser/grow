@@ -237,7 +237,7 @@ impl Fixture {
         let unified_ids: Vec<_> = unified
             .rows
             .iter()
-            .map(|row| row.legacy.session_id.clone())
+            .map(|row| row.session.session_id.clone())
             .collect();
         assert_eq!(
             unified_ids.as_slice(),
@@ -249,12 +249,12 @@ impl Fixture {
             let workspace_index = self
                 .same_repo_cwds
                 .iter()
-                .position(|cwd| cwd == &row.legacy.cwd)
+                .position(|cwd| cwd == &row.session.cwd)
                 .expect("unified row cwd belongs to same-repo topology");
             actual_sources.push(self.same_repo_sources[workspace_index]);
-            top_cwds.insert(row.legacy.cwd.as_str());
+            top_cwds.insert(row.session.cwd.as_str());
             assert_eq!(
-                row.legacy.worktree_label.as_deref(),
+                row.session.worktree_label.as_deref(),
                 self.same_repo_labels[workspace_index].as_deref()
             );
         }
@@ -490,20 +490,20 @@ fn write_summary(
         previous_cwd: None,
         pending_cwd_switch_reminder: None,
         cwd_switch_bookkeeping_generation: 0,
-        session_summary: format!("Deterministic benchmark session {ordinal}"),
+        title: Some(format!("Benchmark session {ordinal}")),
+        title_source: Some(chat_state::SessionTitleSource::User),
+        title_event_seq: Some(1),
         created_at: active_at - ChronoDuration::minutes(5),
         updated_at: active_at,
         num_messages: 8 + ordinal % 24,
-        num_chat_messages: 8 + ordinal % 24,
         current_model_id: acp::ModelId::new("benchmark-model"),
         parent_session_id: None,
         forked_at: None,
-        chat_format_version: 1,
+        session_format_version: shell::session::persistence::SESSION_FORMAT_VERSION,
         prompt_display_cwd: None,
         session_kind: None,
         fork_context_source: None,
         fork_parent_prompt_id: None,
-        inherited_prefix_len: None,
         hidden: None,
         source_workspace_dir: None,
         git_root_dir: Some(cwd.to_owned()),
@@ -512,8 +512,6 @@ fn write_summary(
         head_branch: Some("main".to_owned()),
         grow_home: None,
         last_active_at: Some(active_at),
-        generated_title: Some(format!("Benchmark session {ordinal}")),
-        title_is_manual: false,
         worktree_label: worktree_label.map(str::to_owned),
         agent_name: Some("benchmark-agent".to_owned()),
         sandbox_profile: Some("workspace".to_owned()),

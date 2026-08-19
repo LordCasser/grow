@@ -32,8 +32,8 @@ pub type ServerFingerprint = (usize, u64, u64);
 /// Deterministic, portable hash for change detection.
 ///
 /// Uses FNV-1a which is stable across Rust versions, build profiles, and
-/// CPU architectures.  Safe to persist (used by `announcement_state.json`
-/// for MCP server fingerprints).
+/// CPU architectures. Safe to record as an MCP server fingerprint in a
+/// Timeline announcement snapshot.
 fn hash_value<H: std::hash::Hash>(val: &H) -> u64 {
     use std::hash::Hasher;
 

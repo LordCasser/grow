@@ -606,9 +606,7 @@ mod tests {
     use super::*;
     use crate::tracing::TracingEntry;
     use crate::views::list_pane::layout::WrapMode;
-    use crate::views::list_pane::{
-        FilterMatcher, ListMatcher, ListPaneStyle, MatchMode, QueryKind,
-    };
+    use crate::views::list_pane::{ListMatcher, ListPaneStyle, MatchMode, QueryKind};
     use ratatui::style::Style;
     use ratatui::text::Line;
 
@@ -784,7 +782,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 5);
 
         // Filter to items containing "alph".
-        state.set_filter(Some(FilterMatcher::substring("alph")));
+        state.set_matcher(Some(ListMatcher::substring("alph")));
         state.prepare_layout(&items, area.width, area.height);
 
         let mut buf = Buffer::empty(area);
@@ -1735,7 +1733,7 @@ mod tests {
         let mut state = ListPaneState::new(WrapMode::NoWrap, false);
         let area = Rect::new(0, 0, 20, 10);
 
-        state.set_filter(Some(FilterMatcher::substring("row")));
+        state.set_matcher(Some(ListMatcher::substring("row")));
         state.prepare_layout(&items, area.width, area.height);
         assert_eq!(state.visible_count(), 4);
         assert_eq!(state.selected_id(), Some(0));

@@ -4,7 +4,7 @@
 //! commands are `setsid`-detached, so they escape the terminal's process group
 //! and survive a quit/kill unless the exit path reaps them.
 //!
-//! Drives the real pager against the mock (spawn args are only `--yolo --trust`;
+//! Drives the real pager against the mock (spawn args are only `--permission-mode always-approve --trust`;
 //! the prompt is typed in via `inject_keys` after the welcome screen), scripts a
 //! background command that records its PID then sleeps, quits via a real SIGINT,
 //! and asserts the PID is gone. Without the fix the detached process reparents to
@@ -47,13 +47,13 @@ async fn background_task_reaped_on_quit() {
     content.set_response("BG_TASK_STARTED");
 
     let binary = pager_binary().expect("resolve pager binary");
-    // --yolo skips the bash permission prompt; --trust skips the folder-trust gate.
+    // --permission-mode always-approve skips the bash permission prompt; --trust skips the folder-trust gate.
     let mut harness = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--yolo", "--trust"],
+        &["--permission-mode", "always-approve", "--trust"],
         Some(content.home()),
     )
     .expect("spawn pager");

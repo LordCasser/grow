@@ -1,6 +1,7 @@
 //! Search methods (`workspace.ripgrep`, `workspace.fuzzy_*`).
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 
 use super::WorkspaceRpc;
@@ -167,19 +168,6 @@ impl WorkspaceRpc for FuzzyCloseReq {
     type Response = bool;
 }
 
-/// `workspace.fuzzy_search` — poll the current results of an open fuzzy
-/// search. The response is the serialized result set (or `null` when the
-/// search no longer exists).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FuzzyStatusReq {
-    pub search_id: String,
-}
-
-impl WorkspaceRpc for FuzzyStatusReq {
-    const METHOD: &'static str = "workspace.fuzzy_search";
-    type Response = Value;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,7 +178,6 @@ mod tests {
         assert_eq!(FuzzyOpenReq::METHOD, "workspace.fuzzy_open");
         assert_eq!(FuzzyChangeReq::METHOD, "workspace.fuzzy_change");
         assert_eq!(FuzzyCloseReq::METHOD, "workspace.fuzzy_close");
-        assert_eq!(FuzzyStatusReq::METHOD, "workspace.fuzzy_search");
     }
 
     #[test]

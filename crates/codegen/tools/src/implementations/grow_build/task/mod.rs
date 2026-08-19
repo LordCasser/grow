@@ -371,7 +371,6 @@ impl tool_runtime::Tool for TaskTool {
                 model,
                 model_override_provenance: ModelOverrideProvenance::Tool,
                 reasoning_effort: None,
-                persona: None,
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
                 completion_output_cap: None,
@@ -494,8 +493,6 @@ impl tool_runtime::Tool for TaskTool {
 
         // 6. Return result
         if result.success {
-            let resume_from_hint = result.subagent_id.clone();
-            let persona_hint: Option<String> = None;
             Ok(ToolOutput::SubagentCompleted(SubagentCompletedOutput {
                 // SubagentCompletedOutput.output is `String` (serde-visible
                 // boundary). One allocation per completion; cheaper paths
@@ -507,9 +504,6 @@ impl tool_runtime::Tool for TaskTool {
                 turns: result.turns,
                 duration_ms: result.duration_ms,
                 worktree_path: result.worktree_path,
-                persona: None,
-                resume_from_hint,
-                persona_hint,
             }))
         } else {
             Err(tool_runtime::ToolError::invalid_arguments(
@@ -1384,7 +1378,6 @@ mod tests {
         let overrides = SubagentRuntimeOverrides::default();
         assert!(overrides.model.is_none());
         assert!(overrides.reasoning_effort.is_none());
-        assert!(overrides.persona.is_none());
         assert!(overrides.capability_mode.is_none());
     }
 
@@ -1562,7 +1555,6 @@ mod tests {
                 tc("bash", ToolKind::Execute),
                 tc("task", ToolKind::Task),
             ],
-            behavior_preset: None,
         };
         SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
         let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
@@ -1584,7 +1576,6 @@ mod tests {
                 tc("search_replace", ToolKind::Edit),
                 tc("bash", ToolKind::Execute),
             ],
-            behavior_preset: None,
         };
         SubagentCapabilityMode::ReadWrite.filter_tool_config(&mut config);
         let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
@@ -1603,7 +1594,6 @@ mod tests {
                 tc("search_replace", ToolKind::Edit),
                 tc("bash", ToolKind::Execute),
             ],
-            behavior_preset: None,
         };
         SubagentCapabilityMode::Execute.filter_tool_config(&mut config);
         let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
@@ -1622,7 +1612,6 @@ mod tests {
                 tc("search_replace", ToolKind::Edit),
                 tc("bash", ToolKind::Execute),
             ],
-            behavior_preset: None,
         };
         SubagentCapabilityMode::All.filter_tool_config(&mut config);
         assert_eq!(config.tools.len(), 3);
@@ -1637,7 +1626,6 @@ mod tests {
                 tc("read_file", ToolKind::Read),
                 crate::registry::types::ToolConfig::from_id("mcp_custom_tool"),
             ],
-            behavior_preset: None,
         };
         SubagentCapabilityMode::ReadOnly.filter_tool_config(&mut config);
         let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
@@ -2482,7 +2470,6 @@ mod tests {
                 ModelOverrideProvenance::Tool,
             );
             assert!(request.runtime_overrides.reasoning_effort.is_none());
-            assert!(request.runtime_overrides.persona.is_none());
             let id = request.id.clone();
             request
                 .result_tx
@@ -2652,7 +2639,6 @@ mod tests {
                 ModelOverrideProvenance::Tool,
             );
             assert!(request.runtime_overrides.reasoning_effort.is_none());
-            assert!(request.runtime_overrides.persona.is_none());
             let id = request.id.clone();
             request
                 .result_tx

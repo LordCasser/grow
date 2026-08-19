@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 /// and ONE upward walk.
 ///
 /// The folder-trust gate's `repo_configs_present` probes a dozen repo-local
-/// code-exec markers (`.mcp.json`, `.grow/config.toml`, `.claude/settings.json`,
-/// project plugin/agent dirs, …) back-to-back on the agent startup path. Each
+/// code-exec markers (`.grow/mcp.json`, `.grow/config.toml`, project plugin and
+/// Agent directories, …) back-to-back on the Agent startup path. Each
 /// marker walker used to run its own `discover` + cwd→root walk; sharing one
 /// `RepoDirChain` collapses that to a single traversal (each redundant syscall
 /// is taxed 10-100x on Windows, and on a non-git dir each `discover` walks to

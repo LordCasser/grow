@@ -1262,10 +1262,11 @@ mod prompt_page_scroll_tests {
                 .map(|i| CompletionItemParsed {
                     display: format!("item {i}"),
                     description: String::new(),
-                    insert_text: format!("item {i}"),
+                    replacement: format!("item {i}"),
                     source: SuggestionSource::History,
                     priority: 0,
-                    ..Default::default()
+                    replace_range: 0..0,
+                    truncated: false,
                 })
                 .collect(),
             selected: 0,

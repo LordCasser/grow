@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// flattened config patch (the JSON sibling of a `[[campaigns]]` TOML override).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CampaignOverride {
-    #[serde(default, alias = "campaign_id")]
+    #[serde(default)]
     pub id: Option<String>,
     #[serde(flatten, default)]
     pub patch: serde_json::Map<String, serde_json::Value>,
@@ -452,10 +452,6 @@ pub struct RemoteSettings {
     pub non_git_workspace_capture: Option<bool>,
     #[serde(default)]
     pub login_shell_capture: Option<bool>,
-    /// When `Some(false)`, scheduled task fires run as main-conversation
-    /// turns instead of background subagents.
-    #[serde(default)]
-    pub scheduler_background_loops: Option<bool>,
     /// Release channel: `"stable"` or `"alpha"`.
     /// Fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
     #[serde(default)]
@@ -564,26 +560,6 @@ pub struct RemoteSettings {
     pub todo_gate_max_fires_per_prompt: Option<u32>,
     #[serde(default)]
     pub auto_wake_enabled: Option<bool>,
-    #[serde(default)]
-    pub cursor_skills_enabled: Option<bool>,
-    #[serde(default)]
-    pub cursor_rules_enabled: Option<bool>,
-    #[serde(default)]
-    pub cursor_agents_enabled: Option<bool>,
-    #[serde(default)]
-    pub claude_skills_enabled: Option<bool>,
-    #[serde(default)]
-    pub claude_rules_enabled: Option<bool>,
-    #[serde(default)]
-    pub claude_agents_enabled: Option<bool>,
-    #[serde(default)]
-    pub cursor_mcps_enabled: Option<bool>,
-    #[serde(default)]
-    pub cursor_hooks_enabled: Option<bool>,
-    #[serde(default)]
-    pub claude_mcps_enabled: Option<bool>,
-    #[serde(default)]
-    pub claude_hooks_enabled: Option<bool>,
     /// When `Some(true)`, enable goal mode remotely.
     /// When `Some(false)`, force-disable it (kill-switch).
     /// Absent ⇒ client default (enabled).
@@ -622,55 +598,11 @@ pub struct RemoteSettings {
     /// Absent ⇒ default of `max(1, goal_classifier_max_runs / 2)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_strategist_every: Option<u32>,
-    /// Planner role model+toolset. Absent ⇒ inherit current model. A
-    /// present-but-malformed value is tolerantly dropped to `None` (not a
-    /// hard parse error) so it cannot nuke the whole `RemoteSettings`
-    /// payload (see [`deserialize_tolerant_goal_role_model`]).
-    #[serde(
-        default,
-        deserialize_with = "deserialize_tolerant_goal_role_model",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub goal_planner_model: Option<GoalRoleModel>,
-    /// Strategist role model+toolset. Absent ⇒ inherit current model. A
-    /// present-but-malformed value is tolerantly dropped to `None`
-    /// (see [`deserialize_tolerant_goal_role_model`]).
-    #[serde(
-        default,
-        deserialize_with = "deserialize_tolerant_goal_role_model",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub goal_strategist_model: Option<GoalRoleModel>,
-    /// Ordered skeptic pool. `pool[0]` = skeptic-0's model; skeptics
-    /// `1..N` are assigned round-robin over the pool. Empty/absent ⇒
-    /// inherit the current model. A single malformed pool entry is
-    /// dropped rather than discarding the whole pool (see
-    /// [`deserialize_tolerant_goal_skeptic_models`]).
-    #[serde(
-        default,
-        deserialize_with = "deserialize_tolerant_goal_skeptic_models",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub goal_skeptic_models: Vec<GoalRoleModel>,
     #[serde(default)]
     pub workflows_enabled: Option<bool>,
-    /// Remote fallback for managed MCP connector fetching.
-    #[serde(default)]
-    pub managed_mcps_enabled: Option<bool>,
-    #[serde(default)]
-    pub managed_mcp_gateway_tools_enabled: Option<bool>,
     /// `Some(false)` disarms managed-config signature verification (remote kill-switch).
     #[serde(default)]
     pub managed_config_signature_verification: Option<bool>,
-    /// Two-pass (prefire) compaction. When approaching the auto-compact
-    /// threshold the shell speculatively summarizes the history prefix in the
-    /// background (pass 1 → NOTE₁); at compaction it summarizes NOTE₁ + the
-    /// recent tail (pass 2 → final summary), keeping summarizer latency off the
-    /// critical path. `Some(true)` enables (remote rollout), `Some(false)` forces
-    /// off, `None` falls back to `[features] two_pass_compaction` /
-    /// `GROW_TWO_PASS_COMPACTION` / default (off).
-    #[serde(default)]
-    pub two_pass_compaction_enabled: Option<bool>,
     /// Dynamic tip list from remote settings. When present with non-empty entries,
     /// one tip is shown at startup (rotated daily by UTC day).
     /// `None` or `[]` = no tips shown.
@@ -689,7 +621,7 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub non_git_warning: Option<bool>,
     #[serde(default)]
-    pub session_summary_model: Option<String>,
+    pub session_title_model: Option<String>,
     #[serde(default)]
     pub image_description_model: Option<String>,
     /// Server-side pin for the next-prompt suggestion model (tab-autocomplete
@@ -811,16 +743,6 @@ pub struct RemoteSettings {
     /// env > user > managed > remote > default true).
     #[serde(default)]
     pub group_tool_verbs: Option<bool>,
-    /// Whether the TUI shows Edit tool calls as a collapsed one-line `+N/-M`
-    /// diffstat summary by default and merges back-to-back edits to the same
-    /// file into one row (expand for the diffs). `None` defers to local
-    /// config / env / default (`false`); `Some(false)` is a remote kill
-    /// switch. Resolved via `resolve_collapsed_edit_blocks` (requirements >
-    /// env > user > managed > remote > default false). Explicit pager.toml
-    /// `[scrollback.blocks.edit]` shape keys override the flag's fold shape
-    /// client-side; merging always follows the flag.
-    #[serde(default)]
-    pub collapsed_edit_blocks: Option<bool>,
     /// Display-refresh probe + auto-cadence. See [`DisplayRefreshSettings`].
     /// Partial object falls through per-field; resolved via `resolve_display_refresh`.
     #[serde(default)]
@@ -863,14 +785,6 @@ pub struct RemoteSettings {
     /// Resolved via `resolve_compaction_wall_clock_budget_secs`.
     #[serde(default)]
     pub compaction_wall_clock_budget_secs: Option<u64>,
-    /// Compaction mode (`summary` | `transcript` | `segments`) from remote settings.
-    /// Env (`GROW_COMPACTION_MODE`) and user config override it.
-    #[serde(default)]
-    pub compaction_mode: Option<String>,
-    /// Segments verbatim detail (`none` | `minimal` | `balanced` | `verbose`)
-    /// from remote settings. Env (`GROW_COMPACTION_DETAIL`) and config override it.
-    #[serde(default)]
-    pub compaction_detail: Option<String>,
     /// remote settings verbatim-input flag; env (`GROW_COMPACTION_VERBATIM_INPUT`) and config override it. `None` = default (true).
     #[serde(default)]
     pub compaction_verbatim_input: Option<bool>,
@@ -914,82 +828,6 @@ pub struct ContextualHintsRemote {
     /// SSH wrap session-load tip (recommend `grow wrap ssh` for remote sessions).
     #[serde(default)]
     pub ssh_wrap: Option<bool>,
-}
-/// Parse one JSON value as a [`GoalRoleModel`], returning `None` (with a
-/// `tracing::warn!`) instead of erroring when the value is malformed.
-/// Shared by the tolerant deserializers for the single-pair role fields
-/// and the skeptic pool so all three goal-role-model fields drop bad
-/// remote payloads rather than failing the whole `RemoteSettings` parse.
-fn parse_goal_role_model_tolerant(value: serde_json::Value) -> Option<GoalRoleModel> {
-    match serde_json::from_value::<GoalRoleModel>(value) {
-        Ok(model) => Some(model),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "remote settings goal role model: dropped malformed value"
-            );
-            None
-        }
-    }
-}
-/// Tolerant deserializer for `Option<GoalRoleModel>` (the single-pair
-/// role fields). Parses as `Option<Value>`; a present-but-malformed value
-/// (or an explicit `null`) maps to `None` via
-/// [`parse_goal_role_model_tolerant`] rather than erroring, so one bad
-/// remote payload cannot nuke the whole `RemoteSettings` parse.
-fn deserialize_tolerant_goal_role_model<'de, D>(
-    deserializer: D,
-) -> Result<Option<GoalRoleModel>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let opt: Option<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
-    Ok(match opt {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => parse_goal_role_model_tolerant(value),
-    })
-}
-/// Tolerant deserializer for `Vec<GoalRoleModel>` (the skeptic pool).
-/// Parses as `Option<Value>`; a non-array value (or null/absent) yields
-/// an empty pool, and within an array each malformed entry is dropped
-/// (via [`parse_goal_role_model_tolerant`]) instead of nuking the whole
-/// pool. Survivor order is preserved — the skeptic round-robin assignment
-/// (`expand_skeptic_assignment`) depends on pool order.
-fn deserialize_tolerant_goal_skeptic_models<'de, D>(
-    deserializer: D,
-) -> Result<Vec<GoalRoleModel>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let opt: Option<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
-    match opt {
-        Some(serde_json::Value::Array(arr)) => Ok(arr
-            .into_iter()
-            .filter_map(parse_goal_role_model_tolerant)
-            .collect()),
-        _ => Ok(Vec::new()),
-    }
-}
-/// A model + the harness whose system prompt / toolset flavor that model must
-/// run against. The pair is the atomic configurable unit because a model is
-/// only guaranteed to work with a compatible harness (cursor vs grow-build).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GoalRoleModel {
-    /// Model id, e.g. "grow-4". Resolved against available models at
-    /// spawn time; unknown/unauthorized ⇒ fail-open to current model.
-    pub model: String,
-    /// Harness `agent_type` (e.g. "cursor", "grow") whose
-    /// `AgentDefinition` decides the role subagent's harness flavor (system
-    /// prompt + cursor-vs-grow-build toolset), applied REGARDLESS of the
-    /// session/parent agent. Resolved by NAME (project/plugin/builtin lookup,
-    /// then re-flavored by the subagent toolset resolver) — NOT via the main
-    /// session's env/ACP/strict-harness precedence chain. NOT a subagent type:
-    /// the role always spawns `general-purpose`, so the harness only re-flavors
-    /// that toolset. An `agent_type` that doesn't resolve, that resolves to a
-    /// strict harness whose flavor the subagent system can't represent, or whose
-    /// role toolset can't satisfy the role, fails open to the
-    /// session model + harness before commit.
-    pub agent_type: String,
 }
 #[cfg(test)]
 mod tests {
@@ -1104,246 +942,7 @@ mod tests {
         let s3: RemoteSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s3.prompt_suggestion_model, None);
     }
-    #[test]
-    fn remote_settings_goal_role_models_absent_default_clean() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_model, None);
-        assert_eq!(s.goal_strategist_model, None);
-        assert!(s.goal_skeptic_models.is_empty());
-    }
-    #[test]
-    fn remote_settings_goal_planner_model_round_trip() {
-        let json =
-            r#"{"goal_planner_model": {"model": "grow-4", "agent_type": "general-purpose"}}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_planner_model,
-            Some(GoalRoleModel {
-                model: "grow-4".to_string(),
-                agent_type: "general-purpose".to_string(),
-            })
-        );
-        let out = serde_json::to_string(&s).unwrap();
-        let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
-        assert_eq!(s2.goal_planner_model, s.goal_planner_model);
-    }
-    #[test]
-    fn remote_settings_goal_strategist_model_round_trip() {
-        let json = r#"{"goal_strategist_model": {"model": "grow-4.5", "agent_type": "cursor"}}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_strategist_model,
-            Some(GoalRoleModel {
-                model: "grow-4.5".to_string(),
-                agent_type: "cursor".to_string(),
-            })
-        );
-        let out = serde_json::to_string(&s).unwrap();
-        let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
-        assert_eq!(s2.goal_strategist_model, s.goal_strategist_model);
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_fully_valid_pool_round_trips() {
-        let json = r#"{"goal_skeptic_models": [
-            {"model": "grow-4", "agent_type": "general-purpose"},
-            {"model": "grow-3", "agent_type": "cursor"}
-        ]}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_skeptic_models,
-            vec![
-                GoalRoleModel {
-                    model: "grow-4".to_string(),
-                    agent_type: "general-purpose".to_string(),
-                },
-                GoalRoleModel {
-                    model: "grow-3".to_string(),
-                    agent_type: "cursor".to_string(),
-                },
-            ]
-        );
-        let out = serde_json::to_string(&s).unwrap();
-        let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
-        assert_eq!(s2.goal_skeptic_models, s.goal_skeptic_models);
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_one_bad_item_does_not_poison_pool() {
-        let json = r#"{"goal_skeptic_models": [
-            {"model": "grow-4", "agent_type": "general-purpose"},
-            {"model": "grow-broken"},
-            {"model": "grow-3", "agent_type": "cursor"}
-        ]}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_skeptic_models,
-            vec![
-                GoalRoleModel {
-                    model: "grow-4".to_string(),
-                    agent_type: "general-purpose".to_string(),
-                },
-                GoalRoleModel {
-                    model: "grow-3".to_string(),
-                    agent_type: "cursor".to_string(),
-                },
-            ]
-        );
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_null_yields_empty() {
-        let json = r#"{"goal_skeptic_models": null}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert!(s.goal_skeptic_models.is_empty());
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_empty_array_yields_empty() {
-        let json = r#"{"goal_skeptic_models": []}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert!(s.goal_skeptic_models.is_empty());
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_all_entries_bad_yields_empty() {
-        let json = r#"{"goal_skeptic_models": [
-            {"model": "only-model"},
-            {"agent_type": "only-agent-type"},
-            "scalar-not-an-object",
-            42
-        ]}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert!(s.goal_skeptic_models.is_empty());
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_non_array_yields_empty() {
-        for json in [
-            r#"{"goal_skeptic_models": {"model": "x", "agent_type": "y"}}"#,
-            r#"{"goal_skeptic_models": "not-an-array"}"#,
-            r#"{"goal_skeptic_models": 7}"#,
-        ] {
-            let s: RemoteSettings = serde_json::from_str(json).unwrap();
-            assert!(
-                s.goal_skeptic_models.is_empty(),
-                "non-array pool must yield empty for {json}"
-            );
-        }
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_missing_model_entry_dropped() {
-        let json = r#"{"goal_skeptic_models": [
-            {"agent_type": "general-purpose"},
-            {"model": "grow-3", "agent_type": "cursor"}
-        ]}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_skeptic_models,
-            vec![GoalRoleModel {
-                model: "grow-3".to_string(),
-                agent_type: "cursor".to_string(),
-            }]
-        );
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_wrong_typed_scalar_dropped() {
-        let json = r#"{"goal_skeptic_models": [
-            {"model": 123, "agent_type": "general-purpose"},
-            {"model": "grow-3", "agent_type": ["cursor"]},
-            {"model": "grow-4", "agent_type": "general-purpose"}
-        ]}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_skeptic_models,
-            vec![GoalRoleModel {
-                model: "grow-4".to_string(),
-                agent_type: "general-purpose".to_string(),
-            }]
-        );
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_extra_unknown_fields_kept() {
-        let json = r#"{"goal_skeptic_models": [
-            {"model": "grow-4", "agent_type": "general-purpose", "reasoning_effort": "high"}
-        ]}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_skeptic_models,
-            vec![GoalRoleModel {
-                model: "grow-4".to_string(),
-                agent_type: "general-purpose".to_string(),
-            }]
-        );
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_survivor_order_preserved() {
-        let json = r#"{"goal_skeptic_models": [
-            {"model": "first", "agent_type": "general-purpose"},
-            {"model": "bad"},
-            {"model": "second", "agent_type": "cursor"},
-            "garbage",
-            {"model": "third", "agent_type": "general-purpose"}
-        ]}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        let order: Vec<&str> = s
-            .goal_skeptic_models
-            .iter()
-            .map(|m| m.model.as_str())
-            .collect();
-        assert_eq!(order, vec!["first", "second", "third"]);
-    }
-    #[test]
-    fn remote_settings_goal_planner_model_malformed_yields_none() {
-        for json in [
-            r#"{"goal_planner_model": {"model": "only-model"}}"#,
-            r#"{"goal_planner_model": {"agent_type": "only-agent-type"}}"#,
-            r#"{"goal_planner_model": {"model": 1, "agent_type": "x"}}"#,
-            r#"{"goal_planner_model": "scalar"}"#,
-            r#"{"goal_planner_model": null}"#,
-        ] {
-            let s: RemoteSettings = serde_json::from_str(json)
-                .unwrap_or_else(|e| panic!("must not hard-error for {json}: {e}"));
-            assert_eq!(s.goal_planner_model, None, "for {json}");
-        }
-    }
-    #[test]
-    fn remote_settings_goal_strategist_model_malformed_yields_none() {
-        for json in [
-            r#"{"goal_strategist_model": {"model": "only-model"}}"#,
-            r#"{"goal_strategist_model": {"agent_type": ["x"]}}"#,
-            r#"{"goal_strategist_model": 42}"#,
-        ] {
-            let s: RemoteSettings = serde_json::from_str(json)
-                .unwrap_or_else(|e| panic!("must not hard-error for {json}: {e}"));
-            assert_eq!(s.goal_strategist_model, None, "for {json}");
-        }
-    }
-    #[test]
-    fn remote_settings_goal_role_models_malformed_pair_does_not_drop_other_fields() {
-        let json = r#"{
-            "goal_planner_model": {"model": "broken"},
-            "goal_strategist_model": {"model": "grow-4.5", "agent_type": "cursor"},
-            "default_model": "grow-4"
-        }"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_model, None);
-        assert_eq!(
-            s.goal_strategist_model,
-            Some(GoalRoleModel {
-                model: "grow-4.5".to_string(),
-                agent_type: "cursor".to_string(),
-            })
-        );
-        assert_eq!(s.default_model.as_deref(), Some("grow-4"));
-    }
-    #[test]
-    fn remote_settings_goal_role_model_extra_unknown_fields_kept_single_pair() {
-        let json = r#"{"goal_planner_model": {"model": "grow-4", "agent_type": "general-purpose", "future": true}}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_planner_model,
-            Some(GoalRoleModel {
-                model: "grow-4".to_string(),
-                agent_type: "general-purpose".to_string(),
-            })
-        );
-    }
+
     #[test]
     fn remote_settings_inference_idle_timeout_present() {
         let json = r#"{"inference_idle_timeout_secs": 180}"#;

@@ -197,8 +197,8 @@ pub(crate) async fn refresh_codebase_graph_after_head_change(
         .args(["diff", "--name-status", "ORIG_HEAD", "HEAD"])
         .current_dir(repo_root)
         .stdin(std::process::Stdio::null());
-    tools::util::detach_command(&mut diff_cmd);
-    diff_cmd.envs(tools::util::pager_env());
+    tty_utils::detach_command(&mut diff_cmd);
+    diff_cmd.envs(tty_utils::pager_env());
     let diff_output = diff_cmd.output().await;
 
     // `None` means the update failed entirely (channel closed) --

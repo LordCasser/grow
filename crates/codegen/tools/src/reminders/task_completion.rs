@@ -325,18 +325,15 @@ pub fn format_monitor_events(
     }
 }
 /// Whether a background task should be surfaced to the session whose owner id
-/// is `my_owner`.
+/// is `my_owner`. Ownerless tasks are not session events and never surface in
+/// a session transcript.
 ///
 /// Subagents share the parent's terminal backend, so `list_tasks()` returns
 /// tasks owned by other sessions (the parent, sibling subagents). A task is in
-/// scope only when it has no recorded owner (legacy / non-grow-build backends)
-/// or its owner matches the current session; cross-session tasks are filtered
-/// out so their completions surface in the owning session, not here.
-pub(crate) fn task_owned_by_session(task: &TaskSnapshot, my_owner: Option<&str>) -> bool {
-    match (my_owner, task.owner_session_id.as_deref()) {
-        (Some(me), Some(owner)) => me == owner,
-        _ => true,
-    }
+/// scope only when its owner matches the current session; cross-session and
+/// ownerless tasks are filtered out.
+pub(crate) fn task_owned_by_session(task: &TaskSnapshot, my_owner: &str) -> bool {
+    task.owner_session_id.as_deref() == Some(my_owner)
 }
 /// Append the completion-output delivery section for a bash task or subagent.
 ///
@@ -514,7 +511,7 @@ pub fn format_between_turn_bash_completions(
 /// - `shell`'s `SessionActor` to sweep matching synthetic
 ///   auto-wake prompts and notifications out of `pending_inputs` /
 ///   `pending_notifications` (closes the TOCTOU race that produces
-///   trailing `<system-reminder>` items in `chat_history.jsonl`).
+///   trailing `<system-reminder>` items in the model-facing Surface).
 ///
 /// Centralising this here means the two consumer surfaces cannot drift:
 /// both call the same function, and the exhaustive `match` below
@@ -659,10 +656,15 @@ impl Reminder for TaskCompletionReminder {
             let my_owner = res
                 .get::<crate::types::resources::OwnerSessionId>()
                 .map(|o| o.0.clone());
-            let tasks: Vec<TaskSnapshot> = all_tasks
-                .into_iter()
-                .filter(|t| task_owned_by_session(t, my_owner.as_deref()))
-                .collect();
+            let tasks: Vec<TaskSnapshot> = my_owner
+                .as_deref()
+                .map(|owner| {
+                    all_tasks
+                        .into_iter()
+                        .filter(|task| task_owned_by_session(task, owner))
+                        .collect()
+                })
+                .unwrap_or_default();
             let goal_loop_active = res
                 .get::<crate::implementations::grow_build::task::types::GoalLoopActive>()
                 .is_some_and(|g| g.0);
@@ -800,7 +802,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
-            owner_session_id: None,
+            owner_session_id: Some("test-session".into()),
             description: None,
             is_backgrounded: false,
         };
@@ -828,7 +830,7 @@ mod tests {
             kind: crate::computer::types::TaskKind::Monitor,
             block_waited: false,
             explicitly_killed: false,
-            owner_session_id: None,
+            owner_session_id: Some("test-session".into()),
             description: None,
             is_backgrounded: false,
         };
@@ -862,7 +864,7 @@ mod tests {
             kind: crate::computer::types::TaskKind::Monitor,
             block_waited: false,
             explicitly_killed: false,
-            owner_session_id: None,
+            owner_session_id: Some("test-session".into()),
             description: None,
             is_backgrounded: false,
         };
@@ -891,7 +893,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
-            owner_session_id: None,
+            owner_session_id: Some("test-session".into()),
             description: None,
             is_backgrounded: false,
         };
@@ -1187,7 +1189,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
-            owner_session_id: None,
+            owner_session_id: Some("test-session".into()),
             description: None,
             is_backgrounded: false,
         }
@@ -1209,7 +1211,7 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
-            owner_session_id: None,
+            owner_session_id: Some("test-session".into()),
             description: None,
             is_backgrounded: false,
         }
@@ -1231,6 +1233,9 @@ mod tests {
         let mut res = Resources::new();
         let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal { tasks });
         res.insert(Terminal(backend));
+        res.insert(crate::types::resources::OwnerSessionId(
+            "test-session".into(),
+        ));
         res.register_state::<ReportedTaskCompletions>();
         res.into_shared()
     }
@@ -1239,6 +1244,9 @@ mod tests {
         let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal { tasks });
         res.insert(Terminal(backend));
         res.insert(gate);
+        res.insert(crate::types::resources::OwnerSessionId(
+            "test-session".into(),
+        ));
         res.register_state::<ReportedTaskCompletions>();
         res.into_shared()
     }
@@ -1249,6 +1257,9 @@ mod tests {
         let mut res = Resources::new();
         let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal { tasks });
         res.insert(Terminal(backend));
+        res.insert(crate::types::resources::OwnerSessionId(
+            "test-session".into(),
+        ));
         res.register_state::<ReportedTaskCompletions>();
         let params = crate::implementations::grow_build::bash::BashParams {
             surface_bg_completion_reminders: false,
@@ -1260,7 +1271,7 @@ mod tests {
     /// Bash completions are scoped to the session that OWNS the task. A
     /// subagent shares the parent's terminal backend, so `list_tasks()` returns
     /// the parent's (and sibling subagents') tasks too; only this session's
-    /// (and unowned) tasks may surface. Regression guard for the parent →
+    /// tasks may surface. Regression guard for the parent →
     /// subagent background-task completion leak.
     #[tokio::test]
     async fn bash_completions_scoped_to_owning_session() {
@@ -1272,7 +1283,8 @@ mod tests {
             owner_session_id: Some("parent-0".into()),
             ..make_completed("parent-task")
         };
-        let unowned = make_completed("unowned-task");
+        let mut unowned = make_completed("unowned-task");
+        unowned.owner_session_id = None;
         let mut res = Resources::new();
         let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal {
             tasks: vec![mine, parents, unowned],
@@ -1294,8 +1306,8 @@ mod tests {
             "this session's own task must surface: {joined}"
         );
         assert!(
-            joined.contains("unowned-task"),
-            "unowned task must surface (backwards compat): {joined}"
+            !joined.contains("unowned-task"),
+            "ownerless tasks are outside every session: {joined}"
         );
         assert!(
             !joined.contains("parent-task"),
@@ -1505,7 +1517,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn subagent_completion_suppressed_by_wait_tasks_multi_result() {
+    async fn subagent_completion_suppressed_by_multi_task_output() {
         let shared = shared_with_subagent_completions(
             vec![],
             vec![
@@ -1551,7 +1563,7 @@ mod tests {
         let r = reminder.collect_reminders(shared, &output).await;
         assert!(
             r.is_empty(),
-            "wait_tasks MultiResult should suppress reminders for completed subagents"
+            "multi-task output should suppress reminders for completed subagents"
         );
     }
     #[tokio::test]
@@ -1851,8 +1863,8 @@ mod tests {
             "the reminder pipeline must leave the buffer for the turn loop to drain"
         );
     }
-    /// `drain_owned` leader-mode partition: the draining session takes its
-    /// own + owner-less legacy events; foreign events stay buffered.
+    /// `drain_owned` leader-mode partition: the draining session takes only
+    /// its own events; foreign and ownerless events stay buffered.
     #[test]
     fn drain_owned_partitions_by_session_owner() {
         use crate::implementations::grow_build::monitor::types::{
@@ -1874,18 +1886,18 @@ mod tests {
             event_text: "legacy line".into(),
             owner_session_id: None,
         });
-        let mine = drain_owned(&shared_buffer, Some("session-B"));
+        let mine = drain_owned(&shared_buffer, "session-B");
         let ids: Vec<&str> = mine.iter().map(|e| e.task_id.as_str()).collect();
+        assert_eq!(ids, vec!["mine-1"], "only owned events drain");
         assert_eq!(
-            ids,
-            vec!["mine-1", "legacy-1"],
-            "own + legacy events drain, in arrival order"
+            shared_buffer.len(),
+            2,
+            "foreign and ownerless events remain buffered"
         );
-        assert_eq!(shared_buffer.len(), 1, "foreign event must remain buffered");
-        let foreign = drain_owned(&shared_buffer, Some("session-A"));
+        let foreign = drain_owned(&shared_buffer, "session-A");
         assert_eq!(foreign.len(), 1);
         assert_eq!(foreign[0].task_id, "foreign-1");
-        assert!(shared_buffer.is_empty());
+        assert_eq!(shared_buffer.len(), 1);
     }
     /// Single event => lean `<monitor-event>` form; multiple => count-led
     /// batch with per-monitor `<monitor>` groups and numbered labels;

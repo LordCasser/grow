@@ -15,21 +15,12 @@ impl ActorGuard {
 
 fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
-    let summary_tx = tx.clone();
-    let sampling_client = OaiCompatClient::new(sampler::SamplerConfig::default()).unwrap();
     let task = tokio::spawn(
         SessionPersistence {
             info,
             storage,
             pending_notification: None,
             rx,
-            summary: crate::session::summary::SummaryGenerator::new(
-                crate::session::summary::SummaryConfig {
-                    sampling_client,
-                    model: String::new(),
-                    persistence_tx: tx.downgrade(),
-                },
-            ),
             gateway: None,
         }
         .run(),
@@ -201,28 +192,26 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
     actor.stop().await;
 }
 
-/// The load path self-heals a persisted bare model slug by sending
-/// `PersistenceMsg::CurrentModel` with the resolved canonical key and
-/// `agent_name`/`reasoning_effort` left `None` — the write must replace only
-/// the model id and preserve the persisted effort and agent name.
+/// A `CurrentModel` mutation with omitted metadata replaces only the canonical
+/// catalog ID and preserves the persisted effort and agent name.
 #[tokio::test]
-async fn current_model_write_back_replaces_bare_slug_and_preserves_rest() {
+async fn current_model_write_preserves_omitted_metadata() {
     use sampling_types::ReasoningEffort;
     let dir = tempfile::tempdir().unwrap();
     let info = Info {
-        id: acp::SessionId::new("slug-write-back"),
+        id: acp::SessionId::new("catalog-id-write"),
         cwd: dir.path().to_string_lossy().into_owned(),
     };
     let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
         dir.path().to_path_buf(),
     ));
-    let bare = acp::ModelId::new("deepseek-v4-flash");
-    let canonical = acp::ModelId::new("deepseek/deepseek-v4-flash");
-    storage.init_session(&info, bare.clone()).await.unwrap();
+    let previous = acp::ModelId::new("deepseek/deepseek-v4-flash");
+    let replacement = acp::ModelId::new("anthropic/claude-sonnet");
+    storage.init_session(&info, previous.clone()).await.unwrap();
     storage
         .update_current_model_and_agent(
             &info,
-            &bare,
+            &previous,
             Some("grow-build"),
             Some(Some(ReasoningEffort::High)),
         )
@@ -230,8 +219,8 @@ async fn current_model_write_back_replaces_bare_slug_and_preserves_rest() {
         .unwrap();
     assert_eq!(
         storage.load_summary(&info).await.unwrap().current_model_id,
-        bare,
-        "precondition: summary holds the bare slug"
+        previous,
+        "precondition: summary holds the previous catalog ID"
     );
 
     let actor = test_actor(info.clone(), storage.clone());
@@ -239,7 +228,7 @@ async fn current_model_write_back_replaces_bare_slug_and_preserves_rest() {
         .handle
         .tx
         .send(PersistenceMsg::CurrentModel {
-            model_id: canonical.clone(),
+            model_id: replacement.clone(),
             agent_name: None,
             reasoning_effort: None,
         })
@@ -255,7 +244,7 @@ async fn current_model_write_back_replaces_bare_slug_and_preserves_rest() {
     ack_rx.await.unwrap();
 
     let summary = storage.load_summary(&info).await.unwrap();
-    assert_eq!(summary.current_model_id, canonical);
+    assert_eq!(summary.current_model_id, replacement);
     assert_eq!(
         summary.reasoning_effort,
         Some(ReasoningEffort::High),

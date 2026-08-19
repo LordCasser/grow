@@ -1,6 +1,6 @@
 {
   "hooks": {
-    "Stop": [
+    "stop": [
       {
         "hooks": [
           { "type": "command", "command": "bin/stop-verify.sh", "timeout": 300 }

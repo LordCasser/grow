@@ -10,8 +10,7 @@ const MAX_LINES_READ_DEFAULT: usize = 1_000;
 /// the model to recover the clipped bytes. Non-skill reads are bounded by
 /// the whole-read `MAX_NUM_TOKENS` cap instead (skill files are exempt from
 /// all read limits by design). Other agent CLIs likewise apply no
-/// per-line cap. The wire field (`TruncationConfig.max_chars_per_line` in
-/// tools.proto) is deprecated and ignored.
+/// per-line cap.
 #[derive(Debug, Clone, Default)]
 pub struct TruncationConfig {
     /// Max total output bytes for any tool. Default: 40KB.
@@ -67,8 +66,6 @@ impl TruncationConfig {
     /// - `{max_lines_read}` — from `max_lines_read` (default 1000)
     /// - `{max_wait_ms}` — the blocking-wait ceiling, as `600000 (~10 min)`
     /// - `{max_output_bytes}` — resolved via `max_output_bytes_for(tool_name, builtin_default)`
-    /// - `{max_chars_per_line}` — deprecated fixed display value retained by
-    ///   the template renderer; Grow's `read_file` never clips lines.
     ///
     /// Returns the original string unchanged if no placeholders are present.
     pub fn interpolate_description(
@@ -84,7 +81,6 @@ impl TruncationConfig {
                 "{max_wait_ms}",
                 &tool_types::format_wait_cap_ms(max_wait_ms),
             )
-            .replace("{max_chars_per_line}", "2000")
             .replace(
                 "{max_output_bytes}",
                 &self

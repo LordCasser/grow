@@ -2,7 +2,7 @@ use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
 use crate::util::config as cli_config;
-use agent::prompt::skills::{CompatConfig, SkillInfo, SkillsConfig, list_skills_with_plugins};
+use agent::prompt::skills::{SkillInfo, SkillsConfig, list_skills_with_plugins};
 
 use super::ExtResult;
 
@@ -121,10 +121,9 @@ pub struct SkillsConfigResponse {
 async fn reload_skills(
     cwd: &str,
     plugin_registry: Option<&agent::plugins::PluginRegistry>,
-    compat: CompatConfig,
 ) -> Vec<SkillInfo> {
     let config = cli_config::load_config().await.skills;
-    let discovery = list_skills_with_plugins(Some(cwd), &config, plugin_registry, compat);
+    let discovery = list_skills_with_plugins(Some(cwd), &config, plugin_registry);
     match tokio::time::timeout(std::time::Duration::from_secs(5), discovery).await {
         Ok(skills) => skills,
         Err(_) => {
@@ -186,16 +185,6 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
         .ok()
         .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()));
 
-    // Once the user has imported, stop scanning hardcoded
-    // .claude/skills/ paths. Equivalent locations should be opted in via
-    // [paths] extra_skill_dirs in config.toml (written by /import-claude).
-    let imported = crate::claude_import::is_claude_import_marked();
-    let local_dir_names: &[&str] = if imported {
-        &[".grow", ".agents"]
-    } else {
-        &[".grow", ".agents", ".claude"]
-    };
-
     let mut sources: Vec<(String, usize)> = Vec::new();
     let subdirs = ["skills", "commands"];
 
@@ -209,19 +198,15 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
     };
 
     let mut local_dirs: Vec<std::path::PathBuf> = Vec::new();
-    for dir_name in local_dir_names {
-        for subdir in &subdirs {
-            let dir = cwd_path.join(dir_name).join(subdir);
-            try_add_source(dir.clone(), None);
-            local_dirs.push(dir);
-        }
+    for subdir in &subdirs {
+        let dir = cwd_path.join(".grow").join(subdir);
+        try_add_source(dir.clone(), None);
+        local_dirs.push(dir);
     }
 
     if let Some(ref root) = git_root {
-        for dir_name in local_dir_names {
-            for subdir in &subdirs {
-                try_add_source(root.join(dir_name).join(subdir), Some(&local_dirs));
-            }
+        for subdir in &subdirs {
+            try_add_source(root.join(".grow").join(subdir), Some(&local_dirs));
         }
     }
 
@@ -229,22 +214,7 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
         try_add_source(grow_home.join(subdir), None);
     }
 
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    if let Some(ref h) = home {
-        let home_path = std::path::PathBuf::from(h);
-        for subdir in &subdirs {
-            try_add_source(home_path.join(".agents").join(subdir), None);
-        }
-        if !imported {
-            for subdir in &subdirs {
-                try_add_source(home_path.join(".claude").join(subdir), None);
-            }
-        }
-    }
-
-    // [paths] extra_skill_dirs from config.toml. These supplement the built-in
-    // scan locations. Used both standalone and as the migration target after
-    // /import-claude when the runtime .claude/skills/ scan is disabled.
+    // Explicit custom skill roots supplement canonical discovery.
     for dir in extra_skill_dirs_from_config() {
         let path = crate::util::expand_home(&dir);
         if path.is_dir()
@@ -284,7 +254,6 @@ pub async fn handle(
     agent: &crate::agent::mvp_agent::MvpAgent,
     args: &acp::ExtRequest,
     plugin_registry: Option<&agent::plugins::PluginRegistry>,
-    compat: CompatConfig,
 ) -> ExtResult {
     match args.method.as_ref() {
         "grow/skills/add" => {
@@ -315,7 +284,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry, compat).await;
+            let skills = reload_skills(cwd, plugin_registry).await;
             let added_count = skills
                 .iter()
                 .filter(|s| s.path.starts_with(&resolved))
@@ -364,7 +333,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry, compat).await;
+            let skills = reload_skills(cwd, plugin_registry).await;
             let total = skills.len();
             let message = format!(
                 "Removed path {}. {} skill{} remaining.",
@@ -398,7 +367,7 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry, compat).await;
+            let skills = reload_skills(cwd, plugin_registry).await;
             let message = "Custom skills config reset".to_string();
 
             super::to_ext_response(Ok(SkillsResetResponse { skills, message }))
@@ -406,7 +375,7 @@ pub async fn handle(
 
         "grow/skills/list" => {
             let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
-            let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
+            let skills = reload_skills(&req.cwd, plugin_registry).await;
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 
@@ -438,7 +407,7 @@ pub async fn handle(
             let paths = config.paths.clone();
             let ignore = config.ignore.clone();
 
-            let skills = reload_skills(cwd, plugin_registry, compat).await;
+            let skills = reload_skills(cwd, plugin_registry).await;
             let total_skills = skills.len();
 
             let auto_sources = discover_auto_sources(cwd, &skills);
@@ -497,7 +466,7 @@ pub async fn handle(
             let cwd = req.cwd.as_deref().unwrap_or(".");
 
             // Validate the skill name exists before modifying config.
-            let current_skills = reload_skills(cwd, plugin_registry, compat).await;
+            let current_skills = reload_skills(cwd, plugin_registry).await;
             if !current_skills.iter().any(|s| s.name == req.name) {
                 return super::to_ext_response(Err::<SkillsListResponse, _>(anyhow::anyhow!(
                     "Skill '{}' not found",

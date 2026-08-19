@@ -44,7 +44,7 @@ pub struct ScriptedScenario {
     /// Optional ephemeral workspace materialized into a temp dir and used as the
     /// pager's cwd. Lets a scenario exercise repo-local behavior — e.g. the
     /// folder-trust prompt, which only renders when `cwd` has a repo-local
-    /// config (`.mcp.json`). `None` inherits the test process cwd.
+    /// Grow config. `None` inherits the test process cwd.
     #[serde(default)]
     pub workspace: Option<WorkspaceConfig>,
     #[serde(default)]
@@ -157,7 +157,7 @@ pub struct EnvVar {
 /// Ephemeral workspace materialized for a scenario run: a temp dir seeded with
 /// declared files and optionally `git init`-ed, then used as the pager's cwd.
 /// The folder-trust prompt, for example, only renders when `cwd` contains a
-/// repo-local config (`.mcp.json`), so a scenario can declare one here.
+/// repo-local executable config, so a scenario can declare one here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     /// Run `git init` so the temp dir resolves as a git repository root — the
@@ -2056,11 +2056,14 @@ mod tests {
     fn workspace_rejects_paths_outside_the_tempdir() {
         use std::collections::BTreeMap;
 
-        // A normal relative key (the folder-trust scenario's own `.mcp.json`)
+        // A normal relative key (the folder-trust scenario's own Grow config)
         // is accepted.
         let ok = WorkspaceConfig {
             git_init: false,
-            files: BTreeMap::from([(".mcp.json".to_string(), "{}".to_string())]),
+            files: BTreeMap::from([(
+                ".grow/config.toml".to_string(),
+                "[mcp_servers.fixture]\ncommand = \"/usr/bin/true\"\n".to_string(),
+            )]),
         };
         let sandbox = test_support::TestSandbox::new();
         assert!(materialize_workspace(&ok, &sandbox).is_ok());

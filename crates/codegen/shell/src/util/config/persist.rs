@@ -37,6 +37,7 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     merge_section(table, "cli", &config.cli);
     merge_section(table, "models", &config.models);
     merge_section(table, "ui", &config.ui);
+    remove_retired_ui_keys(table);
     merge_section(table, "session", &config.session);
     merge_ask_user_question_section(table, &config.ask_user_question);
     if config.skills == SkillsConfig::default() {
@@ -75,6 +76,16 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     let _ = prior_mode;
     tokio::fs::rename(&tmp, &path).await?;
     Ok(())
+}
+/// Never preserve retired `[ui]` aliases through the generic unknown-field
+/// merge. The current schema has one key for each setting.
+fn remove_retired_ui_keys(table: &mut TomlMap<String, TomlValue>) {
+    let Some(ui) = table.get_mut("ui").and_then(TomlValue::as_table_mut) else {
+        return;
+    };
+    ui.remove("ui_theme");
+    ui.remove("selection_highlight_duration_ms");
+    ui.remove("double_click_action");
 }
 /// Acquire the `config.toml` write lock used by [`save_config`], so callers that
 /// mutate the file directly (marketplace add/remove) can't interleave with a
@@ -325,7 +336,7 @@ mod tests {
     fn merge_section_updates_modeled_fields_preserving_unmodeled() {
         let mut table = TomlMap::new();
         let mut ui = TomlMap::new();
-        ui.insert("yolo".into(), TomlValue::Boolean(false));
+        ui.insert("permission_mode".into(), TomlValue::String("ask".into()));
         ui.insert("show_timestamps".into(), TomlValue::Boolean(true));
         ui.insert(
             "auto_light_theme".into(),
@@ -333,15 +344,15 @@ mod tests {
         );
         table.insert("ui".into(), TomlValue::Table(ui));
         let cfg = crate::agent::config::UiConfig {
-            yolo: true,
+            permission_mode: Some("always-approve".into()),
             ..Default::default()
         };
         merge_section(&mut table, "ui", &cfg);
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
-            ui.get("yolo").and_then(|v| v.as_bool()),
-            Some(true),
-            "modeled field yolo should be updated"
+            ui.get("permission_mode").and_then(|v| v.as_str()),
+            Some("always-approve"),
+            "modeled permission_mode should be updated"
         );
         assert_eq!(
             ui.get("show_timestamps").and_then(|v| v.as_bool()),
@@ -359,12 +370,15 @@ mod tests {
         let mut table = TomlMap::new();
         assert!(table.get("ui").is_none());
         let cfg = crate::agent::config::UiConfig {
-            yolo: true,
+            permission_mode: Some("always-approve".into()),
             ..Default::default()
         };
         merge_section(&mut table, "ui", &cfg);
         let ui = table.get("ui").unwrap().as_table().unwrap();
-        assert_eq!(ui.get("yolo").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            ui.get("permission_mode").and_then(|v| v.as_str()),
+            Some("always-approve")
+        );
     }
     /// Regression test: pager-side commits of a
     /// [session] field (e.g., `auto_compact_threshold_percent`) must
@@ -464,14 +478,14 @@ mod tests {
     fn ui_config_round_trip_preserves_pager_fields() {
         let toml_str = r#"
 [ui]
-yolo = true
+permission_mode = "always-approve"
 show_timestamps = false
 auto_dark_theme = "tokyonight"
 auto_light_theme = "growday"
 "#;
         let root: TomlValue = toml::from_str(toml_str).unwrap();
         let cfg = load_config_from_toml(&root);
-        assert!(cfg.ui.yolo);
+        assert_eq!(cfg.ui.permission_mode.as_deref(), Some("always-approve"));
         assert_eq!(cfg.ui.show_timestamps, Some(false));
         assert_eq!(cfg.ui.auto_dark_theme.as_deref(), Some("tokyonight"));
         assert_eq!(cfg.ui.auto_light_theme.as_deref(), Some("growday"));
@@ -490,7 +504,10 @@ auto_light_theme = "growday"
             ui.get("auto_light_theme").and_then(|v| v.as_str()),
             Some("growday")
         );
-        assert_eq!(ui.get("yolo").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            ui.get("permission_mode").and_then(|v| v.as_str()),
+            Some("always-approve")
+        );
     }
     #[test]
     fn ui_config_hunk_tracker_mode_round_trips() {
@@ -519,10 +536,7 @@ auto_light_theme = "growday"
         let cfg = crate::agent::config::UiConfig::default();
         let val = TomlValue::try_from(&cfg).unwrap();
         let table = val.as_table().unwrap();
-        assert!(
-            table.get("yolo").is_some(),
-            "yolo must always serialize so revert-to-default persists"
-        );
+        assert!(table.get("permission_mode").is_none());
         assert!(
             table.get("compact_mode").is_some(),
             "compact_mode must always serialize so revert-to-default persists"
@@ -594,20 +608,17 @@ auto_update = true
         );
     }
     #[test]
-    fn merge_section_revert_to_default_overwrites_old_value() {
+    fn settings_write_removes_retired_appearance_keys() {
         let mut table = TomlMap::new();
         let mut ui = TomlMap::new();
-        ui.insert("yolo".into(), TomlValue::Boolean(true));
+        ui.insert("ui_theme".into(), TomlValue::String("legacy".into()));
         ui.insert("compact_mode".into(), TomlValue::Boolean(true));
         table.insert("ui".into(), TomlValue::Table(ui));
         let cfg = crate::agent::config::UiConfig::default();
         merge_section(&mut table, "ui", &cfg);
+        remove_retired_ui_keys(&mut table);
         let ui = table.get("ui").unwrap().as_table().unwrap();
-        assert_eq!(
-            ui.get("yolo").and_then(|v| v.as_bool()),
-            Some(false),
-            "yolo=false must overwrite the old yolo=true"
-        );
+        assert!(!ui.contains_key("ui_theme"));
         assert_eq!(
             ui.get("compact_mode").and_then(|v| v.as_bool()),
             Some(false),
@@ -619,14 +630,14 @@ auto_update = true
         let mut table = TomlMap::new();
         table.insert("ui".into(), TomlValue::String("garbage".into()));
         let cfg = crate::agent::config::UiConfig {
-            yolo: true,
+            permission_mode: Some("always-approve".into()),
             ..Default::default()
         };
         merge_section(&mut table, "ui", &cfg);
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
-            ui.get("yolo").and_then(|v| v.as_bool()),
-            Some(true),
+            ui.get("permission_mode").and_then(|v| v.as_str()),
+            Some("always-approve"),
             "non-table section should be replaced with proper table"
         );
     }
@@ -640,7 +651,7 @@ auto_update = true
         if let TomlValue::Table(t) = v {
             assert_eq!(t.len(), 1);
             assert!(t.contains_key("default"));
-            assert!(!t.contains_key("session_summary"));
+            assert!(!t.contains_key("session_title"));
             assert!(!t.contains_key("image_description"));
             assert!(!t.contains_key("hidden_models"));
             assert!(!t.contains_key("disabled_models"));
@@ -761,7 +772,7 @@ auto_update = true
             m.get("unmodeled_foo").and_then(|v| v.as_str()),
             Some("keep-me")
         );
-        assert!(!m.contains_key("session_summary"));
+        assert!(!m.contains_key("session_title"));
     }
     #[test]
     fn persist_preferred_model_flow_roundtrips_via_load_and_new_from_toml_cfg() {
@@ -931,7 +942,7 @@ auto_update = true
         }
         /// ModelInfo populated with the GB per-model value (or none).
         fn model_info(gb_per_model: Option<u8>) -> ModelInfo {
-            let mut info = ModelInfo::fallback(TEST_MODEL);
+            let mut info = ModelInfo::baseline(TEST_MODEL);
             info.auto_compact_threshold_percent = gb_per_model;
             info
         }
@@ -1128,7 +1139,7 @@ auto_update = true
         fn apply_does_not_merge_auto_compact_threshold_percent_into_model_info() {
             use crate::agent::config::{EndpointsConfig, ModelEntry};
             let endpoints = EndpointsConfig::default();
-            let base = ModelEntry::fallback(TEST_MODEL);
+            let base = ModelEntry::baseline(TEST_MODEL);
             let over = ConfigModelOverride {
                 auto_compact_threshold_percent: Some(42),
                 ..ConfigModelOverride::default()

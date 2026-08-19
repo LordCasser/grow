@@ -22,13 +22,13 @@ pub enum SuggestionSource {
 }
 
 impl SuggestionSource {
-    fn parse_source(s: &str) -> Self {
+    fn parse_source(s: &str) -> Option<Self> {
         match s {
-            "history" => Self::History,
-            "path" => Self::PathExecutable,
-            "file" => Self::FilePath,
-            "ai" => Self::AI,
-            _ => Self::None,
+            "history" => Some(Self::History),
+            "path" => Some(Self::PathExecutable),
+            "file" => Some(Self::FilePath),
+            "ai" => Some(Self::AI),
+            _ => None,
         }
     }
 }
@@ -54,37 +54,46 @@ pub struct GhostSuggestionParsed {
 }
 
 /// A single completion item from an ACP `grow/suggest` response.
-// `Default` (empty item) exists for downstream test fixtures — functional-
-// update construction (`..Default::default()`) keeps out-of-crate literals
-// (e.g. pager-minimal's) compiling when optional fields are added.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CompletionItemParsed {
     pub display: String,
     pub description: String,
-    /// Whole-line replacement — always safe to `set_text` (the shell keeps
-    /// this backward-shaped for range-unaware pagers).
-    pub insert_text: String,
+    /// The only text written into `replace_range`.
+    pub replacement: String,
     pub source: SuggestionSource,
     pub priority: i32,
-    /// Byte range in the REQUEST text the completion targets. `None` (older
-    /// shells, whole-line items, or malformed wire data) keeps the
-    /// whole-line accept behavior. Parsed atomically with `token_text`:
-    /// present only as a pair.
-    pub replace_range: Option<std::ops::Range<usize>>,
-    /// Replacement for `replace_range` (path/file token completions);
-    /// `Some` exactly when `replace_range` is.
-    pub token_text: Option<String>,
+    /// Byte range in the exact REQUEST text the completion targets.
+    pub replace_range: std::ops::Range<usize>,
     /// The provider capped its scan/results — the set may be incomplete, so
-    /// Tab must not conclude from it (dropdown-only). Absent on the wire
-    /// (older shells) parses as `false`.
+    /// Tab must not conclude from it (dropdown-only).
     pub truncated: bool,
 }
 
-impl CompletionItemParsed {
-    /// The text that replaces `replace_range` on an in-place accept.
-    pub fn span_replacement(&self) -> &str {
-        self.token_text.as_deref().unwrap_or(&self.insert_text)
-    }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SuggestResponseWire {
+    ghost: Option<GhostSuggestionWire>,
+    completions: Vec<CompletionItemWire>,
+    generation: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GhostSuggestionWire {
+    suffix: String,
+    source: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompletionItemWire {
+    display: String,
+    description: String,
+    replacement: String,
+    source: String,
+    priority: i32,
+    replace_range: (usize, usize),
+    truncated: bool,
 }
 
 /// Parsed response from an ACP `grow/suggest` request.
@@ -99,82 +108,37 @@ impl SuggestResponseParsed {
     /// Parse a raw JSON value from an ACP `grow/suggest` response.
     pub fn from_json(value: &serde_json::Value) -> Option<Self> {
         let result = value.get("result").unwrap_or(value);
-        let generation = result.get("generation")?.as_u64()?;
-        let ghost = result.get("ghost").and_then(|g| {
-            if g.is_null() {
-                return None;
-            }
-            let suffix = g.get("suffix")?.as_str()?;
-            if suffix.is_empty() {
-                return None;
-            }
-            let source_str = g.get("source").and_then(|s| s.as_str()).unwrap_or("");
-            Some(GhostSuggestionParsed {
-                suffix: suffix.to_owned(),
-                source: SuggestionSource::parse_source(source_str),
+        let wire: SuggestResponseWire = serde_json::from_value(result.clone()).ok()?;
+        let ghost = match wire.ghost.filter(|ghost| !ghost.suffix.is_empty()) {
+            Some(ghost) => Some(GhostSuggestionParsed {
+                suffix: ghost.suffix,
+                source: SuggestionSource::parse_source(&ghost.source)?,
+            }),
+            None => None,
+        };
+        let completions = wire
+            .completions
+            .into_iter()
+            .map(|item| {
+                let (start, end) = item.replace_range;
+                if start > end {
+                    return None;
+                }
+                Some(CompletionItemParsed {
+                    display: item.display,
+                    description: item.description,
+                    replacement: item.replacement,
+                    source: SuggestionSource::parse_source(&item.source)?,
+                    priority: item.priority,
+                    replace_range: start..end,
+                    truncated: item.truncated,
+                })
             })
-        });
-        let completions = result
-            .get("completions")
-            .and_then(|c| c.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|item| {
-                        let display = item.get("display")?.as_str()?.to_owned();
-                        let insert_text = item.get("insertText")?.as_str()?.to_owned();
-                        let description = item
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("")
-                            .to_owned();
-                        let source_str = item.get("source").and_then(|s| s.as_str()).unwrap_or("");
-                        let priority =
-                            item.get("priority").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
-                        // Optional `[start, end]`; anything malformed
-                        // degrades to the legacy whole-line accept.
-                        let replace_range = item.get("replaceRange").and_then(|r| {
-                            let arr = r.as_array()?;
-                            let (start, end) = match arr.as_slice() {
-                                [s, e] => (s.as_u64()? as usize, e.as_u64()? as usize),
-                                _ => return None,
-                            };
-                            (start <= end).then_some(start..end)
-                        });
-                        let token_text = item
-                            .get("tokenText")
-                            .and_then(|t| t.as_str())
-                            .map(str::to_owned);
-                        // The pair is atomic: a range without its token
-                        // would splice the whole-line `insertText` into a
-                        // token span (`cat no` → `cat cat notes.md`), a
-                        // token without its range has nowhere to go — half
-                        // pairs degrade to the rangeless whole-line accept.
-                        let (replace_range, token_text) = match (replace_range, token_text) {
-                            (Some(r), Some(t)) => (Some(r), Some(t)),
-                            _ => (None, None),
-                        };
-                        let truncated = item
-                            .get("truncated")
-                            .and_then(|t| t.as_bool())
-                            .unwrap_or(false);
-                        Some(CompletionItemParsed {
-                            display,
-                            description,
-                            insert_text,
-                            source: SuggestionSource::parse_source(source_str),
-                            priority,
-                            replace_range,
-                            token_text,
-                            truncated,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+            .collect::<Option<Vec<_>>>()?;
         Some(Self {
             ghost,
             completions,
-            generation,
+            generation: wire.generation,
         })
     }
 }
@@ -229,11 +193,8 @@ pub enum TabAction {
 /// applied by `PromptWidget::apply_completion_splice`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CompletionSplice {
-    /// Rangeless (legacy-shell) item: replace the whole line — safe because
-    /// wire `insert_text` is always a full line by protocol contract.
-    WholeLine(String),
-    /// Token item with a still-valid span: replace that range in place.
-    Token(std::ops::Range<usize>, String),
+    /// One still-valid atomic edit.
+    Edit(std::ops::Range<usize>, String),
     /// The item's span no longer fits the draft: accept is a
     /// draft-preserving no-op — never a clobber.
     Stale,
@@ -442,17 +403,16 @@ impl SuggestionController {
         }
         let idx = self.dropdown.selected.min(self.dropdown.items.len() - 1);
         let item = &self.dropdown.items[idx];
-        Some(match item.replace_range.clone() {
-            None => CompletionSplice::WholeLine(item.insert_text.clone()),
-            Some(range) => {
-                match self.validated_replace_range(range, item.span_replacement(), current_text) {
-                    Some(range) => {
-                        CompletionSplice::Token(range, item.span_replacement().to_owned())
-                    }
-                    None => CompletionSplice::Stale,
-                }
-            }
-        })
+        Some(
+            match self.validated_replace_range(
+                item.replace_range.clone(),
+                &item.replacement,
+                current_text,
+            ) {
+                Some(range) => CompletionSplice::Edit(range, item.replacement.clone()),
+                None => CompletionSplice::Stale,
+            },
+        )
     }
 
     /// Accept the selected completion-dropdown item, refusing stale state:
@@ -547,17 +507,14 @@ impl SuggestionController {
         if current_cursor != self.dropdown.request_cursor + grown {
             return TabAction::Nothing;
         }
-        // Source alone is not enough: old shells send rangeless `path` rows
-        // whose whole-line fallback would clobber the draft on insta-accept
-        // (`ls | gr` → `grep`), and a truncated (capped) scan may hide the
-        // row that disproves a sole match or an LCP.
+        // A truncated (capped) scan may hide the row that disproves a sole
+        // match or an LCP, so only exhaustive token sources get terminal-Tab
+        // semantics. History/AI remain explicit dropdown choices.
         let token_shaped = self.dropdown.items.iter().all(|i| {
             matches!(
                 i.source,
                 SuggestionSource::FilePath | SuggestionSource::PathExecutable
-            ) && i.replace_range.is_some()
-                && i.token_text.is_some()
-                && !i.truncated
+            ) && !i.truncated
         });
         if token_shaped {
             if self.dropdown.items.len() == 1 {
@@ -586,16 +543,13 @@ impl SuggestionController {
         if items.len() < 2 {
             return None;
         }
-        let range = items[0].replace_range.clone()?;
-        if items[1..]
-            .iter()
-            .any(|i| i.replace_range.as_ref() != Some(&range))
-        {
+        let range = items[0].replace_range.clone();
+        if items[1..].iter().any(|i| i.replace_range != range) {
             return None;
         }
-        let mut lcp = items[0].span_replacement();
+        let mut lcp = items[0].replacement.as_str();
         for item in &items[1..] {
-            lcp = common_str_prefix(lcp, item.span_replacement());
+            lcp = common_str_prefix(lcp, &item.replacement);
             if lcp.is_empty() {
                 return None;
             }

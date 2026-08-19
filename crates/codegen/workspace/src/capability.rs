@@ -49,10 +49,7 @@ impl CapabilityMode {
             })
             .cloned()
             .collect();
-        ToolServerConfig {
-            tools: kept,
-            behavior_preset: config.behavior_preset.clone(),
-        }
+        ToolServerConfig { tools: kept }
     }
 
     /// Whether every kind allowed by `self` is also allowed by `other`.
@@ -83,12 +80,12 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Plan,
     ToolKind::WebFetch,
     ToolKind::BackgroundTaskAction,
-    ToolKind::WaitTasksAction,
     ToolKind::KillTaskAction,
     ToolKind::List,
     ToolKind::Skill,
     ToolKind::MemorySearch,
     ToolKind::MemoryGet,
+    ToolKind::ContextFetch,
     ToolKind::Task,
     ToolKind::PlanControl,
     ToolKind::AskUser,
@@ -135,7 +132,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         }
 
         // Read class.
-        Read | MemoryGet | MemorySearch => {
+        Read | MemoryGet | MemorySearch | ContextFetch => {
             matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute)
         }
 
@@ -153,7 +150,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // Bash / shell.
         Execute => matches!(mode, M::Execute),
 
-        BackgroundTaskAction | WaitTasksAction | KillTaskAction | Task | Monitor | Workflow => {
+        BackgroundTaskAction | KillTaskAction | Task | Monitor | Workflow => {
             matches!(mode, M::Execute)
         }
 
@@ -176,10 +173,7 @@ mod tests {
     use tools::types::tool::ToolKind;
 
     fn make_cfg(tools: Vec<ToolConfig>) -> ToolServerConfig {
-        ToolServerConfig {
-            tools,
-            behavior_preset: None,
-        }
+        ToolServerConfig { tools }
     }
 
     #[test]
@@ -303,25 +297,6 @@ mod tests {
         }
         let all = CapabilityMode::All.filter(&cfg);
         assert_eq!(all.tools.len(), 3);
-    }
-
-    #[test]
-    fn capability_mode_preserves_behavior_preset_across_all_modes() {
-        let mut cfg = make_cfg(vec![test_support::tc("read", Some(ToolKind::Read))]);
-        cfg.behavior_preset = Some("current".to_owned());
-        for mode in [
-            CapabilityMode::ReadOnly,
-            CapabilityMode::ReadWrite,
-            CapabilityMode::Execute,
-            CapabilityMode::All,
-        ] {
-            let out = mode.filter(&cfg);
-            assert_eq!(
-                out.behavior_preset.as_deref(),
-                Some("current"),
-                "behavior_preset lost under {mode:?}"
-            );
-        }
     }
 
     // -----------------------------------------------------------------------

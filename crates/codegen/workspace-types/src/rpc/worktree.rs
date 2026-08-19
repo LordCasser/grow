@@ -136,14 +136,10 @@ impl WorkspaceRpc for WorktreeCreateSyncReq {
     type Response = Value;
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveWorktreeRequest {
-    /// Legacy field: direct path to the worktree directory.
-    #[serde(default)]
-    pub worktree_path: Option<String>,
-    /// New field: worktree ID or filesystem path, resolved via DB first.
-    #[serde(default)]
-    pub id_or_path: Option<String>,
+    /// Worktree ID or filesystem path, resolved via DB first.
+    pub id_or_path: String,
     #[serde(default)]
     pub force: bool,
     #[serde(default)]

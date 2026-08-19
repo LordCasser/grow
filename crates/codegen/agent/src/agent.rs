@@ -6,7 +6,7 @@ use tools::bridge::ToolBridge;
 use tools::types::definition::ToolDefinition;
 
 use crate::compaction::CompactionPolicy;
-use crate::config::{AgentDefinition, CompletionRequirement, PermissionMode};
+use crate::config::{AgentDefinition, CompletionRequirement};
 use crate::prompt::context::PromptContext;
 use crate::system_reminder::ReminderPolicy;
 
@@ -80,11 +80,6 @@ impl Agent {
         &self.definition
     }
 
-    /// Permission mode for this agent.
-    pub fn permission_mode(&self) -> &PermissionMode {
-        &self.definition.permission_mode
-    }
-
     /// Completion requirement, if any.
     pub fn completion_requirement(&self) -> Option<&CompletionRequirement> {
         self.definition.completion_requirement.as_ref()
@@ -130,19 +125,6 @@ impl Agent {
     /// respecting audience (compacted for subagents) and template.
     pub fn agents_md_user_reminder(&self) -> Option<String> {
         self.prompt_context.agents_md_user_reminder()
-    }
-
-    /// Personas content formatted for user-message injection.
-    ///
-    /// Returns the `<system-reminder>` block to prepend as a user message,
-    /// respecting audience (suppressed for subagents) and template.
-    pub fn personas_user_reminder(&self) -> Option<String> {
-        self.prompt_context.personas_user_reminder()
-    }
-
-    /// The structured prompt context for inspection and re-rendering.
-    pub fn prompt_context(&self) -> &PromptContext {
-        &self.prompt_context
     }
 
     /// Audience this agent's prompt was rendered for (Primary or Subagent).
@@ -195,8 +177,6 @@ impl Agent {
     /// (tool name overrides, disabled tools). Called by hosts after
     /// mid-session tool-override updates.
     pub async fn finalize_prompt(&mut self) {
-        self.prompt_context.build_timestamp_utc = chrono::Utc::now().to_rfc3339();
-
         self.system_prompt = self
             .prompt_context
             .render(&self.tool_bridge)

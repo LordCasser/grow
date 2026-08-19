@@ -20,9 +20,7 @@ pub struct PermissionEvent {
     /// Additional context (e.g., file path for edit, command for bash)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_detail: Option<String>,
-    /// Whether YOLO mode was enabled when this decision was made
-    pub yolo_mode: bool,
-    /// Whether this was auto-approved (by YOLO mode or policy rules)
+    /// Whether this was auto-approved (by always-approve mode or policy rules)
     pub auto_approved: bool,
     /// Whether the user was prompted for this decision
     pub user_prompted: bool,
@@ -64,7 +62,7 @@ pub struct PermissionEvent {
     /// The trigger that produced this decision, distinct from `prompt_outcome`
     /// (which records the user's choice when prompted). Lets a trace show *why*
     /// a request reached a prompt even when `user_prompted=true`. Values:
-    /// yolo, policy_allow, policy_deny, policy_ask, bash_command_gate_ask,
+    /// always_approve, policy_allow, policy_deny, policy_ask, bash_command_gate_ask,
     /// shell_file_gate_ask, auto_fast_path,
     /// auto_classifier_allow, auto_classifier_block, auto_classifier_deny,
     /// auto_classifier_timeout, auto_classifier_unavailable, auto_denial_limit,
@@ -116,13 +114,13 @@ pub struct PermissionEvent {
 pub enum ClientType {
     /// Generic client - show simple permission options with full command text
     #[default]
-    #[serde(rename = "generic", alias = "grow-shell", alias = "grow_shell")]
+    #[serde(rename = "generic")]
     Generic,
     /// Grow TUI client - show fancy options with interactive bash term selection
-    #[serde(rename = "grow-tui", alias = "grow_tui")]
+    #[serde(rename = "grow-tui")]
     GrowTUI,
     /// Grow Web client - identified by clientIdentifier "grow-web"
-    #[serde(rename = "grow_web")]
+    #[serde(rename = "grow-web")]
     GrowWeb,
     /// Named client (`"nebula"`) — uses the generic permission UI
     #[serde(rename = "nebula")]
@@ -133,11 +131,7 @@ pub enum ClientType {
     /// Grow Pager client - TUI-like terminal pager with interactive permission UI.
     /// Treated identically to GrowTUI for permission options (gets bash highlights +
     /// interactive selection). Reports as "grow-pager" for diagnostics attribution.
-    ///
-    /// Accepts both the hyphenated `"grow-pager"` (what the pager actually
-    /// sends over the wire, matching `PAGER_CLIENT_TYPE`) and the underscored
-    /// `"grow_pager"` form for symmetry with the rest of this enum.
-    #[serde(rename = "grow-pager", alias = "grow_pager")]
+    #[serde(rename = "grow-pager")]
     GrowPager,
 }
 impl ClientType {
@@ -312,14 +306,12 @@ pub enum Decision {
 pub enum EditPolicy {
     #[default]
     Ask,
-    Allow,
     Reject,
 }
 impl Serialize for EditPolicy {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(match self {
             Self::Ask => "ask",
-            Self::Allow => "allow",
             Self::Reject => "reject",
         })
     }
@@ -330,14 +322,13 @@ impl<'de> Deserialize<'de> for EditPolicy {
         impl serde::de::Visitor<'_> for V {
             type Value = EditPolicy;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("one of: ask, allow, reject")
+                f.write_str("one of: ask, reject")
             }
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<EditPolicy, E> {
                 match v {
                     "ask" => Ok(EditPolicy::Ask),
-                    "allow" => Ok(EditPolicy::Allow),
                     "reject" => Ok(EditPolicy::Reject),
-                    other => Err(E::unknown_variant(other, &["ask", "allow", "reject"])),
+                    other => Err(E::unknown_variant(other, &["ask", "reject"])),
                 }
             }
         }
@@ -358,16 +349,10 @@ pub enum PermissionCommand {
         respond_to: oneshot::Sender<Decision>,
         context: PermissionRequestContext,
     },
-    /// Set the YOLO mode (auto-approve all permissions)
-    SetYoloMode(bool),
-    /// Set auto mode (LLM classifier for non-fast-path tools). Mutually
-    /// exclusive with YOLO at the handle level; enabling auto clears yolo
-    /// and vice versa when applied by the actor.
-    SetAutoMode(bool),
+    /// Atomically select the canonical permission mode.
+    SetMode(diagnostics::enums::PermissionMode),
     /// Install or replace the permission classifier used in auto mode.
     SetClassifier(Option<std::sync::Arc<dyn super::auto_mode::PermissionClassifier>>),
-    /// Recent transcript turns for classifier context (compacted by caller).
-    SetClassifierTranscript(Vec<super::auto_mode::ClassifierTurn>),
     /// Project AGENTS.md instructions for classifier context (None clears).
     SetProjectInstructions(Option<String>),
     /// Drop every child-local permission and classifier state when the live
@@ -394,9 +379,9 @@ impl From<&tools::types::ToolInput> for AccessKind {
             },
             ToolInput::TodoWrite(_)
             | ToolInput::TaskOutput(_)
-            | ToolInput::WaitTasks(_)
             | ToolInput::KillTask(_)
-            | ToolInput::Skill(_) => AccessKind::Read(None),
+            | ToolInput::Skill(_)
+            | ToolInput::ContextFetch(_) => AccessKind::Read(None),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
             }
@@ -488,7 +473,7 @@ pub enum ToolFilter {
     Mcp,
     WebFetch,
 }
-/// Where a requirement/permission was loaded from (duplicated for claude_compat).
+/// Where a requirement or permission was loaded from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequirementSource {
     Unknown,
@@ -502,17 +487,11 @@ pub enum RequirementSource {
     SystemRequirements {
         path: std::path::PathBuf,
     },
-    ManagedSettings {
-        path: std::path::PathBuf,
-    },
     /// Defaults tier; never an admin source.
     ManagedConfig {
         path: std::path::PathBuf,
     },
     Config {
-        path: std::path::PathBuf,
-    },
-    Settings {
         path: std::path::PathBuf,
     },
 }
@@ -524,14 +503,10 @@ impl std::fmt::Display for RequirementSource {
             Self::SystemRequirements { path } => {
                 write!(f, "{} (system requirements)", path.display())
             }
-            Self::ManagedSettings { path } => {
-                write!(f, "{} (managed-settings)", path.display())
-            }
             Self::ManagedConfig { path } => {
                 write!(f, "{} (managed config)", path.display())
             }
             Self::Config { path } => write!(f, "{} (config)", path.display()),
-            Self::Settings { path } => write!(f, "{} (settings)", path.display()),
         }
     }
 }
@@ -550,7 +525,6 @@ mod tests {
             "tool_id": "tc1",
             "tool_name": "bash",
             "access_kind": "bash",
-            "yolo_mode": false,
             "auto_approved": false,
             "user_prompted": true,
             "decision": "allow",
@@ -580,7 +554,6 @@ mod tests {
             tool_name: "bash".into(),
             access_kind: "bash".into(),
             access_detail: None,
-            yolo_mode: false,
             auto_approved: false,
             user_prompted: true,
             decision: "allow".into(),
@@ -628,7 +601,6 @@ mod tests {
             tool_name: "bash".into(),
             access_kind: "bash".into(),
             access_detail: None,
-            yolo_mode: false,
             auto_approved: true,
             user_prompted: false,
             decision: "allow".into(),
@@ -772,18 +744,19 @@ mod tests {
         );
     }
     #[test]
-    fn client_type_deserializes_shell_as_generic() {
-        assert_eq!(
-            serde_json::from_value::<ClientType>("grow-shell".into()).unwrap(),
-            ClientType::Generic,
-        );
-        assert_eq!(
-            serde_json::from_value::<ClientType>("grow_shell".into()).unwrap(),
-            ClientType::Generic,
-        );
+    fn client_type_requires_canonical_wire_name() {
         assert_eq!(
             serde_json::from_value::<ClientType>("generic".into()).unwrap(),
             ClientType::Generic,
         );
+        for obsolete in [
+            "grow-shell",
+            "grow_shell",
+            "grow_tui",
+            "grow_web",
+            "grow_pager",
+        ] {
+            assert!(serde_json::from_value::<ClientType>(obsolete.into()).is_err());
+        }
     }
 }

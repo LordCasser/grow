@@ -245,27 +245,25 @@ impl WorkspaceRpc for FsExistsReq {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FsReadFileReq {
     pub path: String,
     #[serde(default)]
     pub cwd: Option<PathBuf>,
-    /// Byte offset to start reading from. When `offset` or `length` is
-    /// set (or `encoding` is `base64`) the read is a binary-safe ranged
-    /// read; when all are absent the whole file is read.
+    /// Byte offset to start reading from. Every read is binary-safe and bounded.
     #[serde(default)]
     pub offset: Option<u64>,
-    /// Bytes to read (absent means "to EOF"). Only consulted for ranged
-    /// reads, and always capped at `max_bytes` and the server's hard limit —
+    /// Bytes to read (absent means "to EOF"), always capped at `max_bytes`
+    /// and the server's hard limit —
     /// so an unset `length` still returns at most `max_bytes`. Detect "more
     /// data" by comparing the returned bytes (from `offset`) against `size`.
     #[serde(default)]
     pub length: Option<u64>,
     /// Per-chunk byte budget applied on top of `length` (default 1 MiB),
-    /// further clamped so a single base64 chunk remains bounded. Only
-    /// consulted for ranged reads.
+    /// further clamped so a single base64 chunk remains bounded.
     #[serde(default = "default_max_bytes")]
     pub max_bytes: u64,
-    /// Transfer encoding for ranged reads (default `utf8`; non-UTF-8
+    /// Transfer encoding (default `utf8`; non-UTF-8
     /// ranges fall back to base64 regardless of this setting).
     #[serde(default)]
     pub encoding: FsReadEncoding,
@@ -563,18 +561,13 @@ mod tests {
     }
 
     #[test]
-    fn fs_read_file_req_defaults_are_legacy_full_read() {
-        // Absent offset/length/encoding ⇒ whole-file read with the
-        // unchanged wire contract; max_bytes defaults to 1 MiB and is
-        // only consulted on ranged reads.
+    fn fs_read_file_req_defaults_are_bounded() {
         let req: FsReadFileReq =
             serde_json::from_value(serde_json::json!({ "path": "a.txt" })).unwrap();
         assert_eq!(req.offset, None);
         assert_eq!(req.length, None);
         assert_eq!(req.max_bytes, 1_048_576);
         assert_eq!(req.encoding, FsReadEncoding::Utf8);
-        // A bare full read serializes without leaking range fields beyond
-        // the documented defaults.
         let req: FsReadFileReq = serde_json::from_value(serde_json::json!({
             "path": "a.bin", "offset": 4096, "length": 1024, "encoding": "base64"
         }))
@@ -582,6 +575,13 @@ mod tests {
         assert_eq!(req.offset, Some(4096));
         assert_eq!(req.length, Some(1024));
         assert_eq!(req.encoding, FsReadEncoding::Base64);
+        assert!(
+            serde_json::from_value::<FsReadFileReq>(serde_json::json!({
+                "path": "a.txt",
+                "maxLines": 100
+            }))
+            .is_err()
+        );
     }
 
     #[test]

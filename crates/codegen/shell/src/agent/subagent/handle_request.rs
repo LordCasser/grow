@@ -97,9 +97,6 @@ fn validate_goal_context(request: &SubagentRequest) -> Result<(), String> {
                         "Only the Goal planner stage may carry a plan submit handle".to_string()
                     );
                 }
-                if request.runtime_overrides.persona.is_some() {
-                    return Err("Goal stages cannot apply a persona".to_string());
-                }
                 // Fresh planners fork the parent context; a resuming planner
                 // relies on the resolved resume source (forking is skipped).
                 let expected_fork =
@@ -147,11 +144,10 @@ pub(crate) async fn run_shell_child(
         return child_run_output(
             cancelled_result(&request, "Subagent was cancelled"),
             completion_data,
-            None,
         );
     }
     if let Err(message) = validate_goal_context(&request) {
-        return child_run_output(failure_result(&request, &message), completion_data, None);
+        return child_run_output(failure_result(&request, &message), completion_data);
     }
     use tools::implementations::grow_build::task::types::GoalSubagentRole;
     let host_goal_stage = request
@@ -173,7 +169,7 @@ pub(crate) async fn run_shell_child(
         });
     let Some(mut definition) = definition else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
-        return child_run_output(failure_result(&request, &msg), completion_data, None);
+        return child_run_output(failure_result(&request, &msg), completion_data);
     };
     if host_goal_stage.is_some() {
         // Session operator allow/deny remains the final clamp even for a
@@ -190,45 +186,26 @@ pub(crate) async fn run_shell_child(
                 "Subagent '{}' is not available to the current Agent or is disabled via [subagents.toggle]",
                 request.subagent_type
             );
-            return child_run_output(failure_result(&request, &msg), completion_data, None);
+            return child_run_output(failure_result(&request, &msg), completion_data);
         }
         SubagentValidateTypeOutcome::Unknown { .. }
         | SubagentValidateTypeOutcome::ValidationUnavailable => {
             let msg = format!("Cannot validate subagent '{}'", request.subagent_type);
-            return child_run_output(failure_result(&request, &msg), completion_data, None);
+            return child_run_output(failure_result(&request, &msg), completion_data);
         }
         SubagentValidateTypeOutcome::Ok => {}
         _ => {
             let msg = format!("Cannot validate subagent '{}'", request.subagent_type);
-            return child_run_output(failure_result(&request, &msg), completion_data, None);
+            return child_run_output(failure_result(&request, &msg), completion_data);
         }
     }
     if host_goal_stage.is_none() {
         resolve_subagent_toolset(&request.subagent_type, &ctx, &mut definition);
     }
-    let cwd = ctx
-        .parent_session_info
-        .as_ref()
-        .map(|i| std::path::Path::new(&i.cwd));
-    let mut effective_runtime = if host_goal_stage.is_some() {
-        crate::agent::subagent::resolution::resolve_runtime_config(
-            &request.subagent_type,
-            &request.runtime_overrides,
-            &Default::default(),
-            &Default::default(),
-            cwd,
-            &definition,
-        )
-    } else {
-        crate::agent::subagent::resolution::resolve_runtime_config(
-            &request.subagent_type,
-            &request.runtime_overrides,
-            &ctx.subagent_roles,
-            &ctx.subagent_personas,
-            cwd,
-            &definition,
-        )
-    };
+    let mut effective_runtime = crate::agent::subagent::resolution::resolve_runtime_config(
+        &request.runtime_overrides,
+        &definition,
+    );
     match host_goal_stage {
         Some(GoalSubagentRole::Planner) => {
             effective_runtime.isolation = tool_types::SubagentIsolationMode::None;
@@ -240,21 +217,6 @@ pub(crate) async fn run_shell_child(
         Some(GoalSubagentRole::Worker) | None => {}
     }
     let prompt = request.prompt.clone();
-    if let Some(ref err) = effective_runtime.persona_error {
-        tracing::error!(
-            subagent_id = %request.id,
-            error = err,
-            "Persona resolution failed, aborting subagent spawn"
-        );
-        return child_run_output(failure_result(&request, err), completion_data, None);
-    }
-    if let Some(ref warn) = effective_runtime.role_prompt_warning {
-        tracing::warn!(
-            subagent_id = %request.id,
-            warning = warn,
-            "Role prompt_file degraded, continuing without role prompt"
-        );
-    }
     // Normalize the historical implicit default before any worktree, MCP, or
     // session side effect. Nested authority is a strict subset relation, not a
     // permission request: widening fails the spawn rather than prompting or
@@ -270,7 +232,7 @@ pub(crate) async fn run_shell_child(
              parent's immutable delegation ceiling",
             initial_capability_mode.as_str()
         );
-        return child_run_output(failure_result(&request, &msg), completion_data, None);
+        return child_run_output(failure_result(&request, &msg), completion_data);
     }
     effective_runtime.capability_mode = Some(initial_capability_mode);
     let resume_source = if let Some(resume_id) = request
@@ -278,43 +240,24 @@ pub(crate) async fn run_shell_child(
         .as_deref()
         .filter(|s| is_valid_resume_id(s))
     {
-        match reporter
-            .resume_source(resume_id, &ctx.parent_session_id)
-            .await
-        {
-            SubagentResumeLookup::Active => {
+        match durable_resume_source_for(resume_id, &ctx.parent_session_id, &ctx.parent_cwd) {
+            Some(info) => Some(info),
+            None if reporter
+                .source_is_active(resume_id, &ctx.parent_session_id)
+                .await =>
+            {
                 let msg = format!(
                     "Cannot resume from subagent '{resume_id}': it is still running. \
                      Wait for it to complete before resuming."
                 );
-                return child_run_output(failure_result(&request, &msg), completion_data, None);
+                return child_run_output(failure_result(&request, &msg), completion_data);
             }
-            SubagentResumeLookup::Completed(info) => Some(ResumeSourceData {
-                subagent_id: info.subagent_id,
-                child_session_id: info.child_session_id,
-                child_cwd: info.child_cwd,
-                worktree_path: info.worktree_path.map(PathBuf::from),
-                snapshot_ref: info.snapshot_ref,
-                subagent_type: info.subagent_type,
-                persona: info.persona,
-                model_id: info.model_id,
-            }),
-            SubagentResumeLookup::Missing => {
-                match durable_resume_source_for(resume_id, &ctx.parent_session_id, &ctx.parent_cwd)
-                {
-                    Some(info) => Some(info),
-                    None => {
-                        let msg = format!(
-                            "Cannot resume from subagent '{resume_id}': not found. \
-                             The subagent may have been evicted or the ID is invalid."
-                        );
-                        return child_run_output(
-                            failure_result(&request, &msg),
-                            completion_data,
-                            None,
-                        );
-                    }
-                }
+            None => {
+                let msg = format!(
+                    "Cannot resume from subagent '{resume_id}': no completed canonical lifecycle \
+                     was found."
+                );
+                return child_run_output(failure_result(&request, &msg), completion_data);
             }
         }
     } else {
@@ -330,14 +273,9 @@ pub(crate) async fn run_shell_child(
         effective_runtime.model = None;
         if let Err(e) = crate::agent::subagent::resolution::validate_resume_identity(
             &request.subagent_type,
-            request.runtime_overrides.persona.as_deref(),
             source,
         ) {
-            return child_run_output(
-                failure_result(&request, &e.to_string()),
-                completion_data,
-                None,
-            );
+            return child_run_output(failure_result(&request, &e.to_string()), completion_data);
         }
     }
     if let Some(error) = task_model_override_error(
@@ -347,15 +285,18 @@ pub(crate) async fn run_shell_child(
         &ctx.available_models,
         false,
     ) {
-        return child_run_output(failure_result(&request, &error), completion_data, None);
+        return child_run_output(failure_result(&request, &error), completion_data);
     }
     let worktree_path = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
         {
-            tracing::info!(
-                subagent_id = %request.id,
-                "Ignoring isolation=worktree override: resumed source had no worktree"
+            return child_run_output(
+                failure_result(
+                    &request,
+                    "Cannot resume with isolation: the source subagent has no worktree",
+                ),
+                completion_data,
             );
         }
         match source.worktree_path.as_deref() {
@@ -384,22 +325,29 @@ pub(crate) async fn run_shell_child(
                                 Some(path)
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    subagent_id = %request.id,
-                                    error = %e,
-                                    "Failed to rehydrate subagent worktree, falling back to shared workspace"
+                                return child_run_output(
+                                    failure_result(
+                                        &request,
+                                        &format!(
+                                            "Cannot resume isolated subagent: failed to rehydrate worktree: {e}"
+                                        ),
+                                    ),
+                                    completion_data,
                                 );
-                                None
                             }
                         }
                     }
-                    ResumeWorktreeAction::Shared => {
-                        tracing::warn!(
-                            subagent_id = %request.id,
-                            worktree = %dest.display(),
-                            "Resumed subagent worktree dir missing with no snapshot; using shared workspace"
+                    ResumeWorktreeAction::Missing => {
+                        return child_run_output(
+                            failure_result(
+                                &request,
+                                &format!(
+                                    "Cannot resume isolated subagent: worktree '{}' is missing and no snapshot exists",
+                                    dest.display()
+                                ),
+                            ),
+                            completion_data,
                         );
-                        None
                     }
                 }
             }
@@ -446,20 +394,22 @@ pub(crate) async fn run_shell_child(
                 Some(report.worktree_path)
             }
             Ok(Err(e)) => {
-                tracing::warn!(
-                    subagent_id = %request.id,
-                    error = %e,
-                    "Failed to create worktree, falling back to shared workspace"
+                return child_run_output(
+                    failure_result(
+                        &request,
+                        &format!("Cannot create isolated subagent worktree: {e}"),
+                    ),
+                    completion_data,
                 );
-                None
             }
             Err(e) => {
-                tracing::warn!(
-                    subagent_id = %request.id,
-                    error = %e,
-                    "Worktree creation task panicked, falling back to shared workspace"
+                return child_run_output(
+                    failure_result(
+                        &request,
+                        &format!("Isolated subagent worktree task failed: {e}"),
+                    ),
+                    completion_data,
                 );
-                None
             }
         }
     } else {
@@ -472,7 +422,6 @@ pub(crate) async fn run_shell_child(
                 "Goal verifier requires an isolated worktree; creation failed",
             ),
             completion_data,
-            None,
         );
     }
     let worktree_freshly_created = resume_source.is_none() && worktree_path.is_some();
@@ -487,11 +436,7 @@ pub(crate) async fn run_shell_child(
                         } else {
                             format!("cwd \"{cwd_path}\" does not exist")
                         };
-                        return child_run_output(
-                            failure_result(&request, &msg),
-                            completion_data,
-                            None,
-                        );
+                        return child_run_output(failure_result(&request, &msg), completion_data);
                     }
                 }
                 request.cwd = Some(cwd_path);
@@ -569,16 +514,15 @@ pub(crate) async fn run_shell_child(
                 .values()
                 .any(|e| e.info().model == *model_str);
         if model_unknown {
-            let (parent_config, parent_mid) = read_parent_sampling_config(&ctx).await;
-            tracing::warn!(
-                subagent_id = %request.id,
-                resolved_model = %model_str,
-                parent_model = %parent_config.model,
-                "Resolved subagent model not found in available models — \
-                 falling back to parent model"
+            return child_run_output(
+                failure_result(
+                    &request,
+                    &format!(
+                        "Resolved subagent model '{model_str}' is not present in the model catalogue"
+                    ),
+                ),
+                completion_data,
             );
-            effective_sampling_config = parent_config;
-            effective_model_id = parent_mid;
         }
     }
     if let Some(ref source) = resume_source
@@ -600,16 +544,23 @@ pub(crate) async fn run_shell_child(
                  is no longer available in the model catalogue.",
                 source.subagent_id,
             );
-            return child_run_output(failure_result(&request, &msg), completion_data, None);
+            return child_run_output(failure_result(&request, &msg), completion_data);
         }
     }
-    if let Some(raw) = effective_runtime.reasoning_effort.as_deref()
-        && ctx
-            .models_manager
-            .model_supports_reasoning_effort(effective_model_id.0.as_ref())
-    {
+    if let Some(raw) = effective_runtime.reasoning_effort.as_deref() {
         match raw.parse::<ReasoningEffort>() {
-            Ok(eff) => effective_sampling_config.reasoning_effort = Some(eff),
+            Ok(eff)
+                if ctx
+                    .models_manager
+                    .model_offers_reasoning_effort(effective_model_id.0.as_ref(), eff) =>
+            {
+                effective_sampling_config.reasoning_effort = Some(eff)
+            }
+            Ok(eff) => tracing::warn!(
+                model_id = %effective_model_id.0,
+                effort = %eff,
+                "subagent reasoning_effort is not offered by the selected model"
+            ),
             Err(err) => {
                 tracing::warn!(
                     value = raw,
@@ -630,86 +581,53 @@ pub(crate) async fn run_shell_child(
         cwd: effective_cwd,
     };
     let child_session_dir = session::persistence::session_dir(&child_session_info);
-    let parent_session_dir = session::persistence::session_dir(&SessionInfo {
-        id: acp::SessionId::new(ctx.parent_session_id.clone()),
-        cwd: ctx.parent_cwd.to_string_lossy().to_string(),
-    });
-    let subagent_meta_dir = parent_session_dir.join("subagents").join(&subagent_id);
     let InitialContext {
         source: context_source,
-        copy_error: fork_copy_error,
+        source_ref,
         prefix_len: inherited_prefix_len,
         conversation: forked_conversation,
+        prompt_blobs: inherited_prompt_blobs,
         verbatim_fork: context_verbatim_fork,
     } = match bootstrap_initial_context(
         &request,
         resume_source.as_ref(),
         &ctx,
-        &child_session_info,
-        &child_session_dir,
-        effective_model_id.0.as_ref(),
         effective_sampling_config.context_window,
     )
     .await
     {
         BootstrapInitialContext::Ready(ctx) => ctx,
-        BootstrapInitialContext::ResumeAbort(msg) => {
+        BootstrapInitialContext::Abort(msg) => {
             tracing::error!(
                 subagent_id = %request.id,
                 error = %msg,
-                "Resume-copy failed, aborting subagent spawn"
+                "Requested child lineage failed, aborting subagent spawn"
             );
-            return child_run_output(failure_result(&request, &msg), completion_data, None);
+            return child_run_output(failure_result(&request, &msg), completion_data);
         }
     };
     let verbatim_mirror_fork =
         context_source == InitialContextSource::Forked && context_verbatim_fork;
     let task_prompt_text = prompt.clone();
-    let (mut forked_conversation, mut inherited_prefix_len) =
-        (forked_conversation, inherited_prefix_len.unwrap_or(0));
-    if context_source != InitialContextSource::Resumed
-        && !verbatim_mirror_fork
-        && let Some(ref pi) = effective_runtime.persona_instructions
-    {
-        let reminder = sampling_types::conversation::ConversationItem::system_reminder(format!(
-            "<system-reminder>\n{pi}\n</system-reminder>"
-        ));
-        let insert_at = inherited_prefix_len.min(forked_conversation.len());
-        forked_conversation.insert(insert_at, reminder);
-        inherited_prefix_len += 1;
-    }
+    let inherited_prefix_len = inherited_prefix_len.unwrap_or(0);
     let effective_source_str = match &context_source {
         InitialContextSource::New => "new",
         InitialContextSource::Forked => "forked",
         InitialContextSource::Resumed => "resumed",
     };
-    let subagent_meta = SubagentMeta {
-        subagent_id: subagent_id.clone(),
-        parent_session_id: ctx.parent_session_id.clone(),
-        child_session_id: child_session_id.0.to_string(),
-        subagent_type: request.subagent_type.clone(),
-        description: request.description.clone(),
-        prompt: request.prompt.clone(),
-        status: "running".to_string(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        error: None,
-        effective_context_source: Some(effective_source_str.to_string()),
-        context_normalized: fork_context_normalized(&context_source, context_verbatim_fork),
-        fork_copy_error: fork_copy_error.clone(),
-        persona: effective_runtime.persona.clone(),
-        resumed_from: request.resume_from.clone(),
-        child_cwd: Some(child_session_info.cwd.clone()),
-        worktree_path: worktree_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
-        snapshot_ref: None,
-        effective_model_id: Some(effective_model_id.0.to_string()),
+    let timeline_context_source = match &context_source {
+        InitialContextSource::New => chat_state::SubagentContextSource::New,
+        InitialContextSource::Forked => chat_state::SubagentContextSource::Forked,
+        InitialContextSource::Resumed => chat_state::SubagentContextSource::Resumed,
     };
-    write_subagent_meta(&subagent_meta_dir, &subagent_meta);
+    let context_normalized = fork_context_normalized(&context_source, context_verbatim_fork);
+    let capability_mode = effective_runtime
+        .capability_mode
+        .and_then(|mode| serde_json::to_value(mode).ok())
+        .and_then(|value| value.as_str().map(String::from));
+    let permission_mode = serde_json::to_value(ctx.subagent_permission_mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned));
     let effective_permission_mode = ctx.permission_handle.as_ref().map(|permissions| {
         match permissions.effective_request_mode(Some(ctx.subagent_permission_mode)) {
             workspace::permission::types::EffectivePermissionMode::Ask => "ask",
@@ -720,6 +638,58 @@ pub(crate) async fn run_shell_child(
         }
         .to_owned()
     });
+    let workflow_run_id = request.owner.workflow_run_id().map(str::to_string);
+    let goal_id = request.owner.goal_id().map(str::to_string);
+    let Some(parent_chat_state) = ctx.parent_chat_state.as_ref() else {
+        return child_run_output(
+            failure_result(
+                &request,
+                "Cannot persist subagent spawn: parent Timeline is unavailable",
+            ),
+            completion_data,
+        );
+    };
+    let parent_spawn = match parent_chat_state
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                subagent_id: subagent_id.clone(),
+                child_session_id: child_session_id.0.to_string(),
+                subagent_type: request.subagent_type.clone(),
+                description: request.description.clone(),
+                prompt: request.prompt.clone(),
+                context_source: timeline_context_source,
+                source_ref: source_ref.clone(),
+                context_normalized,
+                resumed_from: request.resume_from.clone(),
+                parent_prompt_id: request.parent_prompt_id.clone(),
+                capability_mode: capability_mode.clone(),
+                permission_mode: permission_mode.clone(),
+                effective_permission_mode: effective_permission_mode.clone(),
+                workflow_run_id: workflow_run_id.clone(),
+                goal_id: goal_id.clone(),
+                child_cwd: child_session_info.cwd.clone(),
+                worktree_path: worktree_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                effective_model_id: effective_model_id.0.to_string(),
+            }),
+        ))
+        .await
+    {
+        Ok(event) => event,
+        Err(error) => {
+            let message = format!("Cannot persist subagent spawn in parent Timeline: {error}");
+            return child_run_output(failure_result(&request, &message), completion_data);
+        }
+    };
+    let subagent_seed = chat_state::SubagentSeedEvent {
+        parent_timeline_id: ctx.parent_session_id.clone(),
+        parent_spawn_seq: parent_spawn.seq.get(),
+        subagent_id: subagent_id.clone(),
+        context_source: timeline_context_source,
+        source_ref,
+        normalized: context_normalized,
+    };
     emit_subagent_notification(
         gateway,
         &ctx.parent_session_id,
@@ -731,49 +701,50 @@ pub(crate) async fn run_shell_child(
             subagent_type: request.subagent_type.clone(),
             description: request.description.clone(),
             effective_context_source: Some(effective_source_str.to_string()),
-            context_normalized: fork_context_normalized(&context_source, context_verbatim_fork),
-            capability_mode: effective_runtime
-                .capability_mode
-                .and_then(|m| serde_json::to_value(m).ok())
-                .and_then(|v| v.as_str().map(String::from)),
-            permission_mode: serde_json::to_value(ctx.subagent_permission_mode)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned)),
+            context_normalized,
+            capability_mode,
+            permission_mode,
             effective_permission_mode,
-            persona: effective_runtime.persona.clone(),
-            role: effective_runtime.role_name.clone(),
             model: Some(effective_model_id.0.to_string()),
             resumed_from: request.resume_from.clone(),
-            workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
-            goal_id: request.owner.goal_id().map(str::to_string),
+            workflow_run_id,
+            goal_id,
         },
         ctx.parent_cmd_tx.as_ref(),
     );
     completion_data.spawned_notification_emitted = true;
-    let sampling_client = match crate::sampling::Client::new(effective_sampling_config.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = format!("Sampling client error: {e}");
-            let result =
-                fail_subagent(&msg, &subagent_id, &child_session_id, &subagent_meta_dir, 0);
-            return child_run_output(result, completion_data, None);
-        }
-    };
-    let persistence = match session::persistence::new_with_explicit_dir(
+    let (persistence, child_timeline_events) = match session::persistence::new_with_explicit_dir(
         &child_session_info,
         child_session_dir.clone(),
         effective_model_id.clone(),
-        sampling_client,
-        effective_sampling_config.model.clone(),
+        session::persistence::SessionLineage {
+            session_kind: match &context_source {
+                InitialContextSource::New => "subagent",
+                InitialContextSource::Forked => "subagent_fork",
+                InitialContextSource::Resumed => "subagent_resume",
+            }
+            .to_string(),
+            context_source: effective_source_str.to_string(),
+            parent_session_id: ctx.parent_session_id.clone(),
+            parent_prompt_id: request.parent_prompt_id.clone(),
+            subagent_seed,
+        },
+        forked_conversation.clone(),
+        inherited_prompt_blobs,
     )
     .await
     {
         Ok(p) => p,
         Err(e) => {
             let msg = format!("Persistence error: {e}");
-            let result =
-                fail_subagent(&msg, &subagent_id, &child_session_id, &subagent_meta_dir, 0);
-            return child_run_output(result, completion_data, None);
+            let result = failure_result(&request, &msg);
+            if record_parent_subagent_end(parent_chat_state, &result, None, None)
+                .await
+                .is_ok()
+            {
+                completion_data.mark_terminal_committed();
+            }
+            return child_run_output(result, completion_data);
         }
     };
     let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
@@ -813,9 +784,7 @@ pub(crate) async fn run_shell_child(
     tool_ctx.subagent_depth = child_depth;
     tool_ctx.lsp = ctx.lsp.clone();
     tool_ctx.process_scope = ctx.process_scope.clone();
-    let tracker_child_cwd = child_session_info.cwd.clone();
     let tracker_model_id = effective_model_id.0.to_string();
-    let initial_child_tokens = chat_state::estimate_conversation_tokens(&forked_conversation);
     let credentials = chat_state::Credentials {
         api_key: effective_sampling_config.api_key.clone(),
         alpha_test_key: ctx.alpha_test_key.clone(),
@@ -967,7 +936,6 @@ pub(crate) async fn run_shell_child(
                 Some(&parent_cwd_str),
                 &ctx.parent_skills_config,
                 ctx.plugin_registry.as_deref(),
-                ctx.parent_compat,
             )
             .await,
         );
@@ -992,7 +960,6 @@ pub(crate) async fn run_shell_child(
         subagent_id: request.id.clone(),
         parent_session_id: request.parent_session_id.clone(),
         subagent_type: request.subagent_type.clone(),
-        persona: request.runtime_overrides.persona.clone(),
         fork_context: matches!(context_source, InitialContextSource::Forked),
         resume_from: request.resume_from.clone(),
         isolated_worktree: worktree_path.is_some(),
@@ -1008,8 +975,11 @@ pub(crate) async fn run_shell_child(
             agent_name: Some(definition.name.clone()),
             reasoning_effort: Some(effective_sampling_config.reasoning_effort),
         });
+    let recovery_persistence = persistence.clone();
+    let recovery_timeline_events = child_timeline_events.clone();
     let spawn_result = session::spawn_session_on_thread(
         child_session_info,
+        child_session_dir.clone(),
         gateway.clone(),
         effective_sampling_config,
         credentials,
@@ -1024,10 +994,9 @@ pub(crate) async fn run_shell_child(
         None,
         persistence,
         None,
-        forked_conversation,
+        crate::session::TimelineBootstrap::Existing(child_timeline_events),
         None,
         None,
-        initial_child_tokens,
         crate::session::StartupHints {
             inherited_prefix_len: Some(inherited_prefix_len),
             is_subagent: true,
@@ -1042,12 +1011,10 @@ pub(crate) async fn run_shell_child(
         ctx.permission_prompt_timeout,
         ctx.resolve_auto_compact_threshold_percent(&subagent_model_id),
         agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
-        chat_state::CompactionMode::Summary,
         ctx.resolve_compaction_verbatim_input(),
         ctx.resolve_compaction_tool_choice(),
         ctx.resolve_compaction_pre_prune(),
         ctx.resolve_compaction_pre_prune_token_budget(),
-        false,
         None,
         None,
         std::sync::Arc::new(parking_lot::Mutex::new(
@@ -1069,12 +1036,10 @@ pub(crate) async fn run_shell_child(
         } else {
             None
         },
-        ctx.parent_compat,
         false,
         None,
         None,
         None,
-        false,
         0,
         Vec::new(),
         None,
@@ -1092,11 +1057,8 @@ pub(crate) async fn run_shell_child(
         } else {
             ctx.memory_config.clone()
         },
-        ctx.managed_mcp_state.clone(),
-        ctx.managed_mcp_proxy_base_url.clone(),
         effective_model_id,
-        ctx.yolo_mode,
-        false,
+        ctx.permission_mode,
         None,
         ctx.inference_idle_timeout_secs,
         None,
@@ -1112,10 +1074,7 @@ pub(crate) async fn run_shell_child(
         ctx.client_hooks.clone(),
         None,
         ctx.subagent_toggle.clone(),
-        Vec::new(),
         agent::prompt::context::PromptAudience::Subagent,
-        effective_runtime.role_prompt.clone(),
-        None,
         ctx.respect_gitignore,
         ctx.path_not_found_hints,
         ctx.resolve_tool_params_json(),
@@ -1148,22 +1107,28 @@ pub(crate) async fn run_shell_child(
                 &msg,
                 &subagent_id,
                 &child_session_id,
-                &subagent_meta_dir,
                 start.elapsed().as_millis() as u64,
             );
-            return child_run_output(result, completion_data, None);
+            let result_ref = record_child_result_with_persistence(
+                &recovery_persistence,
+                recovery_timeline_events,
+                &result,
+            )
+            .await
+            .ok();
+            if record_parent_subagent_end(parent_chat_state, &result, result_ref, None)
+                .await
+                .is_ok()
+            {
+                completion_data.mark_terminal_committed();
+            }
+            return child_run_output(result, completion_data);
         }
     };
     let promoted = reporter
         .started(StartedChild {
             child_session_id: child_session_id.0.to_string(),
-            persona: effective_runtime.persona.clone(),
             resumed_from: request.resume_from.clone(),
-            child_cwd: tracker_child_cwd,
-            worktree_path: worktree_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned()),
-            effective_model_id: tracker_model_id.clone(),
             definition_background,
             control: ShellChildRuntime {
                 child_handle: child_handle.clone(),
@@ -1178,16 +1143,24 @@ pub(crate) async fn run_shell_child(
         ctx.workspace_ops
             .end_local_session(child_session_id.0.as_ref());
         let result = cancel_pending_shell_child(
-            &child_handle.cmd_tx,
             &subagent_id,
             &child_session_id,
-            &subagent_meta_dir,
             worktree_path.as_deref(),
             worktree_freshly_created,
             start.elapsed().as_millis() as u64,
         )
         .await;
-        return child_run_output(result, completion_data, None);
+        let result_ref = record_child_result(&child_handle.chat_state_handle, &result, None)
+            .await
+            .ok();
+        let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        if record_parent_subagent_end(parent_chat_state, &result, result_ref, None)
+            .await
+            .is_ok()
+        {
+            completion_data.mark_terminal_committed();
+        }
+        return child_run_output(result, completion_data);
     }
     spawn_progress_publisher(
         child_handle.signals_handle.clone(),
@@ -1224,7 +1197,6 @@ pub(crate) async fn run_shell_child(
         admission: None,
         respond_to: prompt_tx,
         persist_ack: None,
-        parsed_prompt_tx: None,
     });
     let wait_outcome = await_subagent_turn_or_cancellation(prompt_rx, cancel_token.clone()).await;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -1424,9 +1396,6 @@ pub(crate) async fn run_shell_child(
             }
         }
     };
-    completion_data.set_persisted_output_dir(persist_subagent_output(&subagent_meta_dir, &result));
-    persist_subagent_completion(&subagent_meta_dir, &result);
-    let final_status = result.status().to_string();
     let snapshot_dispose_enabled = ctx.resolve_subagent_worktree_snapshot_enabled();
     let diagnostics_tokens = if result.tool_calls > 0 || result.success {
         child_handle.chat_state_handle.get_total_tokens().await
@@ -1465,6 +1434,32 @@ pub(crate) async fn run_shell_child(
         result.output_tokens_used = output_tokens_used.unwrap_or(0);
         result.output_usage_incomplete = subagent_usage_incomplete || output_tokens_used.is_none();
     }
+    let persisted_output_ref = match persist_subagent_output(&child_session_dir, &result) {
+        Ok(output_ref) => output_ref,
+        Err(error) => {
+            tracing::error!(subagent_id = %request.id, %error, "subagent output artifact failed");
+            result.success = false;
+            result.cancelled = false;
+            result.error = Some(error);
+            None
+        }
+    };
+    completion_data.set_persisted_output_ref(
+        persisted_output_ref
+            .as_ref()
+            .map(|artifact| artifact.path.clone()),
+    );
+    let child_result_ref = record_child_result(
+        &child_handle.chat_state_handle,
+        &result,
+        persisted_output_ref.map(|artifact| artifact.timeline_ref),
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(subagent_id = %request.id, %error, "canonical child result failed");
+        error
+    })
+    .ok();
     let fold_acked = record_subagent_usage(
         ctx.parent_cmd_tx.as_ref(),
         subagent_usage_by_model,
@@ -1586,22 +1581,13 @@ pub(crate) async fn run_shell_child(
         .end_local_session(child_session_id.0.as_ref());
     let mut disposed_snapshot_ref: Option<String> = None;
     let mut worktree_removed = false;
+    let verifier_worktree = request.owner.goal_role()
+        == Some(tools::implementations::grow_build::task::types::GoalSubagentRole::Verifier);
     if let Some(ref wt_path) = worktree_path {
-        if request.owner.goal_role()
-            == Some(tools::implementations::grow_build::task::types::GoalSubagentRole::Verifier)
-        {
+        if verifier_worktree {
             // Verifier isolation is intentionally disposable evidence space,
             // not resumable delegated work. Never create a snapshot ref that
             // could later reintroduce its mutations.
-            match crate::session::worktree::remove_subagent_worktree(wt_path).await {
-                Ok(()) => worktree_removed = true,
-                Err(error) => tracing::warn!(
-                    subagent_id = %request.id,
-                    worktree_path = %wt_path.display(),
-                    %error,
-                    "failed removing disposable Goal verifier worktree"
-                ),
-            }
         } else if snapshot_dispose_enabled {
             let ref_name = format!("refs/grow/subagents/{}", request.id);
             let source_repo = resolve_subagent_source_repo(&ctx);
@@ -1612,40 +1598,7 @@ pub(crate) async fn run_shell_child(
             )
             .await
             {
-                Ok(snapshot_ref) => {
-                    let persisted = update_subagent_meta_snapshot_ref(
-                        &subagent_meta_dir,
-                        &snapshot_ref,
-                        &final_status,
-                    );
-                    if persisted {
-                        disposed_snapshot_ref = Some(snapshot_ref);
-                        match crate::session::worktree::remove_subagent_worktree(wt_path).await {
-                            Ok(()) => {
-                                worktree_removed = true;
-                                tracing::info!(
-                                    subagent_id = %request.id,
-                                    worktree_path = %wt_path.display(),
-                                    "snapshotted and removed subagent worktree"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    subagent_id = %request.id,
-                                    worktree_path = %wt_path.display(),
-                                    error = %e,
-                                    "snapshotted subagent worktree but removal failed; ref persisted for resume"
-                                )
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            subagent_id = %request.id,
-                            worktree_path = %wt_path.display(),
-                            "snapshot_ref not persisted; preserving worktree for resume"
-                        );
-                    }
-                }
+                Ok(snapshot_ref) => disposed_snapshot_ref = Some(snapshot_ref),
                 Err(e) => {
                     tracing::warn!(
                         subagent_id = %request.id,
@@ -1662,6 +1615,49 @@ pub(crate) async fn run_shell_child(
                 "Worktree preserved for review"
             );
         }
+    }
+    let terminal_committed = match child_result_ref {
+        Some(result_ref) => record_parent_subagent_end(
+            parent_chat_state,
+            &result,
+            Some(result_ref),
+            disposed_snapshot_ref.clone(),
+        )
+        .await
+        .map(|()| true)
+        .unwrap_or_else(|error| {
+            tracing::error!(subagent_id = %request.id, %error, "canonical parent terminal failed");
+            false
+        }),
+        None => false,
+    };
+    if terminal_committed {
+        completion_data.mark_terminal_committed();
+        if let Some(ref wt_path) = worktree_path
+            && (verifier_worktree || disposed_snapshot_ref.is_some())
+        {
+            match crate::session::worktree::remove_subagent_worktree(wt_path).await {
+                Ok(()) => {
+                    worktree_removed = true;
+                    tracing::info!(
+                        subagent_id = %request.id,
+                        worktree_path = %wt_path.display(),
+                        "removed subagent worktree after canonical terminal commit"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    subagent_id = %request.id,
+                    worktree_path = %wt_path.display(),
+                    %error,
+                    "canonical terminal committed but subagent worktree removal failed"
+                ),
+            }
+        }
+    } else if worktree_path.is_some() {
+        tracing::warn!(
+            subagent_id = %request.id,
+            "preserving subagent worktree because the parent terminal is not canonical"
+        );
     }
     if worktree_removed {
         result.worktree_path = None;
@@ -1693,5 +1689,5 @@ pub(crate) async fn run_shell_child(
             "error": &result.error,
         })),
     );
-    child_run_output(result, completion_data, disposed_snapshot_ref)
+    child_run_output(result, completion_data)
 }

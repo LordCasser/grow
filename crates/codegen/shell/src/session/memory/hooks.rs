@@ -24,7 +24,7 @@
 //! - **SIGTERM:** Triggered via `SessionCommand::Shutdown` handler
 
 use crate::sampling::ConversationItem;
-use crate::session::memory::storage::{MemoryStorage, slugify};
+use memory::storage::{MemoryStorage, slugify};
 
 /// Minimum number of *real* user prompts required to save a session summary.
 ///
@@ -208,7 +208,7 @@ mod tests {
 
     /// Build a realistic first-turn user message: metadata prefix + user query in tags.
     ///
-    /// This matches what `construct_user_message` + `user_query()` produce.
+    /// This matches what the runtime-context snapshot + `user_query()` produce.
     fn make_synthetic_prefix_with_query(query: &str) -> ConversationItem {
         make_user(&format!(
             "<user_info>\nOS Version: macos\nShell: /bin/bash\n</user_info>\n\

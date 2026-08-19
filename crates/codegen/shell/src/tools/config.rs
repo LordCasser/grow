@@ -321,7 +321,6 @@ impl FileToolset {
                         name_override: None,
                         params_name_overrides: None,
                         description_override: None,
-                        behavior_version: None,
                         kind: None,
                     },
                     ToolConfig {
@@ -330,7 +329,6 @@ impl FileToolset {
                         name_override: None,
                         params_name_overrides: None,
                         description_override: None,
-                        behavior_version: None,
                         kind: None,
                     },
                     ToolConfig {
@@ -339,7 +337,6 @@ impl FileToolset {
                         name_override: None,
                         params_name_overrides: None,
                         description_override: None,
-                        behavior_version: None,
                         kind: None,
                     },
                 ])

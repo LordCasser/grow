@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
-use tools::util::ProcessGroup;
+use tty_utils::ProcessGroup;
 
 use crate::config::HookSpec;
 use crate::event::HookEventEnvelope;
@@ -142,7 +142,7 @@ pub async fn run_command_hook(
 
     // Detach from the controlling terminal so children (e.g. GPG pinentry)
     // can't open /dev/tty and corrupt the TUI display.
-    tools::util::detach_command(&mut cmd);
+    tty_utils::detach_command(&mut cmd);
 
     // Spawn the child process.
     //
@@ -151,7 +151,7 @@ pub async fn run_command_hook(
     // the order matters: we MUST apply user/plugin `extra_env` FIRST and
     // the runner-injected vars LAST. Otherwise a user JSON hook (or a
     // plugin) can spoof `GROW_HOOK_EVENT`, `GROW_HOOK_NAME`, `GROW_SESSION_ID`,
-    // `GROW_WORKSPACE_ROOT`, or `CLAUDE_PROJECT_DIR`, which are the
+    // or `GROW_WORKSPACE_ROOT`, which are the
     // identity/event signals a hook script consumes for policy and audit.
     // See the `runner_injected_vars_override_extra_env_at_spawn`
     // regression test in `tests/integration.rs` and the rustdoc on
@@ -169,10 +169,6 @@ pub async fn run_command_hook(
         .env("GROW_HOOK_NAME", &spec.name)
         .env("GROW_SESSION_ID", ctx.session_id)
         .env("GROW_WORKSPACE_ROOT", ctx.workspace_root)
-        // Compatibility alias for external hooks that read this env name.
-        // Same value as `GROW_WORKSPACE_ROOT`; native `.grow` hooks should use
-        // `GROW_WORKSPACE_ROOT`.
-        .env("CLAUDE_PROJECT_DIR", ctx.workspace_root)
         .kill_on_drop(true)
         .spawn()
     {
@@ -301,7 +297,6 @@ pub(crate) const RUNNER_ALWAYS_SET_ENV: &[&str] = &[
     "GROW_HOOK_NAME",
     "GROW_SESSION_ID",
     "GROW_WORKSPACE_ROOT",
-    "CLAUDE_PROJECT_DIR",
 ];
 
 /// Parse `command_str` for `${VAR}` and `$VAR` references and return the
@@ -518,7 +513,7 @@ fn parse_blocking_result(
 ///
 /// * **JSON stdout (any exit code)**: parsed as [`StopHookJson`]:
 ///   `decision: "block"` (+ `reason`), `continue: false` (+ `stopReason`), and
-///   `hookSpecificOutput.additionalContext`.
+///   `additionalContext`.
 /// * **no JSON + exit 0**: plain allow-stop.
 /// * **no JSON + exit 2**: block, with stderr as the feedback fed to the model.
 /// * **no JSON + any other exit code**: failure (callers fail open: the agent
@@ -540,13 +535,12 @@ fn parse_stop_result(
                 };
             }
             Err(err) => {
-                // JSON-looking output that fails to parse is likely a broken
-                // decision; warn and fall back to the exit code.
                 if trimmed.starts_with('{') {
-                    tracing::warn!(
-                        hook_name,
-                        error = %err,
-                        "stop hook stdout looks like JSON but failed to parse; falling back to the exit code"
+                    return (
+                        HookRunnerResult::Failed(format!(
+                            "stop hook '{hook_name}' returned invalid decision JSON: {err}"
+                        )),
+                        elapsed,
                     );
                 }
             }
@@ -741,7 +735,7 @@ mod tests {
     #[test]
     fn stop_stdout_json_wins_over_exit_2() {
         let (result, _) = parse_stop_result(
-            r#"{"continue":false,"stopReason":"enough","hookSpecificOutput":{"additionalContext":"ctx"}}"#,
+            r#"{"continue":false,"stopReason":"enough","additionalContext":"ctx"}"#,
             "log noise\n",
             2,
             "s",
@@ -790,7 +784,7 @@ mod tests {
     #[test]
     fn stop_additional_context_captured() {
         let (result, _) = parse_stop_result(
-            r#"{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"run the test suite before finishing"}}"#,
+            r#"{"additionalContext":"run the test suite before finishing"}"#,
             "",
             0,
             "s",
@@ -804,6 +798,15 @@ mod tests {
                 ..Default::default()
             }
         );
+
+        let (legacy, _) = parse_stop_result(
+            r#"{"hookSpecificOutput":{"additionalContext":"ignored"}}"#,
+            "",
+            0,
+            "s",
+            Duration::ZERO,
+        );
+        assert!(matches!(legacy, HookRunnerResult::Failed(_)));
     }
 
     #[test]
@@ -829,7 +832,7 @@ mod tests {
     #[test]
     fn stop_output_captures_all_combined_signals() {
         let (result, _) = parse_stop_result(
-            r#"{"decision":"block","reason":"keep going","continue":false,"stopReason":"user said stop","hookSpecificOutput":{"additionalContext":"ctx"}}"#,
+            r#"{"decision":"block","reason":"keep going","continue":false,"stopReason":"user said stop","additionalContext":"ctx"}"#,
             "",
             0,
             "s",
@@ -950,7 +953,7 @@ mod tests {
         }
     }
 
-    fn make_scoped_ctx(scope: tools::util::ProcessScope) -> RunContext<'static> {
+    fn make_scoped_ctx(scope: tty_utils::ProcessScope) -> RunContext<'static> {
         RunContext {
             process_scope: Some(scope),
             ..make_ctx()
@@ -1101,69 +1104,6 @@ mod tests {
         );
     }
 
-    /// `CLAUDE_PROJECT_DIR` is part of the external hook contract: it points
-    /// to the workspace/project root and is set for ALL hooks (not just
-    /// plugin-scoped ones). Plugin hooks frequently reference it as
-    /// `"$CLAUDE_PROJECT_DIR/.claude/hooks/foo.sh"`. The runner must export
-    /// it on the spawned child so shell expansion via the `sh -c` branch
-    /// resolves correctly; otherwise such hooks fail to find the
-    /// command.
-    #[tokio::test]
-    async fn test_claude_project_dir_is_exported() {
-        let tmp = tempfile::tempdir().unwrap();
-        let script = tmp.path().join("hook.sh");
-        // Exit 0 only if CLAUDE_PROJECT_DIR matches the workspace root.
-        let workspace = tmp.path().to_string_lossy().into_owned();
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\ntest \"${{CLAUDE_PROJECT_DIR}}\" = \"{workspace}\"\n",
-                workspace = workspace
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
-
-        let spec = HookSpec {
-            name: "test-claude-project-dir".into(),
-            event: crate::event::HookEventName::Stop,
-            handler_type: crate::config::HandlerType::Command,
-            configured_matcher: None,
-            matcher: None,
-            enabled: true,
-            // Use ${CLAUDE_PROJECT_DIR} in the path itself so this also exercises
-            // the `$` -> sh -c routing.
-            command: Some(std::path::PathBuf::from("${CLAUDE_PROJECT_DIR}/hook.sh")),
-            command_raw: Some("${CLAUDE_PROJECT_DIR}/hook.sh".to_string()),
-            url: None,
-            url_raw: None,
-            timeout_ms: 5000,
-            source_dir: tmp.path().to_path_buf(),
-            extra_env: std::collections::HashMap::new(),
-            layer: crate::config::HookProvenance::File,
-        };
-
-        let envelope = make_envelope();
-        let ctx = RunContext {
-            session_id: "test-session",
-            workspace_root: &workspace,
-            process_scope: None,
-        };
-        let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
-
-        assert!(
-            matches!(result, HookRunnerResult::Success),
-            "hook should see CLAUDE_PROJECT_DIR set to the workspace root, got {:?}",
-            result
-        );
-    }
-
     /// `extra_env` seeds what's "set" so the test does not depend on the
     /// process environment.
     #[test]
@@ -1190,9 +1130,9 @@ mod tests {
     #[test]
     fn find_unresolved_skips_resolvable_vars() {
         let mut env = std::collections::HashMap::new();
-        env.insert("CLAUDE_PLUGIN_ROOT".to_string(), "/plugins/foo".to_string());
+        env.insert("GROW_PLUGIN_ROOT".to_string(), "/plugins/foo".to_string());
         let v = find_unresolved_env_vars(
-            "${GROW_HOOK_EVENT}/${CLAUDE_PROJECT_DIR}/${GROW_SESSION_ID}/${CLAUDE_PLUGIN_ROOT}/foo",
+            "${GROW_HOOK_EVENT}/${GROW_WORKSPACE_ROOT}/${GROW_SESSION_ID}/${GROW_PLUGIN_ROOT}/foo",
             &env,
         );
         assert!(
@@ -1305,8 +1245,7 @@ mod tests {
 
     /// Regression: a hook command starting with `~` must be
     /// routed through `sh -c` so the shell expands `~` to `$HOME`.
-    /// Previously `~/.claude/hook.sh` was treated as a relative path and
-    /// joined to `source_dir`, producing a broken path.
+    /// A leading `~/` must not be treated as relative to `source_dir`.
     ///
     /// The test injects `HOME` via `extra_env` so it works in sandboxed
     /// CI environments where `HOME` is not set (e.g. hermetic remote exec).
@@ -1444,7 +1383,7 @@ mod tests {
         ));
         spec.timeout_ms = 60_000;
         let envelope = make_envelope();
-        let scope = tools::util::ProcessScope::new();
+        let scope = tty_utils::ProcessScope::new();
         let hook_scope = scope.clone();
         let hook = tokio::spawn(async move {
             run_command_hook(
@@ -1474,7 +1413,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn command_hook_fails_fast_when_scope_already_closed() {
-        let scope = tools::util::ProcessScope::new();
+        let scope = tty_utils::ProcessScope::new();
         scope.kill_all();
         let mut spec = make_shell_spec("sleep 600");
         spec.timeout_ms = 60_000;

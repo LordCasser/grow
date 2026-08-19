@@ -3,32 +3,15 @@
 //! Router pattern: single `handle()` dispatches by method name.
 //! Business logic delegates to pure functions or MvpAgent methods.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use agent_client_protocol::{self as acp};
 use serde::Deserialize;
 
 use super::super::mvp_agent::MvpAgent;
-use crate::session::persistence::{Summary, list_recent_summaries, list_summaries};
 use crate::session::{
-    AllSessionOverviewRequest, AllSessionOverviewResponse, ContextInfo, ExtMethodResult,
-    SessionCommand, SessionInfoData, SessionInfoResponse, SessionListRequest, SessionListResponse,
+    ContextInfo, ExtMethodResult, SessionCommand, SessionInfoData, SessionInfoResponse,
 };
 
-/// Mirrors the display title (`generated_title`, else `session_summary`) into
-/// `session_summary` so clients that only read that field show the same title
-/// as `display_title()` — including after a `/rename` that updated only
-/// `generated_title`. Mutates the response copy only; never persisted.
-fn backfill_session_summary(summary: &mut Summary) {
-    let display = summary.display_title().to_owned();
-    if !display.is_empty() && display != summary.session_summary {
-        summary.session_summary = display;
-    }
-}
-
-/// Router for grow/session/* and grow/session_summaries/* methods.
+/// Router for the current session query and control methods.
 pub async fn handle(
     agent: &MvpAgent,
     args: &acp::ExtRequest,
@@ -39,9 +22,6 @@ pub async fn handle(
         "grow/session/close" => handle_session_close(agent, args).await,
         "grow/session/list" => handle_session_list(agent, args).await,
         "grow/sessions/list" => handle_roster_list(agent, args).await,
-        m if m.starts_with("grow/session_summaries/") => {
-            handle_session_summaries(agent, args).await
-        }
         _ => Err(acp::Error::method_not_found()),
     }
 }
@@ -132,14 +112,9 @@ async fn handle_roster_list(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SessionInfoRequest {
     session_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RecentSessionsRequest {
-    limit: usize,
 }
 
 async fn handle_session_info(
@@ -186,7 +161,6 @@ async fn handle_session_info(
         model_fingerprint: None,
         show_model_fingerprint: false,
         api_backend: None,
-        conversation_id: None,
         turns: 0,
         turn_index: 0,
         context: ContextInfo {
@@ -221,7 +195,7 @@ async fn handle_session_close(
     args: &acp::ExtRequest,
 ) -> Result<acp::ExtResponse, acp::Error> {
     #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct CloseRequest {
         session_id: String,
     }
@@ -248,89 +222,6 @@ async fn handle_session_close(
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
-async fn handle_session_summaries(
-    _agent: &MvpAgent,
-    args: &acp::ExtRequest,
-) -> Result<acp::ExtResponse, acp::Error> {
-    match args.method.as_ref() {
-        "grow/session_summaries/session_list" => {
-            let req = serde_json::from_str::<SessionListRequest>(args.params.get())?;
-            let cwd = req.workspace_directory.to_string_lossy().to_string();
-
-            let _timer = crate::instrumentation_timer!("session.list_sessions_for_workspace");
-
-            let mut summaries = list_summaries(Some(&cwd)).await.map_err(|e| {
-                acp::Error::internal_error().data(format!("failed to list sessions: {e}"))
-            })?;
-            for s in &mut summaries {
-                backfill_session_summary(s);
-            }
-
-            let value = serde_json::to_value(SessionListResponse {
-                session_summaries: summaries,
-            })
-            .map(|v| serde_json::value::to_raw_value(&v).map(Arc::from))
-            .expect("to work")
-            .expect("to work");
-
-            Ok(acp::ExtResponse::new(value))
-        }
-        "grow/session_summaries/workspace_list" => {
-            tracing::debug!("grow/session_summaries/workspace_list is working");
-            let _req = serde_json::from_str::<AllSessionOverviewRequest>(args.params.get())?;
-
-            let _timer = crate::instrumentation_timer!("session.list_sessions_for_load");
-
-            let summaries = list_summaries(None).await.map_err(|e| {
-                acp::Error::internal_error().data(format!("failed to list workspaces: {e}"))
-            })?;
-
-            summaries_to_overview_response(summaries)
-        }
-        "grow/session_summaries/workspace_list_recent" => {
-            let req = serde_json::from_str::<RecentSessionsRequest>(args.params.get())?;
-
-            let _timer = crate::instrumentation_timer!("session.list_sessions_recent");
-
-            let limit = req.limit.min(10_000);
-            let mut summaries = list_recent_summaries(limit).await.map_err(|e| {
-                acp::Error::internal_error().data(format!("failed to list workspaces: {e}"))
-            })?;
-            for s in &mut summaries {
-                backfill_session_summary(s);
-            }
-
-            let value = serde_json::to_value(&summaries)
-                .map(|v| serde_json::value::to_raw_value(&v).map(Arc::from))
-                .expect("to work")
-                .expect("to work");
-
-            Ok(acp::ExtResponse::new(value))
-        }
-        _ => Err(acp::Error::method_not_found()),
-    }
-}
-
-/// Group summaries by cwd and serialize into an [`AllSessionOverviewResponse`].
-fn summaries_to_overview_response(summaries: Vec<Summary>) -> Result<acp::ExtResponse, acp::Error> {
-    let mut by_cwd: BTreeMap<String, Vec<Summary>> = Default::default();
-    for mut s in summaries {
-        backfill_session_summary(&mut s);
-        by_cwd.entry(s.info.cwd.clone()).or_default().push(s);
-    }
-
-    let value = serde_json::to_value(AllSessionOverviewResponse {
-        all_sessions: by_cwd
-            .into_iter()
-            .map(|(k, v)| (PathBuf::from(k), v))
-            .collect(),
-    })
-    .map(|v| serde_json::value::to_raw_value(&v).map(Arc::from))
-    .expect("to work")
-    .expect("to work");
-
-    Ok(acp::ExtResponse::new(value))
-}
 // ── Unified local session list ────────────────────────────────────────
 
 async fn handle_session_list(

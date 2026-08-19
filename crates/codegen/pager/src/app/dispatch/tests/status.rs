@@ -338,7 +338,6 @@ fn session_info_response() -> shell::session::SessionInfoResponse {
             model_fingerprint: None,
             show_model_fingerprint: false,
             api_backend: None,
-            conversation_id: None,
             turns: 1,
             turn_index: 0,
             context: shell::session::ContextInfo {

@@ -57,19 +57,6 @@ pub(super) fn lock_path_for_args(args: &serde_json::Value) -> Option<&str> {
     str_arg(args, &["file_path", "path", "target_file"])
 }
 
-/// Pull the path a read/list tool targets and classify it against the store.
-/// Keys span harnesses: `read_file`=`target_file`, grep=`path`,
-/// `list_dir`=`target_directory`. Grammar lives in `chat_state`.
-pub(super) fn compaction_artifact_read(
-    args: &serde_json::Value,
-) -> Option<chat_state::compaction_transcript::CompactionArtifact> {
-    let path = str_arg(
-        args,
-        &["target_file", "file_path", "path", "target_directory"],
-    )?;
-    chat_state::compaction_transcript::classify_compaction_path(path)
-}
-
 /// Temporary gate: only expose resolved model ID to the user for these models.
 pub(super) fn should_show_resolved_model(requested: &str, resolved: &str) -> bool {
     requested != resolved && super::acp_types::is_coding_model_slug(requested)
@@ -114,7 +101,7 @@ impl SessionActor {
                 && let Some(meta_val) = &text.meta
                 && let Some(meta) = PromptBlockMeta::from_value(meta_val)
             {
-                return meta.bash_command;
+                return Some(meta.bash_command);
             }
         }
         None
@@ -123,7 +110,7 @@ impl SessionActor {
     /// Handle a direct bash command from bash mode.
     /// Runs the command with streaming output and sends updates to the TUI.
     pub(super) async fn handle_direct_bash_command(
-        &self,
+        self: &Arc<Self>,
         _prompt_id: &str,
         command: String,
         prompt_blocks: &[acp::ContentBlock],
@@ -148,14 +135,6 @@ impl SessionActor {
                         .meta(notification_meta.as_object().cloned()),
                 ))));
         }
-
-        // Persist the user message for session history
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
-                prompt_blocks.to_vec(),
-            )));
 
         // Run the bash command with streaming enabled
         let tool_call_id = acp::ToolCallId::from(format!("bash-mode-{}", uuid::Uuid::new_v4()));
@@ -292,15 +271,30 @@ impl SessionActor {
         // a noisy duplicate scrollback entry. Old sessions that have it will
         // still replay fine; new sessions are cleaner.
 
-        // Build a single user message for chat history that includes command, output, and exit code
+        // Build one Surface item that includes command, output, and exit code.
         let user_message = format!(
             "I executed a terminal command: `{}`\n\nOutput:\n```\n{}\n```\n\n[exit code: {}]",
             command, displayed_output, exit_code
         );
 
-        // Add to chat history as a user message only
-        self.chat_state_handle
-            .push_user_message(ConversationItem::user(&user_message));
+        // Append it to the canonical Surface as a user message only.
+        if let Err(error) = self
+            .chat_state_handle
+            .push_user_message_durably(ConversationItem::user(&user_message))
+            .await
+        {
+            return Err(acp::Error::internal_error()
+                .data(format!("direct command was not durably recorded: {error}")));
+        }
+        let title_source = prompt_blocks
+            .iter()
+            .filter_map(|block| match block {
+                acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.schedule_session_title(title_source).await;
 
         self.chat_state_handle.flush();
 

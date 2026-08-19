@@ -626,13 +626,10 @@ impl SessionActor {
         // is honored on reload, then gate project hook sources on the verdict.
         let cwd = std::path::Path::new(&self.session_info.cwd);
         let is_trusted = crate::agent::folder_trust::resolve_and_record(cwd, None, false);
-        // Single load entry point so all vendors (compat and native) and custom
-        // hook-paths are handled consistently with the session-startup sites.
-        let (mut registry, errors) = crate::util::hooks::discover_hooks(
-            git_root.as_deref(),
-            &self.rebuild_spec.compat,
-            is_trusted,
-        );
+        // Single load entry point keeps native and custom hook paths consistent
+        // with session startup.
+        let (mut registry, errors) =
+            crate::util::hooks::discover_hooks(git_root.as_deref(), is_trusted);
         for err in &errors {
             tracing::warn!("hook reload error: {err}");
         }
@@ -736,7 +733,7 @@ impl SessionActor {
 
         let t0 = std::time::Instant::now();
         // Resolve effective [plugins] config (global + ancestor project
-        // configs + compat merge). Shared with commands/list and the eager
+        // configs). Shared with commands/list and the eager
         // fan-out so all paths discover the same plugins for this cwd.
         let plugins_cfg = crate::config::resolve_effective_plugins_config(session_cwd);
         let config_read_ms = t0.elapsed().as_millis();
@@ -883,11 +880,8 @@ impl SessionActor {
                         workspace::session::git::find_git_root_from_path(session_cwd).ok();
                     let is_trusted =
                         crate::agent::folder_trust::resolve_and_record(session_cwd, None, false);
-                    let (mut new_reg, _errs) = crate::util::hooks::discover_hooks(
-                        git_root.as_deref(),
-                        &self.rebuild_spec.compat,
-                        is_trusted,
-                    );
+                    let (mut new_reg, _errs) =
+                        crate::util::hooks::discover_hooks(git_root.as_deref(), is_trusted);
                     new_reg.append_specs(new_specs);
                     *reg = Some(Arc::new(new_reg));
                 }
@@ -912,19 +906,10 @@ impl SessionActor {
         // the order-sensitive `update_configs` would cause (merge order is
         // non-deterministic). Mirrors the `UpdateMcpServers` command handler.
         let t_mcp = std::time::Instant::now();
-        let managed_configs = {
-            let mcp_handle = self.managed_mcp_handle.lock().await;
-            match &mcp_handle.cache {
-                crate::session::managed_mcp::ManagedMcpCache::Ready(configs) => configs.clone(),
-                _ => vec![],
-            }
-        };
-        let new_mcp_servers = crate::session::managed_mcp::merge_managed_mcp_servers(
+        let new_mcp_servers = crate::session::mcp_catalog::merge_mcp_servers(
             self.initial_client_mcp_servers.clone(),
             session_cwd,
-            &managed_configs,
             new_registry_snapshot.as_deref(),
-            &self.rebuild_spec.compat,
         );
         let (mcp_diff, dispatch_event_tx) = {
             let mut mcp_state = self.mcp_state.lock().await;
@@ -942,11 +927,7 @@ impl SessionActor {
                 });
             }
             for name in &diff.removed {
-                let prefix = format!(
-                    "{}{}",
-                    name,
-                    crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-                );
+                let prefix = format!("{}{}", name, workspace_types::MCP_TOOL_NAME_DELIMITER);
                 let removed_count = self
                     .agent
                     .borrow()

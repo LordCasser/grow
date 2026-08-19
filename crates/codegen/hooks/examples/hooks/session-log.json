@@ -1,13 +1,13 @@
 {
   "hooks": {
-    "SessionStart": [
+    "session_start": [
       {
         "hooks": [
           { "type": "command", "command": "bin/session-log.sh", "timeout": 5 }
         ]
       }
     ],
-    "SessionEnd": [
+    "session_end": [
       {
         "hooks": [
           { "type": "command", "command": "bin/session-log.sh", "timeout": 5 }

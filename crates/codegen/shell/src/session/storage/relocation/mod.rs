@@ -777,10 +777,15 @@ fn require_regular_file(path: &Path) -> Result<()> {
 
 fn read_summary(path: &Path) -> Result<Summary> {
     let bytes = std_fs::read(path).map_err(|e| fs::io_error("read", path, e))?;
-    serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json {
-        path: path.to_path_buf(),
-        source,
-    })
+    let summary: Summary =
+        serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    summary
+        .validate_current_format()
+        .map_err(|error| RelocationError::Inconsistent(format!("{}: {error}", path.display())))?;
+    Ok(summary)
 }
 
 fn write_failure_error(error: WriteFailure) -> RelocationError {

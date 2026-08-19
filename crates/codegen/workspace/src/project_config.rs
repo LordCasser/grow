@@ -1,5 +1,4 @@
-//! Project config-file discovery: locating repo-local `.mcp.json` and
-//! `.grow/config.toml` files by walking from `cwd` up to the git root.
+//! Project config-file discovery for repo-local `.grow/config.toml` files.
 //!
 //! These pure `git2` + filesystem walks are shared by the shell's config
 //! loaders and the folder-trust gate's `repo_configs_present`.
@@ -7,39 +6,6 @@
 use std::path::{Path, PathBuf};
 
 use agent::repo::RepoDirChain;
-
-/// Filename of the project-local MCP server config.
-pub const MCP_JSON_FILENAME: &str = ".mcp.json";
-
-/// Candidate `.mcp.json` paths from repo root to `cwd`, whether or not they exist.
-/// Useful for file watching so newly created files are detected after startup.
-pub fn mcp_json_candidate_paths(cwd: &Path) -> Vec<PathBuf> {
-    mcp_json_candidate_paths_in(&RepoDirChain::resolve(cwd).dirs)
-}
-
-/// [`mcp_json_candidate_paths`] over a precomputed cwd→git-root dir chain
-/// ([`RepoDirChain`]), repo-root-first. Private: only this file's two callers.
-fn mcp_json_candidate_paths_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    chain_dirs
-        .iter()
-        .rev()
-        .map(|dir| dir.join(MCP_JSON_FILENAME))
-        .collect()
-}
-
-/// Find existing `.mcp.json` files from `cwd` up to the git root (repo-root-first order).
-pub fn find_mcp_json_files(cwd: &Path) -> Vec<PathBuf> {
-    find_mcp_json_files_in(&RepoDirChain::resolve(cwd).dirs)
-}
-
-/// [`find_mcp_json_files`] over a precomputed dir chain. See [`RepoDirChain`].
-/// `pub(crate)` — the gate (`repo_configs_present`) reaches it within this crate.
-pub(crate) fn find_mcp_json_files_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    mcp_json_candidate_paths_in(chain_dirs)
-        .into_iter()
-        .filter(|path| path.is_file())
-        .collect()
-}
 
 /// True when `config_path` is `$GROW_HOME/config.toml` (user tier, not project).
 fn is_user_config_file(config_path: &Path) -> bool {

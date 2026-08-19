@@ -46,10 +46,10 @@ impl AgentView {
     }
     /// Whether the prompt "auto" (LLM classifier mode) flag should render.
     /// Extracted for unit testing the precedence: auto shows only when the
-    /// session is in auto mode and yolo is not active. Behavior and permission
+    /// session is in auto mode and always-approve is not active. Behavior and permission
     /// policy are independent, so Plan does not hide the permission indicator.
     pub(super) fn auto_flag_visible(&self, _effective_plan: bool) -> bool {
-        self.session.is_auto() && !self.session.is_yolo()
+        self.session.is_auto() && !self.session.is_always_approve()
     }
     /// Whether plan content is available for preview.
     fn plan_preview_available(&self) -> bool {
@@ -661,13 +661,13 @@ mod prompt_flag_tests {
     fn auto_flag_visible_precedence() {
         let mut agent = make_agent();
         assert!(!agent.auto_flag_visible(false));
-        agent.session.auto_mode = true;
+        agent.session.permission_mode = shell::util::config::PermissionMode::Auto;
         assert!(agent.auto_flag_visible(false));
         assert!(agent.auto_flag_visible(true));
-        agent.session.yolo_mode = true;
+        agent.session.permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
         assert!(!agent.auto_flag_visible(false));
-        agent.session.yolo_mode = false;
-        assert!(agent.auto_flag_visible(false));
+        agent.session.permission_mode = shell::util::config::PermissionMode::Ask;
+        assert!(!agent.auto_flag_visible(false));
     }
 }
 #[cfg(test)]
@@ -692,8 +692,7 @@ mod plan_chip_tests {
                 forked_from: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
-                yolo_mode: false,
-                auto_mode: false,
+                permission_mode: shell::util::config::PermissionMode::Ask,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,

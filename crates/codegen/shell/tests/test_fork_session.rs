@@ -21,9 +21,12 @@ async fn create_test_session(storage: &JsonlStorageAdapter, session_id: &str, cw
     let model_id = acp::ModelId::new("grow-code-fast-1");
     storage.init_session(&info, model_id).await.unwrap();
 
-    // Add some chat messages
+    // Seed the canonical Timeline.
     let msg = ConversationItem::user("Hello world");
-    storage.append_chat_message(&info, &msg).await.unwrap();
+    let timeline = chat_state::Timeline::from_seed(vec![msg]).unwrap();
+    for event in timeline.events() {
+        storage.append_timeline_event(&info, event).await.unwrap();
+    }
 
     // Add an update
     let notification = acp::SessionNotification::new(
@@ -69,7 +72,7 @@ async fn test_fork_session_creates_new_session_with_parent_tracking() {
         .unwrap();
 
     // Verify result
-    assert_eq!(result.chat_messages_copied, 1);
+    assert_eq!(result.surface_items_copied, 1);
     assert_eq!(result.updates_copied, 1);
 
     // Load the forked session and verify metadata
@@ -84,8 +87,9 @@ async fn test_fork_session_creates_new_session_with_parent_tracking() {
     );
     assert!(loaded.summary.forked_at.is_some());
 
-    // Verify chat history was copied
-    assert_eq!(loaded.chat_history.len(), 1);
+    // Verify the canonical Timeline projects the copied Surface.
+    let timeline = chat_state::Timeline::from_events(loaded.timeline_events.clone()).unwrap();
+    assert_eq!(timeline.surface().len(), 1);
 
     // Verify updates were copied with transformed session ID
     assert_eq!(loaded.updates.len(), 1);
@@ -98,16 +102,26 @@ async fn test_fork_session_creates_new_session_with_parent_tracking() {
 }
 
 #[tokio::test]
-async fn test_fork_preserves_session_title() {
+async fn test_fork_starts_new_title_lineage() {
     let temp_dir = TempDir::new().unwrap();
     let storage = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
 
     // Create source session
     let source_info = create_test_session(&storage, "titled-session", "/source").await;
 
-    // Update source session with a title
+    // Commit the source title as a canonical Timeline fact.
+    let mut source_timeline =
+        chat_state::Timeline::from_seed(vec![ConversationItem::user("Hello world")]).unwrap();
+    let title_event = source_timeline
+        .record(chat_state::TimelineEventKind::SessionTitle(
+            chat_state::SessionTitleEvent {
+                title: "My Important Session".to_string(),
+                source: chat_state::SessionTitleSource::User,
+            },
+        ))
+        .unwrap();
     storage
-        .update_session_title(&source_info, "My Important Session".to_string())
+        .append_timeline_event_durable(&source_info, &title_event)
         .await
         .unwrap();
 
@@ -129,7 +143,8 @@ async fn test_fork_preserves_session_title() {
         .await
         .unwrap();
 
-    // Load and verify title was preserved (generated_title is the LLM title field).
+    // A fork inherits Surface, not parent metadata identity. It generates or
+    // receives a title in its own Timeline lineage.
     let loaded = storage.load_session(&target_info).await.unwrap();
-    assert_eq!(loaded.summary.display_title(), "My Important Session");
+    assert_eq!(loaded.summary.display_title(), "");
 }

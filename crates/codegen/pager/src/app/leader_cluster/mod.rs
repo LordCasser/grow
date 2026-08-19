@@ -140,11 +140,7 @@ impl ClusterClient {
             ask_user: self.app.ask_user,
             restore_code: self.app.restore_code,
             agent_override: self.app.agent_override.clone(),
-            yolo_mode: self.app.default_yolo,
-            auto_mode: dispatch::effective_auto(
-                self.app.default_yolo,
-                matches!(self.app.current_ui.permission_mode.as_deref(), Some("auto")),
-            ),
+            permission_mode: dispatch::inherit_permission_mode(&self.app),
             screen_mode_label: Some(self.app.screen_mode.meta_label()),
             resume_local_miss: self.app.resume_local_miss.clone(),
         };

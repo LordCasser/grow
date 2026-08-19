@@ -1,13 +1,10 @@
 //! `get_task_output` tool — output/status for one or many background tasks.
 //!
-//! Positive `timeout_ms` waits (multi-id = wait-all). Also provides helpers used
-//! by the legacy `wait_tasks` tool.
+//! Positive `timeout_ms` waits (multi-id = wait-all).
 
 pub mod terminal_command;
-pub mod wait_tasks;
 use std::time::Duration;
 pub use terminal_command::GetTerminalCommandOutputTool;
-pub use wait_tasks::WaitTasksTool;
 
 use crate::DEFAULT_TOOL_OUTPUT_BYTES;
 use crate::implementations::BashTool;
@@ -22,10 +19,9 @@ use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
 use tool_types::{MultiTaskOutputResult, TaskOutputOutput, TaskOutputResult, TaskOutputToolInput};
 
-/// Default wait budget when a caller is already in wait mode but omitted
-/// `timeout_ms` (legacy `wait_tasks` / internal `capped_wait_timeout`). On
-/// `get_task_output`, omitting `timeout_ms` is a non-blocking snapshot — this
-/// constant is not applied unless a wait is active.
+/// Default wait budget used by internal blocking callers that omit
+/// `timeout_ms`. `get_task_output` itself treats omission as a non-blocking
+/// snapshot.
 pub(crate) const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The blocking-wait ceiling: `GROW_MAX_WAIT_BLOCK_MS`, else 10 min.
@@ -149,7 +145,7 @@ pub(crate) fn background_bash_requires_exprs() -> Vec<Expr<ToolRequirement>> {
     vec![grow_build_bash, grow_build_concise_bash]
 }
 
-/// Shared `requires_expr` for both `get_task_output` and `wait_tasks`.
+/// Capability requirements for `get_task_output`.
 pub(crate) fn task_output_requires_expr() -> Expr<ToolRequirement> {
     use crate::types::tool_metadata::ToolMetadata;
     let task_tool = Expr::Value(ToolRequirement::Tool {
@@ -170,14 +166,8 @@ impl TaskOutputTool {
         &self,
         task_id: &str,
         timeout_ms: Option<u64>,
-        ctx: &tool_runtime::ToolCallContext,
         resources: SharedResources,
     ) -> Result<TaskOutputOutput, tool_runtime::ToolError> {
-        let contract_version = ctx
-            .extensions
-            .get::<tool_runtime::BehaviorVersion>()
-            .map(|v| v.0.clone());
-        let is_legacy = crate::versions::is_legacy_contract(contract_version.as_deref());
         let terminal;
         {
             terminal = resources.lock().await.require::<Terminal>()?.0.clone();
@@ -254,21 +244,17 @@ impl TaskOutputTool {
 
         // Neither found
         {
-            let msg = if is_legacy {
-                render_legacy_task_output_not_found(task_id)
+            let known = terminal.list_tasks().await;
+            let msg = if known.is_empty() {
+                format!(
+                    "Task {task_id} not found. No background tasks or subagents exist in this session.",
+                )
             } else {
-                let known = terminal.list_tasks().await;
-                if known.is_empty() {
-                    format!(
-                        "Task {task_id} not found. No background tasks or subagents exist in this session.",
-                    )
-                } else {
-                    let ids: Vec<&str> = known.iter().map(|t| t.task_id.as_str()).collect();
-                    format!(
-                        "Task {task_id} not found. Known task IDs: [{}]",
-                        ids.join(", ")
-                    )
-                }
+                let ids: Vec<&str> = known.iter().map(|t| t.task_id.as_str()).collect();
+                format!(
+                    "Task {task_id} not found. Known task IDs: [{}]",
+                    ids.join(", ")
+                )
             };
             Ok(TaskOutputOutput::TaskNotFound(msg))
         }
@@ -488,68 +474,6 @@ fn finalize_wait_outcome(outcome: WaitOutcome, deadline: tokio::time::Instant) -
     }
 }
 
-/// Wait until any one task (bash or subagent) completes, or deadline is reached.
-pub(crate) async fn wait_any_event_driven(
-    terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
-    backend: &Option<SubagentBackendResource>,
-    bash_ids: &[String],
-    subagent_ids: &[String],
-    deadline: tokio::time::Instant,
-) -> WaitOutcome {
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if remaining.is_zero() {
-        return WaitOutcome::DeadlineElapsed;
-    }
-
-    // Register waiter BEFORE spawns to avoid race: a spawned task could complete
-    // and call notify_waiters() before the Notified future exists.
-    use tokio::sync::Notify as TokioNotify;
-    let done = std::sync::Arc::new(TokioNotify::new());
-    let notified = done.notified();
-
-    let mut waits: Vec<tokio::task::AbortHandle> = Vec::new();
-
-    for id in bash_ids {
-        let terminal = terminal.clone();
-        let id = id.clone();
-        let timeout = remaining;
-        let done = done.clone();
-        waits.push(
-            tokio::spawn(async move {
-                terminal.wait_for_completion(&id, Some(timeout)).await;
-                done.notify_waiters();
-            })
-            .abort_handle(),
-        );
-    }
-
-    for id in subagent_ids {
-        if let Some(be) = backend {
-            let be = be.clone();
-            let id = id.clone();
-            let timeout_ms = remaining.as_millis() as u64;
-            let done = done.clone();
-            waits.push(
-                tokio::spawn(async move {
-                    let _ = be.backend().query(&id, true, Some(timeout_ms)).await;
-                    done.notify_waiters();
-                })
-                .abort_handle(),
-            );
-        }
-    }
-
-    // Tear the helper waits down on every exit path: first completion,
-    // deadline, or cancellation of this future.
-    let _guard = AbortWaitsOnDrop(waits);
-
-    let outcome = tokio::select! {
-        _ = notified => WaitOutcome::CompletedEarly,
-        _ = tokio::time::sleep_until(deadline) => WaitOutcome::DeadlineElapsed,
-    };
-    finalize_wait_outcome(outcome, deadline)
-}
-
 /// Wait until all tasks (bash and subagent) complete, or deadline is reached.
 pub(crate) async fn wait_all_event_driven(
     terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
@@ -595,20 +519,6 @@ pub(crate) async fn wait_all_event_driven(
         _ = tokio::time::sleep_until(deadline) => WaitOutcome::DeadlineElapsed,
     };
     finalize_wait_outcome(outcome, deadline)
-}
-
-//
-// Historical fixture captured from the 0.4.10 implementation.
-//
-// In 0.4.10, get_task_output returned:
-//   Err(ToolError::ProcessManagerError(format!("Task {} not found", input.task_id)))
-//
-// The meaningful customer-facing message content is the inner string.
-// Subagent wording is out of scope — subagents didn't exist in 0.4.10.
-
-/// Exact historical not-found message for `get_task_output` in legacy-0.4.10.
-fn render_legacy_task_output_not_found(task_id: &str) -> String {
-    format!("Task {} not found", task_id)
 }
 
 fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> TaskOutputOutput {
@@ -706,7 +616,6 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             output.push_str(&tool_types::format_resume_footer(
                 &snap.subagent_id,
                 &snap.subagent_type,
-                snap.persona.as_deref(),
             ));
             let raw_output_bytes = output.len();
             TaskOutputOutput::Result(TaskOutputResult {
@@ -790,7 +699,7 @@ impl crate::types::tool_metadata::ToolMetadata for TaskOutputTool {
     }
 
     fn description_template(&self) -> &str {
-        // Canonical wording lives in the shared builder; `versioned_definition`
+        // Canonical wording lives in the shared builder; `finalized_definition`
         // renders it context-aware from the finalized toolset. This static
         // fallback mirrors the default grow-build toolset.
         static DESC: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -807,9 +716,8 @@ impl crate::types::tool_metadata::ToolMetadata for TaskOutputTool {
         &DESC
     }
 
-    fn versioned_definition(
+    fn finalized_definition(
         &self,
-        _contract_version: Option<&str>,
         client_name: &str,
         description_override: Option<&str>,
         renderer: &TemplateRenderer,
@@ -921,7 +829,7 @@ impl tool_runtime::Tool for TaskOutputTool {
 
         if ids.len() == 1 {
             return self
-                .run_single_task(&ids[0], input.timeout_ms, &ctx, resources)
+                .run_single_task(&ids[0], input.timeout_ms, resources)
                 .await;
         }
 
@@ -1174,7 +1082,7 @@ mod tests {
         );
     }
 
-    /// The context-aware `versioned_definition` path only mentions a tool when
+    /// The context-aware `finalized_definition` path only mentions a tool when
     /// it's actually in the finalized toolset. Renders every relevant subset
     /// through the shared builder via `task_output_description`.
     #[test]
@@ -1681,26 +1589,13 @@ mod tests {
         .unwrap();
         assert!(with_timeout.waits());
 
-        // Legacy block is ignored; wait is driven only by timeout_ms.
-        let legacy_block_false: TaskOutputToolInput = serde_json::from_value(serde_json::json!({
-            "task_ids": ["t"],
-            "block": false,
-            "timeout_ms": 120_000
-        }))
-        .unwrap();
         assert!(
-            legacy_block_false.waits(),
-            "positive timeout_ms must wait (legacy block ignored)"
-        );
-
-        let legacy_block_only: TaskOutputToolInput = serde_json::from_value(serde_json::json!({
-            "task_ids": ["t"],
-            "block": true
-        }))
-        .unwrap();
-        assert!(
-            !legacy_block_only.waits(),
-            "legacy block=true without timeout_ms must not wait"
+            serde_json::from_value::<TaskOutputToolInput>(serde_json::json!({
+                "task_ids": ["t"],
+                "block": true
+            }))
+            .is_err(),
+            "unknown wait controls must be rejected"
         );
 
         let no_timeout: TaskOutputToolInput =
@@ -1756,45 +1651,6 @@ mod tests {
         }
     }
 
-    // ── Legacy message parity fixture tests ────────────────────────
-    //
-    // These tests verify exact historical wording for legacy-0.4.10.
-    // Fixture source: the historical 0.4.10 task_output implementation.
-    //
-    // Historical 0.4.10 message (inner string from ToolError::ProcessManagerError):
-    //   "Task {task_id} not found"
-    //
-    // Subagent wording is out of scope — subagents didn't exist in 0.4.10.
-
-    #[tokio::test]
-    async fn legacy_get_task_not_found_exact_historical_message() {
-        let resources = resources_with_terminal(None);
-        let tool = TaskOutputTool;
-
-        let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions
-            .insert(tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
-
-        let result = tool_runtime::Tool::run(
-            &tool,
-            ctx,
-            TaskOutputToolInput {
-                task_ids: vec!["task-xyz".into()],
-                timeout_ms: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        match result {
-            TaskOutputOutput::TaskNotFound(msg) => {
-                // Exact historical fixture — no trailing period.
-                assert_eq!(msg, "Task task-xyz not found");
-            }
-            other => panic!("Expected TaskNotFound, got {:?}", other),
-        }
-    }
-
     #[tokio::test]
     async fn current_get_task_not_found_includes_discoverability() {
         // Current (non-legacy) path must still include known task IDs
@@ -1832,7 +1688,6 @@ mod tests {
             subagent_id: "sub-init".to_string(),
             description: "Check PR status".to_string(),
             subagent_type: "general-purpose".to_string(),
-            persona: None,
             status: SubagentSnapshotStatus::Initializing,
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 8_500,
@@ -1870,7 +1725,6 @@ mod tests {
             subagent_id: "sub-abc".to_string(),
             description: "Find all API endpoints".to_string(),
             subagent_type: "explore".to_string(),
-            persona: None,
             status: SubagentSnapshotStatus::Running {
                 turn_count: 3,
                 tool_call_count: 12,
@@ -1939,7 +1793,6 @@ mod tests {
             subagent_id: "sub-stable".to_string(),
             description: "stable body".to_string(),
             subagent_type: "explore".to_string(),
-            persona: None,
             status: SubagentSnapshotStatus::Running {
                 turn_count: 1,
                 tool_call_count: 2,
@@ -1997,7 +1850,6 @@ mod tests {
             subagent_id: "sub-new".to_string(),
             description: "just started".to_string(),
             subagent_type: "general-purpose".to_string(),
-            persona: None,
             status: SubagentSnapshotStatus::Running {
                 turn_count: 0,
                 tool_call_count: 0,
@@ -2154,7 +2006,6 @@ mod tests {
                     },
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 1500,
-                    persona: None,
                 }))
                 .unwrap();
         });
@@ -2205,7 +2056,6 @@ mod tests {
                     },
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 3000,
-                    persona: None,
                 }))
                 .unwrap();
         });

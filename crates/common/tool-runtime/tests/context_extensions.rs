@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tool_protocol::ToolCallId;
-use tool_runtime::{BehaviorVersion, Cwd, ToolCallContext};
+use tool_runtime::{Cwd, ToolCallContext};
 
 #[derive(Debug, PartialEq)]
 struct Config {
@@ -184,10 +184,7 @@ fn clone_extension_map_is_independent_after_remove() {
 //
 //   1. Each extension round-trips through the typed-extension store
 //      independently of the others.
-//   2. A dispatcher with only some of the concepts can install them
-//      individually — installing `Cwd` MUST NOT make `BehaviorVersion`
-//      look "present" with a default value, and vice versa.
-//   3. Absence of every well-known extension is the legitimate "backend
+//   2. Absence of every well-known extension is the legitimate "backend
 //      dispatcher" shape; tools that require one MUST treat absence as
 //      a hard error rather than fall back to a process-wide default.
 // ---------------------------------------------------------------------------
@@ -196,14 +193,12 @@ fn clone_extension_map_is_independent_after_remove() {
 fn each_well_known_extension_round_trips_independently() {
     let mut ctx = ToolCallContext::default();
     ctx.extensions.insert(Cwd(std::path::PathBuf::from("/tmp")));
-    ctx.extensions.insert(BehaviorVersion("v1.0".into()));
 
     assert_eq!(
         ctx.extensions.get::<Cwd>().unwrap().0,
         std::path::PathBuf::from("/tmp")
     );
-    assert_eq!(ctx.extensions.get::<BehaviorVersion>().unwrap().0, "v1.0");
-    assert_eq!(ctx.extensions.len(), 2);
+    assert_eq!(ctx.extensions.len(), 1);
 }
 
 #[test]
@@ -216,7 +211,6 @@ fn dispatcher_can_install_only_what_it_has() {
         .insert(Cwd(std::path::PathBuf::from("/work")));
 
     assert!(ctx.extensions.contains::<Cwd>());
-    assert!(!ctx.extensions.contains::<BehaviorVersion>());
     assert_eq!(ctx.extensions.len(), 1);
 }
 
@@ -227,16 +221,12 @@ fn absence_signals_backend_or_other_mode() {
     // — this test pins the contract.
     let ctx = ToolCallContext::default();
     assert!(ctx.extensions.get::<Cwd>().is_none());
-    assert!(ctx.extensions.get::<BehaviorVersion>().is_none());
     assert!(!ctx.extensions.contains::<Cwd>());
-    assert!(!ctx.extensions.contains::<BehaviorVersion>());
 }
 
 #[test]
 fn well_known_extensions_clone_preserves_inner_value() {
     let cwd = Cwd(std::path::PathBuf::from("/etc"));
-    let behavior = BehaviorVersion("v0".into());
 
     assert_eq!(cwd.clone().0, cwd.0);
-    assert_eq!(behavior.clone().0, behavior.0);
 }

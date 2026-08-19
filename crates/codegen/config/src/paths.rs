@@ -5,12 +5,6 @@ use std::sync::OnceLock;
 
 static GROW_HOME: OnceLock<PathBuf> = OnceLock::new();
 
-#[cfg(target_os = "macos")]
-const CLAUDE_MANAGED_SETTINGS_PATH: &str =
-    "/Library/Application Support/ClaudeCode/managed-settings.json";
-#[cfg(target_os = "linux")]
-const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
-
 /// The default user grow directory (`~/.grow`, canonicalized) used when
 /// `GROW_HOME` is unset. Exposed so callers (e.g. display helpers) can detect
 /// whether [`grow_home()`] is the default without duplicating the computation.
@@ -75,30 +69,6 @@ pub fn system_config_dir() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-/// System path for the managed-settings.json used for settings compat, if it exists.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn claude_managed_settings_path() -> Option<PathBuf> {
-    let path = PathBuf::from(CLAUDE_MANAGED_SETTINGS_PATH);
-    path.exists().then_some(path)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn claude_managed_settings_path() -> Option<PathBuf> {
-    None
-}
-
-/// The platform path where managed-settings.json would live for settings
-/// compat, whether or not it exists. `None` on unsupported platforms.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn claude_managed_settings_probe_path() -> Option<PathBuf> {
-    Some(PathBuf::from(CLAUDE_MANAGED_SETTINGS_PATH))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn claude_managed_settings_probe_path() -> Option<PathBuf> {
-    None
 }
 
 /// Max bytes for a single directory name component (macOS APFS, Linux ext4,

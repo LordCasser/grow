@@ -1,5 +1,5 @@
 //! Input/output types for the background-task / sub-agent task tools
-//! (`task`, `get_task_output`, `wait_tasks`).
+//! (`task`, `get_task_output`, `kill_task`).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -148,23 +148,9 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum SubagentCapabilityMode {
-    #[serde(
-        alias = "readonly",
-        alias = "readOnly",
-        alias = "read_only",
-        alias = "ReadOnly"
-    )]
     ReadOnly,
-    #[serde(
-        alias = "readwrite",
-        alias = "readWrite",
-        alias = "read_write",
-        alias = "ReadWrite"
-    )]
     ReadWrite,
-    #[serde(alias = "Execute", alias = "EXECUTE")]
     Execute,
-    #[serde(alias = "All", alias = "ALL")]
     All,
 }
 
@@ -198,9 +184,7 @@ impl SubagentCapabilityMode {
 #[serde(rename_all = "kebab-case")]
 pub enum SubagentIsolationMode {
     #[default]
-    #[serde(alias = "None")]
     None,
-    #[serde(alias = "Worktree", alias = "work_tree", alias = "work-tree")]
     Worktree,
 }
 
@@ -228,26 +212,12 @@ pub struct SubagentCompletedOutput {
     pub turns: u32,
     pub duration_ms: u64,
     pub worktree_path: Option<String>,
-    /// Persona used by this subagent, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persona: Option<String>,
-    /// The `subagent_id` to pass as `resume_from` to continue this subagent.
-    /// Always equals `subagent_id` — provided as a convenience so programmatic
-    /// consumers can extract the resume handle without parsing text.
-    pub resume_from_hint: String,
-    /// If the subagent used a persona, the persona name to pass when resuming.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persona_hint: Option<String>,
 }
 
 impl SubagentCompletedOutput {
     /// Render the resume footer showing the subagent ID and resume hint.
     pub fn resume_footer(&self) -> String {
-        format_resume_footer(
-            &self.subagent_id,
-            &self.subagent_type,
-            self.persona.as_deref(),
-        )
+        format_resume_footer(&self.subagent_id, &self.subagent_type)
     }
 
     /// Render the full model-facing completion block: the answer text, the
@@ -260,7 +230,6 @@ impl SubagentCompletedOutput {
             self.tool_calls,
             self.turns,
             self.duration_ms,
-            self.persona.as_deref(),
         )
     }
 }
@@ -293,9 +262,8 @@ pub fn format_subagent_completed(
     tool_calls: u32,
     turns: u32,
     duration_ms: u64,
-    persona: Option<&str>,
 ) -> String {
-    let footer = format_resume_footer(subagent_id, subagent_type, persona);
+    let footer = format_resume_footer(subagent_id, subagent_type);
     format!(
         "{output}\n\n<subagent_meta>id={subagent_id}, type={subagent_type}, \
          tool_calls={tool_calls}, turns={turns}, duration_ms={duration_ms}</subagent_meta>\n\n\
@@ -305,50 +273,27 @@ pub fn format_subagent_completed(
 
 /// Render a resume footer from bare fields (when [`SubagentCompletedOutput`] is
 /// not available, e.g. in the `get_task_output` path).
-pub fn format_resume_footer(
-    subagent_id: &str,
-    subagent_type: &str,
-    persona: Option<&str>,
-) -> String {
-    let mut footer = format!(
+pub fn format_resume_footer(subagent_id: &str, subagent_type: &str) -> String {
+    format!(
         "<subagent_result>\n\
          subagent_id: {subagent_id}\n\
          subagent_type: {subagent_type}\n\
-         To continue this subagent's conversation, use resume_from=\"{subagent_id}\"."
-    );
-    if let Some(persona) = persona {
-        footer.push_str(&format!(
-            "\nThe subagent used persona=\"{persona}\". Pass the same persona when resuming."
-        ));
-    }
-    footer.push_str("\n</subagent_result>");
-    footer
+         To continue this subagent's conversation, use resume_from=\"{subagent_id}\".\n\
+         </subagent_result>"
+    )
 }
 
 /// Maximum number of task IDs accepted by a single multi-id `get_task_output`
-/// (or legacy `wait_tasks`) call. Shared by the tool schema, the server-side
-/// fan-out, and the toolbox wait path so the cap cannot drift.
+/// call. Shared by the tool schema and server-side fan-out.
 pub const MAX_MULTI_WAIT_IDS: usize = 20;
 
 /// Input for the `get_task_output` tool.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TaskOutputToolInput {
     /// Task IDs to query. Pass one or more; a single task is a one-element list.
-    ///
-    /// Lenient on the wire (invisible to the advertised schema — schemars
-    /// ignores serde aliases and custom deserializers): also accepts the
-    /// singular `task_id` key and a bare string/number instead of an array.
-    /// Models frequently mirror `kill_task`'s singular `task_id` here (in
-    /// soak rollouts 3 of 4 organic calls did) and previously hard-failed
-    /// with "Provide a non-empty task_ids list", after which they abandoned
-    /// the background-task workflow for shell polling.
     #[schemars(
         description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With a positive timeout_ms, multiple ids wait until all complete. Omit timeout_ms or pass 0 for a non-blocking snapshot."
-    )]
-    #[serde(
-        default,
-        alias = "task_id",
-        deserialize_with = "crate::serde_lenient::deserialize_lenient_string_list"
     )]
     pub task_ids: Vec<String>,
 
@@ -399,7 +344,7 @@ pub fn task_output_waits(timeout_ms: Option<u64>) -> bool {
 }
 
 /// Default ceiling on a single blocking wait (`get_task_output` with a positive
-/// `timeout_ms`, `wait_tasks`). Capping is safe because a completed task pings
+/// `timeout_ms`). Capping is safe because a completed task pings
 /// the model, so a truncated wait costs one more poll, not the result.
 pub const MAX_WAIT_BLOCK_MS_DEFAULT: u64 = 600_000;
 
@@ -495,7 +440,7 @@ impl TaskOutputOutput {
     }
 }
 
-/// Result from a multi-wait `get_task_output` / `wait_tasks` call.
+/// Result from a multi-id `get_task_output` call.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MultiTaskOutputResult {
     pub mode: String,
@@ -533,37 +478,6 @@ impl TaskOutputResult {
         self.raw_output_bytes.hash(&mut hasher);
         hasher.finish()
     }
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// `wait_tasks` tool — Input
-// ───────────────────────────────────────────────────────────────────────────
-
-/// How a multi-wait (`wait_tasks`) request should resolve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WaitMode {
-    WaitAny,
-    WaitAll,
-}
-
-/// Input for the `wait_tasks` tool — blocks until multiple background tasks /
-/// sub-agents reach a terminal state.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct WaitTasksToolInput {
-    #[schemars(description = "Task IDs to wait for")]
-    pub task_ids: Vec<String>,
-
-    #[schemars(
-        description = "Wait mode: 'wait_any' (return when first completes) or 'wait_all' (wait for all)"
-    )]
-    pub mode: WaitMode,
-
-    /// Carries the same `{max_wait_ms}` marker as `TaskOutputToolInput`: this
-    /// tool blocks on the same ceiling, so it needs the same resolved bound.
-    #[schemars(description = "Max wait time in milliseconds, up to {max_wait_ms}")]
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1066,46 +980,6 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
     )
 }
 
-/// Naming/feature inputs for [`build_wait_tasks_description`].
-#[derive(Clone, Copy, Debug)]
-pub struct WaitTasksToolNaming<'a> {
-    /// The preferred retrieval tool name shown in the "Prefer …" line.
-    pub background_retrieval_tool: &'a str,
-    /// The bash `is_background` param name, when a bash/`execute` tool is present.
-    pub bash_background_param: Option<&'a str>,
-    /// The subagent `run_in_background` param name, when a `task` tool is present.
-    pub subagent_background_param: Option<&'a str>,
-}
-
-/// Build the shared `wait_tasks` tool description.
-pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
-    let WaitTasksToolNaming {
-        background_retrieval_tool,
-        bash_background_param,
-        subagent_background_param,
-    } = *naming;
-
-    let sources = match (bash_background_param, subagent_background_param) {
-        // Both params share one client-facing name: don't repeat it.
-        (Some(b), Some(s)) if b == s => format!("{b}=true commands or subagents"),
-        (Some(b), Some(s)) => format!("{b}=true commands or {s}=true subagents"),
-        (Some(b), None) => format!("{b}=true commands"),
-        (None, Some(s)) => format!("{s}=true subagents"),
-        (None, None) => "background tasks".to_string(),
-    };
-
-    let wait_cap = MAX_WAIT_MS_PLACEHOLDER;
-
-    format!(
-        "Wait for multiple background tasks or subagents to complete.\n\n\
-         Prefer {background_retrieval_tool} with task_ids and a positive timeout_ms. This tool is kept for compatibility.\n\n\
-         Usage notes:\n\
-         - task_ids: list of task IDs from {sources}\n\
-         - mode: 'wait_all' or 'wait_any'\n\
-         - timeout_ms: optional max wait, default 30s, capped at {wait_cap}"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1226,49 +1100,30 @@ mod tests {
     }
 
     #[test]
-    fn task_output_input_accepts_singular_task_id_alias() {
-        // Canonical plural form (unchanged).
+    fn task_output_input_requires_canonical_plural_array() {
         let input: TaskOutputToolInput =
             serde_json::from_str(r#"{"task_ids": ["a", "b"]}"#).unwrap();
         assert_eq!(input.resolved_task_ids(), vec!["a", "b"]);
-
-        // Singular key with a bare string — the shape models organically send
-        // (mirroring kill_task's singular task_id).
-        let input: TaskOutputToolInput =
-            serde_json::from_str(r#"{"task_id": "abc-123", "timeout_ms": 0}"#).unwrap();
-        assert_eq!(input.resolved_task_ids(), vec!["abc-123"]);
-        assert_eq!(input.timeout_ms, Some(0));
-
-        // Singular key with an array also works.
-        let input: TaskOutputToolInput =
-            serde_json::from_str(r#"{"task_id": ["x", "y"]}"#).unwrap();
-        assert_eq!(input.resolved_task_ids(), vec!["x", "y"]);
-
-        // Plural key with a bare string.
-        let input: TaskOutputToolInput = serde_json::from_str(r#"{"task_ids": "solo"}"#).unwrap();
-        assert_eq!(input.resolved_task_ids(), vec!["solo"]);
-
-        // Bare number (observed: an OS PID) becomes a string id, so the tool
-        // answers "Task 228 not found" instead of a deserialize error.
-        let input: TaskOutputToolInput = serde_json::from_str(r#"{"task_id": 228}"#).unwrap();
-        assert_eq!(input.resolved_task_ids(), vec!["228"]);
+        for rejected in [
+            r#"{"task_id": "abc-123"}"#,
+            r#"{"task_id": ["x", "y"]}"#,
+            r#"{"task_ids": "solo"}"#,
+            r#"{"task_ids": [228]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TaskOutputToolInput>(rejected).is_err(),
+                "non-canonical input must fail: {rejected}"
+            );
+        }
     }
 
     #[test]
-    fn task_output_input_schema_does_not_advertise_the_alias() {
-        // The leniency is wire-only: the advertised schema must keep exactly
-        // the canonical properties (task_ids, timeout_ms) so tool-definition
-        // dumps and param randomization are unaffected.
+    fn task_output_input_schema_is_exact() {
         let schema = serde_json::to_value(schemars::schema_for!(TaskOutputToolInput)).unwrap();
         let props = schema["properties"].as_object().unwrap();
         assert!(props.contains_key("task_ids"));
         assert!(props.contains_key("timeout_ms"));
-        assert!(
-            !props.contains_key("task_id"),
-            "singular alias must not leak into the schema: {props:?}"
-        );
         assert_eq!(props.len(), 2);
-        // And task_ids stays a plain string array.
         assert_eq!(props["task_ids"]["type"], "array");
         assert_eq!(props["task_ids"]["items"]["type"], "string");
     }
@@ -1648,36 +1503,5 @@ mod tests {
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
-    }
-
-    #[test]
-    fn wait_tasks_matches_cli_default() {
-        let desc = build_wait_tasks_description(&WaitTasksToolNaming {
-            background_retrieval_tool: "get_command_or_subagent_output",
-            bash_background_param: Some("background"),
-            subagent_background_param: Some("background"),
-        });
-        assert_eq!(
-            desc,
-            "Wait for multiple background tasks or subagents to complete.\n\n\
-             Prefer get_command_or_subagent_output with task_ids and a positive timeout_ms. This tool is kept for compatibility.\n\n\
-             Usage notes:\n\
-             - task_ids: list of task IDs from background=true commands or subagents\n\
-             - mode: 'wait_all' or 'wait_any'\n\
-             - timeout_ms: optional max wait, default 30s, capped at {max_wait_ms}"
-        );
-    }
-
-    #[test]
-    fn wait_tasks_subagent_only_toolbox() {
-        let desc = build_wait_tasks_description(&WaitTasksToolNaming {
-            background_retrieval_tool: "get_task_output",
-            bash_background_param: None,
-            subagent_background_param: Some("run_in_background"),
-        });
-        assert!(
-            desc.contains("- task_ids: list of task IDs from run_in_background=true subagents\n")
-        );
-        assert!(desc.contains("Prefer get_task_output with task_ids"));
     }
 }

@@ -76,9 +76,8 @@ Plugin hooks automatically receive `GROW_PLUGIN_ROOT` and `GROW_PLUGIN_DATA` env
 
 Browse and install plugins from configured marketplace sources.
 
-Sources are loaded from:
-1. **config.toml** — `[[marketplace.sources]]` entries
-2. **settings.json** — `extraKnownMarketplaces` from `~/.grow/settings.json` or `~/.claude/settings.json`
+Sources are loaded only from `[[marketplace.sources]]` entries in
+`$GROW_HOME/config.toml`.
 
 Each source shows its plugins with:
 - **Name** and **version**
@@ -113,19 +112,6 @@ git = "https://github.com/my-org/plugins.git"
 [[marketplace.sources]]
 name = "Local Dev"
 path = "~/dev/my-plugins"
-```
-
-Or in `~/.grow/settings.json` / `~/.claude/settings.json`:
-
-```json
-{
-  "extraKnownMarketplaces": {
-    "my-marketplace": {
-      "source": { "source": "git", "url": "git@github.com:my-org/plugins.git" },
-      "autoUpdate": true
-    }
-  }
-}
 ```
 
 ---

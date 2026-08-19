@@ -216,8 +216,6 @@ mod tests {
             child_session_id: std::sync::Arc::from("child-1"),
             description: std::sync::Arc::from("test child"),
             subagent_type: std::sync::Arc::from("general-purpose"),
-            persona: None,
-            role: None,
             model: None,
             context_source: None,
             resumed_from: None,

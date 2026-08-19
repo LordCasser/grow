@@ -992,7 +992,7 @@ pub fn render_picker_row(
     // Show ›/◆ fold indicator for expandable rows (those with fields
     // or description lines). Non-expandable rows show a ◆ diamond.
     // Selection is indicated by bg_hover/bg_visual row highlight
-    // (no ❯ cursor glyph), matching the import-claude modal's style.
+    // (no ❯ cursor glyph), matching the shared modal style.
     let is_expandable =
         row.collapsible || !row.fields.is_empty() || !row.description_lines.is_empty();
     let fold_width: u16 = 2; // "› " or "◆ "

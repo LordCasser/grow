@@ -69,7 +69,7 @@ impl SlashCommand for EffortCommand {
             });
         }
 
-        // Same gate-first policy as the CLI (`--effort`) and headless.
+        // Same gate-first policy as the CLI (`--reasoning-effort`) and headless.
         match ctx.models.resolve_effort_for_model(&model_id, trimmed) {
             Ok(effort) => CommandResult::Action(Action::SwitchModel {
                 model_id,
@@ -84,7 +84,6 @@ impl SlashCommand for EffortCommand {
 mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::slash::commands::effort_levels::EFFORT_LEVELS;
     use agent_client_protocol as acp;
     use shell::sampling::types::ReasoningEffort;
     use std::sync::Arc;
@@ -93,8 +92,8 @@ mod tests {
         let id = acp::ModelId::new(Arc::from(id));
         let mut meta = serde_json::Map::new();
         meta.insert(
-            "supportsReasoningEffort".into(),
-            serde_json::Value::Bool(true),
+            "reasoningEfforts".into(),
+            serde_json::json!(["xhigh", "high", "medium", "low"]),
         );
         let info = acp::ModelInfo::new(id.clone(), name.to_string())
             .meta(serde_json::Value::Object(meta).as_object().cloned());
@@ -110,12 +109,8 @@ mod tests {
     static EMPTY_BUNDLE: crate::app::bundle::BundleState = crate::app::bundle::BundleState {
         has_cache: false,
         version: String::new(),
-        personas: Vec::new(),
-        roles: Vec::new(),
         agents: Vec::new(),
         skills: Vec::new(),
-        persona_details: Vec::new(),
-        role_details: Vec::new(),
     };
 
     fn dummy_exec_ctx(models: &ModelState) -> CommandExecCtx<'_> {
@@ -126,7 +121,7 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
-                yolo_mode: false,
+                permission_mode: shell::util::config::PermissionMode::Ask,
                 ..crate::settings::PagerLocalSnapshot::default()
             },
         }
@@ -225,7 +220,6 @@ mod tests {
         let id = acp::ModelId::new(Arc::from("effort-dual"));
         let info = acp::ModelInfo::new(id.clone(), "Effort Dual".to_string()).meta(
             serde_json::json!({
-                "supportsReasoningEffort": true,
                 "reasoningEfforts": [
                     { "value": "none", "label": "None", "default": true },
                     { "value": "high", "label": "High" },
@@ -253,7 +247,6 @@ mod tests {
         let id = acp::ModelId::new(Arc::from("reasoning-x"));
         let info = acp::ModelInfo::new(id.clone(), "Reasoning X".to_string()).meta(
             serde_json::json!({
-                "supportsReasoningEffort": true,
                 "reasoningEfforts": [{ "id": "deep", "value": "xhigh", "label": "Deep" }],
             })
             .as_object()
@@ -364,10 +357,10 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
-        assert_eq!(items.len(), EFFORT_LEVELS.len());
+        assert_eq!(items.len(), 4);
         assert_eq!(items[0].insert_text, "xhigh");
         assert_eq!(items[1].insert_text, "high");
-        assert_eq!(items[1].display, "high (active)");
+        assert_eq!(items[1].display, "High (active)");
         assert_eq!(items[2].insert_text, "medium");
         assert_eq!(items[3].insert_text, "low");
         assert!(items[0].match_text.starts_with("a "));

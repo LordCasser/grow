@@ -105,11 +105,8 @@ pub struct ConnectFlags {
     /// CLI permission rules from --allow / --deny flags.
     /// Not supported in leader mode (agent config is set at leader startup).
     pub permission_rules: Vec<workspace::permission::types::PermissionRule>,
-    /// Seed agent sessions with always-approve (YOLO) permission mode.
-    pub default_yolo_mode: bool,
-    /// Seed agent sessions with auto (classifier) permission mode.
-    /// Ignored when `default_yolo_mode` is true.
-    pub default_auto_mode: bool,
+    /// Seed agent sessions with this canonical permission mode.
+    pub default_permission_mode: shell::util::config::PermissionMode,
 }
 
 /// Connect to an agent: spawn, initialize, authenticate.
@@ -126,18 +123,15 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     agent_config.resolve_runtime_fields(&shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
         remote_settings: flags.remote_settings.as_ref(),
-        is_headless: false,
         cli_subagents: Some(flags.subagents),
-        cli_session_summary_model: None,
+        cli_session_title_model: None,
         cli_experimental_memory: flags.experimental_memory,
         cli_no_memory: flags.no_memory,
         todo_gate: flags.todo_gate,
         laziness_debug_log: flags.laziness_debug_log.as_deref(),
     });
 
-    // Permission mode seeds for every session this agent creates (CLI / config).
-    agent_config.default_yolo_mode = flags.default_yolo_mode;
-    agent_config.default_auto_mode = flags.default_auto_mode && !flags.default_yolo_mode;
+    agent_config.default_permission_mode = flags.default_permission_mode;
 
     if let Some(effort) = flags.reasoning_effort_override {
         agent_config.reasoning_effort_override = Some(effort);
@@ -211,9 +205,8 @@ pub async fn connect_via_leader(
         .as_deref()
         .unwrap_or(HEADLESS_CLIENT_TYPE);
     let capabilities = ClientCapabilities {
-        // Leader agent is pre-running; seed modes via capabilities → session meta.
-        yolo_mode: flags.default_yolo_mode,
-        auto_mode: flags.default_auto_mode && !flags.default_yolo_mode,
+        // Leader agent is pre-running; seed the per-client session mode via metadata.
+        permission_mode: flags.default_permission_mode,
         default_model: agent_config.models.default.clone(),
         client_version: Some(PAGER_CLIENT_VERSION.to_string()),
         code_nav_enabled: false,
@@ -690,15 +683,22 @@ mod tests {
     }
 
     #[test]
-    fn client_capabilities_meta_canonicalizes_off_and_mixed_case() {
-        // Mixed-case / alias values are canonicalized so the agent runtime
-        // matches the modal display.
-        for raw in ["off", "OFF", "Disabled"] {
-            let meta = client_capabilities_meta(&ConnectFlags {
+    fn client_capabilities_meta_accepts_only_canonical_off() {
+        let canonical = client_capabilities_meta(&ConnectFlags {
+            hunk_tracker_mode: Some("off".into()),
+            ..Default::default()
+        });
+        assert_eq!(canonical["grow/hunkTracker"]["mode"], "off");
+
+        for raw in ["OFF", "Disabled"] {
+            let invalid = client_capabilities_meta(&ConnectFlags {
                 hunk_tracker_mode: Some(raw.into()),
                 ..Default::default()
             });
-            assert_eq!(meta["grow/hunkTracker"]["mode"], "off", "raw={raw}");
+            assert_eq!(
+                invalid["grow/hunkTracker"]["mode"], "agent_only",
+                "raw={raw}"
+            );
         }
     }
 }

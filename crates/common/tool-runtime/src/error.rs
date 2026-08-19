@@ -37,8 +37,6 @@ pub enum ToolErrorKind {
     NetworkError,
     /// Tool body returned an error.
     Execution,
-    /// Requested behavior version not supported.
-    BehaviorVersionUnsupported,
     /// Render-card budget exceeded.
     RenderLimited,
     /// Terminal subprocess failure.
@@ -62,7 +60,6 @@ impl ToolErrorKind {
             Self::ServiceUnavailable => "service_unavailable",
             Self::NetworkError => "network_error",
             Self::Execution => "execution",
-            Self::BehaviorVersionUnsupported => "behavior_version_unsupported",
             Self::RenderLimited => "render_limited",
             Self::TerminalError => "terminal_error",
             Self::Custom => "custom",

@@ -34,8 +34,7 @@ impl HunkTrackerActor {
     /// Get hunks + file content for a specific path (for diff rendering).
     /// Each hunk includes its own patch fragment with context lines.
     /// Returns explicit content status (Full/Binary/TooLarge/Missing) for both
-    /// baseline and current content, plus legacy Option<String> fields for
-    /// backward compatibility.
+    /// baseline and current content.
     pub(super) fn get_file_hunk_data(&self, path: &Path) -> FileHunkData {
         self.file_states
             .get(path)
@@ -72,16 +71,10 @@ impl HunkTrackerActor {
                 let baseline = FileContentView::from_content_state(&state.baseline);
                 let current = FileContentView::from_content_state(&state.current_content);
 
-                // Legacy fields for backward compatibility (populated from views)
-                let baseline_content = baseline.content.clone();
-                let current_content = current.content.clone();
-
                 FileHunkData {
                     hunks: hunks_with_patches,
                     baseline,
                     current,
-                    baseline_content,
-                    current_content,
                 }
             })
             .unwrap_or_default()

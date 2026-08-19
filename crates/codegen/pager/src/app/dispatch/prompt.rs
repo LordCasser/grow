@@ -468,7 +468,6 @@ pub(super) fn dispatch_send_prompt_inner(
     // Set when a plain prompt is queued while a turn is running (local path);
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
-    let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -511,8 +510,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,
-                    yolo_mode: agent.session.is_yolo(),
-                    auto_mode: agent.session.is_auto(),
+                    permission_mode: agent.session.permission_mode(),
                     current_model_id: agent
                         .session
                         .models
@@ -546,11 +544,6 @@ pub(super) fn dispatch_send_prompt_inner(
                     respect_manual_folds: respect_manual_folds_from_app,
                     auto_mode_gate: auto_mode_gate_from_app,
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
-                    // This session's own value (what its fires will actually
-                    // do), seed only until the session response lands.
-                    scheduler_background_loops: agent
-                        .scheduler_background_loops
-                        .unwrap_or(scheduler_background_loops_seed),
                 },
             };
 

@@ -148,7 +148,7 @@ pub async fn run_http_hook(
     };
 
     // Re-expand the URL here (in addition to the load-time pass) because plugin
-    // vars (e.g. `${CLAUDE_PLUGIN_ROOT}/check`) only land in `extra_env` after
+    // vars (e.g. `${GROW_PLUGIN_ROOT}/check`) only land in `extra_env` after
     // the plugin adapter runs. Unset refs are preserved so `validate_hook_url`
     // rejects them rather than smuggling a literal `${VAR}` past validation.
     let expanded_url = crate::env_expand::expand_env_vars_with_extra(raw_url, &spec.extra_env);

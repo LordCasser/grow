@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use bm25::{Language, SearchEngineBuilder};
 use tools::types::tool_index::{SearchSnapshot, ServerSummary, ToolSearchIndex, ToolSearchResult};
 
-use super::mcp_servers::MCP_TOOL_NAME_DELIMITER;
+use workspace_types::MCP_TOOL_NAME_DELIMITER;
 
 /// Split a compound identifier into component words.
 ///
@@ -499,16 +499,16 @@ mod tests {
     fn search_underscore_joined_identifier_components() {
         let tools = vec![
             ToolMetadata {
-                qualified_name: "grow_managed_chronosphere__query_prometheus_range".into(),
-                server_name: "grow_managed_chronosphere".into(),
+                qualified_name: "chronosphere__query_prometheus_range".into(),
+                server_name: "chronosphere".into(),
                 tool_name: "query_prometheus_range".into(),
                 description: "Run a range query".into(),
                 parameters: vec!["start".into(), "end".into()],
                 input_schema: serde_json::json!({}),
             },
             ToolMetadata {
-                qualified_name: "grow_managed_chronosphere__list_metrics".into(),
-                server_name: "grow_managed_chronosphere".into(),
+                qualified_name: "chronosphere__list_metrics".into(),
+                server_name: "chronosphere".into(),
                 tool_name: "list_metrics".into(),
                 description: "List available metrics".into(),
                 parameters: vec![],
@@ -527,19 +527,19 @@ mod tests {
         let snap = index.search_snapshot("chronosphere", 5);
         assert_eq!(snap.results.len(), 2);
         let names: Vec<&str> = snap.results.iter().map(|r| r.tool_name.as_str()).collect();
-        assert!(names.contains(&"grow_managed_chronosphere__query_prometheus_range"));
-        assert!(names.contains(&"grow_managed_chronosphere__list_metrics"));
+        assert!(names.contains(&"chronosphere__query_prometheus_range"));
+        assert!(names.contains(&"chronosphere__list_metrics"));
 
         let snap_exact = index.search_snapshot("query_prometheus_range", 3);
         assert_eq!(snap_exact.results.len(), 1);
         assert_eq!(
             snap_exact.results[0].tool_name,
-            "grow_managed_chronosphere__query_prometheus_range"
+            "chronosphere__query_prometheus_range"
         );
     }
 
     #[test]
-    fn gateway_tool_with_canonical_connector_tool_name_appears_in_results() {
+    fn qualified_mcp_tool_appears_in_results() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_exact_canonical_name_match_returns_tool() {
+    fn exact_qualified_name_match_returns_tool() {
         let index = Bm25ToolSearchIndex::new(make_snapshot(vec![ToolMetadata {
             qualified_name: "slack__search".into(),
             server_name: "slack".into(),
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_only_snapshot_can_stay_partial() {
+    fn partial_mcp_snapshot_can_stay_partial() {
         let index = Bm25ToolSearchIndex::new(Arc::new(Mutex::new(ToolMetadataSnapshot {
             tools: vec![ToolMetadata {
                 qualified_name: "grafana__search_dashboards".into(),
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn list_server_summaries_groups_gateway_tools_by_connector_id() {
+    fn list_server_summaries_groups_tools_by_server() {
         let index = Bm25ToolSearchIndex::new(make_snapshot(vec![ToolMetadata {
             qualified_name: "grafana__search_dashboards".into(),
             server_name: "grafana".into(),
@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn split_mixed_formats() {
         assert_eq!(
-            split_identifier("grow_managed_slack__slack_send_message"),
+            split_identifier("slack__slack_send_message"),
             vec!["grow", "managed", "slack", "slack", "send", "message"]
         );
     }
@@ -1299,7 +1299,7 @@ mod tests {
     //
     //   Server formats:  simple        ("linear")
     //                    kebab-case    ("grafana-ai")
-    //                    snake_case    ("grow_managed_slack")
+    //                    snake_case    ("slack")
     //
     //   Tool formats:    snake_case    ("save_issue")
     //                    PascalCase    ("SearchDashboards")
@@ -1340,8 +1340,8 @@ mod tests {
             },
             // snake_case server + snake_case tool
             ToolMetadata {
-                qualified_name: "grow_managed_slack__slack_send_message".into(),
-                server_name: "grow_managed_slack".into(),
+                qualified_name: "slack__slack_send_message".into(),
+                server_name: "slack".into(),
                 tool_name: "slack_send_message".into(),
                 description: "Send a message in a Slack channel".into(),
                 parameters: vec!["channel_id".into(), "text".into()],
@@ -1349,8 +1349,8 @@ mod tests {
             },
             // snake_case server + PascalCase tool
             ToolMetadata {
-                qualified_name: "grow_managed_chronosphere__QueryPrometheusRange".into(),
-                server_name: "grow_managed_chronosphere".into(),
+                qualified_name: "chronosphere__QueryPrometheusRange".into(),
+                server_name: "chronosphere".into(),
                 tool_name: "QueryPrometheusRange".into(),
                 description: "Run a Prometheus range query".into(),
                 parameters: vec!["query".into(), "start".into(), "end".into()],
@@ -1428,23 +1428,20 @@ mod tests {
     fn fmt_exact_snake_server_snake_tool() {
         // snake_case__snake_case
         let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
-        let snap = index.search_snapshot("grow_managed_slack__slack_send_message", 5);
+        let snap = index.search_snapshot("slack__slack_send_message", 5);
         assert_eq!(snap.results.len(), 1);
-        assert_eq!(
-            snap.results[0].tool_name,
-            "grow_managed_slack__slack_send_message"
-        );
+        assert_eq!(snap.results[0].tool_name, "slack__slack_send_message");
     }
 
     #[test]
     fn fmt_exact_snake_server_pascal_tool() {
         // snake_case__PascalCase
         let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
-        let snap = index.search_snapshot("grow_managed_chronosphere__QueryPrometheusRange", 5);
+        let snap = index.search_snapshot("chronosphere__QueryPrometheusRange", 5);
         assert_eq!(snap.results.len(), 1);
         assert_eq!(
             snap.results[0].tool_name,
-            "grow_managed_chronosphere__QueryPrometheusRange"
+            "chronosphere__QueryPrometheusRange"
         );
     }
 
@@ -1541,10 +1538,7 @@ mod tests {
         let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
         let snap = index.search_snapshot("GROW_MANAGED_SLACK__SLACK_SEND_MESSAGE", 5);
         assert_eq!(snap.results.len(), 1);
-        assert_eq!(
-            snap.results[0].tool_name,
-            "grow_managed_slack__slack_send_message"
-        );
+        assert_eq!(snap.results[0].tool_name, "slack__slack_send_message");
     }
 
     #[test]
@@ -1605,10 +1599,10 @@ mod tests {
     #[test]
     fn fmt_snake_server_only_falls_through() {
         let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
-        let snap = index.search_snapshot("grow_managed_slack", 5);
+        let snap = index.search_snapshot("slack", 5);
         for r in &snap.results {
             assert_ne!(
-                r.tool_name, "grow_managed_slack",
+                r.tool_name, "slack",
                 "should not match a bare server name as a tool"
             );
         }
@@ -1659,122 +1653,122 @@ mod tests {
         };
 
         vec![
-            // ── grow_managed_slack (17 tools) ───────────────────────────
+            // ── slack (17 tools) ───────────────────────────
             tool(
-                "grow_managed_slack__slack_create_canvas",
-                "grow_managed_slack",
+                "slack__slack_create_canvas",
+                "slack",
                 "slack_create_canvas",
                 "Create a new Slack canvas in a channel",
                 &["channel_id", "content"],
             ),
             tool(
-                "grow_managed_slack__slack_get_reactions",
-                "grow_managed_slack",
+                "slack__slack_get_reactions",
+                "slack",
                 "slack_get_reactions",
                 "Retrieves all reactions (emoji) on a specific Slack message",
                 &["channel_id", "message_ts"],
             ),
             tool(
-                "grow_managed_slack__slack_list_channel_members",
-                "grow_managed_slack",
+                "slack__slack_list_channel_members",
+                "slack",
                 "slack_list_channel_members",
                 "List members of a Slack channel",
                 &["channel_id"],
             ),
             tool(
-                "grow_managed_slack__slack_read_canvas",
-                "grow_managed_slack",
+                "slack__slack_read_canvas",
+                "slack",
                 "slack_read_canvas",
                 "Read a Slack canvas by ID",
                 &["canvas_id"],
             ),
             tool(
-                "grow_managed_slack__slack_read_channel",
-                "grow_managed_slack",
+                "slack__slack_read_channel",
+                "slack",
                 "slack_read_channel",
                 "Reads messages from a Slack channel in reverse chronological order",
                 &["channel_id", "limit"],
             ),
             tool(
-                "grow_managed_slack__slack_read_file",
-                "grow_managed_slack",
+                "slack__slack_read_file",
+                "slack",
                 "slack_read_file",
                 "Reads a Slack file's content by file ID",
                 &["file_id"],
             ),
             tool(
-                "grow_managed_slack__slack_read_thread",
-                "grow_managed_slack",
+                "slack__slack_read_thread",
+                "slack",
                 "slack_read_thread",
                 "Reads messages from a specific Slack thread (parent message + all replies)",
                 &["channel_id", "message_ts"],
             ),
             tool(
-                "grow_managed_slack__slack_read_user_profile",
-                "grow_managed_slack",
+                "slack__slack_read_user_profile",
+                "slack",
                 "slack_read_user_profile",
                 "Read a Slack user's profile information",
                 &["user_id"],
             ),
             tool(
-                "grow_managed_slack__slack_schedule_message",
-                "grow_managed_slack",
+                "slack__slack_schedule_message",
+                "slack",
                 "slack_schedule_message",
                 "Schedule a message to be sent at a specific time",
                 &["channel_id", "text", "post_at"],
             ),
             tool(
-                "grow_managed_slack__slack_search_channels",
-                "grow_managed_slack",
+                "slack__slack_search_channels",
+                "slack",
                 "slack_search_channels",
                 "Search for Slack channels by name or topic",
                 &["query"],
             ),
             tool(
-                "grow_managed_slack__slack_search_emojis",
-                "grow_managed_slack",
+                "slack__slack_search_emojis",
+                "slack",
                 "slack_search_emojis",
                 "Search for custom emoji in the Slack workspace",
                 &["query"],
             ),
             tool(
-                "grow_managed_slack__slack_search_public",
-                "grow_managed_slack",
+                "slack__slack_search_public",
+                "slack",
                 "slack_search_public",
                 "Searches for messages and files in public Slack channels only",
                 &["query", "sort", "sort_dir"],
             ),
             tool(
-                "grow_managed_slack__slack_search_public_and_private",
-                "grow_managed_slack",
+                "slack__slack_search_public_and_private",
+                "slack",
                 "slack_search_public_and_private",
                 "Searches for messages and files in both public and private Slack channels",
                 &["query", "sort", "sort_dir"],
             ),
             tool(
-                "grow_managed_slack__slack_search_users",
-                "grow_managed_slack",
+                "slack__slack_search_users",
+                "slack",
                 "slack_search_users",
                 "Search for users in the Slack workspace by name or email",
                 &["query"],
             ),
             tool(
-                "grow_managed_slack__slack_send_message",
-                "grow_managed_slack",
+                "slack__slack_send_message",
+                "slack",
                 "slack_send_message",
                 "Send a message in a Slack channel or thread",
                 &["channel_id", "text", "thread_ts"],
             ),
             tool(
-                "grow_managed_slack__slack_send_message_draft",
-                "grow_managed_slack",
+                "slack__slack_send_message_draft",
+                "slack",
                 "slack_send_message_draft",
                 "Create a draft message for user review before sending",
                 &["channel_id", "text"],
             ),
             tool(
-                "grow_managed_slack__slack_update_canvas",
-                "grow_managed_slack",
+                "slack__slack_update_canvas",
+                "slack",
                 "slack_update_canvas",
                 "Update the content of an existing Slack canvas",
                 &["canvas_id", "content"],
@@ -2071,12 +2065,9 @@ mod tests {
     #[test]
     fn haystack_exact_qualified_name() {
         let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-        let snap = index.search_snapshot("grow_managed_slack__slack_search_public", 5);
+        let snap = index.search_snapshot("slack__slack_search_public", 5);
         assert_eq!(snap.results.len(), 1);
-        assert_eq!(
-            snap.results[0].tool_name,
-            "grow_managed_slack__slack_search_public"
-        );
+        assert_eq!(snap.results[0].tool_name, "slack__slack_search_public");
     }
 
     #[test]
@@ -2084,10 +2075,7 @@ mod tests {
         let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
         let snap = index.search_snapshot("slack_search_public", 5);
         assert_eq!(snap.results.len(), 1);
-        assert_eq!(
-            snap.results[0].tool_name,
-            "grow_managed_slack__slack_search_public"
-        );
+        assert_eq!(snap.results[0].tool_name, "slack__slack_search_public");
     }
 
     #[test]
@@ -2115,7 +2103,7 @@ mod tests {
         let snap = index.search_snapshot("search public slack messages", 5);
         assert_top_n(
             &snap,
-            "grow_managed_slack__slack_search_public",
+            "slack__slack_search_public",
             3,
             "search public slack messages",
         );
@@ -2127,7 +2115,7 @@ mod tests {
         let snap = index.search_snapshot("send a message in slack", 5);
         assert_top_n(
             &snap,
-            "grow_managed_slack__slack_send_message",
+            "slack__slack_send_message",
             3,
             "send a message in slack",
         );
@@ -2139,7 +2127,7 @@ mod tests {
         let snap = index.search_snapshot("read thread replies slack", 5);
         assert_top_n(
             &snap,
-            "grow_managed_slack__slack_read_thread",
+            "slack__slack_read_thread",
             3,
             "read thread replies slack",
         );
@@ -2229,10 +2217,10 @@ mod tests {
         let names: Vec<&str> = snap.results.iter().map(|r| r.tool_name.as_str()).collect();
         let pub_pos = names
             .iter()
-            .position(|n| *n == "grow_managed_slack__slack_search_public");
+            .position(|n| *n == "slack__slack_search_public");
         let priv_pos = names
             .iter()
-            .position(|n| *n == "grow_managed_slack__slack_search_public_and_private");
+            .position(|n| *n == "slack__slack_search_public_and_private");
         assert!(
             pub_pos.is_some(),
             "slack_search_public should appear for 'search public channels only', got {names:?}"
@@ -2291,12 +2279,7 @@ mod tests {
         let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
         // Query is a partial snake_case identifier — not an exact tool name
         let snap = index.search_snapshot("search_public", 5);
-        assert_top_n(
-            &snap,
-            "grow_managed_slack__slack_search_public",
-            3,
-            "search_public",
-        );
+        assert_top_n(&snap, "slack__slack_search_public", 3, "search_public");
     }
 
     #[test]
@@ -2320,7 +2303,7 @@ mod tests {
         let snap = index.search_snapshot("slack__slack_read_thread", 5);
         assert_top_n(
             &snap,
-            "grow_managed_slack__slack_read_thread",
+            "slack__slack_read_thread",
             3,
             "slack__slack_read_thread",
         );
@@ -2332,10 +2315,7 @@ mod tests {
         // User types tool name with underscores as a query
         let snap = index.search_snapshot("slack_send_message", 5);
         // Exact match on bare tool name catches this
-        assert_eq!(
-            snap.results[0].tool_name,
-            "grow_managed_slack__slack_send_message"
-        );
+        assert_eq!(snap.results[0].tool_name, "slack__slack_send_message");
     }
 
     #[test]
@@ -2470,13 +2450,10 @@ mod tests {
                 "grafana-ai__SearchDashboards",
             ),
             // partial snake_case — "search_public" adds "search public"
-            ("search_public", "grow_managed_slack__slack_search_public"),
+            ("search_public", "slack__slack_search_public"),
             // wrong server prefix — "slack__slack_read_thread" adds
             // "slack slack read thread"
-            (
-                "slack__slack_read_thread",
-                "grow_managed_slack__slack_read_thread",
-            ),
+            ("slack__slack_read_thread", "slack__slack_read_thread"),
             // kebab query — "notion-create" adds "notion create"
             ("notion-create", "notion__notion-create-pages"),
         ];
@@ -2510,10 +2487,7 @@ mod tests {
                 "wrong_server__SearchDashboards",
                 "grafana-ai__SearchDashboards",
             ),
-            (
-                "slack__slack_read_thread",
-                "grow_managed_slack__slack_read_thread",
-            ),
+            ("slack__slack_read_thread", "slack__slack_read_thread"),
             ("notion-create", "notion__notion-create-pages"),
         ];
 

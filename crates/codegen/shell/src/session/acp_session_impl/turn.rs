@@ -2,7 +2,6 @@
 //! sampling loop).
 use super::*;
 use crate::session::behavior::BehaviorChangeOutcome;
-use tools::implementations::grow_build::LoopFireMode;
 
 pub(super) fn should_capture_implicit_goal_objective(
     origin: &crate::session::PromptOrigin,
@@ -159,16 +158,13 @@ impl SessionActor {
         &self,
         text_out: &mut String,
         images: Vec<acp::ImageContent>,
-        is_cursor: bool,
     ) -> Vec<acp::ImageContent> {
-        let mut norm_result =
-            crate::session::image_normalize::normalize_images(images, is_cursor).await;
+        let mut norm_result = crate::session::image_normalize::normalize_images(images).await;
         let user_images = std::mem::take(&mut norm_result.images);
         use crate::extensions::notification::ImageCompressedEntry;
         if !norm_result.compressed.is_empty() {
             text_out.push_str(&crate::session::image_normalize::render_compression_notice(
                 &norm_result.compressed,
-                is_cursor,
             ));
             let message = norm_result
                 .compressed
@@ -188,7 +184,6 @@ impl SessionActor {
             text_out.push_str(
                 &crate::session::image_normalize::render_re_encode_fallback_notice(
                     &norm_result.re_encode_fallbacks,
-                    is_cursor,
                 ),
             );
             self.send_grow_notification(GrowSessionUpdate::ImageCompressed {
@@ -199,7 +194,6 @@ impl SessionActor {
         }
         if let Some((notice, notes)) = crate::session::image_normalize::dropped_to_envelope(
             std::mem::take(&mut norm_result.dropped),
-            is_cursor,
         ) {
             text_out.push_str(&notice);
             self.send_grow_notification(GrowSessionUpdate::ImageDropped { notes })
@@ -257,7 +251,6 @@ impl SessionActor {
         verbatim: bool,
         json_schema: Option<serde_json::Value>,
         persist_ack: Option<oneshot::Sender<()>>,
-        parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     ) -> PromptTurnResult {
         let handle_prompt_start = std::time::Instant::now();
         let prompt_length: usize = prompt_blocks
@@ -277,7 +270,6 @@ impl SessionActor {
                 "block_count": prompt_blocks.len(),
             })),
         );
-        let _turn_kind = turn_kind;
         if let Some(completion_id) = origin.completion_id() {
             // A deferred Goal task may finish after Goal already returned to
             // Normal, in which case the existing auto-wake path owns delivery.
@@ -367,28 +359,16 @@ impl SessionActor {
                 .await;
         }
         let slash_skills = self.slash_skills_for_resolve().await;
-        let skill_rewrite = if crate::session::is_cursor_user_template(
-            &self.agent.borrow().definition().user_message_template,
-        ) {
-            slash_commands::SkillSlashRewrite::Passthrough
-        } else {
-            slash_commands::SkillSlashRewrite::RewriteToRun
-        };
+        let skill_rewrite = slash_commands::SkillSlashRewrite::RewriteToRun;
         let availability = self.command_availability().await;
         let mut pending_skill_information: Option<String> = None;
         let (_, named_workflows, _) = self.named_workflow_snapshot();
-        let loop_fire_mode = if self.rebuild_spec.scheduler_background_loops {
-            LoopFireMode::Detached
-        } else {
-            LoopFireMode::InSession
-        };
         let prompt_blocks = match slash_commands::resolve(
             prompt_blocks,
             &slash_skills,
             availability,
             skill_rewrite,
             &named_workflows,
-            loop_fire_mode,
         ) {
             Ok(blocks) => blocks,
             Err(SlashCommandOutcome::Builtin(action)) => {
@@ -499,30 +479,41 @@ impl SessionActor {
         let model_id = self.current_model_id().await;
         let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
         self.current_turn_number.set(turn_number);
-        let yolo_mode = self.permissions.is_yolo_mode();
+        let permission_mode = self.permissions.mode();
         let msg_count = self.chat_state_handle.get_conversation_len().await;
         let redirect_kind = if matches!(origin, super::super::PromptOrigin::User) {
             self.events.take_prior_redirect_kind()
         } else {
             None
         };
-        self.emit_event(crate::session::events::Event::TurnStarted {
-            session_id: self.session_id_string(),
-            turn_number,
-            origin: origin.wire_name().to_string(),
-            model_id: model_id.clone(),
-            yolo_mode,
-            conversation_message_count: msg_count,
-            prompt_index: Some(turn_number as usize),
-            prompt_text: Some(original_prompt_text.trim().to_owned()),
-            session_relationship: crate::session::events::SessionRelationship::Primary,
-            schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
-            redirect_kind,
-        });
+        let input_kind = if Self::extract_bash_command(&prompt_blocks).is_some() {
+            chat_state::TurnInputKind::Bash
+        } else {
+            chat_state::TurnInputKind::Prompt
+        };
+        self.events
+            .start_turn(crate::session::events::Event::TurnStarted {
+                session_id: self.session_id_string(),
+                turn_number,
+                identity: origin.turn_identity(turn_kind),
+                model_id: model_id.clone(),
+                permission_mode,
+                conversation_message_count: msg_count,
+                prompt_index: Some(turn_number as usize),
+                prompt_text: Some(original_prompt_text.trim().to_owned()),
+                input_kind,
+                session_relationship: crate::session::events::SessionRelationship::Primary,
+                schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
+                redirect_kind,
+            })
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("turn start was not durably recorded: {error}"))
+            })?;
         self.send_before_turn_event(tool_protocol::turn_hook::BeforeTurnPayload {
             turn_number: self.chat_state_handle.get_prompt_index().await as u64,
             model_id: model_id.clone(),
-            yolo_mode: self.permissions.is_yolo_mode(),
             conversation_message_count: msg_count,
             session_relationship: tool_protocol::turn_hook::DEFAULT_SESSION_RELATIONSHIP
                 .to_string(),
@@ -553,17 +544,6 @@ impl SessionActor {
             chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
         }
         let user_chunk_meta = Some(chunk_meta);
-        self.chat_state_handle.increment_prompt_index();
-        let text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
-            if let acp::ContentBlock::Text(t) = b {
-                acc.push_str(&t.text);
-            }
-            acc
-        });
-        let trimmed = text.trim().to_string();
-        if !trimmed.is_empty() {
-            self.chat_state_handle.cache_prompt_text(trimmed);
-        }
         *self.tool_context.prompt_index.lock().await = current_prompt_index;
         self.file_state_tracker
             .begin_prompt(current_prompt_index)
@@ -592,13 +572,11 @@ impl SessionActor {
             query,
             skill_information: skill_info,
             images: mut raw_images,
-            is_cursor,
         } = match parse_prompt_with_skills(
             &prompt_blocks,
             self.tool_context.cwd.to_path_buf(),
             &self.session_info,
             verbatim,
-            self.is_cursor_harness(),
             pending_skill_information.take().unwrap_or_default(),
         )
         .await
@@ -623,75 +601,45 @@ impl SessionActor {
         }
         let query = crate::session::placeholder_images::strip_paths_from_image_placeholders(query);
         let user_images = self
-            .normalize_images_with_notices(&mut context, raw_images, is_cursor)
+            .normalize_images_with_notices(&mut context, raw_images)
             .await;
-        let (query, extra_images) = if !self.is_cursor_harness() {
-            let extraction = tools::util::base64_images::extract_base64_images(query);
-            if extraction.images.is_empty() {
-                (extraction.text, Vec::new())
-            } else {
-                let cleaned_text = extraction.text;
-                let count = extraction.images.len();
-                tracing::info!(
-                    session_id = %self.session_info.id,
-                    count,
-                    "base64 images extracted from user query",
-                );
-                let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
-                    .images
-                    .into_iter()
-                    .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
-                    .collect();
-                let nr = crate::session::image_normalize::normalize_images(acp_imgs, false).await;
-                if !nr.re_encode_fallbacks.is_empty() {
-                    tracing::warn!(
-                        session_id = %self.session_info.id,
-                        notes = %nr.re_encode_fallbacks.join(" "),
-                        "Extracted user query image kept original after re-encode failure",
-                    );
-                }
-                (cleaned_text, nr.images)
-            }
+        let extraction = tools::util::base64_images::extract_base64_images(query);
+        let (query, extra_images) = if extraction.images.is_empty() {
+            (extraction.text, Vec::new())
         } else {
-            (query, Vec::new())
+            let cleaned_text = extraction.text;
+            let count = extraction.images.len();
+            tracing::info!(
+                session_id = %self.session_info.id,
+                count,
+                "base64 images extracted from user query",
+            );
+            let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
+                .images
+                .into_iter()
+                .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
+                .collect();
+            let nr = crate::session::image_normalize::normalize_images(acp_imgs).await;
+            if !nr.re_encode_fallbacks.is_empty() {
+                tracing::warn!(
+                    session_id = %self.session_info.id,
+                    notes = %nr.re_encode_fallbacks.join(" "),
+                    "Extracted user query image kept original after re-encode failure",
+                );
+            }
+            (cleaned_text, nr.images)
         };
         let assembled = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
             &context,
             &query,
             &skill_info,
-            is_cursor,
         );
-        let pre_truncation_text = assembled.clone();
-        let (user_message, truncated_local_path) = if verbatim {
-            (assembled, None)
+        let user_message = if verbatim {
+            assembled
         } else {
-            self.maybe_truncate_large_prompt_with_skills(
-                context,
-                query,
-                skill_info,
-                is_cursor,
-                current_prompt_index,
-            )
-            .await
+            self.maybe_truncate_large_prompt_with_skills(context, query, skill_info)
+                .await
         };
-        let was_truncated = truncated_local_path.is_some();
-        if let Some(tx) = parsed_prompt_tx {
-            let _ = tx.send(ParsedPromptInfo {
-                text: user_message.clone(),
-                full_text: if was_truncated {
-                    Some(pre_truncation_text)
-                } else {
-                    None
-                },
-                local_path: truncated_local_path,
-            });
-        }
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
-                prompt_blocks.to_vec(),
-            )));
         let model_id = self
             .chat_state_handle
             .get_sampling_config()
@@ -801,24 +749,40 @@ impl SessionActor {
             for image in &extra_images {
                 user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
             }
-            if let Some(ack) = persist_ack {
-                if self
-                    .chat_state_handle
-                    .push_user_message_durably(user_chat)
-                    .await
-                    .is_ok()
-                {
-                    let _ = ack.send(());
-                } else {
-                    tracing::error!(
-                        session_id = %self.session_info.id.0,
-                        prompt_id = %prompt_id,
-                        "persist_ack skipped: user-message Timeline commit failed"
-                    );
-                }
-            } else {
-                self.chat_state_handle.push_user_message(user_chat);
+            if let Err(error) = self
+                .chat_state_handle
+                .push_user_message_durably(user_chat)
+                .await
+            {
+                tracing::error!(
+                    session_id = %self.session_info.id.0,
+                    prompt_id = %prompt_id,
+                    %error,
+                    "aborting turn: user-message Timeline commit failed"
+                );
+                self.emit_turn_ended(
+                    crate::session::events::TurnOutcomeLabel::Error,
+                    chat_state::TurnTerminal {
+                        stop_reason: "error".into(),
+                        completion_kind: "user_message_persistence_failed".into(),
+                    },
+                    None,
+                    Some(serde_json::json!({
+                        "reason": "user_message_persistence_failed",
+                        "error": error.to_string(),
+                    })),
+                )
+                .await?;
+                return Err(acp::Error::internal_error()
+                    .data(format!("user message was not durably recorded: {error}")));
             }
+            if let Some(ack) = persist_ack {
+                let _ = ack.send(());
+            }
+        }
+        if matches!(origin, super::super::PromptOrigin::User) {
+            self.schedule_session_title(original_prompt_text.clone())
+                .await;
         }
         if !matches!(origin, super::super::PromptOrigin::HostCommand) {
             self.dispatch_hook(
@@ -898,29 +862,69 @@ impl SessionActor {
             })),
         );
         let turn_tool_count = self.events.tool_count_this_turn();
-        let (timeline_outcome, timeline_category, timeline_context) = match &result {
-            Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. }) => (
-                crate::session::events::TurnOutcomeLabel::Completed,
-                None,
-                None,
-            ),
-            Ok(TurnOutcome::Cancelled { category, context }) => (
-                crate::session::events::TurnOutcomeLabel::Cancelled,
-                *category,
-                context.clone(),
-            ),
-            Ok(TurnOutcome::MaxTurnsReached { limit }) => (
-                crate::session::events::TurnOutcomeLabel::Cancelled,
-                None,
-                Some(serde_json::json!({
-                    "reason": "max_turns_reached",
-                    "limit": limit,
-                })),
-            ),
-            Err(_) => (crate::session::events::TurnOutcomeLabel::Error, None, None),
-        };
-        self.emit_turn_ended(timeline_outcome, timeline_category, timeline_context)
-            .await?;
+        let (timeline_outcome, timeline_terminal, timeline_category, timeline_context) =
+            match &result {
+                Ok(TurnOutcome::Completed { refusal, .. }) => (
+                    crate::session::events::TurnOutcomeLabel::Completed,
+                    chat_state::TurnTerminal {
+                        stop_reason: if refusal.is_some() {
+                            "refusal"
+                        } else {
+                            "end_turn"
+                        }
+                        .into(),
+                        completion_kind: "completed".into(),
+                    },
+                    None,
+                    None,
+                ),
+                Ok(TurnOutcome::StationarityEnded { .. }) => (
+                    crate::session::events::TurnOutcomeLabel::Completed,
+                    chat_state::TurnTerminal {
+                        stop_reason: "end_turn".into(),
+                        completion_kind: "stationarity_ended".into(),
+                    },
+                    None,
+                    None,
+                ),
+                Ok(TurnOutcome::Cancelled { category, context }) => (
+                    crate::session::events::TurnOutcomeLabel::Cancelled,
+                    chat_state::TurnTerminal {
+                        stop_reason: "cancelled".into(),
+                        completion_kind: "cancelled".into(),
+                    },
+                    *category,
+                    context.clone(),
+                ),
+                Ok(TurnOutcome::MaxTurnsReached { limit }) => (
+                    crate::session::events::TurnOutcomeLabel::Cancelled,
+                    chat_state::TurnTerminal {
+                        stop_reason: "cancelled".into(),
+                        completion_kind: "max_turns_reached".into(),
+                    },
+                    None,
+                    Some(serde_json::json!({
+                        "reason": "max_turns_reached",
+                        "limit": limit,
+                    })),
+                ),
+                Err(_) => (
+                    crate::session::events::TurnOutcomeLabel::Error,
+                    chat_state::TurnTerminal {
+                        stop_reason: "error".into(),
+                        completion_kind: "error".into(),
+                    },
+                    None,
+                    None,
+                ),
+            };
+        self.emit_turn_ended(
+            timeline_outcome,
+            timeline_terminal,
+            timeline_category,
+            timeline_context,
+        )
+        .await?;
         match &result {
             Ok(TurnOutcome::Completed { refusal, .. }) => {
                 if let Some(explanation) = refusal {
@@ -1113,12 +1117,11 @@ impl SessionActor {
         self.file_state_tracker
             .end_prompt(&self.tool_context.fs, current_prompt_index)
             .await;
-        if let Some(mut rewind_point) = self
+        if let Some(rewind_point) = self
             .file_state_tracker
             .get_rewind_point(current_prompt_index)
             .await
         {
-            rewind_point.normalize_to_relative(self.tool_context.cwd.as_ref());
             let _ = self
                 .notifications
                 .persistence_tx
@@ -1360,7 +1363,7 @@ impl SessionActor {
         };
         let mine = tools::implementations::grow_build::monitor::types::drain_owned(
             buffer,
-            Some(self.session_info.id.0.as_ref()),
+            self.session_info.id.0.as_ref(),
         );
         if mine.is_empty() {
             return;
@@ -1573,10 +1576,7 @@ impl SessionActor {
         use tools::types::memory_backend::MemoryBackend as _;
         let (injection_params, configured_min_score) =
             build_initial_injection_backend_params(params, &self.memory.initial_injection_config);
-        let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
-            storage,
-            &injection_params,
-        );
+        let backend = memory::MemoryBackendImpl::from_session_params(storage, &injection_params);
         let raw_query =
             crate::session::helpers::session_compact::extract_last_real_user_query(&conversation)
                 .unwrap_or_default();
@@ -1715,10 +1715,10 @@ impl SessionActor {
             }
         }
         if let Some(snap) = snapshot.as_ref() {
-            let _ = self
-                .notifications
-                .persistence_tx
-                .send(PersistenceMsg::Signals(snap.current.clone()));
+            match snap.current.timeline_kind() {
+                Ok(kind) => self.chat_state_handle.record_timeline_event(kind),
+                Err(error) => tracing::error!(%error, "failed to encode session signals event"),
+            }
         }
         snapshot
     }
@@ -1944,18 +1944,6 @@ impl SessionActor {
                     "degraded canonical image context for known text-only model"
                 );
             }
-            if self.tool_context.task_output_token_budget.is_none()
-                && self.two_pass_active()
-                && !self.compaction.prefire.has_cache()
-                && self.should_prefire_two_pass().await
-                && self.compaction.prefire.try_begin()
-            {
-                let actor = std::sync::Arc::clone(self);
-                let handle = tokio::task::spawn_local(async move {
-                    actor.run_prefire_pass1().await;
-                });
-                self.compaction.prefire.set_handle(handle);
-            }
             if self.tool_context.task_output_token_budget.is_none() {
                 self.refresh_byok_credential().await;
             }
@@ -1985,7 +1973,10 @@ impl SessionActor {
                 .chat_state_handle
                 .build_request(effective_tools, memory_reminder, self.memory.is_enabled())
                 .await
-                .expect("chat state actor should be alive");
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("failed to durably prepare model context: {error}"))
+                })?;
             ::diagnostics::unified_log::debug(
                 "shell.turn.build_request_done",
                 Some(self.session_info.id.0.as_ref()),

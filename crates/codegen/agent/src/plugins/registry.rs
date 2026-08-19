@@ -51,7 +51,7 @@ pub struct LoadedPlugin {
     pub agent_count: usize,
     /// Skill names (directory names under skills/).
     pub skill_names: Vec<String>,
-    /// Agent/persona names (filenames without .md extension).
+    /// Agent names (filenames without .md extension).
     pub agent_names: Vec<String>,
     /// Whether hooks are present (file or inline).
     pub has_hooks: bool,
@@ -763,15 +763,17 @@ mod tests {
     #[test]
     fn origin_threaded_to_loaded_plugin() {
         let mut dp = make_discovered("mp-tool", PluginScope::User, true);
-        dp.origin = PluginOrigin::ClaudeMarketplace {
-            marketplace: "demo-mp".to_string(),
+        dp.origin = PluginOrigin::MarketplaceInstall {
+            source_name: Some("demo-mp".to_string()),
+            git_url: Some("https://example.com/demo.git".to_string()),
         };
 
         let reg = PluginRegistry::from_discovered(vec![dp], &[], &[]);
         assert_eq!(
             reg.get("mp-tool").unwrap().origin,
-            PluginOrigin::ClaudeMarketplace {
-                marketplace: "demo-mp".to_string(),
+            PluginOrigin::MarketplaceInstall {
+                source_name: Some("demo-mp".to_string()),
+                git_url: Some("https://example.com/demo.git".to_string()),
             }
         );
     }
@@ -897,7 +899,7 @@ mod tests {
         let mut dp = make_discovered("hook-plugin", PluginScope::User, true);
         let inline_json = serde_json::json!({
             "hooks": {
-                "PostToolUse": [{"hooks": [{"type": "command", "command": "lint"}]}]
+                "post_tool_use": [{"hooks": [{"type": "command", "command": "lint"}]}]
             }
         });
         dp.manifest.hooks = Some(PathOrInline::Inline(inline_json.clone()));

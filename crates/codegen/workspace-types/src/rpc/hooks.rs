@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::WorkspaceRpc;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookRegistryReq {}
 
 impl WorkspaceRpc for HookRegistryReq {
@@ -17,12 +18,14 @@ impl WorkspaceRpc for HookRegistryReq {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookRegistryWire {
     pub hooks: HashMap<HookEventNameWire, Vec<HookSpecWire>>,
 }
 
 /// Compiled `matcher` omitted; drift-guarded by `hook_spec_wire_covers_all_upstream_fields`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookSpecWire {
     pub name: String,
     pub event: HookEventNameWire,
@@ -36,18 +39,12 @@ pub struct HookSpecWire {
     pub timeout_ms: u64,
     pub source_dir: PathBuf,
     pub extra_env: HashMap<String, String>,
-    /// `default` decodes a pre-field server as `file`.
-    #[serde(default = "default_layer")]
     pub layer: String,
 }
 
-fn default_layer() -> String {
-    "file".to_string()
-}
-
-/// Snake_case JSON map key; hand-written serde keeps an unknown event lossless in
-/// [`Unknown`](Self::Unknown) so decode never fails under deploy skew.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Snake_case JSON map key for the closed hook-event protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HookEventNameWire {
     SessionStart,
     SessionEnd,
@@ -62,68 +59,8 @@ pub enum HookEventNameWire {
     Notification,
     SubagentStart,
     SubagentStop,
-    SubagentEnd,
     PreCompact,
     PostCompact,
-    Unknown(String),
-}
-
-impl HookEventNameWire {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::SessionStart => "session_start",
-            Self::SessionEnd => "session_end",
-            Self::Stop => "stop",
-            Self::StopFailure => "stop_failure",
-            Self::StopCancelled => "stop_cancelled",
-            Self::PreToolUse => "pre_tool_use",
-            Self::PostToolUse => "post_tool_use",
-            Self::PostToolUseFailure => "post_tool_use_failure",
-            Self::PermissionDenied => "permission_denied",
-            Self::UserPromptSubmit => "user_prompt_submit",
-            Self::Notification => "notification",
-            Self::SubagentStart => "subagent_start",
-            Self::SubagentStop => "subagent_stop",
-            Self::SubagentEnd => "subagent_end",
-            Self::PreCompact => "pre_compact",
-            Self::PostCompact => "post_compact",
-            Self::Unknown(s) => s,
-        }
-    }
-}
-
-impl Serialize for HookEventNameWire {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for HookEventNameWire {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
-            "session_start" => Self::SessionStart,
-            "session_end" => Self::SessionEnd,
-            "stop" => Self::Stop,
-            "stop_failure" => Self::StopFailure,
-            "stop_cancelled" => Self::StopCancelled,
-            "pre_tool_use" => Self::PreToolUse,
-            "post_tool_use" => Self::PostToolUse,
-            "post_tool_use_failure" => Self::PostToolUseFailure,
-            "permission_denied" => Self::PermissionDenied,
-            "user_prompt_submit" => Self::UserPromptSubmit,
-            "notification" => Self::Notification,
-            "subagent_start" => Self::SubagentStart,
-            "subagent_stop" => Self::SubagentStop,
-            "subagent_end" => Self::SubagentEnd,
-            "pre_compact" => Self::PreCompact,
-            "post_compact" => Self::PostCompact,
-            _ => Self::Unknown(s),
-        })
-    }
 }
 
 #[cfg(test)]
@@ -137,7 +74,7 @@ mod tests {
 
     #[test]
     fn hook_event_name_wire_snake_case_round_trip() {
-        // All 16 variants (mirrors upstream `event_name_deser_all_variants`).
+        // All variants (mirrors upstream `event_name_deser_all_variants`).
         for (variant, wire) in [
             (HookEventNameWire::SessionStart, "session_start"),
             (HookEventNameWire::SessionEnd, "session_end"),
@@ -155,7 +92,6 @@ mod tests {
             (HookEventNameWire::Notification, "notification"),
             (HookEventNameWire::SubagentStart, "subagent_start"),
             (HookEventNameWire::SubagentStop, "subagent_stop"),
-            (HookEventNameWire::SubagentEnd, "subagent_end"),
             (HookEventNameWire::PreCompact, "pre_compact"),
             (HookEventNameWire::PostCompact, "post_compact"),
         ] {
@@ -170,15 +106,9 @@ mod tests {
     }
 
     #[test]
-    fn hook_event_name_wire_unknown_round_trips_losslessly() {
-        // A newer server's event must decode (not error) and preserve its raw
-        // value so it stays a distinct map key.
-        let v: HookEventNameWire =
-            serde_json::from_value(serde_json::json!("future_event")).unwrap();
-        assert_eq!(v, HookEventNameWire::Unknown("future_event".to_string()));
-        assert_eq!(
-            serde_json::to_value(&v).unwrap(),
-            serde_json::json!("future_event")
+    fn hook_event_name_wire_rejects_unknown_value() {
+        assert!(
+            serde_json::from_value::<HookEventNameWire>(serde_json::json!("future_event")).is_err()
         );
     }
 

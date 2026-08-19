@@ -1,8 +1,7 @@
 //! Plugin marketplace browse and index crate.
 //!
-//! Provides marketplace source configuration, plugin discovery (indexed +
-//! filesystem fallback), and install integration with the existing
-//! `InstallRegistry` pipeline.
+//! Provides canonical indexed marketplace discovery and install integration
+//! with the Grow plugin registry.
 
 pub mod catalog;
 pub mod config;
@@ -15,10 +14,7 @@ pub mod matcher;
 pub mod scanner;
 pub mod types;
 
-pub use config::{
-    env_require_sha, load_extra_sources_from_settings, load_extra_sources_from_settings_in,
-    load_require_sha, load_sources,
-};
+pub use config::{env_require_sha, load_require_sha, load_sources};
 pub use error::MarketplaceError;
 pub use scanner::scan_marketplace;
 pub use types::*;

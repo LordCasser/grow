@@ -7,36 +7,20 @@
 //! the oversized tool results worth trimming. Pure functions only: no async,
 //! no serde, no I/O, no model call.
 //!
-//! # Relationship to the `intra_compaction::fit` ladder
-//!
-//! [`crate::intra_compaction::fit`] is the **summarizer-input** ladder: it
-//! builds a disposable copy of the turns that fits the compaction model's
-//! window (its `ToolTruncated` rung prefix-clips payloads on the copy) and
-//! never rewrites stored conversation state. `prune` is the **session-side**
-//! counterpart: later tasks apply the returned [`PrunePlan`] to the stored
-//! items to shed load in place. The `fit` ladder and its rung order are
-//! untouched by this module.
-//!
 //! # Budget and byte accounting
 //!
 //! Budgets are tokens; internally `max_bytes = budget_tokens * 4`, the same
-//! grow-build-style conversion used by
-//! [`crate::intra_compaction::truncate_text_to_token_budget`]. The marker
-//! counts toward the budget and its room is reserved **first**: the head gets
+//! conversion used by the range-summary budget estimator. The marker counts
+//! toward the budget and its room is reserved **first**: the head gets
 //! 1/2 and the tail 1/4 of `max_bytes`, the remaining 1/4 is the marker's
 //! room. The returned string never exceeds `max_bytes`.
 //!
-//! # Difference from `truncate_text_to_token_budget`
-//!
-//! That helper is a **prefix clip** for summarizer input: only the head
-//! survives, a dropped-bytes marker is appended. A tool result loses most of
-//! its value that way — the tail commonly carries the final state or the
-//! error — so [`prune_tool_result_content`] keeps both ends and puts the
-//! marker in the middle. Use the prefix clip where a prefix suffices
-//! (summarizer input); use this module for stored tool results.
-
-use crate::item::CompactionItem;
 use crate::token::ItemTokenCounter;
+
+/// Minimal read seam needed by the model-free pruning planner.
+pub trait ToolResultItem {
+    fn is_tool_result(&self) -> bool;
+}
 
 /// Head share of the byte budget: 1/2 (see module docs).
 const HEAD_BUDGET_NUM: usize = 1;
@@ -51,10 +35,8 @@ const TAIL_BUDGET_DEN: usize = 4;
 /// Returns `None` when `text` already fits (`text.len() <= budget_tokens * 4`),
 /// i.e. no pruning is needed.
 ///
-/// The byte math mirrors
-/// [`crate::intra_compaction::truncate_text_to_token_budget`]
-/// (`max_bytes = budget_tokens * 4`), but the cut is head+tail instead of a
-/// prefix clip. The marker counts toward the budget and is reserved first:
+/// The byte budget is `budget_tokens * 4`. The marker counts toward the
+/// budget and is reserved first:
 /// head gets 1/2 and tail 1/4 of `max_bytes`; the remaining 1/4 is the
 /// marker's room. A marker longer than its room is itself clipped (on a UTF-8
 /// char boundary) so the result still never exceeds `max_bytes`. All cuts
@@ -148,7 +130,7 @@ impl PrunePlan {
 /// Safety fallbacks returning an empty plan (nothing gets pruned):
 /// `total_target_tokens == 0`, `item_budget_tokens == 0`, an empty input, or
 /// a total already `<= total_target_tokens`.
-pub fn plan_tool_result_pruning<T: CompactionItem>(
+pub fn plan_tool_result_pruning<T: ToolResultItem>(
     items: &[T],
     counter: &dyn ItemTokenCounter<T>,
     item_budget_tokens: u32,
@@ -191,54 +173,33 @@ pub fn plan_tool_result_pruning<T: CompactionItem>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item::{CompactionFileRef, CompactionRole};
 
     #[derive(Debug, Clone)]
     struct MockItem {
-        role: CompactionRole,
-        text: String,
+        tool_result: bool,
         tokens: u32,
     }
 
     impl MockItem {
-        fn tool(text: &str, tokens: u32) -> Self {
+        fn tool(_text: &str, tokens: u32) -> Self {
             Self {
-                role: CompactionRole::Tool,
-                text: text.to_string(),
+                tool_result: true,
                 tokens,
             }
         }
 
-        fn user(text: &str, tokens: u32) -> Self {
+        fn user(_text: &str, tokens: u32) -> Self {
             Self {
-                role: CompactionRole::User,
-                text: text.to_string(),
+                tool_result: false,
                 tokens,
             }
         }
     }
 
-    impl CompactionItem for MockItem {
-        fn role(&self) -> CompactionRole {
-            self.role
+    impl ToolResultItem for MockItem {
+        fn is_tool_result(&self) -> bool {
+            self.tool_result
         }
-
-        fn text(&self) -> Option<String> {
-            Some(self.text.clone())
-        }
-
-        fn has_tool_requests(&self) -> bool {
-            false
-        }
-
-        fn is_compaction_summary(&self) -> bool {
-            false
-        }
-
-        fn attachment_refs(&self) -> Vec<CompactionFileRef> {
-            Vec::new()
-        }
-        // `is_tool_result` uses the default: role == Tool.
     }
 
     /// Counts tokens straight from the mock's `tokens` field for exact math.

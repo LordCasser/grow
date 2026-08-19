@@ -401,8 +401,6 @@ fn handle_session_notification_inner(
             child_session_id,
             subagent_type,
             description,
-            persona,
-            role,
             model,
             effective_context_source,
             resumed_from,
@@ -425,8 +423,6 @@ fn handle_session_notification_inner(
                 .task_tool_background
                 .remove(&subagent_id)
                 .unwrap_or(false);
-            let persona_display = persona.clone();
-            let role_display = role.clone();
             let model_display = model.clone();
             agent.subagent_sessions.insert(
                 child_session_id.clone(),
@@ -435,8 +431,6 @@ fn handle_session_notification_inner(
                     child_session_id: Arc::from(child_session_id.clone()),
                     description: Arc::from(description.clone()),
                     subagent_type: Arc::from(subagent_type.clone()),
-                    persona: persona.map(Arc::from),
-                    role: role.map(Arc::from),
                     model: model.map(Arc::from),
                     context_source: effective_context_source.map(Arc::from),
                     resumed_from: resumed_from.map(Arc::from),
@@ -475,7 +469,11 @@ fn handle_session_notification_inner(
             if let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
             {
-                crate::app::subagent::enrich_from_meta(info, &agent.session.cwd, sid.0.as_ref());
+                crate::app::subagent::enrich_from_timeline(
+                    info,
+                    &agent.session.cwd,
+                    sid.0.as_ref(),
+                );
             }
             let (effective_child_cwd, effective_is_worktree) = derive_child_cwd(
                 &agent.session.cwd,
@@ -493,8 +491,10 @@ fn handle_session_notification_inner(
                 forked_from: None,
                 pending_prompts: std::collections::VecDeque::new(),
                 next_queue_id: 0,
-                yolo_mode: effective_permission_mode.as_deref() == Some("always-approve"),
-                auto_mode: effective_permission_mode.as_deref() == Some("auto"),
+                permission_mode: effective_permission_mode
+                    .as_deref()
+                    .map(shell::util::config::parse_permission_mode_canonical)
+                    .unwrap_or(shell::util::config::PermissionMode::Ask),
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -554,8 +554,6 @@ fn handle_session_notification_inner(
                     &description,
                     &child_session_id,
                     &subagent_type,
-                    persona_display,
-                    role_display,
                     model_display,
                     is_background,
                 );
@@ -738,18 +736,16 @@ fn handle_session_notification_inner(
                         shell::extensions::notification::HookRunStatusDto::Skipped => {
                             HookRunStatus::Skipped
                         }
-                        shell::extensions::notification::HookRunStatusDto::Failed {
-                            error,
+                        shell::extensions::notification::HookRunStatusDto::Blocked {
+                            detail,
                             elapsed_ms,
-                            blocked: true,
                         } => HookRunStatus::Blocked {
-                            detail: error,
+                            detail,
                             elapsed: std::time::Duration::from_millis(elapsed_ms),
                         },
                         shell::extensions::notification::HookRunStatusDto::Failed {
                             error,
                             elapsed_ms,
-                            blocked: false,
                         } => HookRunStatus::Failed {
                             error,
                             elapsed: std::time::Duration::from_millis(elapsed_ms),
@@ -847,11 +843,6 @@ fn handle_session_notification_inner(
             } else {
                 false
             }
-        }
-        GrowSessionUpdate::SessionSummaryGenerated { session_summary } => {
-            agent.generated_session_title =
-                Some(crate::util::decode_html_entities(&session_summary).into_owned());
-            true
         }
         GrowSessionUpdate::SessionRecap { summary, auto } => {
             use crate::scrollback::block::RenderBlock;

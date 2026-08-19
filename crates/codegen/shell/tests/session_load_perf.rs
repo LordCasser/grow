@@ -2,7 +2,7 @@
 //! spent before the client can render anything.
 //!
 //! The pager resumes via `session/load` and blocks on the response. The shell
-//! answers by (1) `load_light` (chat history; rewind points now load lazily) and
+//! answers by (1) `load_light` (Timeline Surface; rewind points now load lazily) and
 //! (2) `replay_session_updates`, which reads `updates.jsonl`, filters it, typed
 //! parses every line, and forwards each as a `session/update`. All of that
 //! happens while the client waits; both tests drive the real production code.
@@ -79,12 +79,7 @@ async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, 
         .await
         .expect("init_session");
     let dir = synth::locate_session_dir(root, &id);
-    for name in [
-        "timeline.jsonl",
-        "updates.jsonl",
-        "rewind_points.jsonl",
-        "chat_history.jsonl",
-    ] {
+    for name in ["timeline.jsonl", "updates.jsonl", "rewind_points.jsonl"] {
         let from = Path::new(&src).join(name);
         if from.exists() {
             std::fs::copy(&from, dir.join(name)).unwrap();
@@ -212,7 +207,7 @@ async fn phase_breakdown_real_functions() {
 
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
 
-    // Phase A: load_light core (summary + chat_history), what mvp_agent's
+    // Phase A: load_light core (summary + Timeline fold), what mvp_agent's
     // `load_light` blocks on before replay.
     let t = Instant::now();
     let light = adapter

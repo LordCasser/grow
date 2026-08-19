@@ -16,7 +16,7 @@ use super::*;
 /// If no agent owns the `session_id` (e.g. session was just cleaned up), the
 /// request is cancelled rather than left dangling.
 ///
-/// Root-session YOLO is honored regardless of which agent is active. Child
+/// Root-session always-approve is honored regardless of which agent is active. Child
 /// requests never inherit that UI switch: their request-local mode was already
 /// resolved by the permission manager.
 pub(super) fn handle_permission_request(
@@ -38,17 +38,17 @@ pub(super) fn handle_permission_request(
     let owning_agent_id = matched.agent_id();
     let is_active = is_matched_agent_active(app, owning_agent_id);
 
-    // 2. Root YOLO mode: auto-approve immediately on the owning agent so
+    // 2. Root always-approve mode: auto-approve immediately on the owning agent so
     //    background root turns aren't blocked waiting for a view switch.
     //
     //    If no `AllowOnce` option exists, falls through to
-    //    `enqueue_permission` even in YOLO mode (won't pick
+    //    `enqueue_permission` even in always-approve mode (won't pick
     //    `AllowAlways` by default).
     if matches!(matched, SessionMatch::Root(_))
         && app
             .agents
             .get(&owning_agent_id)
-            .is_some_and(|agent| agent.session.is_yolo())
+            .is_some_and(|agent| agent.session.is_always_approve())
         && let Some(allow) = perm
             .request
             .options

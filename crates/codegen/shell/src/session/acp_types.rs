@@ -5,41 +5,15 @@
 //! that file focused on behaviour while giving downstream crates a lightweight
 //! import path for data types.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-
-use crate::session::persistence::Summary;
 use crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
-
-// ── Session list ───────────────────────────────────────────────────────
-
-/// Request to grab all the sessions from the current working directory
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct SessionListRequest {
-    pub workspace_directory: PathBuf,
-}
-
-/// Request to grab all the sessions tagged by their working directory as well
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct AllSessionOverviewRequest {}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct SessionListResponse {
-    pub session_summaries: Vec<Summary>,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct AllSessionOverviewResponse {
-    pub all_sessions: BTreeMap<PathBuf, Vec<Summary>>,
-}
 
 // ── Compaction ──────────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompactConversationRequest {
-    #[serde(alias = "sessionId")]
     pub session_id: String,
-    #[serde(default, alias = "userContext")]
+    #[serde(default)]
     pub user_context: Option<String>,
 }
 
@@ -119,11 +93,11 @@ pub enum RewindMode {
     ConversationOnly,
     /// Roll back files only; leave conversation untouched.
     /// Use when the files went wrong but the conversation context is valuable.
-    #[serde(alias = "code_only")]
     FilesOnly,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindRequest {
     /// Target prompt index to rewind to (0-based).
     /// Semantics: "restore state before prompt N ran" — prompts 0..N-1 are kept.
@@ -131,17 +105,12 @@ pub struct RewindRequest {
     /// Whether to force rewind even with conflicts
     pub force: bool,
     /// What to rewind. Clients must specify this explicitly.
-    /// Defaults to `All` for backwards compatibility with older clients.
-    #[serde(default = "default_rewind_mode")]
     pub mode: RewindMode,
-}
-
-pub fn default_rewind_mode() -> RewindMode {
-    RewindMode::All
 }
 
 /// Response from a rewind operation
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindResponse {
     /// Whether the rewind was successful
     pub success: bool,
@@ -152,13 +121,11 @@ pub struct RewindResponse {
     /// List of file paths that were reverted (only populated on success with All or FilesOnly)
     pub reverted_files: Vec<String>,
     /// List of file paths that can be cleanly reverted (no conflicts)
-    #[serde(default)]
     pub clean_files: Vec<String>,
     /// List of conflicts that were encountered (if force=false and conflicts exist, success=false)
     pub conflicts: Vec<RewindConflictInfo>,
     /// The original prompt text at target_prompt_index, for pre-filling the input field.
     /// Populated on successful conversation rewind (All or ConversationOnly).
-    #[serde(default)]
     pub prompt_text: Option<String>,
     /// Optional error message
     pub error: Option<String>,
@@ -166,6 +133,7 @@ pub struct RewindResponse {
 
 /// Info about a conflict during rewind
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindConflictInfo {
     pub path: String,
     pub conflict_type: String, // "missing_file", "extra_file", "content_mismatch"
@@ -173,26 +141,27 @@ pub struct RewindConflictInfo {
 
 /// Request to get available rewind points for the session
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindPointsRequest {}
 
 /// Response with available rewind points
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindPointsResponse {
     pub rewind_points: Vec<RewindPointInfo>,
 }
 
 /// Info about a single rewind point
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RewindPointInfo {
     pub prompt_index: usize,
     pub created_at: String,
     pub num_file_snapshots: usize,
     /// Whether this prompt has file snapshots that can be reverted.
     /// When false, only conversation rewind is available for this checkpoint.
-    #[serde(default)]
     pub has_file_changes: bool,
     /// Preview of the user prompt text (truncated)
-    #[serde(default)]
     pub prompt_preview: Option<String>,
 }
 
@@ -208,7 +177,7 @@ pub struct RewindPointInfo {
 /// session can show rows before the reminders are injected. Neither
 /// estimate counts the `<system-reminder>` wrapper added on injection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TokenUsageCategory {
     /// Display label, e.g. `"Skills"` or `"MCP servers"`.
     pub label: String,
@@ -251,7 +220,7 @@ pub fn count_detail(count: u64, noun: &str) -> String {
 
 /// Context usage breakdown for session info.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextInfo {
     pub used: u64,
     pub total: u64,
@@ -272,11 +241,9 @@ pub struct ContextInfo {
     /// (env > user per-model > user global > GB per-model > GB global > 85).
     /// Used by the TUI `/context` view so the displayed “Auto-compact at X%”
     /// always matches the actual trigger (e.g. 65 for grow-build in remote settings).
-    #[serde(default = "default_auto_compact_threshold")]
     pub auto_compact_threshold_percent: u8,
     /// Itemized usage rows (skills listing, MCP server listing). Empty on
     /// partial snapshots.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub usage_categories: Vec<TokenUsageCategory>,
 }
 
@@ -293,12 +260,6 @@ impl ContextInfo {
             ..Self::default()
         }
     }
-}
-
-/// Serde default for the new threshold field (keeps old snapshots / partials
-/// deserializing without error and gives the historical default of 85).
-fn default_auto_compact_threshold() -> u8 {
-    DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
 }
 
 /// Unified session info data returned by GetSessionInfo.
@@ -319,9 +280,6 @@ pub struct SessionInfoData {
     pub show_model_fingerprint: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_backend: Option<String>,
-    /// Gateway chat conversation id when this session is gateway-proxied.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation_id: Option<String>,
     pub turns: u64,
     /// Current turn (0-based).
     /// Matches the `turn_number` used in TurnStarted events, traces, and rewinds.
@@ -391,8 +349,7 @@ pub struct StartupHints {
     /// System head for a `resume_from` subagent so the resumed body stays compactable.
     #[serde(default)]
     pub inherited_prefix_len: Option<usize>,
-    /// When true, this session is a subagent child and its prompts should
-    /// not be appended to the per-CWD prompt_history.jsonl file.
+    /// Whether this session is a subagent child.
     #[serde(default)]
     pub is_subagent: bool,
     /// Parent session id when this session is a subagent child. Emitted as
@@ -465,16 +422,7 @@ mod tests {
             serde_json::from_value::<RewindMode>(json!("files_only")).unwrap(),
             RewindMode::FilesOnly
         );
-        // Backwards-compat alias: "code_only" still deserializes to FilesOnly
-        assert_eq!(
-            serde_json::from_value::<RewindMode>(json!("code_only")).unwrap(),
-            RewindMode::FilesOnly
-        );
-    }
-
-    #[test]
-    fn rewind_mode_default_is_all() {
-        assert_eq!(default_rewind_mode(), RewindMode::All);
+        assert!(serde_json::from_value::<RewindMode>(json!("code_only")).is_err());
     }
 
     #[test]
@@ -482,21 +430,20 @@ mod tests {
         assert!(serde_json::from_value::<RewindMode>(json!("code_only_v2")).is_err());
     }
 
-    // ── RewindRequest backwards compatibility ─────────────────────────
-
     #[test]
-    fn rewind_request_missing_mode_defaults_to_all() {
-        let req: RewindRequest =
-            serde_json::from_value(json!({"target_prompt_index": 2, "force": false})).unwrap();
-        assert_eq!(req.mode, RewindMode::All);
-        assert_eq!(req.target_prompt_index, 2);
-        assert!(!req.force);
+    fn rewind_request_requires_mode() {
+        assert!(
+            serde_json::from_value::<RewindRequest>(
+                json!({"targetPromptIndex": 2, "force": false})
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn rewind_request_explicit_mode_is_respected() {
         let req: RewindRequest = serde_json::from_value(
-            json!({"target_prompt_index": 5, "force": true, "mode": "code_only"}),
+            json!({"targetPromptIndex": 5, "force": true, "mode": "files_only"}),
         )
         .unwrap();
         assert_eq!(req.mode, RewindMode::FilesOnly);
@@ -532,7 +479,7 @@ mod tests {
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["mode"], json!("conversation_only"));
-        assert_eq!(v["prompt_text"], json!("fix the bug"));
+        assert_eq!(v["promptText"], json!("fix the bug"));
         assert_eq!(v["success"], json!(true));
     }
 
@@ -549,18 +496,20 @@ mod tests {
             error: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
-        assert!(v["prompt_text"].is_null());
-        assert_eq!(v["reverted_files"], json!(["src/main.rs"]));
+        assert!(v["promptText"].is_null());
+        assert_eq!(v["revertedFiles"], json!(["src/main.rs"]));
     }
 
     #[test]
-    fn rewind_response_deserialize_with_defaults() {
+    fn rewind_response_deserializes_current_wire_shape() {
         let v = json!({
             "success": false,
-            "target_prompt_index": 4,
+            "targetPromptIndex": 4,
             "mode": "all",
-            "reverted_files": [],
-            "conflicts": [{"path": "a.rs", "conflict_type": "content_mismatch"}],
+            "revertedFiles": [],
+            "conflicts": [{"path": "a.rs", "conflictType": "content_mismatch"}],
+            "cleanFiles": [],
+            "promptText": null,
             "error": "dirty working tree"
         });
         let resp: RewindResponse = serde_json::from_value(v).unwrap();
@@ -584,8 +533,8 @@ mod tests {
             prompt_preview: Some("refactor auth".into()),
         };
         let v = serde_json::to_value(&point).unwrap();
-        assert_eq!(v["has_file_changes"], json!(true));
-        assert_eq!(v["num_file_snapshots"], json!(3));
+        assert_eq!(v["hasFileChanges"], json!(true));
+        assert_eq!(v["numFileSnapshots"], json!(3));
     }
 
     #[test]
@@ -598,21 +547,18 @@ mod tests {
             prompt_preview: None,
         };
         let v = serde_json::to_value(&point).unwrap();
-        assert_eq!(v["has_file_changes"], json!(false));
-        assert_eq!(v["num_file_snapshots"], json!(0));
+        assert_eq!(v["hasFileChanges"], json!(false));
+        assert_eq!(v["numFileSnapshots"], json!(0));
     }
 
     #[test]
-    fn rewind_point_info_has_file_changes_defaults_to_false() {
+    fn rewind_point_info_requires_current_shape() {
         let v = json!({
-            "prompt_index": 1,
-            "created_at": "2025-01-01T00:00:00Z",
-            "num_file_snapshots": 5
+            "promptIndex": 1,
+            "createdAt": "2025-01-01T00:00:00Z",
+            "numFileSnapshots": 5
         });
-        let point: RewindPointInfo = serde_json::from_value(v).unwrap();
-        assert!(!point.has_file_changes);
-        assert_eq!(point.num_file_snapshots, 5);
-        assert!(point.prompt_preview.is_none());
+        assert!(serde_json::from_value::<RewindPointInfo>(v).is_err());
     }
 
     #[test]
@@ -635,21 +581,22 @@ mod tests {
     }
 
     #[test]
-    fn usage_categories_tolerate_serde_skew_in_both_directions() {
-        // Old agents omit the field entirely: deserialize to empty.
-        let from_old_agent: ContextInfo = serde_json::from_str(r#"{"used":1,"total":2}"#).unwrap();
-        assert!(from_old_agent.usage_categories.is_empty());
-
-        // Empty vec is skipped on serialize (old clients see no new field).
+    fn context_info_requires_exact_current_shape() {
+        assert!(serde_json::from_str::<ContextInfo>(r#"{"used":1,"total":2}"#).is_err());
         let json = serde_json::to_string(&ContextInfo::default()).unwrap();
-        assert!(!json.contains("usageCategories"), "{json}");
+        assert!(json.contains("usageCategories"), "{json}");
+        let roundtripped: ContextInfo = serde_json::from_str(&json).unwrap();
+        assert!(roundtripped.usage_categories.is_empty());
 
-        // Extra fields from newer agents are ignored, keeping the label
-        // renderable.
         let row: TokenUsageCategory =
-            serde_json::from_str(r#"{"kind":"agents_md","label":"AGENTS.md","tokens":42}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"label":"AGENTS.md","tokens":42,"detail":null}"#).unwrap();
         assert_eq!(row.label, "AGENTS.md");
+        assert!(
+            serde_json::from_str::<TokenUsageCategory>(
+                r#"{"kind":"agents_md","label":"AGENTS.md","tokens":42}"#
+            )
+            .is_err()
+        );
 
         // Rows round-trip.
         let original = TokenUsageCategory::skills_listing("t", 2);

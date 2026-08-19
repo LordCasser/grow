@@ -1955,7 +1955,7 @@
 ## Features
 
 - Memory system: /remember command, note modal with raw/enhanced preview, grow/memory/rewrite ACP extension, Ctrl+F fullscreen toggle for /memory modal.
-- Agent configuration: /config-agents modal with agents, personas, and defaults.
+- Agent configuration: /config-agents modal with definitions and defaults.
 - Goal classifier: end-to-end goal tracking with subagent-powered classification.
 
 

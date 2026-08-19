@@ -1,6 +1,6 @@
 //! Auxiliary vision-model support for degrading image-bearing conversation
 //! groups after the active model is proven to accept text only.
-use crate::sampling::{Client as OaiCompatClient, ConversationRequest};
+use crate::sampling::ConversationRequest;
 use agent_client_protocol::ImageContent;
 use base64::Engine as _;
 use chat_state::compaction_utils::{extract_real_user_queries, extract_user_query};
@@ -215,63 +215,26 @@ impl ImageDescribeCache {
             inner: Mutex::new(HashMap::new()),
         }
     }
-    /// Returns a cached description when `(path, bytes, prompt)`
-    /// matches a prior successful describe; otherwise calls the vision
-    /// model, stores the result, and returns it.
-    pub async fn get_or_describe(
+    /// Stable cache identity for one image group and its purpose-owned prompt.
+    pub fn key_for_urls(
         &self,
-        client: sampler::SamplingClient,
-        model: &str,
-        images: &[(Vec<u8>, String)],
-        outline: Option<&str>,
-        current_query: &str,
-        source_context: &str,
-        path_key: &str,
-    ) -> Result<String, DescribeError> {
-        let image_urls: Vec<std::sync::Arc<str>> = images
-            .iter()
-            .map(|(bytes, mime_type)| {
-                std::sync::Arc::<str>::from(format!(
-                    "data:{};base64,{}",
-                    mime_type,
-                    base64::engine::general_purpose::STANDARD.encode(bytes)
-                ))
-            })
-            .collect();
-        self.get_or_describe_urls(
-            client,
-            model,
-            &image_urls,
-            outline,
-            current_query,
-            source_context,
-            path_key,
-        )
-        .await
-    }
-
-    /// Describe an already-normalized conversation image group. Successful
-    /// results share the same session cache as file-backed descriptions.
-    pub async fn get_or_describe_urls(
-        &self,
-        client: sampler::SamplingClient,
-        model: &str,
         image_urls: &[std::sync::Arc<str>],
         outline: Option<&str>,
         current_query: &str,
         source_context: &str,
         group_key: &str,
-    ) -> Result<String, DescribeError> {
+    ) -> (String, String, String) {
         let content_fp = content_fingerprint_urls(image_urls);
         let prompt_fp = describe_prompt_fingerprint(outline, current_query, source_context);
-        let cache_key = (group_key.to_owned(), content_fp, prompt_fp);
-        if let Some(description) = self.inner.lock().get(&cache_key).cloned() {
-            return Ok(description);
-        }
-        let prompt_text = build_describe_prompt(outline, current_query, source_context);
-        let description = describe_images(client, model, prompt_text, image_urls).await?;
-        self.inner.lock().insert(cache_key, description.clone());
-        Ok(description)
+        (group_key.to_owned(), content_fp, prompt_fp)
+    }
+
+    pub fn get(&self, key: &(String, String, String)) -> Option<String> {
+        self.inner.lock().get(key).cloned()
+    }
+
+    pub fn insert(&self, key: (String, String, String), description: String) {
+        self.inner.lock().insert(key, description);
     }
 }
 /// Build the `<image_files>` envelope that lists the workspace paths
@@ -352,6 +315,8 @@ pub enum DescribeError {
     /// unusable.
     ///
     EmptyResponse,
+    /// The durable Sideband lifecycle could not be committed.
+    Sideband(String),
 }
 
 impl std::fmt::Display for DescribeError {
@@ -364,21 +329,19 @@ impl std::fmt::Display for DescribeError {
                 duration.as_secs()
             ),
             Self::EmptyResponse => write!(f, "image describe model returned no content"),
+            Self::Sideband(error) => write!(f, "image describe Sideband failed: {error}"),
         }
     }
 }
 
 impl std::error::Error for DescribeError {}
-/// Call the vision model and return its description text.
-///
-/// The caller is responsible for prompt assembly and data URLs so this stays
-/// a pure transport helper.
-pub async fn describe_images(
-    client: OaiCompatClient,
+/// Assemble the exact vision request. The session actor owns transport,
+/// timeout, validation, Sideband persistence, and caching.
+pub fn build_describe_request(
     model: &str,
     prompt_text: String,
     image_urls: &[std::sync::Arc<str>],
-) -> Result<String, DescribeError> {
+) -> ConversationRequest {
     let mut user_item = ConversationItem::User(UserItem {
         content: vec![ContentPart::Text {
             text: std::sync::Arc::<str>::from(prompt_text),
@@ -392,22 +355,10 @@ pub async fn describe_images(
             u.content.push(ContentPart::Image { url: url.clone() });
         }
     }
-    let request = ConversationRequest::from_items(vec![user_item]).with_model(model);
-    const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
-    let response = tokio::time::timeout(DESCRIBE_TIMEOUT, client.conversation_collect(request))
-        .await
-        .map_err(|_| DescribeError::Timeout(DESCRIBE_TIMEOUT))?
-        .map_err(|error| DescribeError::Sampling(sampler::SamplingErrorInfo::from(&error)))?;
-    let text = response
-        .assistant()
-        .map(|a| a.content.as_ref().to_owned())
-        .unwrap_or_default();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err(DescribeError::EmptyResponse);
-    }
-    Ok(trimmed.to_owned())
+    ConversationRequest::from_items(vec![user_item]).with_model(model)
 }
+
+pub const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
 /// Persist attachments under `<session_dir>/assets/` and prepend an
 /// `<image_files>` block so the coding model has real on-disk paths for
 /// `Read` / `read_file` (and does not invent cloud paths like
@@ -545,105 +496,46 @@ mod tests {
             query_slice.chars().count()
         );
     }
-    #[tokio::test]
-    async fn configured_describer_sends_all_pdf_page_images() {
-        use axum::Router;
-        use axum::response::sse::{Event, Sse};
-        use axum::routing::post;
-        use futures_util::stream;
-        use sampling_types::ApiBackend;
-        use tokio::net::TcpListener;
-        use tokio::sync::oneshot;
-
-        let (request_tx, request_rx) = oneshot::channel::<serde_json::Value>();
-        let request_tx = std::sync::Arc::new(parking_lot::Mutex::new(Some(request_tx)));
-        let app = Router::new().route(
-            "/v1/chat/completions",
-            post({
-                let request_tx = request_tx.clone();
-                move |axum::Json(body): axum::Json<serde_json::Value>| {
-                    let request_tx = request_tx.clone();
-                    async move {
-                        if let Some(tx) = request_tx.lock().take() {
-                            let _ = tx.send(body);
-                        }
-                        let events = vec![
-                            Event::default().data(
-                                serde_json::json!({
-                                    "id": "chatcmpl-image",
-                                    "object": "chat.completion.chunk",
-                                    "created": 1,
-                                    "model": "vision-model",
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {"role": "assistant", "content": "Pages contain scanned invoices."},
-                                        "finish_reason": "stop"
-                                    }]
-                                })
-                                .to_string(),
-                            ),
-                            Event::default().data("[DONE]"),
-                        ];
-                        Sse::new(stream::iter(
-                            events.into_iter().map(Ok::<_, std::convert::Infallible>),
-                        ))
-                    }
-                }
-            }),
-        );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = sampler::SamplingClient::new(sampler::SamplerConfig {
-            api_key: Some("test-key".to_owned()),
-            base_url: format!("http://{addr}/v1"),
-            model: "vision-model".to_owned(),
-            api_backend: ApiBackend::ChatCompletions,
-            ..Default::default()
-        })
-        .unwrap();
+    #[test]
+    fn describe_request_and_cache_cover_all_pdf_page_images() {
         let cache = ImageDescribeCache::new();
-        let images = vec![
-            (vec![1, 2, 3], "image/png".to_owned()),
-            (vec![4, 5, 6], "image/jpeg".to_owned()),
+        let image_urls = vec![
+            std::sync::Arc::<str>::from("data:image/png;base64,AQID"),
+            std::sync::Arc::<str>::from("data:image/jpeg;base64,BAUG"),
         ];
-
-        let description = cache
-            .get_or_describe(
-                client,
-                "vision-model",
-                &images,
-                Some("Earlier request"),
-                "Extract invoice totals",
-                "Rendered PDF pages 2 and 3",
-                "/workspace/scan.pdf",
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(description, "Pages contain scanned invoices.");
-        let request = request_rx.await.unwrap();
-        assert!(
-            request.get("temperature").is_none(),
-            "image description must inherit the configured model temperature"
+        let prompt = build_describe_prompt(
+            Some("Earlier request"),
+            "Extract invoice totals",
+            "Rendered PDF pages 2 and 3",
         );
-        assert!(
-            request.get("max_tokens").is_none(),
-            "image description must inherit the configured model output limit"
-        );
-        let content = request["messages"][0]["content"].as_array().unwrap();
+        let request = build_describe_request("vision-model", prompt, &image_urls);
+        assert!(request.temperature.is_none());
+        assert!(request.max_output_tokens.is_none());
+        let ConversationItem::User(user) = &request.items[0] else {
+            panic!("describe request must contain one User item")
+        };
         assert_eq!(
-            content
+            user.content
                 .iter()
-                .filter(|part| part["type"] == "image_url")
+                .filter(|part| matches!(part, ContentPart::Image { .. }))
                 .count(),
             2
         );
         assert!(
-            content[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("PDF pages 2 and 3")
+            matches!(&user.content[0], ContentPart::Text { text } if text.contains("PDF pages 2 and 3"))
+        );
+        let key = cache.key_for_urls(
+            &image_urls,
+            Some("Earlier request"),
+            "Extract invoice totals",
+            "Rendered PDF pages 2 and 3",
+            "/workspace/scan.pdf",
+        );
+        assert!(cache.get(&key).is_none());
+        cache.insert(key.clone(), "Pages contain scanned invoices.".into());
+        assert_eq!(
+            cache.get(&key).as_deref(),
+            Some("Pages contain scanned invoices.")
         );
     }
     #[test]

@@ -120,7 +120,7 @@ pub fn decide_inputs_with_interactive(
 ///
 /// THE single security short-circuit: every explicit trust auto-grant site calls
 /// this (greppable via `folder_trust_inert`). When true a self-built grow never
-/// prompts, never gates repo-local `.envrc`/`.claude`/hooks/plugins/MCP/LSP, and
+/// prompts, never gates repo-local `.envrc`/hooks/plugins/MCP/LSP, and
 /// does NO `trusted_folders.toml` I/O. Release-stamped builds are unaffected.
 pub fn folder_trust_inert() -> bool {
     is_local_build()
@@ -288,11 +288,8 @@ fn directory_present_or_uncertain(path: &Path) -> bool {
 /// Return the first trust-sensitive repo configuration kind, if one exists.
 fn first_repo_config_kind(cwd: &Path) -> Option<&'static str> {
     // Resolve the git root + cwd→root dir chain ONCE and reuse it across the
-    // git2-based marker checks below: this gate does 1 git2 discover + 1 git2
-    // walk (+ the settings-compat path's own cheap `.git`-existence walk, intentionally separate —
-    // see its check). Each walker used to run its own git2 discover + walk (~5
-    // discovers), and on a non-git dir each discover walks to the filesystem root
-    // — wasteful anywhere, and Windows taxes every such syscall 10-100x.
+    // git2-based marker checks below. A shared chain keeps the trust boundary
+    // deterministic and avoids rediscovering the same repository per surface.
     // Cheap→expensive, short-circuiting on first hit.
     let chain = agent::repo::RepoDirChain::resolve(cwd);
     macro_rules! hit {
@@ -301,10 +298,6 @@ fn first_repo_config_kind(cwd: &Path) -> Option<&'static str> {
         };
     }
 
-    // `.mcp.json` anywhere from repo root down to cwd.
-    if !crate::project_config::find_mcp_json_files_in(&chain.dirs).is_empty() {
-        hit!("mcp");
-    }
     // Project `.grow/config.toml` declaring repo-controlled code-exec or
     // permission policy: a non-empty `[mcp_servers]` table, a non-empty
     // `[plugins].paths` array, OR a contributing `[permission]` section.
@@ -342,29 +335,12 @@ fn first_repo_config_kind(cwd: &Path) -> Option<&'static str> {
     if cwd.join(".grow").join("lsp.json").is_file() {
         hit!("lsp");
     }
-    // Project `.cursor/mcp.json` — vendor MCP loading is default-on and tagged
-    // `Project`, so a repo shipping ONLY this file must still be gated. (File
-    // presence is enough; if the `.cursor` compat flag is off the servers won't
-    // spawn and gating is a harmless no-op.)
-    if cwd.join(".cursor").join("mcp.json").is_file() {
-        hit!("mcp");
-    }
     // Project `.envrc` — auto-sourced in a bash subshell when `direnv` isn't
     // installed (direct code-exec), so an `.envrc`-only clone must still be
     // gated. The loader reads `<cwd>/.envrc` directly (NOT a git-root walk), so
     // probe at cwd to match exactly what gets executed.
     if cwd.join(".envrc").is_file() {
         hit!("envrc");
-    }
-    // Project `.claude/settings.json` / `settings.local.json`: the hooks surface
-    // reads these at the git root, but the ENV/permission loaders walk EVERY dir
-    // cwd→repo-root (`collect_project_claude_paths`), so detect along the SAME
-    // walk via the shared reader — else a `.claude` `env` in a SUBDIR (injected
-    // into every spawned subprocess) loads ungated. Subsumes the git-root probe.
-    // Keeps its own `.git`-existence walk (NOT the git2 chain) so detection stays
-    // identical to the loader, which bounds on a bare/empty `.git` too.
-    if crate::permission::claude_settings::project_claude_settings_present(cwd) {
-        hit!("claude");
     }
     // Other project HOOK sources are resolved from the git worktree root only
     // (the chain's `git_root`, the same root hook discovery resolves from via
@@ -374,9 +350,7 @@ fn first_repo_config_kind(cwd: &Path) -> Option<&'static str> {
     // resolve trusted and run ungated. Presence mirrors discovery's "something to
     // gate" check.
     let hook_root = chain.git_root.as_deref().unwrap_or(cwd);
-    if path_present_or_uncertain(&hook_root.join(".grow").join("hooks"))
-        || hook_root.join(".cursor").join("hooks.json").is_file()
-    {
+    if path_present_or_uncertain(&hook_root.join(".grow").join("hooks")) {
         hit!("hooks");
     }
     // Project PLUGIN dirs: project-scoped plugins are unified under folder-trust
@@ -388,53 +362,15 @@ fn first_repo_config_kind(cwd: &Path) -> Option<&'static str> {
     if !agent::plugins::project_plugin_dirs_in(&chain.dirs).is_empty() {
         hit!("plugins");
     }
-    // Project AGENT dirs (`.grow/agents` / `.claude/agents`): a project agent
-    // definition can carry an inline `hooks:` block (repo-controlled code-exec)
-    // AND can SHADOW a built-in subagent by name, so an agents-only clone must
-    // still be gated. Uses the shared SSOT walk (cwd→git root) so detection
-    // can't drift from agent discovery — same pattern as the plugin line above.
+    // Project `.grow/agents` definitions can carry inline hooks and shadow a
+    // built-in subagent, so an agents-only clone must still be gated.
     if !agent::discovery::project_agent_dirs_in(&chain.dirs).is_empty() {
         hit!("agents");
-    }
-    // Presence matches exact-cwd discovery without parsing repository content.
-    let grow = cwd.join(".grow");
-    if directory_present_or_uncertain(&grow.join("roles")) {
-        hit!("roles");
-    }
-    if directory_present_or_uncertain(&grow.join("personas")) {
-        hit!("personas");
     }
     if directory_present_or_uncertain(&hook_root.join(".grow").join("workflows")) {
         hit!("workflows");
     }
-    // `~/.claude.json` `projects.<cwd>.mcpServers`.
-    if claude_project_mcp_present(cwd) {
-        hit!("mcp");
-    }
     None
-}
-
-/// Display names under `~/.claude.json projects.<cwd>.mcpServers`, or `None`
-/// when the file/entry is absent or the object is empty. Single reader that both
-/// [`claude_project_mcp_present`] (existence) and the shell's
-/// `project_scoped_mcp_names` (the names) derive from, so the two never drift.
-pub fn claude_project_mcp_names(cwd: &Path) -> Option<Vec<String>> {
-    let home = dirs::home_dir()?;
-    let content = std::fs::read_to_string(home.join(".claude.json")).ok()?;
-    let value = serde_json::from_str::<serde_json::Value>(&content).ok()?;
-    let cwd_key = cwd.to_string_lossy();
-    let names: Vec<String> = value
-        .get("projects")
-        .and_then(|p| p.get(cwd_key.as_ref()))
-        .and_then(|proj| proj.get("mcpServers"))
-        .and_then(|m| m.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-    (!names.is_empty()).then_some(names)
-}
-
-fn claude_project_mcp_present(cwd: &Path) -> bool {
-    claude_project_mcp_names(cwd).is_some()
 }
 
 fn is_interactive() -> bool {
@@ -452,7 +388,7 @@ pub fn prompt_for_trust(key: &Path) -> bool {
     let _ = writeln!(err);
     let _ = writeln!(
         err,
-        "This folder contains repo-local config (.mcp.json / .grow/lsp.json / hooks) \
+        "This folder contains repo-local config (.grow/config.toml / .grow/lsp.json / hooks) \
          that can run commands on your machine."
     );
     let _ = writeln!(err, "  Folder: {}", key.display());
@@ -478,69 +414,10 @@ mod tests {
             store_trusted: false,
             repo_configs_present: true,
             is_interactive: false,
-            // Default: a normal (recordable) key, so the Case-2 rule doesn't fire
-            // and every `..inputs()` spread exercises the pre-existing precedence.
             key_recordable: true,
         }
     }
 
-    #[test]
-    fn feature_off_is_always_trusted() {
-        // Even with everything pointing to untrusted, feature off => trusted.
-        assert_eq!(decide(false, &inputs()), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn store_trusted_is_trusted() {
-        let i = DecideInputs {
-            store_trusted: true,
-            ..inputs()
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn no_repo_configs_is_trusted_without_prompt() {
-        let i = DecideInputs {
-            repo_configs_present: false,
-            is_interactive: true,
-            ..inputs()
-        };
-        // Nothing to gate => trusted, and crucially NOT Prompt.
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn interactive_with_configs_prompts() {
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Prompt);
-    }
-
-    #[test]
-    fn headless_with_configs_is_untrusted() {
-        assert_eq!(decide(true, &inputs()), TrustOutcome::Untrusted);
-    }
-
-    #[test]
-    fn unrecordable_key_is_trusted_even_with_configs_and_interactive() {
-        // Case 2: cwd == $HOME (or fs-root / non-absolute). The store can't record
-        // such a key, so gating would re-prompt forever — decide() trusts it,
-        // ahead of the repo-configs and interactive rules.
-        let i = DecideInputs {
-            store_trusted: false,
-            repo_configs_present: true,
-            is_interactive: true,
-            key_recordable: false,
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
-    }
-
-    /// A `git init`'d temp dir so `find_mcp_json_files` / `find_project_configs`
-    /// (which discover the enclosing repo and walk to its root) are bounded to
-    /// the temp dir instead of any ancestor repo the system temp dir lives in.
     fn repo_tmp() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         git2::Repository::init(tmp.path()).unwrap();
@@ -548,549 +425,131 @@ mod tests {
     }
 
     #[test]
-    fn repo_configs_present_false_when_empty() {
-        let tmp = repo_tmp();
-        assert!(!repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_mcp_json() {
-        let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".mcp.json"), "{}").unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_config_mcp_servers() {
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(grow.join("config.toml"), "[mcp_servers.x]\ncommand=\"y\"\n").unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_grow_lsp_json() {
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(grow.join("lsp.json"), "{}").unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_cursor_mcp_json() {
-        let tmp = repo_tmp();
-        let cursor = tmp.path().join(".cursor");
-        std::fs::create_dir_all(&cursor).unwrap();
-        std::fs::write(cursor.join("mcp.json"), "{}").unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_envrc() {
-        // An `.envrc`-only clone is auto-sourced in a bash subshell (direct RCE),
-        // so it must resolve untrusted even though it has no MCP/LSP/hook configs.
-        let tmp = repo_tmp();
-        std::fs::write(tmp.path().join(".envrc"), "export FOO=bar\n").unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_agents() {
-        // A `.grow/agents`-only clone must be gated: a project agent definition
-        // can carry an inline `hooks:` block (code-exec) and can shadow a built-in
-        // subagent by name.
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("agents")).unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_claude_agents() {
-        // `.claude/agents` is the vendor-compat project agent dir; same gate.
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".claude").join("agents")).unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_agents_from_subdir() {
-        // Agents live at the git root but the session is launched from a subdir;
-        // detection walks cwd→git root exactly like agent discovery, so it must
-        // still fire (a cwd-only probe would miss it).
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("agents")).unwrap();
-        let subdir = tmp.path().join("crates").join("inner");
-        std::fs::create_dir_all(&subdir).unwrap();
-        assert!(repo_configs_present(&subdir));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_roles() {
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("roles")).unwrap();
-
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_personas() {
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("personas")).unwrap();
-
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn project_subagent_marker_regular_file_is_absent() {
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(grow.join("roles"), "not a directory").unwrap();
-        assert!(!repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn project_subagent_marker_at_repo_root_is_absent_from_subdir() {
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow/roles")).unwrap();
-        let subdir = tmp.path().join("nested");
-        std::fs::create_dir_all(&subdir).unwrap();
-        assert!(!repo_configs_present(&subdir));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_subagent_marker_symlink_to_directory_is_present() {
-        let tmp = repo_tmp();
-        let target = tmp.path().join("target-roles");
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::create_dir_all(&grow).unwrap();
-        std::os::unix::fs::symlink(&target, grow.join("roles")).unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dangling_project_subagent_marker_is_absent() {
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::os::unix::fs::symlink("missing", grow.join("personas")).unwrap();
-        assert!(!repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_workflows_from_subdir() {
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("workflows")).unwrap();
-        let subdir = tmp.path().join("crates").join("inner");
-        std::fs::create_dir_all(&subdir).unwrap();
-        assert!(repo_configs_present(&subdir));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_claude_settings_from_subdir() {
-        // A `.claude/settings.json` `env` in a SUBDIR (no other repo config),
-        // launched from that subdir, must be detected: the env loader walks
-        // cwd→repo-root, so detection walks the same path (a git-root-only probe
-        // would miss it and leave the env injectable ungated).
-        let tmp = repo_tmp();
-        let subdir = tmp.path().join("crates").join("inner");
-        let claude = subdir.join(".claude");
-        std::fs::create_dir_all(&claude).unwrap();
-        std::fs::write(claude.join("settings.json"), r#"{"env":{"X":"1"}}"#).unwrap();
-        assert!(repo_configs_present(&subdir));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_hooks() {
-        // A hooks-only repo (no MCP/LSP configs) must still be gated, so its
-        // project hooks don't run ungated when the folder is untrusted.
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("hooks")).unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_hooks_file() {
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(grow.join("hooks"), "{}").unwrap();
-
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn repo_configs_present_detects_dangling_project_hooks_symlink() {
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::os::unix::fs::symlink("missing-hooks", grow.join("hooks")).unwrap();
-
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_hooks_from_subdir() {
-        // Hooks live at the git root but the session is launched from a subdir;
-        // the gate must still fire because discovery resolves hooks from the root
-        // (the cwd-relative check this regresses would miss it).
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("hooks")).unwrap();
-        let subdir = tmp.path().join("crates").join("inner");
-        std::fs::create_dir_all(&subdir).unwrap();
-        assert!(repo_configs_present(&subdir));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_plugins() {
-        // A plugin-only repo (no MCP/LSP/hooks configs) must still be gated, so a
-        // project plugin's hooks/MCP don't run ungated when the folder is untrusted.
-        let tmp = repo_tmp();
-        std::fs::create_dir_all(tmp.path().join(".grow").join("plugins").join("x")).unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_project_plugins_in_subdir() {
-        // A plugin under a subdir (root otherwise clean), launched from that
-        // subdir, must still be gated: detection walks cwd→git root exactly like
-        // discover_plugins, so a subdir-only plugin is not a fail-open hole.
-        let tmp = repo_tmp();
-        let subdir = tmp.path().join("packages").join("foo");
-        std::fs::create_dir_all(subdir.join(".grow").join("plugins").join("evil")).unwrap();
-        assert!(repo_configs_present(&subdir));
-    }
-
-    #[test]
-    fn repo_configs_present_false_for_empty_mcp_servers_table() {
-        // A project config whose `[mcp_servers]` table is empty has nothing to
-        // gate, so it must not trip the gate.
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(grow.join("config.toml"), "[mcp_servers]\n").unwrap();
-        assert!(!repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_config_plugins_paths() {
-        // A repo whose ONLY repo-local config is `[plugins].paths` (no plugin
-        // dir, no MCP/LSP/hooks) must still be gated: those paths load as
-        // auto-trusted ConfigPath plugins, so an ungated clone is a live RCE.
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(grow.join("config.toml"), "[plugins]\npaths = [\"./x\"]\n").unwrap();
-        assert!(repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_false_for_empty_plugins_paths() {
-        // An empty `[plugins].paths` (or a `[plugins]` table without `paths`)
-        // contributes no plugin code-exec, so it must not trip the gate.
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(grow.join("config.toml"), "[plugins]\npaths = []\n").unwrap();
-        assert!(!repo_configs_present(tmp.path()));
-    }
-
-    #[test]
-    fn repo_configs_present_detects_config_permission() {
-        // A repo whose ONLY repo-local config is a contributing `[permission]`
-        // section (no MCP/plugins/hooks) must still be gated: those allow rules
-        // auto-approve tool calls, so an ungated clone loads the attacker's
-        // policy. Also covers subdir launch (cwd→git-root walk).
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(
-            grow.join("config.toml"),
-            "[permission]\nallow = [\"Bash(*)\"]\n",
-        )
-        .unwrap();
-        assert!(repo_configs_present(tmp.path()));
-        let subdir = tmp.path().join("crates").join("inner");
-        std::fs::create_dir_all(&subdir).unwrap();
-        assert!(
-            repo_configs_present(&subdir),
-            "permission-only config at git root must gate subdir launches"
-        );
-    }
-
-    #[test]
-    fn repo_configs_present_false_for_empty_permission() {
-        // Empty allow/deny/ask arrays contribute no rules, so they must not
-        // trip the gate (mirrors empty `[mcp_servers]` / empty `[plugins].paths`).
-        let tmp = repo_tmp();
-        let grow = tmp.path().join(".grow");
-        std::fs::create_dir_all(&grow).unwrap();
-        std::fs::write(
-            grow.join("config.toml"),
-            "[permission]\nallow = []\ndeny = []\n",
-        )
-        .unwrap();
-        assert!(!repo_configs_present(tmp.path()));
-    }
-
-    // GROW_HOME-isolation idiom mirrored from this crate's `permission::claude_compat`
-    // tests (the workspace crate has no `serial_test`/`test-support`
-    // dev-dep): nextest runs each test in its own process; `ENV_LOCK` serializes
-    // the rare in-process `cargo test` thread, and `EnvVarGuard` restores the prior
-    // value on drop so a panic can't leak state. The lock is crate-shared so it
-    // also serializes against the other env-mutating test modules (e.g. `trust`,
-    // `worktree`) under single-process `cargo test --lib`.
-    use crate::ENV_TEST_LOCK as ENV_LOCK;
-
-    // The crate-shared generic env-var guard (one definition in `lib.rs`),
-    // aliased here so the existing `EnvVarGuard::set/unset` call sites are unchanged.
-    use crate::TestEnvGuard as EnvVarGuard;
-
-    /// Simulate a release-stamped build so store I/O runs (a local/dev build makes
-    /// grant/revoke no-ops). Hold the returned guard for the test body.
-    fn simulate_release_build() -> EnvVarGuard {
-        EnvVarGuard::set(version::TEST_VERSION_ENV, Path::new("0.0.0-sim"))
-    }
-
-    #[test]
-    fn local_build_ignores_remote_rollout() {
-        // A local/dev build never gates (auto-trust): even a remote rollout enable
-        // is ignored, so the feature stays off and resolves Trusted with repo
-        // configs present + interactive. (Env/config isolated to unset so the
-        // remote flag is unambiguously the only enable being dropped here.)
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROW_HOME", home.path());
-        let _flag = EnvVarGuard::unset("GROW_FOLDER_TRUST");
-
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        let feature = feature_enabled_for_build(Some(&remote), true);
-        assert!(!feature);
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
-        };
-        assert_eq!(decide(feature, &i), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn release_build_keeps_gate_when_enabled() {
-        // A release-stamped build (is_local_build=false) honors the remote enable,
-        // keeping today's gate. Isolate config so neither on-disk user/managed
-        // config nor an ambient env flag can override it: empty GROW_HOME (no
-        // config.toml/managed_config.toml) + GROW_FOLDER_TRUST unset. nextest's
-        // process-per-test makes grow_home()'s OnceLock pick up the temp dir.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROW_HOME", home.path());
-        let _flag = EnvVarGuard::unset("GROW_FOLDER_TRUST");
-
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        let feature = feature_enabled_for_build(Some(&remote), false);
-        assert!(feature);
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
-        };
-        assert_eq!(decide(feature, &i), TrustOutcome::Prompt);
-    }
-
-    #[test]
-    fn local_build_ignores_explicit_env_optin() {
-        // Auto-trust is absolute on a local build: even an explicit
-        // GROW_FOLDER_TRUST=1 does NOT enable the feature (so a self-built grow
-        // never prompts). GROW_HOME isolated so on-disk config can't influence it.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROW_HOME", home.path());
-        let _flag = EnvVarGuard::set("GROW_FOLDER_TRUST", Path::new("1"));
-
-        assert!(!feature_enabled_for_build(None, true));
-    }
-
-    #[test]
-    fn release_build_defaults_on() {
-        // A release-stamped build with no env/config/managed/remote signal defaults
-        // the feature ON. Empty GROW_HOME (no config.toml/managed config) +
-        // GROW_FOLDER_TRUST unset so only the default applies.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROW_HOME", home.path());
-        let _flag = EnvVarGuard::unset("GROW_FOLDER_TRUST");
-
-        assert!(feature_enabled_for_build(None, false));
-    }
-
-    #[test]
-    fn is_local_build_honors_test_version_override() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // A pinned GROW_TEST_VERSION simulates a release build => not a local build.
-        {
-            let _sim = EnvVarGuard::set(version::TEST_VERSION_ENV, Path::new("0.0.0-sim"));
-            assert!(!is_local_build());
-        }
-        // With it unset, an unstamped build (no GROW_VERSION) is a local build.
-        // Guard to the unstamped case so a release-stamped test binary (CI release)
-        // doesn't spuriously fail this arm.
-        let _unset = EnvVarGuard::unset(version::TEST_VERSION_ENV);
-        if option_env!("GROW_VERSION").is_none() {
-            assert!(is_local_build());
-        }
-    }
-
-    #[test]
-    fn store_io_is_noop_on_local_build() {
-        // On a local/dev build the whole feature is inert. Both halves pin a guard
-        // via a UNIQUE per-repo key (never store-file existence) so they hold under
-        // single-process `cargo test` too. Assert ONLY when compiled unstamped
-        // (mirrors `is_local_build_honors_test_version_override`); GROW_HOME-isolated
-        // and ENV_LOCK-serialized so toggling GROW_TEST_VERSION is race-safe.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROW_HOME", home.path());
-        let _unset = EnvVarGuard::unset(version::TEST_VERSION_ENV);
-        if option_env!("GROW_VERSION").is_some() {
-            return; // a release-stamped test binary is not a local build
-        }
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-
-        // grant is a no-op: a local-build grant never trusts the fresh key.
-        grant_folder_trust(tmp.path());
-        assert!(
-            !TrustStore::load().is_trusted(&key),
-            "local build: grant_folder_trust must not trust the folder"
-        );
-
-        // Seed a genuinely-trusted folder under a simulated release build (so the
-        // store actually records the grant); the guard drops at block end => local.
-        {
-            let _sim = simulate_release_build();
-            let mut store = TrustStore::load();
-            store.set_trusted(&key).unwrap();
-            assert!(
-                TrustStore::load().is_trusted(&key),
-                "release build: seeding must record the trust grant"
-            );
-        }
-
-        // revoke is a no-op: a local-build revoke returns false AND leaves the grant
-        // intact (without the guard it would `set_untrusted` and return true).
-        assert!(
-            !revoke_folder_trust_store(tmp.path()),
-            "local build: revoke_folder_trust_store must return false"
-        );
-        assert!(
-            TrustStore::load().is_trusted(&key),
-            "local build: revoke_folder_trust_store must not untrust the folder"
-        );
-    }
-
-    #[test]
-    fn revoke_folder_trust_store_persists_untrust_for_trusted_folder() {
-        // The store half of revoke, tested directly (not just via the shell
-        // wrapper): a previously-trusted folder reports was_trusted=true AND gets
-        // an explicit `set_untrusted` persisted, so it is untrusted on reload.
-        // GROW_HOME-isolated so the seed/deny hit a temp store, not the real file.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set("GROW_HOME", home.path());
-        let _sim = simulate_release_build();
-        let tmp = repo_tmp();
-        let key = workspace_key(tmp.path());
-
-        let mut store = TrustStore::load();
-        store.set_trusted(&key).unwrap();
-        assert!(TrustStore::load().is_trusted(&key));
-
-        assert!(
-            revoke_folder_trust_store(tmp.path()),
-            "a trusted folder must report was_trusted=true"
-        );
-        assert!(
-            !TrustStore::load().is_trusted(&key),
-            "store-only revoke must persist set_untrusted for a trusted folder"
-        );
-    }
-
-    #[test]
-    fn revoke_folder_trust_store_writes_no_deny_for_never_trusted_folder() {
-        // The cascade-poisoning guard: revoking a NEVER-trusted child returns
-        // false and writes NO explicit child deny, so a later ancestor grant still
-        // cascades to the child (a spurious child `set_untrusted` would win
-        // most-specific and break the cascade). This store half does NOT touch the
-        // `DECISIONS` cache — that downgrade is the shell wrapper's job.
-        // GROW_HOME-isolated so the grant writes to a temp store.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set("GROW_HOME", home.path());
-        let _sim = simulate_release_build();
-        // Distinct git roots so `workspace_key` keeps parent/child as separate
-        // keys (the child's own `.git` stops discovery at the child).
-        let parent = repo_tmp();
-        let child = parent.path().join("child");
-        std::fs::create_dir_all(&child).unwrap();
-        git2::Repository::init(&child).unwrap();
-
-        assert!(
-            !revoke_folder_trust_store(&child),
-            "revoking a never-trusted folder must return false"
-        );
-
-        // No child deny was written, so an ancestor grant still cascades down.
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(parent.path())).unwrap();
-        assert!(
-            TrustStore::load().is_trusted(&workspace_key(&child)),
-            "ancestor grant must cascade to a child revoked-while-untrusted (no poisoning deny)"
-        );
-    }
-
-    #[test]
-    fn decide_inputs_flags_home_key_unrecordable() {
-        // Case-2 wiring: with cwd == $HOME (git-init'd so workspace_key discovers
-        // it as the home git root), the gather flags key_recordable=false and
-        // decide() trusts it despite configs + interactive. $HOME is overridden so
-        // dirs::home_dir()/workspace_key see the tempdir as home.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("HOME", home.path());
-        git2::Repository::init(home.path()).unwrap();
-
-        let home_key = crate::trust::workspace_key(home.path());
-        let home_inputs = decide_inputs_with_interactive(home.path(), &home_key, true);
-        assert!(
-            !home_inputs.key_recordable,
-            "cwd == $HOME must gather key_recordable=false"
+    fn trust_precedence_is_explicit() {
+        assert_eq!(decide(false, &inputs()), TrustOutcome::Trusted);
+        assert_eq!(
+            decide(
+                true,
+                &DecideInputs {
+                    store_trusted: true,
+                    ..inputs()
+                },
+            ),
+            TrustOutcome::Trusted,
         );
         assert_eq!(
-            decide(true, &home_inputs),
+            decide(
+                true,
+                &DecideInputs {
+                    key_recordable: false,
+                    ..inputs()
+                },
+            ),
             TrustOutcome::Trusted,
-            "an unrecordable home key resolves Trusted (no prompt, no gate)"
         );
+        assert_eq!(
+            decide(
+                true,
+                &DecideInputs {
+                    repo_configs_present: false,
+                    ..inputs()
+                },
+            ),
+            TrustOutcome::Trusted,
+        );
+        assert_eq!(
+            decide(
+                true,
+                &DecideInputs {
+                    is_interactive: true,
+                    ..inputs()
+                },
+            ),
+            TrustOutcome::Prompt,
+        );
+        assert_eq!(decide(true, &inputs()), TrustOutcome::Untrusted);
+    }
 
-        // A non-home repo subdir key is recordable — the Case-2 rule can't
-        // over-trigger for a real fetched repo.
-        let repo = repo_tmp();
-        let subdir = repo.path().join("pkg");
-        std::fs::create_dir_all(&subdir).unwrap();
-        let repo_key = crate::trust::workspace_key(&subdir);
-        let repo_inputs = decide_inputs_with_interactive(&subdir, &repo_key, true);
-        assert!(
-            repo_inputs.key_recordable,
-            "a non-home repo key must gather key_recordable=true"
-        );
+    #[test]
+    fn empty_repository_has_no_trust_sensitive_config() {
+        let tmp = repo_tmp();
+        assert!(!repo_configs_present(tmp.path()));
+    }
+
+    #[test]
+    fn canonical_config_surfaces_are_detected() {
+        for body in [
+            "[mcp_servers.local]\ncommand = \"server\"\n",
+            "[plugins]\npaths = [\"./plugin\"]\n",
+            "[permission]\nallow = [\"Bash(*)\"]\n",
+        ] {
+            let tmp = repo_tmp();
+            let grow = tmp.path().join(".grow");
+            std::fs::create_dir_all(&grow).unwrap();
+            std::fs::write(grow.join("config.toml"), body).unwrap();
+            assert!(repo_configs_present(tmp.path()), "{body}");
+        }
+    }
+
+    #[test]
+    fn empty_canonical_tables_do_not_trigger_trust() {
+        for body in [
+            "[mcp_servers]\n",
+            "[plugins]\npaths = []\n",
+            "[permission]\nallow = []\ndeny = []\nask = []\n",
+        ] {
+            let tmp = repo_tmp();
+            let grow = tmp.path().join(".grow");
+            std::fs::create_dir_all(&grow).unwrap();
+            std::fs::write(grow.join("config.toml"), body).unwrap();
+            assert!(!repo_configs_present(tmp.path()), "{body}");
+        }
+    }
+
+    #[test]
+    fn canonical_executable_surfaces_are_detected_from_subdirectories() {
+        for relative in [
+            ".grow/hooks",
+            ".grow/workflows",
+            ".grow/plugins/local",
+            ".grow/agents",
+        ] {
+            let tmp = repo_tmp();
+            std::fs::create_dir_all(tmp.path().join(relative)).unwrap();
+            let child = tmp.path().join("src").join("nested");
+            std::fs::create_dir_all(&child).unwrap();
+            assert!(repo_configs_present(&child), "{relative}");
+        }
+    }
+
+    #[test]
+    fn cwd_scoped_envrc_and_lsp_are_detected() {
+        let env_repo = repo_tmp();
+        std::fs::write(env_repo.path().join(".envrc"), "export X=1\n").unwrap();
+        assert!(repo_configs_present(env_repo.path()));
+
+        let lsp_repo = repo_tmp();
+        let grow = lsp_repo.path().join(".grow");
+        std::fs::create_dir_all(&grow).unwrap();
+        std::fs::write(grow.join("lsp.json"), "{}").unwrap();
+        assert!(repo_configs_present(lsp_repo.path()));
+    }
+
+    #[test]
+    fn foreign_configuration_files_are_ignored() {
+        let tmp = repo_tmp();
+        for relative in [
+            ".mcp.json",
+            ".cursor/mcp.json",
+            ".cursor/hooks.json",
+            ".claude/settings.json",
+            ".claude/agents/example.md",
+            ".other-agent/config.json",
+        ] {
+            let path = tmp.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}").unwrap();
+        }
+        assert!(!repo_configs_present(tmp.path()));
     }
 }

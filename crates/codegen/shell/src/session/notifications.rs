@@ -15,6 +15,7 @@ use crate::session::storage::SessionUpdate;
 
 /// Transport layer for delivering session notifications to the client
 /// and persistence layer.
+#[derive(Clone)]
 pub struct NotificationSender {
     /// Gateway handle for forwarding notifications to the client.
     pub gateway: GatewaySender,
@@ -52,5 +53,31 @@ impl NotificationSender {
                 ))
             })?
             .map_err(Into::into)
+    }
+
+    /// Append one immutable sideband fact and wait for its fsync boundary.
+    pub async fn append_sideband_event_durably(
+        &self,
+        event: chat_state::SidebandEvent,
+    ) -> Result<(), crate::session::persistence::DurableAppendError> {
+        use crate::session::persistence::DurableAppendError;
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        self.persistence_tx
+            .send(PersistenceMsg::SidebandDurablyAndAck { event, respond_to })
+            .map_err(|_| {
+                DurableAppendError::NotCommitted(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session persistence actor stopped before sideband append",
+                ))
+            })?;
+        response
+            .await
+            .map_err(|_| {
+                DurableAppendError::AcknowledgementLost(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session persistence actor dropped sideband acknowledgement",
+                ))
+            })?
+            .map_err(DurableAppendError::NotCommitted)
     }
 }

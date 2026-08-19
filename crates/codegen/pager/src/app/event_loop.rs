@@ -93,11 +93,6 @@ struct AgentLoadOutcome {
     success: bool,
     /// Structured regular foreground owner from the reload response.
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
-    /// `grow/schedulerBackgroundLoops` from the reload response. A reconnect
-    /// re-spawns the session actor, which re-pins the fire mode, so the
-    /// pre-reconnect value can be stale — adopt the reloaded one or `/loop`
-    /// describes a runtime the new actor will not use.
-    scheduler_background_loops: Option<bool>,
 }
 
 /// Fields of the reconnect `session/load`, derived from the agent being
@@ -108,7 +103,7 @@ struct ReconnectLoadPlan {
     /// pager cwd only when unset. The pager cwd only matches sessions started
     /// in it; worktree/cross-cwd sessions would fail to reload.
     cwd: std::path::PathBuf,
-    /// `yoloMode` plus the optional reconnect `cursor`: the agent replays
+    /// Canonical `permissionMode` plus the optional reconnect `cursor`: the agent replays
     /// only the post-cursor tail (as live updates) when it finds the eventId,
     /// and full-replays when it doesn't.
     meta: serde_json::Value,
@@ -133,15 +128,16 @@ fn plan_reconnect_load(
     } else {
         agent.session.cwd.clone()
     };
-    let yolo = agent.session.is_yolo();
-    // Set BOTH yoloMode and autoMode explicitly. The leader's capability injection
-    // only fills ABSENT keys, so omitting autoMode here lets a stale launch-time
-    // `ClientCapabilities.auto_mode` re-enable Auto after the user left it (e.g.
-    // switching to Ask). Auto is per-agent (symmetric with yolo) — derive it from
-    // this agent's own `auto_mode` so a background tab reconnects with ITS mode,
-    // not the active tab's global `current_ui` mirror.
-    let auto = super::dispatch::effective_auto(yolo, agent.session.is_auto());
-    let mut meta = serde_json::json!({ "yoloMode": yolo, "autoMode": auto });
+    let mode = if agent.session.is_always_approve() {
+        shell::util::config::PermissionMode::AlwaysApprove
+    } else if agent.session.is_auto() {
+        shell::util::config::PermissionMode::Auto
+    } else {
+        shell::util::config::PermissionMode::Ask
+    };
+    let mut meta = serde_json::json!({
+        "permissionMode": shell::util::config::permission_mode_canonical_str(mode),
+    });
     if let Some(ref cursor) = agent.last_seen_event_id {
         meta["cursor"] = serde_json::Value::String(cursor.clone());
     }
@@ -171,11 +167,7 @@ fn reconnect_restore_outcome(
     pending_agent_ids: &[super::agent::AgentId],
     loads: &std::collections::HashMap<
         super::agent::AgentId,
-        (
-            bool,
-            Option<crate::app::prompt_queue::ForegroundSnapshot>,
-            Option<bool>,
-        ),
+        (bool, Option<crate::app::prompt_queue::ForegroundSnapshot>),
     >,
     active_agent_id: Option<super::agent::AgentId>,
 ) -> (bool, bool) {
@@ -780,20 +772,14 @@ pub(crate) async fn run(
     let remote_permission_mode = remote_settings
         .as_ref()
         .and_then(|s| s.permission_mode.as_deref());
-    let launch_yolo = shell::util::config::effective_yolo_for_launch(
-        args.yolo,
+    let launch_permission = shell::util::config::effective_permission_mode_for_launch(
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
-    app.default_yolo = launch_yolo.yolo;
-    // Gated launch-auto (CLI `--permission-mode auto` or config). Hoisted so it can
-    // be re-applied after `load_initial_ui_config()` replaces `current_ui` below.
-    let launch_auto = shell::util::config::effective_auto_for_launch(
-        args.yolo,
-        args.permission_mode_flag.as_deref(),
-        remote_permission_mode,
-    );
-    if launch_auto {
+    app.default_permission_mode = launch_permission.mode;
+    // Hoisted so it can be re-applied after `load_initial_ui_config()` replaces
+    // `current_ui` below.
+    if launch_permission.mode.is_auto() {
         app.current_ui.permission_mode = Some("auto".into());
     }
     // One effective-config read for launch-mode ownership + the display
@@ -803,7 +789,7 @@ pub(crate) async fn run(
         .and_then(|root| root.get("ui").cloned());
     // Soft-default owns the mode only when neither CLI nor effective TOML
     // claimed it; while owned, `settings/update` pushes may re-arm it.
-    let cli_owns_mode = args.yolo || args.permission_mode_flag.is_some();
+    let cli_owns_mode = args.permission_mode_flag.is_some();
     let toml_owns_mode = launch_effective_ui
         .as_ref()
         .and_then(shell::util::config::permission_mode_from_ui_if_set)
@@ -811,13 +797,13 @@ pub(crate) async fn run(
     app.permission_mode_from_soft_default = !cli_owns_mode && !toml_owns_mode;
     // Cached pin snapshot gating dispatch's runtime always-approve toggles. A
     // mid-session pin change is missed here, but only cosmetically: the agent's
-    // permission manager re-clamps yolo authoritatively at decision time.
-    app.yolo_policy_block = launch_yolo.policy_block;
-    if let Some(warning) = launch_yolo.blocked_warning {
+    // permission manager re-clamps always-approve authoritatively at decision time.
+    app.always_approve_policy_block = launch_permission.policy_block;
+    if let Some(warning) = launch_permission.blocked_warning {
         tracing::warn!("{warning}");
         crate::unified_log::warn(warning, None, None);
         // Consumed by `switch_to_agent` once the first agent view opens.
-        app.yolo_launch_block_notice = Some(warning);
+        app.always_approve_launch_block_notice = Some(warning);
     }
     app.require_plan_approval = shell::util::config::load_require_plan_approval();
     app.plan_mode = !args.no_plan;
@@ -932,27 +918,6 @@ pub(crate) async fn run(
         )
         .value,
     );
-    crate::appearance::cache::set_collapsed_edit_blocks(
-        shell::util::config::resolve_collapsed_edit_blocks(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
-            remote_settings.as_ref(),
-        )
-        .value,
-    );
-
-    // Pre-arrival seed only. The authoritative per-session value rides the
-    // `session/new` / `session/load` response, but `/loop` can be reached from
-    // the session-less dashboard and from a session whose response has not
-    // landed yet; both need an answer now, and this is the same resolver the
-    // shell runs at spawn, so the seed agrees with the flag as it stands today.
-    app.scheduler_background_loops_seed = shell::util::config::resolve_scheduler_background_loops(
-        remote_settings
-            .as_ref()
-            .and_then(|s| s.scheduler_background_loops),
-    );
-
     {
         use shell::util::config::{
             resolve_announcements, resolve_slash_command_tags, resolve_tips,
@@ -1126,22 +1091,7 @@ pub(crate) async fn run(
     // cannot win over `--permission-mode ask`, and a policy-clamped remote
     // AlwaysApprove cannot leave the UI claiming AlwaysApprove while
     // enforcement is Ask.
-    let display_mode: &'static str = if launch_auto {
-        "auto"
-    } else if launch_yolo.yolo {
-        "always-approve"
-    } else if let Some(cli) = args.permission_mode_flag.as_deref() {
-        // CLI always-approve/auto that did not become launch_yolo/launch_auto
-        // (policy pin / gate) display as Ask.
-        shell::util::config::clamped_display_permission_mode(
-            shell::util::config::parse_permission_mode_canonical(cli),
-        )
-    } else {
-        shell::util::config::resolved_display_permission_mode(
-            launch_effective_ui.as_ref(),
-            remote_permission_mode,
-        )
-    };
+    let display_mode = shell::util::config::permission_mode_canonical_str(launch_permission.mode);
     app.current_ui.permission_mode = Some(display_mode.to_string());
     super::dispatch::downgrade_displayed_auto_if_gated(&mut app);
     // Seed `/auto` feature-gate visibility from the resolved gate (so `/auto`
@@ -2148,18 +2098,18 @@ pub(crate) async fn run(
                             let Some(plan) = plan_reconnect_load(agent, &fallback_cwd) else {
                                 continue;
                             };
-                            // Keep the per-session display flag in lockstep with the
-                            // enforcement value (`autoMode`) we just re-seeded on this
-                            // agent (yolo wins, computed inside `plan_reconnect_load`).
-                            agent.session.auto_mode =
-                                plan.meta["autoMode"].as_bool().unwrap_or(false);
+                            let permission_mode = plan.meta["permissionMode"]
+                                .as_str()
+                                .map(shell::util::config::parse_permission_mode_canonical)
+                                .unwrap_or(shell::util::config::PermissionMode::Ask);
+                            agent.session.permission_mode = permission_mode;
                             agent.begin_session_reload(generation);
                             reload_agent_ids.push(id);
                             load_plans.push((id, plan));
                         }
                         let any_reload = !reload_agent_ids.is_empty();
-                        // Per-agent `auto_mode` was just re-seeded from the reload
-                        // meta; keep `/auto` feature-gate slash visibility in sync.
+                        // Per-agent mode was re-seeded from reload metadata; keep
+                        // `/auto` feature-gate slash visibility in sync.
                         app.sync_permission_mode_slash_gate();
 
                         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -2199,12 +2149,8 @@ pub(crate) async fn run(
 
                                 let mut loads = Vec::with_capacity(load_plans.len());
                                 for (agent_id, plan) in load_plans {
-                                    // Reconnect path — no resolved compat in scope; default
-                                    // (all-on) preserves existing behavior.
-                                    let mcp_servers = shell::util::config::load_mcp_servers(
-                                        &plan.cwd,
-                                        &tools::types::compat::CompatConfig::default(),
-                                    );
+                                    let mcp_servers =
+                                        shell::util::config::load_mcp_servers(&plan.cwd);
                                     let load_req = acp::LoadSessionRequest::new(plan.session_id, plan.cwd).mcp_servers(mcp_servers).meta(plan.meta.as_object().cloned());
                                     match acp_send(load_req, &acp_tx).await {
                                         Ok(resp) => {
@@ -2213,10 +2159,6 @@ pub(crate) async fn run(
                                                 success: true,
                                                 foreground:
                                                     effects::parse_session_load_foreground(
-                                                        resp.meta.as_ref(),
-                                                    ),
-                                                scheduler_background_loops:
-                                                    effects::parse_session_scheduler_background_loops(
                                                         resp.meta.as_ref(),
                                                     ),
                                             });
@@ -2229,7 +2171,6 @@ pub(crate) async fn run(
                                                 agent_id,
                                                 success: false,
                                                 foreground: None,
-                                                scheduler_background_loops: None,
                                             });
                                         }
                                     }
@@ -2308,7 +2249,7 @@ pub(crate) async fn run(
                     .map(|l| {
                         (
                             l.agent_id,
-                            (l.success, l.foreground, l.scheduler_background_loops),
+                            (l.success, l.foreground),
                         )
                     })
                     .collect();
@@ -2326,14 +2267,8 @@ pub(crate) async fn run(
                 );
                 restore_dashboard_peek_before_reload(&mut app.dashboard, &mut app.agents);
                 for id in &pending.agent_ids {
-                    let (ok, foreground, scheduler_background_loops) =
-                        loads.remove(id).unwrap_or((false, None, None));
+                    let (ok, foreground) = loads.remove(id).unwrap_or((false, None));
                     if let Some(agent) = app.agents.get_mut(id) {
-                        // The reloaded actor re-pinned the fire mode; a failed
-                        // load leaves the previous value rather than guessing.
-                        if let Some(mode) = scheduler_background_loops {
-                            agent.scheduler_background_loops = Some(mode);
-                        }
                         agent.finalize_reload_and_maybe_adopt(
                             pending.generation,
                             ok,
@@ -3156,11 +3091,7 @@ fn process_effects(
         ask_user: app.ask_user,
         restore_code: app.restore_code,
         agent_override: app.agent_override.clone(),
-        yolo_mode: app.default_yolo,
-        auto_mode: super::dispatch::effective_auto(
-            app.default_yolo,
-            matches!(app.current_ui.permission_mode.as_deref(), Some("auto")),
-        ),
+        permission_mode: super::dispatch::inherit_permission_mode(app),
         screen_mode_label: Some(app.screen_mode.meta_label()),
         resume_local_miss: app.resume_local_miss.clone(),
     };
@@ -3256,66 +3187,65 @@ mod tests {
         assert_eq!(plan.cwd, std::path::PathBuf::from("/pager/cwd"));
     }
 
-    /// The reconnect cursor rides `_meta.cursor` when known; yolo mode
-    /// always rides `_meta.yoloMode`. Auto rides `_meta.autoMode` per-agent.
+    /// The reconnect cursor rides `_meta.cursor` when known and the session's
+    /// canonical permission mode always rides `_meta.permissionMode`.
     #[test]
-    fn plan_reconnect_load_meta_carries_cursor_and_yolo() {
+    fn plan_reconnect_load_meta_carries_cursor_and_permission_mode() {
         let mut agent = crate::test_util::make_agent_view(Some("sess-1"), "/work");
         let plan = plan_reconnect_load(&agent, std::path::Path::new("/pager/cwd")).unwrap();
-        assert_eq!(plan.meta["yoloMode"], serde_json::json!(false));
+        assert_eq!(plan.meta["permissionMode"], serde_json::json!("ask"));
         assert!(
             plan.meta.get("cursor").is_none(),
             "no cursor key before any event was applied"
         );
-        // autoMode is always set explicitly (false when not in auto) so the leader's
-        // capability injection can't re-enable Auto on reconnect.
-        assert_eq!(plan.meta["autoMode"], serde_json::json!(false));
-
         agent.last_seen_event_id = Some("sess-1-42".into());
-        agent.session.yolo_mode = true;
+        agent.session.permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
         let plan = plan_reconnect_load(&agent, std::path::Path::new("/pager/cwd")).unwrap();
-        assert_eq!(plan.meta["yoloMode"], serde_json::json!(true));
+        assert_eq!(
+            plan.meta["permissionMode"],
+            serde_json::json!("always-approve")
+        );
         assert_eq!(plan.meta["cursor"], serde_json::json!("sess-1-42"));
     }
 
     #[test]
-    fn plan_reconnect_load_meta_carries_auto_mode_from_session() {
-        // Auto rides `_meta.autoMode`, derived from THIS agent's own
-        // `auto_mode` (per-agent, symmetric with yolo) — not the global UI mirror.
+    fn plan_reconnect_load_meta_carries_auto_from_session() {
         let mut agent = crate::test_util::make_agent_view(Some("sess-1"), "/work");
-        agent.session.auto_mode = true;
+        agent.session.permission_mode = shell::util::config::PermissionMode::Auto;
         let plan = plan_reconnect_load(&agent, std::path::Path::new("/pager/cwd")).unwrap();
-        assert_eq!(plan.meta["yoloMode"], serde_json::json!(false));
-        assert_eq!(plan.meta["autoMode"], serde_json::json!(true));
+        assert_eq!(plan.meta["permissionMode"], serde_json::json!("auto"));
 
-        // Yolo wins: autoMode is explicitly false even if the session is in auto.
+        // AlwaysApprove wins if stale UI projections disagree.
         let mut agent = crate::test_util::make_agent_view(Some("sess-1"), "/work");
-        agent.session.auto_mode = true;
-        agent.session.yolo_mode = true;
+        agent.session.permission_mode = shell::util::config::PermissionMode::AlwaysApprove;
         let plan = plan_reconnect_load(&agent, std::path::Path::new("/pager/cwd")).unwrap();
-        assert_eq!(plan.meta["yoloMode"], serde_json::json!(true));
-        assert_eq!(plan.meta["autoMode"], serde_json::json!(false));
+        assert_eq!(
+            plan.meta["permissionMode"],
+            serde_json::json!("always-approve")
+        );
     }
 
-    /// Multi-agent reconnect must seed each tab's `autoMode` from ITS OWN
-    /// session, not a shared global mirror: an active Auto tab and a background
-    /// Ask tab reconnect with `autoMode:true` and `autoMode:false` respectively.
+    /// Multi-agent reconnect must seed each tab's mode from its own session,
+    /// not a shared global mirror.
     #[test]
     fn plan_reconnect_load_multi_agent_uses_per_agent_auto() {
         let mut active = crate::test_util::make_agent_view(Some("sess-active"), "/work");
-        active.session.auto_mode = true;
+        active.session.permission_mode = shell::util::config::PermissionMode::Auto;
         let background = crate::test_util::make_agent_view(Some("sess-bg"), "/work");
-        // background.session.auto_mode stays false (Ask).
+        // Background session stays Ask.
 
         let active_plan = plan_reconnect_load(&active, std::path::Path::new("/pager/cwd")).unwrap();
         let background_plan =
             plan_reconnect_load(&background, std::path::Path::new("/pager/cwd")).unwrap();
 
-        assert_eq!(active_plan.meta["autoMode"], serde_json::json!(true));
         assert_eq!(
-            background_plan.meta["autoMode"],
-            serde_json::json!(false),
-            "background Ask tab must reconnect with autoMode:false regardless of the active tab"
+            active_plan.meta["permissionMode"],
+            serde_json::json!("auto")
+        );
+        assert_eq!(
+            background_plan.meta["permissionMode"],
+            serde_json::json!("ask"),
+            "background Ask tab must reconnect independently of the active tab"
         );
     }
 
@@ -3362,8 +3292,8 @@ mod tests {
         let active = AgentId(0);
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (true, None, None));
-        loads.insert(background, (false, None, None));
+        loads.insert(active, (true, None));
+        loads.insert(background, (false, None));
         let pending = vec![active, background];
 
         let (all_restored, active_restored) =
@@ -3386,8 +3316,8 @@ mod tests {
         let active = AgentId(0);
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (false, None, None));
-        loads.insert(background, (true, None, None));
+        loads.insert(active, (false, None));
+        loads.insert(background, (true, None));
         let pending = vec![active, background];
 
         let (all_restored, active_restored) =
@@ -3406,7 +3336,7 @@ mod tests {
         use super::super::agent::AgentId;
         let active = AgentId(0);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(active, (true, None, None));
+        loads.insert(active, (true, None));
         let pending = vec![active];
 
         let (all_restored, active_restored) =
@@ -3436,7 +3366,7 @@ mod tests {
         use super::super::agent::AgentId;
         let background = AgentId(1);
         let mut loads = std::collections::HashMap::new();
-        loads.insert(background, (true, None, None));
+        loads.insert(background, (true, None));
         let pending = vec![background];
 
         let (all_restored, active_restored) =

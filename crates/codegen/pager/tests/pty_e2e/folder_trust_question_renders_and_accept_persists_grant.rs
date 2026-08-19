@@ -3,7 +3,7 @@
 use super::common::*;
 
 /// 13. **Folder-trust question renders + accept persists the grant.**
-/// Feature on + an untrusted git repo with `.mcp.json` + empty store => the
+/// Feature on + an untrusted git repo with project MCP config + empty store => the
 /// trust question renders BEFORE any session. Pressing `y` writes the grant to
 /// `trusted_folders.toml` and lets the session proceed (prompt streams back).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11,7 +11,7 @@ use super::common::*;
 async fn folder_trust_question_renders_and_accept_persists_grant() {
     let content = ContentController::start().await.expect("start content");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} trusted and running."));
-    let repo = git_repo_with_mcp_json();
+    let repo = git_repo_with_project_mcp();
     let env_refs = trust_env(true);
     let cwd = repo.path().to_str().expect("utf8 repo path");
 

@@ -13,9 +13,9 @@ pub enum ConfigSource {
     Bundled { path: PathBuf },
     /// Server-synced (e.g. ~/.grow/server-skills from the skill store).
     Server { path: PathBuf },
-    /// Project-scoped: cwd/.grow/ or cwd/.claude/.
+    /// Project-scoped: cwd/.grow/.
     Project { path: PathBuf },
-    /// User-scoped: ~/.grow/ or ~/.claude/.
+    /// User-scoped: ~/.grow/.
     User { path: PathBuf },
     /// Plugin-provided component.
     Plugin { plugin_name: String, path: PathBuf },
@@ -23,10 +23,6 @@ pub enum ConfigSource {
     /// domain-specific: the declaring config.toml for MCP servers, the
     /// skill's own SKILL.md for `[skills].paths` skills.
     ConfigToml { path: PathBuf },
-    /// `~/.claude.json` MCP servers.
-    ClaudeJson { path: PathBuf },
-    /// `.mcp.json` project-level MCP config.
-    McpJson { path: PathBuf },
     /// CLI override (`--plugin-dir`, `--mcp-server`).
     Cli { path: PathBuf },
     /// Managed (server-managed / IT-deployed).
@@ -47,8 +43,6 @@ impl ConfigSource {
             Self::User { path } => format!("user: {}", path.display()),
             Self::Plugin { plugin_name, .. } => format!("plugin: {plugin_name}"),
             Self::ConfigToml { path } => format!("config: {}", path.display()),
-            Self::ClaudeJson { .. } => "~/.claude.json".into(),
-            Self::McpJson { path } => format!(".mcp.json: {}", path.display()),
             Self::Cli { .. } => "cli".into(),
             Self::Managed { .. } => "managed".into(),
         }
@@ -64,8 +58,6 @@ impl ConfigSource {
             Self::User { .. } => "user".into(),
             Self::Plugin { plugin_name, .. } => format!("plugin: {plugin_name}"),
             Self::ConfigToml { .. } => "config".into(),
-            Self::ClaudeJson { .. } => "~/.claude.json".into(),
-            Self::McpJson { .. } => ".mcp.json".into(),
             Self::Cli { .. } => "cli".into(),
             Self::Managed { .. } => "managed".into(),
         }
@@ -89,8 +81,6 @@ impl ConfigSource {
             | Self::User { path }
             | Self::Plugin { path, .. }
             | Self::ConfigToml { path }
-            | Self::ClaudeJson { path }
-            | Self::McpJson { path }
             | Self::Cli { path } => Some(path),
             Self::Managed { path } => path.as_deref(),
         }

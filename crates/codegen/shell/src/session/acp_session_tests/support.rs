@@ -19,19 +19,25 @@ pub(crate) const PLAN_SEED_TODOS_PHRASE: &str =
 /// explicitly. The first durable tool append then acts as the FIFO barrier for
 /// these buffered start events.
 #[cfg(test)]
-pub(crate) fn begin_test_causal_turn(actor: &SessionActor) {
+pub(crate) async fn begin_test_causal_turn(actor: &SessionActor) {
     actor.events.begin_turn();
     actor
         .events
-        .emit(crate::session::events::Event::TurnStarted {
+        .start_turn(crate::session::events::Event::TurnStarted {
             session_id: actor.session_id_string(),
             turn_number: 1,
-            origin: "test".into(),
+            identity: chat_state::TurnIdentity {
+                origin: "test".into(),
+                turn_kind: "internal".into(),
+                goal_id: None,
+                stage_id: None,
+            },
             model_id: "test".into(),
-            yolo_mode: actor.permissions.is_yolo_mode(),
+            permission_mode: actor.permissions.mode(),
             conversation_message_count: 0,
             prompt_index: Some(0),
             prompt_text: Some("test prompt".into()),
+            input_kind: chat_state::TurnInputKind::Prompt,
             session_relationship: if actor.startup_hints.is_subagent {
                 crate::session::events::SessionRelationship::Subagent
             } else {
@@ -39,10 +45,85 @@ pub(crate) fn begin_test_causal_turn(actor: &SessionActor) {
             },
             schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
             redirect_kind: None,
-        });
+        })
+        .await
+        .unwrap();
     actor
         .events
         .emit(crate::session::events::Event::LoopStarted { loop_index: 0 });
+}
+
+/// Seed a test Surface and its branch-local prompt coordinates through the
+/// same Timeline mechanisms used by production. Snapshots are read models and
+/// must never be used to install actor state.
+#[cfg(test)]
+pub(crate) async fn replace_test_surface(
+    handle: &chat_state::ChatStateHandle,
+    conversation: Vec<crate::sampling::ConversationItem>,
+) {
+    let (_, source_surface_revision) = handle
+        .get_conversation_with_revision()
+        .await
+        .expect("test chat-state actor must be live");
+    handle
+        .replace_context_durably(conversation, source_surface_revision)
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+pub(crate) async fn seed_test_timeline(
+    actor: &SessionActor,
+    conversation: Vec<crate::sampling::ConversationItem>,
+    prompt_texts: &[&str],
+) {
+    replace_test_surface(&actor.chat_state_handle, conversation).await;
+    for prompt_text in prompt_texts {
+        record_test_prompt(actor, prompt_text).await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn record_test_prompt(actor: &SessionActor, prompt_text: &str) {
+    static NEXT_TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(10_000);
+    let prompt_index = actor.chat_state_handle.get_prompt_index().await;
+    let id = chat_state::TurnId(NEXT_TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    actor
+        .chat_state_handle
+        .record_timeline_event(chat_state::TimelineEventKind::Turn(
+            chat_state::TurnEvent::Started {
+                id,
+                identity: chat_state::TurnIdentity {
+                    origin: "test".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    stage_id: None,
+                },
+                model_id: "test".into(),
+                input_message_count: 0,
+                prompt_index,
+                prompt_text: prompt_text.into(),
+                input_kind: chat_state::TurnInputKind::Prompt,
+                redirect_kind: None,
+            },
+        ));
+    actor
+        .chat_state_handle
+        .record_timeline_event(chat_state::TimelineEventKind::Turn(
+            chat_state::TurnEvent::Ended {
+                id,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: chat_state::TurnTerminal {
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "completed".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            },
+        ));
+    let _ = actor.chat_state_handle.get_prompt_index().await;
 }
 #[cfg(test)]
 pub(crate) async fn test_agent_default() -> agent::Agent {
@@ -69,27 +150,8 @@ pub(crate) async fn test_agent_with_tools(
     tools: Vec<tools::registry::types::ToolConfig>,
 ) -> agent::Agent {
     test_agent_from_config(
-        tools::registry::types::ToolServerConfig {
-            tools,
-            behavior_preset: None,
-        },
+        tools::registry::types::ToolServerConfig { tools },
         agent::AgentDefinition::default_grow_build(),
-        std::sync::Arc::new(tools::computer::local::LocalTerminalBackend::new()),
-    )
-    .await
-}
-#[cfg(test)]
-pub(crate) async fn test_agent_with_user_message_template(
-    template: agent::prompt::user_message::UserMessageTemplate,
-) -> agent::Agent {
-    let mut definition = agent::AgentDefinition::default_grow_build();
-    definition.user_message_template = template;
-    test_agent_from_config(
-        tools::registry::types::ToolServerConfig {
-            tools: vec![],
-            behavior_preset: None,
-        },
-        definition,
         std::sync::Arc::new(tools::computer::local::LocalTerminalBackend::new()),
     )
     .await
@@ -104,16 +166,16 @@ async fn test_agent_from_config(
     use tools::computer::types::AsyncFileSystem;
     use tools::notification::ToolNotificationHandle;
     use tools::registry::types::SessionContext;
-    let builder = crate::tools::bridge::ToolBridge::get_builder();
+    let builder = tools::bridge::ToolBridge::get_builder();
     let fs: std::sync::Arc<dyn AsyncFileSystem> = std::sync::Arc::new(LocalFs);
     // Every actor owns an independent persistence path. A shared
-    // `/tmp/tool_state.json` lets parallel tests rename/remove one another's
+    // A shared resources-state path lets parallel tests rename/remove one another's
     // durable snapshot and turns a real persistence acknowledgement into a
     // nondeterministic ENOENT.
     let state_root =
         std::env::temp_dir().join(format!("grow-test-tool-state-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&state_root).expect("create isolated tool-state test directory");
-    let state_path = state_root.join("tool_state.json");
+    let state_path = state_root.join("resources_state.json");
     let ctx = SessionContext {
         backend,
         fs,
@@ -132,7 +194,7 @@ async fn test_agent_from_config(
         app_builder_deployer_config: Default::default(),
         system_reminder_tag: tools::reminders::DEFAULT_REMINDER_TAG,
     };
-    let tool_bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
+    let tool_bridge = tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
         .await
         .expect("finalize_builder should succeed for tests");
     #[allow(clippy::arc_with_non_send_sync)]
@@ -185,8 +247,8 @@ pub(crate) async fn create_test_actor_ex(
                     let _ = persistence_tx.send(PersistenceMsg::Update(update));
                     let _ = respond_to.send(Ok(()));
                 }
-                PersistenceMsg::SessionControlAndAck { state, respond_to } => {
-                    let _ = persistence_tx.send(PersistenceMsg::SessionControl(state));
+                PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
+                    let _ = persistence_tx.send(PersistenceMsg::Timeline(event));
                     let _ = respond_to.send(Ok(()));
                 }
                 other => {
@@ -243,7 +305,7 @@ pub(crate) async fn create_test_actor_ex(
             reasoning_effort: None,
             stream_tool_calls: None,
         },
-        Box::new(chat_state::NullChatPersistence),
+        Box::new(chat_state::NullTimelinePersistence),
         chat_event_tx,
         tokio_util::sync::CancellationToken::new(),
     );
@@ -255,6 +317,7 @@ pub(crate) async fn create_test_actor_ex(
             id: acp::SessionId::new("test-actor"),
             cwd: cwd.as_str().to_string(),
         },
+        session_dir: cwd.as_path().join(".grow-test-session"),
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
         state,
@@ -290,13 +353,10 @@ pub(crate) async fn create_test_actor_ex(
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
-            compaction_mode: chat_state::CompactionMode::Transcript,
             verbatim_input: true,
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             pre_prune: std::cell::Cell::new(true),
             pre_prune_token_budget: std::cell::Cell::new(None),
-            prefire: crate::session::compaction_config::PrefireState::default(),
-            prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
@@ -367,7 +427,6 @@ pub(crate) async fn create_test_actor_ex(
         goal_command_tx,
         workflow_manager: crate::session::workflow::manager::WorkflowManager::test_bundle().0,
         workflow_tx: tokio::sync::mpsc::unbounded_channel().0,
-        managed_mcp_handle: Default::default(),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -380,7 +439,6 @@ pub(crate) async fn create_test_actor_ex(
         deferred_prefix: TaskSlot::new(),
         idle_prompt_extension: None,
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
-        prefix_carries_fallback_date: std::cell::Cell::new(false),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
@@ -400,6 +458,7 @@ pub(crate) async fn create_test_actor_ex(
         sampler_handle: sampler::SamplerHandle::noop(),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: parking_lot::RwLock::new(None),
+        session_title_route: std::cell::RefCell::new(None),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),
@@ -462,7 +521,6 @@ pub(crate) fn user_item_with_rx(
         task_wake_fallback: None,
         respond_to,
         persist_ack: None,
-        parsed_prompt_tx: None,
         queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
             id: id.to_string(),
             version: 0,
@@ -504,7 +562,6 @@ pub(crate) fn input_with_origin_rx(
         task_wake_fallback: None,
         respond_to,
         persist_ack: None,
-        parsed_prompt_tx: None,
         queue_meta: None,
     };
     (item, rx)

@@ -42,14 +42,13 @@ pub use plan_control::PlanControlTool;
 pub use read_file::ReadFileTool;
 pub use request_tool_access::RequestToolAccessTool;
 pub use scheduler::create::{
-    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,
-    loop_usage_message,
+    SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction, loop_usage_message,
 };
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
 pub use search_replace::SearchReplaceTool;
 pub use task::TaskTool;
-pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool, WaitTasksTool};
+pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool};
 pub use todo::TodoWriteTool;
 pub use update_goal::{
     FINALIZE_GOAL_PLAN_TOOL_NAME, FinalizeGoalPlanInput, FinalizeGoalPlanTool, GET_GOAL_TOOL_NAME,

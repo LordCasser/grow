@@ -5,17 +5,28 @@ use clap::Parser;
 /// In-memory `Summary` via serde: every field without `#[serde(default)]`
 /// must be present, and a struct literal would break on each new field.
 fn summary(id: &str, title: Option<&str>, manual: bool) -> Summary {
-    serde_json::from_value(serde_json::json!({
+    let mut value = serde_json::json!({
         "info": { "id": id, "cwd": "/ws" },
-        "session_summary": "auto summary",
         "created_at": "2026-07-01T00:00:00Z",
         "updated_at": "2026-07-01T00:00:00Z",
         "num_messages": 1,
+        "session_format_version": shell::session::persistence::SESSION_FORMAT_VERSION,
         "current_model_id": "grow-build",
-        "generated_title": title,
-        "title_is_manual": manual,
-    }))
-    .expect("valid Summary JSON")
+    });
+    if let Some(title) = title {
+        value["title"] = serde_json::json!(title);
+        value["title_event_seq"] = serde_json::json!(1);
+        value["title_source"] = if manual {
+            serde_json::json!({ "kind": "user" })
+        } else {
+            serde_json::json!({
+                "kind": "generated",
+                "sideband_id": "018f0000-0000-7000-8000-000000000001",
+                "result_seq": 1,
+            })
+        };
+    }
+    serde_json::from_value(value).expect("valid Summary JSON")
 }
 
 fn id_of(s: Option<&Summary>) -> String {
@@ -137,8 +148,9 @@ fn pin_title_resume_finds_saved_profile_and_conflicts() {
         &cwd_str,
         id,
         serde_json::json!({
-            "generated_title": "Locked Down",
-            "title_is_manual": true,
+            "title": "Locked Down",
+            "title_source": { "kind": "user" },
+            "title_event_seq": 1,
             "sandbox_profile": "strict",
         }),
     );
@@ -177,7 +189,11 @@ async fn materialization_consumes_pinned_id_after_concurrent_rename() {
     fx.write_summary(
         &cwd_str,
         pinned,
-        serde_json::json!({ "generated_title": "Alpha", "title_is_manual": true }),
+        serde_json::json!({
+            "title": "Alpha",
+            "title_source": { "kind": "user" },
+            "title_event_seq": 1,
+        }),
     );
 
     let mut args = crate::app::cli::PagerArgs::try_parse_from(["grow", "-r", "alpha"]).unwrap();
@@ -190,12 +206,20 @@ async fn materialization_consumes_pinned_id_after_concurrent_rename() {
     fx.write_summary(
         &cwd_str,
         pinned,
-        serde_json::json!({ "generated_title": "Beta", "title_is_manual": true }),
+        serde_json::json!({
+            "title": "Beta",
+            "title_source": { "kind": "user" },
+            "title_event_seq": 1,
+        }),
     );
     fx.write_summary(
         &cwd_str,
         "dadadada-1111-2222-3333-555555555555",
-        serde_json::json!({ "generated_title": "Alpha", "title_is_manual": true }),
+        serde_json::json!({
+            "title": "Alpha",
+            "title_source": { "kind": "user" },
+            "title_event_seq": 1,
+        }),
     );
 
     use crate::app::session_startup::{MaterializedStartup, materialize_startup_for_cwd};
@@ -228,12 +252,28 @@ fn pin_ambiguous_title_errors_before_sandbox() {
     fx.write_summary(
         &cwd_str,
         "e0e0e0e0-1111-2222-3333-444444444444",
-        serde_json::json!({ "generated_title": "Dup" }),
+        serde_json::json!({
+            "title": "Dup",
+            "title_source": {
+                "kind": "generated",
+                "sideband_id": "018f0000-0000-7000-8000-000000000001",
+                "result_seq": 1,
+            },
+            "title_event_seq": 1,
+        }),
     );
     fx.write_summary(
         &cwd_str,
         "e0e0e0e0-1111-2222-3333-555555555555",
-        serde_json::json!({ "generated_title": "Dup" }),
+        serde_json::json!({
+            "title": "Dup",
+            "title_source": {
+                "kind": "generated",
+                "sideband_id": "018f0000-0000-7000-8000-000000000002",
+                "result_seq": 1,
+            },
+            "title_event_seq": 1,
+        }),
     );
 
     let mut args = crate::app::cli::PagerArgs::try_parse_from(["grow", "-r", "Dup"]).unwrap();
@@ -267,7 +307,11 @@ async fn pinned_no_match_does_not_retry_title_after_sandbox() {
     fx.write_summary(
         &cwd_str,
         late,
-        serde_json::json!({ "generated_title": "ghost", "title_is_manual": true }),
+        serde_json::json!({
+            "title": "ghost",
+            "title_source": { "kind": "user" },
+            "title_event_seq": 1,
+        }),
     );
 
     use crate::app::session_startup::{
@@ -320,7 +364,11 @@ async fn pinned_non_uuid_id_is_not_reinterpreted_as_title() {
     fx.write_summary(
         &cwd_str,
         "f1f1f1f1-1111-2222-3333-444444444444",
-        serde_json::json!({ "generated_title": "legacy-remote-7", "title_is_manual": true }),
+        serde_json::json!({
+            "title": "legacy-remote-7",
+            "title_source": { "kind": "user" },
+            "title_event_seq": 1,
+        }),
     );
 
     use crate::app::session_startup::materialize_startup_for_cwd;
@@ -351,8 +399,9 @@ async fn duplicate_legacy_id_is_not_title_addressable() {
         &cwd_str,
         "legacy-twin",
         serde_json::json!({
-            "generated_title": "Locked Down",
-            "title_is_manual": true,
+            "title": "Locked Down",
+            "title_source": { "kind": "user" },
+            "title_event_seq": 1,
             "sandbox_profile": "strict",
         }),
     );

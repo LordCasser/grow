@@ -361,25 +361,16 @@ def main() -> None:
     command = extract_command(envelope)
     if command is None or not command_is_recursive(command):
         sys.exit(0)  # nothing to block -> silent allow
-    # Deny. Emit the grow-native decision (read by this repo's runner) and the
-    # Claude-style hookSpecificOutput for forward-compatibility, put the reason
-    # on stderr for runners that surface it there, and exit 2 so any exit-code
-    # based runner blocks too.
+    # Deny with Grow's canonical gate response.
     print(
         json.dumps(
             {
                 "decision": "deny",
                 "reason": DENY_REASON,
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": DENY_REASON,
-                },
             }
         )
     )
-    print(DENY_REASON, file=sys.stderr)
-    sys.exit(2)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
