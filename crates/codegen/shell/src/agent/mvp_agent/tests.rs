@@ -1478,7 +1478,7 @@ fn find_model_by_catalog_id_never_matches_routing_slug() {
 }
 fn write_updates(dir: &std::path::Path, lines: &[&str]) -> PathBuf {
     let path = dir.join("updates.jsonl");
-    std::fs::write(&path, lines.join("\n")).unwrap();
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
     path
 }
 fn bg_line(task_id: &str) -> String {
