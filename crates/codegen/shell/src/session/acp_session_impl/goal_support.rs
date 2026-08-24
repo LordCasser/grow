@@ -33,6 +33,7 @@ pub(crate) fn goal_runtime_available_from_tools(goal_enabled: bool, tool_names: 
             CREATE_GOAL_TOOL_NAME,
             GET_GOAL_TOOL_NAME,
             UPDATE_GOAL_TOOL_NAME,
+            "todo_write",
         ]
         .into_iter()
         .all(|required| tool_names.iter().any(|name| name == required))
@@ -375,7 +376,7 @@ impl SessionActor {
         if !enabled {
             self.auto_pause_goal_if_active_with_message(
                 crate::session::goal_tracker::GoalPauseReason::RuntimeUnavailable,
-                "Goal runtime paused because one or more required Goal tools are unavailable. Re-enable create_goal, get_goal, and update_goal before restarting."
+                "Goal runtime paused because one or more required Goal tools are unavailable. Re-enable create_goal, get_goal, update_goal, and todo_write before restarting."
                     .to_string(),
             )
             .await;

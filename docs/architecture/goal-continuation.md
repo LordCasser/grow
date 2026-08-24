@@ -87,7 +87,9 @@ The Goal detail overlay is a read-only projection of that same state. It contain
 ## Recovery invariants
 
 - Active reloads re-arm idle continuation; stopped statuses remain stopped.
-- A missing required Goal tool pauses an Active Goal with an actionable runtime-unavailable message.
+- The Goal runtime requires `create_goal`, `get_goal`, `update_goal`, and
+  `todo_write`. A missing required tool pauses an Active Goal with an actionable
+  runtime-unavailable message; `task` remains optional bounded delegation.
 - Complete receipts freeze Goal usage; later Normal turns are not charged.
 - Graceful shutdown settles live delegated usage and checkpoints elapsed time before the persistence barrier.
 - Fork/copy does not clone Goal runtime ownership.

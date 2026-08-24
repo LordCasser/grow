@@ -153,3 +153,29 @@ async fn every_continuation_audits_the_full_goal_before_planning_a_local_slice()
         })
         .await;
 }
+
+#[test]
+fn goal_runtime_requires_the_local_task_planner() {
+    use tools::implementations::grow_build::{
+        CREATE_GOAL_TOOL_NAME, GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
+    };
+
+    let lifecycle_only = vec![
+        CREATE_GOAL_TOOL_NAME.to_string(),
+        GET_GOAL_TOOL_NAME.to_string(),
+        UPDATE_GOAL_TOOL_NAME.to_string(),
+    ];
+    assert!(
+        !super::goal_support::goal_runtime_available_from_tools(true, &lifecycle_only),
+        "Goal must not advertise a task-first contract without todo_write"
+    );
+
+    let mut complete = lifecycle_only;
+    complete.push("todo_write".into());
+    assert!(super::goal_support::goal_runtime_available_from_tools(
+        true, &complete
+    ));
+    assert!(!super::goal_support::goal_runtime_available_from_tools(
+        false, &complete
+    ));
+}
