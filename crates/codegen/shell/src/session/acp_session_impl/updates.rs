@@ -182,7 +182,7 @@ impl SessionActor {
     /// relative to already-queued chunks. A direct `emit_notification_direct`
     /// here would mint a HIGHER id that is delivered BEFORE those chunks, and
     /// the client's in-order dedup would then drop the chunks as stale —
-    /// silent text loss on a mid-stream plan-mode toggle. Persist + broadcast
+    /// silent text loss when a mode update follows queued output. Persist + broadcast
     /// happen when the actor loop drains the event through `emit_buffered`.
     pub(super) fn enqueue_current_mode_update(&self, current_mode_id: acp::SessionModeId) {
         self.enqueue_current_mode_update_inner(current_mode_id, None);
@@ -928,8 +928,8 @@ mod grow_event_id_stamping_tests {
             })
             .await;
     }
-    /// Mid-stream plan toggle: the plan-mode `CurrentModeUpdate` must ride
-    /// the FIFO event pipeline BEHIND already-queued chunks, with its id
+    /// A plan-mode `CurrentModeUpdate` must ride the FIFO event pipeline
+    /// BEHIND already-queued chunks, with its id
     /// minted at ENQUEUE time. A direct emit would mint a higher id yet
     /// deliver/persist first, and the client's in-order ACP dedup would then
     /// drop the queued chunks as stale (silent text loss).
@@ -1167,6 +1167,42 @@ mod grow_event_id_stamping_tests {
                         crate::session::behavior::BehaviorChangeOutcome::Applied
                     ),
                     "the same-target re-request must apply the switch, got {second:?}"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn behavior_switch_rejects_non_idle_foreground_without_surface_append() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _prx) = super::acking_persistence_channel();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                *actor.agent.borrow_mut() = super::support::test_agent_with_plan_tools().await;
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
+                    super::support::running_task_stub("active-turn"),
+                );
+                let surface_before = actor.chat_state_handle.get_conversation().await;
+
+                let outcome = actor
+                    .request_behavior_change(acp::SessionModeId::new("plan"))
+                    .await;
+                let crate::session::behavior::BehaviorChangeOutcome::Rejected { message } = outcome
+                else {
+                    panic!("active foreground switch must be rejected");
+                };
+                assert!(message.contains("Stop the active foreground work"));
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Normal
+                );
+                assert_eq!(
+                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(),
+                    serde_json::to_value(surface_before).unwrap(),
+                    "a rejected switch must not append Control model context"
                 );
             })
             .await;

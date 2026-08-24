@@ -183,15 +183,6 @@ impl Agent {
             .await
             .unwrap_or_default();
     }
-
-    /// Replace the primary-session Behavior layer and re-render the system
-    /// prompt. Re-rendering is intentional even when the selection is stable:
-    /// compaction may have replaced the conversation's system prompt.
-    pub async fn set_behavior_instructions(&mut self, instructions: Option<String>) -> String {
-        self.prompt_context.behavior_instructions = instructions;
-        self.finalize_prompt().await;
-        self.system_prompt.clone()
-    }
 }
 
 #[cfg(test)]

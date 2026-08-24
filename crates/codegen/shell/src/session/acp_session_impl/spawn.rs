@@ -2504,10 +2504,16 @@ pub(crate) async fn spawn_session_actor(
     if behavior_normalized || goal_was_restored {
         let behavior = session.behavior.lock().snapshot();
         let goal = session.goal_tracker.lock().snapshot().cloned();
-        if let Err(error) = session
-            .persist_control_snapshot_durably(behavior, goal)
-            .await
-        {
+        let persisted = if behavior_normalized {
+            session
+                .persist_behavior_transition_durably(behavior, goal)
+                .await
+        } else {
+            session
+                .persist_control_snapshot_durably(behavior, goal)
+                .await
+        };
+        if let Err(error) = persisted {
             tracing::warn!(%error, "failed to persist reconciled session control state");
         }
     }

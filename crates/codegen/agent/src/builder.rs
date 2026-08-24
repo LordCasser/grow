@@ -870,7 +870,6 @@ impl AgentBuilder {
             prompt_composition: definition.prompt_composition.clone(),
             audience: self.prompt_audience,
             prompt_body: definition.prompt_body.clone(),
-            behavior_instructions: None,
             system_prompt: definition.system_prompt.clone(),
             agents_md_files,
             memory_enabled: self.memory_enabled,

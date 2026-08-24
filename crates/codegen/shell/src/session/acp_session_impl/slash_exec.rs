@@ -1172,7 +1172,7 @@ impl SessionActor {
             }
             BuiltinAction::GoalClear => {
                 if self
-                    .persist_control_snapshot_durably(
+                    .persist_behavior_transition_durably(
                         crate::session::behavior::BehaviorSnapshot::normal(),
                         None,
                     )

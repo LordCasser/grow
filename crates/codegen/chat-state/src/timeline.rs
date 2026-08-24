@@ -6,12 +6,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sampling_types::{ConversationItem, DanglingToolCallReason};
+use sampling_types::{ContentPart, ConversationItem, DanglingToolCallReason, SyntheticReason};
 use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 8;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 9;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -390,16 +390,20 @@ pub struct ObservationEvent {
     pub data: Option<serde_json::Value>,
 }
 
-/// Durable Behavior/Goal control-plane state.
+/// Durable session control-plane state.
 ///
 /// The payload stays shell-owned, while Timeline owns its identity, ordering,
-/// durability and revision monotonicity. This keeps the core crate independent
-/// of concrete Behavior and Goal types without creating a second state file.
+/// durability and revision monotonicity. A transition may also carry its one
+/// model-visible context item. Applying both from the same event prevents a
+/// crash from committing state without its context. If a turn is active, the
+/// fold activates only the latest pending item after that turn's durable end.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlEvent {
     pub revision: u64,
     pub snapshot: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context: Option<ConversationItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,6 +607,17 @@ impl TimelineEvent {
             _ => None,
         }
     }
+
+    fn appended_message_items(&self) -> Option<&[ConversationItem]> {
+        match &self.kind {
+            TimelineEventKind::Messages(MessageEvent {
+                items,
+                surface: SurfaceOp::Append,
+                ..
+            }) => Some(items),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -661,6 +676,7 @@ pub struct Timeline {
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
     surface_revision: u64,
+    pending_control_context: Option<(EventSeq, ConversationItem)>,
     lifecycle: LifecycleFold,
 }
 
@@ -692,6 +708,8 @@ pub enum TimelineError {
     ToolResultIdentityChanged,
     #[error("control revision {actual} must be greater than the previous revision {previous}")]
     NonMonotonicControlRevision { previous: u64, actual: u64 },
+    #[error("control model context must be one non-empty synthetic text reminder after system")]
+    InvalidControlContext,
     #[error("turn {actual:?} cannot start while {active:?} is active")]
     TurnAlreadyActive { active: TurnId, actual: TurnId },
     #[error("turn {0:?} already has a start event")]
@@ -953,24 +971,38 @@ impl Timeline {
     /// that a whole frozen branch was materialized.
     pub fn branch_transcript_with_ids(&self) -> (Vec<SurfaceId>, Vec<ConversationItem>) {
         let mut branch = Vec::<(SurfaceId, ConversationItem)>::new();
+        let mut active_turn = false;
+        let mut pending_control_context = None;
         for event in &self.events {
+            if let Some(items) = event.appended_message_items() {
+                branch.extend(items.iter().cloned().enumerate().map(|(item, value)| {
+                    (
+                        SurfaceId {
+                            event: event.seq,
+                            item: item as u32,
+                        },
+                        value,
+                    )
+                }));
+                continue;
+            }
+            if let Some((source, value)) = fold_control_context_activation(
+                &mut active_turn,
+                &mut pending_control_context,
+                event,
+            ) {
+                branch.push((
+                    SurfaceId {
+                        event: source,
+                        item: 0,
+                    },
+                    value,
+                ));
+            }
             let TimelineEventKind::Messages(messages) = &event.kind else {
                 continue;
             };
             match (&messages.surface, messages.cause) {
-                (SurfaceOp::Append, _) => {
-                    branch.extend(messages.items.iter().cloned().enumerate().map(
-                        |(item, value)| {
-                            (
-                                SurfaceId {
-                                    event: event.seq,
-                                    item: item as u32,
-                                },
-                                value,
-                            )
-                        },
-                    ))
-                }
                 (SurfaceOp::Replace { .. }, MessageCause::Rewind) => {
                     branch = message_entries(event.seq, &messages.items);
                 }
@@ -1023,7 +1055,7 @@ impl Timeline {
                         }
                     }
                 }
-                (SurfaceOp::Replace { .. }, _) => {}
+                (SurfaceOp::Replace { .. }, _) | (SurfaceOp::Append, _) => {}
             }
         }
         branch.into_iter().unzip()
@@ -1053,25 +1085,42 @@ impl Timeline {
             .collect::<BTreeSet<_>>();
         let mut surface = Vec::<BranchProvenance>::new();
         let mut unloaded = BTreeSet::new();
+        let mut active_turn = false;
+        let mut pending_control_context = None;
 
         for event in &self.events {
+            if let Some(items) = event.appended_message_items() {
+                surface.extend(items.iter().cloned().enumerate().map(|(item, value)| {
+                    let id = SurfaceId {
+                        event: event.seq,
+                        item: item as u32,
+                    };
+                    BranchProvenance {
+                        id,
+                        value,
+                        leaves: vec![id],
+                    }
+                }));
+                continue;
+            }
+            if let Some((source, value)) = fold_control_context_activation(
+                &mut active_turn,
+                &mut pending_control_context,
+                event,
+            ) {
+                let id = SurfaceId {
+                    event: source,
+                    item: 0,
+                };
+                surface.push(BranchProvenance {
+                    id,
+                    value,
+                    leaves: vec![id],
+                });
+            }
             match &event.kind {
                 TimelineEventKind::Messages(messages) => match &messages.surface {
-                    SurfaceOp::Append => {
-                        surface.extend(messages.items.iter().cloned().enumerate().map(
-                            |(item, value)| {
-                                let id = SurfaceId {
-                                    event: event.seq,
-                                    item: item as u32,
-                                };
-                                BranchProvenance {
-                                    id,
-                                    value,
-                                    leaves: vec![id],
-                                }
-                            },
-                        ));
-                    }
+                    SurfaceOp::Append => {}
                     SurfaceOp::Replace { start, end, .. } => {
                         let Some(start_index) = surface.iter().position(|entry| entry.id == *start)
                         else {
@@ -1619,23 +1668,23 @@ impl Timeline {
     pub fn turn_items_since(&self, start: EventSeq) -> Vec<ConversationItem> {
         let mut captured = Vec::<(SurfaceId, ConversationItem)>::new();
         for event in self.events.iter().skip(start.get() as usize) {
+            if let Some(items) = event.appended_message_items() {
+                captured.extend(items.iter().cloned().enumerate().map(|(item, value)| {
+                    (
+                        SurfaceId {
+                            event: event.seq,
+                            item: item as u32,
+                        },
+                        value,
+                    )
+                }));
+                continue;
+            }
             let Some(messages) = event.messages() else {
                 continue;
             };
             match &messages.surface {
-                SurfaceOp::Append => {
-                    captured.extend(messages.items.iter().cloned().enumerate().map(
-                        |(item, value)| {
-                            (
-                                SurfaceId {
-                                    event: event.seq,
-                                    item: item as u32,
-                                },
-                                value,
-                            )
-                        },
-                    ));
-                }
+                SurfaceOp::Append => {}
                 SurfaceOp::Replace { shadowed, .. } if shadowed.len() == messages.items.len() => {
                     for (replacement_index, (shadowed_id, replacement)) in
                         shadowed.iter().zip(messages.items.iter()).enumerate()
@@ -1767,8 +1816,24 @@ impl Timeline {
 
     pub fn accept(&mut self, event: TimelineEvent) -> Result<(), TimelineError> {
         let lifecycle = self.validate(&event)?;
-        if let TimelineEventKind::Messages(messages) = &event.kind {
-            self.apply_messages(event.seq, messages);
+        match &event.kind {
+            TimelineEventKind::Messages(messages) => self.apply_messages(event.seq, messages),
+            TimelineEventKind::Control(ControlEvent {
+                model_context: Some(item),
+                ..
+            }) if self.lifecycle.active_turn.is_some() => {
+                self.pending_control_context = Some((event.seq, item.clone()));
+            }
+            TimelineEventKind::Control(ControlEvent {
+                model_context: Some(item),
+                ..
+            }) => self.append_surface_items(event.seq, std::slice::from_ref(item)),
+            TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
+                if let Some((source, item)) = self.pending_control_context.take() {
+                    self.append_surface_items(source, std::slice::from_ref(&item));
+                }
+            }
+            _ => {}
         }
         self.lifecycle = lifecycle;
         self.events.push(event);
@@ -1838,6 +1903,15 @@ impl Timeline {
                 return Err(TimelineError::ContextRebuildAfterTurn);
             }
             self.validate_messages(messages)?;
+        }
+        if let TimelineEventKind::Control(ControlEvent {
+            model_context: Some(item),
+            ..
+        }) = &event.kind
+            && (!matches!(self.surface.first(), Some(ConversationItem::System(_)))
+                || !is_valid_control_context(item))
+        {
+            return Err(TimelineError::InvalidControlContext);
         }
         if let TimelineEventKind::Sideband(sideband) = &event.kind {
             sideband.validate()?;
@@ -2213,14 +2287,7 @@ impl Timeline {
         let item_count = u32::try_from(messages.items.len())
             .expect("message item capacity was checked during validation");
         match &messages.surface {
-            SurfaceOp::Append => {
-                self.surface.extend(messages.items.iter().cloned());
-                self.surface_ids
-                    .extend((0..item_count).map(|item| SurfaceId {
-                        event: event_seq,
-                        item,
-                    }));
-            }
+            SurfaceOp::Append => self.append_surface_items(event_seq, &messages.items),
             SurfaceOp::Replace { start, end, .. } => {
                 let start_index = self
                     .surface_ids
@@ -2243,6 +2310,20 @@ impl Timeline {
                 );
             }
         }
+        if matches!(&messages.surface, SurfaceOp::Replace { .. }) {
+            self.surface_revision = self.surface_revision.saturating_add(1);
+        }
+    }
+
+    fn append_surface_items(&mut self, event_seq: EventSeq, items: &[ConversationItem]) {
+        let item_count = u32::try_from(items.len())
+            .expect("surface item capacity was checked during validation");
+        self.surface.extend(items.iter().cloned());
+        self.surface_ids
+            .extend((0..item_count).map(|item| SurfaceId {
+                event: event_seq,
+                item,
+            }));
         self.surface_revision = self.surface_revision.saturating_add(1);
     }
 }
@@ -2692,6 +2773,60 @@ fn message_entries(
         .collect()
 }
 
+fn is_valid_control_context(item: &ConversationItem) -> bool {
+    let ConversationItem::User(user) = item else {
+        return false;
+    };
+    user.synthetic_reason == Some(SyntheticReason::SystemReminder)
+        && user.permission_evidence.is_none()
+        && user.goal_directive.is_none()
+        && user.cwd_generation.is_none()
+        && user.prior_turn_interrupt.is_none()
+        && user.prompt_index.is_none()
+        && !user.content.is_empty()
+        && user
+            .content
+            .iter()
+            .all(|part| matches!(part, ContentPart::Text { .. }))
+        && !item.text_content().trim().is_empty()
+}
+
+/// Fold the effective boundary of Control-owned model context.
+///
+/// A transition recorded during a turn is durable immediately but cannot
+/// enter Surface until that turn closes: doing so would place a synthetic user
+/// item between an assistant tool call and its result, or before late output
+/// conditioned by the previous protocol. Intermediate transitions are facts
+/// in the ledger, but only the latest pending context becomes model-visible.
+fn fold_control_context_activation(
+    active_turn: &mut bool,
+    pending: &mut Option<(EventSeq, ConversationItem)>,
+    event: &TimelineEvent,
+) -> Option<(EventSeq, ConversationItem)> {
+    match &event.kind {
+        TimelineEventKind::Turn(TurnEvent::Started { .. }) => {
+            *active_turn = true;
+            None
+        }
+        TimelineEventKind::Control(ControlEvent {
+            model_context: Some(item),
+            ..
+        }) if *active_turn => {
+            *pending = Some((event.seq, item.clone()));
+            None
+        }
+        TimelineEventKind::Control(ControlEvent {
+            model_context: Some(item),
+            ..
+        }) => Some((event.seq, item.clone())),
+        TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
+            *active_turn = false;
+            pending.take()
+        }
+        _ => None,
+    }
+}
+
 fn reconcile_repaired_entries(
     event: EventSeq,
     previous: &[(SurfaceId, ConversationItem)],
@@ -3112,18 +3247,168 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 7,
                 snapshot: serde_json::json!({ "control_revision": 7 }),
+                model_context: None,
             }))
             .unwrap();
         assert!(matches!(
             timeline.record(TimelineEventKind::Control(ControlEvent {
                 revision: 7,
                 snapshot: serde_json::json!({ "control_revision": 7 }),
+                model_context: None,
             })),
             Err(TimelineError::NonMonotonicControlRevision {
                 previous: 7,
                 actual: 7
             })
         ));
+    }
+
+    #[test]
+    fn control_context_is_an_append_only_replayable_surface_fact() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ])
+        .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "behavior": "plan" }),
+                model_context: Some(ConversationItem::system_reminder(
+                    "<behavior-context>plan</behavior-context>",
+                )),
+            }))
+            .unwrap();
+        let first_request = serde_json::to_value(timeline.surface()).unwrap();
+
+        timeline
+            .append(
+                ConversationItem::assistant("conditioned answer"),
+                MessageCause::Assistant,
+            )
+            .unwrap();
+        let second_request = serde_json::to_value(timeline.surface()).unwrap();
+        let first = first_request.as_array().unwrap();
+        let second = second_request.as_array().unwrap();
+        assert_eq!(&second[..first.len()], first);
+
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 2,
+                snapshot: serde_json::json!({ "behavior": "normal" }),
+                model_context: Some(ConversationItem::system_reminder(
+                    "<behavior-context>normal; earlier modes retired</behavior-context>",
+                )),
+            }))
+            .unwrap();
+        assert_eq!(
+            timeline.surface().last().unwrap().text_content(),
+            "<behavior-context>normal; earlier modes retired</behavior-context>"
+        );
+        assert_eq!(
+            serde_json::to_value(timeline.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+
+        let replay = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replay.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+    }
+
+    #[test]
+    fn control_context_cannot_bypass_the_typed_surface_boundary() {
+        let mut timeline = Timeline::default();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "behavior": "plan" }),
+                model_context: Some(ConversationItem::system_reminder("plan")),
+            })),
+            Err(TimelineError::InvalidControlContext)
+        ));
+    }
+
+    #[test]
+    fn in_turn_control_context_activates_after_terminal_and_latest_wins() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ])
+        .unwrap();
+        let turn = TurnId(42);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: 2,
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "behavior": "plan" }),
+                model_context: Some(ConversationItem::system_reminder("plan")),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 2,
+                snapshot: serde_json::json!({ "behavior": "normal" }),
+                model_context: Some(ConversationItem::system_reminder("normal")),
+            }))
+            .unwrap();
+        assert_eq!(timeline.surface().len(), 2);
+
+        timeline
+            .append(
+                ConversationItem::assistant("old Behavior output"),
+                MessageCause::Assistant,
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        assert_eq!(
+            timeline
+                .surface()
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            vec![
+                "system".to_string(),
+                "task".to_string(),
+                "old Behavior output".to_string(),
+                "normal".to_string(),
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(timeline.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(
+                Timeline::from_events(timeline.events().to_vec())
+                    .unwrap()
+                    .surface()
+            )
+            .unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
     }
 
     #[test]

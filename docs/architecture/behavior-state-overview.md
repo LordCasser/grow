@@ -12,7 +12,9 @@ enum ForegroundState {
 }
 ```
 
-`InputItem` 只保存 message id、内容、origin 与 turn kind，不保存 Behavior。消息真正获得 foreground 时，`TurnContext` 捕获当前 `BehaviorId`；该 turn 的 prompt、工具面和限制随后保持不变。切换 Behavior 不重标队列，也不改变已经运行的 turn。
+`InputItem` 只保存 message id、内容、origin 与 turn kind，不保存 Behavior。消息真正获得 foreground 时，`TurnContext` 捕获当前 `BehaviorId`；该 turn 的 prompt、工具面和限制随后保持不变。Behavior transition 与 foreground admission 共享 session state mutex，只允许在 `Idle` 提交；运行中或压缩中的切换直接拒绝，不重标队列，也不会把新协议插进已经运行的 turn。
+
+Behavior 协议不再拼进或替换 system head。Timeline `control` 事件把权威选择与一个 `<behavior-context>` synthetic user 项原子提交。Idle transition 立即进入 Surface；Goal 完成、Plan 结束等 turn 内 transition 先留在 Timeline fold 的 pending slot，durable `TurnEnded` 后只激活最后一个，因此不会插进 tool call/result，也不会排在旧 Behavior 所产生的迟到输出之前。下一次请求沿原位置重放，provider-visible 前缀保持 append-only。切回 Normal 会物化明确的 reset，较早的特殊协议只保留为因果历史，不再处于活跃状态。
 
 完成顺序固定为：结算 exact foreground owner → 排队持久化唯一 `TurnCompleted` → 提升用户 FIFO → 若仍 idle 再运行专用 runtime hook。Goal continuation 不进入 FIFO，synthetic work必须携带结构化 origin/lease。
 

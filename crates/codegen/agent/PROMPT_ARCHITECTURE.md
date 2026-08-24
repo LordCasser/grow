@@ -7,11 +7,13 @@ Mandatory Core
   + Audience (primary | subagent)
   + Standard Guidance (extend only)
   + Agent Role (Markdown body)
-  + Active Behavior (normal | clarify | plan | workflow | deep-research | goal)
   + Session Extensions (memory)
+
+Timeline Surface
+  + Control-event-anchored Active Behavior transition items in the live tail
 ```
 
-Mandatory Core contains instruction priority, action safety, tool-use rules, project-instruction scoping, output rules, and Grow client context. It is always rendered. `promptComposition: full` replaces the optional standard guidance; it does not replace Mandatory Core, Audience, an active Behavior, or Session Extensions.
+Mandatory Core contains instruction priority, action safety, tool-use rules, project-instruction scoping, output rules, and Grow client context. It is always rendered. `promptComposition: full` replaces the optional standard guidance; it does not replace Mandatory Core, Audience, Timeline-anchored Behavior transitions, or Session Extensions.
 
 Runtime facts do not belong to the system prompt. At session start, the shell renders one typed `RuntimeContextSnapshot` as a user-role message containing the visible workspace, OS, shell, local date, and optional VCS snapshot, then durably appends it to Timeline. Agent definitions cannot override its shape. Skills, project instructions, MCP catalogs, capability changes, and reminders each publish their own Timeline-backed messages instead of being copied into either the system prompt or the runtime snapshot.
 
@@ -43,7 +45,7 @@ and does not rewrite this architectural purpose.
 
 The built-in Agent, tool, and session surface is Grow-native. External vendor schemas are not exposed as Agent profiles, tool presets, namespaces, ignored frontmatter fields, or session scanners. Agent files use the documented Grow schema and reject unknown keys; source provenance does not create a vendor execution mode.
 
-Behavior is mutually-exclusive primary-session state, not part of `AgentDefinition`. The state is exactly `Normal | Clarify | Plan(phase) | Workflow | DeepResearch { run_id } | Goal`. ACP maps these to `default`, `ask`, `plan`, `workflow`, `deep_research`, and `goal`. Every mode request, including prompt metadata and slash-command shortcuts, passes through the same Behavior transition gateway. Delegated Agents receive an explicit role and task; they never inherit or select a user-facing Behavior. A Behavior never adds a tool, changes which Agent may be delegated to, changes capability mode, or bypasses permission checks.
+Behavior is mutually-exclusive primary-session state, not part of `AgentDefinition`. The state is exactly `Normal | Clarify | Plan(phase) | Workflow | DeepResearch { run_id } | Goal`. ACP maps these to `default`, `ask`, `plan`, `workflow`, `deep_research`, and `goal`. Every external mode request passes through the same gateway and shares the foreground-admission mutex, so it commits only while idle. A selection and its synthetic user protocol item are one durable Timeline Control event. Idle contexts enter Surface immediately; turn-internal transitions such as Goal completion remain pending until that turn's durable terminal, with only the latest pending context activated. Thus later output stays after the protocol that conditioned it, tool call/result adjacency remains valid, and subsequent requests preserve the provider-visible prefix. Later switches append a new transition; switching to `Normal` appends an explicit reset that retires earlier special protocols. No transition mutates the system head. Delegated Agents receive an explicit role and task; they never inherit or select a user-facing Behavior. A Behavior never adds a tool, changes which Agent may be delegated to, changes capability mode, or bypasses permission checks.
 
 The layers have different owners and must not be substituted for one another:
 

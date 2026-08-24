@@ -1,6 +1,7 @@
 //! Session Behavior transitions, reminders, and persistence.
 use super::*;
 use crate::session::behavior::BehaviorChangeOutcome;
+
 /// Plan is a frozen, human-approved execution protocol. The Workflow
 /// launcher is therefore not advertised in any Plan phase; the runtime gate
 /// remains as defense in depth for stale or forged calls.
@@ -121,36 +122,6 @@ impl SessionActor {
         self.behavior_availability_from_tracker(&workflow_tracker, support)
     }
 
-    /// Synchronize the selected primary-session Behavior into the fixed system
-    /// prompt layer: Mandatory Core → Audience → Role → Behavior → Runtime.
-    pub(super) async fn sync_active_behavior_prompt(
-        &self,
-        admitted: tool_types::BehaviorId,
-    ) -> Result<(), chat_state::TimelineWriteError> {
-        use crate::session::behavior::{
-            clarify_reminder_template, deep_research_reminder_template, goal_reminder_template,
-            plan_behavior_template, workflow_reminder_template,
-        };
-        let instructions = match admitted {
-            tool_types::BehaviorId::Normal => None,
-            tool_types::BehaviorId::Clarify => Some(clarify_reminder_template()),
-            tool_types::BehaviorId::Plan => Some(plan_behavior_template()),
-            tool_types::BehaviorId::Workflow => Some(workflow_reminder_template()),
-            tool_types::BehaviorId::DeepResearch => Some(deep_research_reminder_template()),
-            tool_types::BehaviorId::Goal => Some(goal_reminder_template()),
-        }
-        .map(str::to_owned);
-        let system_prompt = self
-            .agent
-            .borrow_mut()
-            .set_behavior_instructions(instructions)
-            .await;
-        self.chat_state_handle
-            .replace_system_head(&system_prompt)
-            .await
-            .map(|_| ())
-    }
-
     pub(super) fn apply_behavior_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
         let behavior = self.turn_behavior.lock().to_string();
         snapshot.admitted_behavior = Some(behavior.clone());
@@ -239,10 +210,28 @@ impl SessionActor {
             return decision.outcome;
         }
 
+        // A Behavior transition is also a model-visible Surface append. Hold
+        // the foreground admission mutex from the idle check through the
+        // durable Control commit and in-memory selection: otherwise an old
+        // turn could append output after the new protocol, or a new turn could
+        // capture the target before its context is durable.
+        let foreground_admission = self.state.lock().await;
+        if !matches!(&foreground_admission.foreground, ForegroundState::Idle) {
+            let message = format!(
+                "Stop the active foreground work before selecting {} Behavior.",
+                mode.display_label()
+            );
+            self.enqueue_current_mode_update_with_behavior_change(
+                acp::SessionModeId::new(previous_behavior.as_id()),
+                serde_json::json!({ "status": "rejected", "message": message }),
+            );
+            return BehaviorChangeOutcome::Rejected { message };
+        }
+
         if !decision.effects.is_empty() {
             let persisted_goal = self.goal_tracker.lock().snapshot().cloned();
             if self
-                .persist_control_snapshot_durably(
+                .persist_behavior_transition_durably(
                     crate::session::behavior::BehaviorSnapshot::selected(mode),
                     persisted_goal,
                 )
@@ -288,15 +277,16 @@ impl SessionActor {
             None
         };
 
-        // Publish the new ownership identity before releasing Workflow
-        // admission. The admitted foreground keeps its own immutable
-        // `turn_behavior`, so this does not mutate a running turn's policy.
+        // Publish the new ownership identity before either admission lock is
+        // released. The next foreground therefore captures exactly the
+        // Behavior whose Control context is already durable in Surface.
         if let Some(target) = decision.effects.iter().find_map(|effect| match effect {
             BehaviorEffect::Select(target) => Some(*target),
             _ => None,
         }) {
             self.behavior.lock().select_behavior(target);
         }
+        drop(foreground_admission);
         drop(workflow_admission);
 
         for effect in decision.effects {
@@ -452,7 +442,13 @@ impl SessionActor {
     ) -> Result<(), String> {
         let next = self.behavior.lock().snapshot();
         let goal = self.goal_tracker.lock().snapshot().cloned();
-        if let Err(error) = self.persist_control_snapshot_durably(next, goal).await {
+        let selection_changed = previous.behavior() != next.behavior();
+        let persisted = if selection_changed {
+            self.persist_behavior_transition_durably(next, goal).await
+        } else {
+            self.persist_control_snapshot_durably(next, goal).await
+        };
+        if let Err(error) = persisted {
             *self.behavior.lock() =
                 crate::session::behavior::BehaviorCoordinator::from_snapshot(previous);
             return Err(format!("Behavior control state was not persisted: {error}"));

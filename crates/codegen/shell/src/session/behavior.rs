@@ -165,6 +165,17 @@ impl BehaviorSnapshot {
         }
     }
 
+    pub fn behavior(&self) -> BehaviorId {
+        match &self.state {
+            BehaviorState::Normal => BehaviorId::Normal,
+            BehaviorState::Clarify => BehaviorId::Clarify,
+            BehaviorState::Plan(_) => BehaviorId::Plan,
+            BehaviorState::Workflow => BehaviorId::Workflow,
+            BehaviorState::DeepResearch { .. } => BehaviorId::DeepResearch,
+            BehaviorState::Goal => BehaviorId::Goal,
+        }
+    }
+
     /// Reject cross-runtime residue instead of reviving state that could not
     /// have been emitted by the current coordinator. Plan transport/artifact
     /// fields are meaningful only while Plan is selected.
@@ -607,6 +618,26 @@ pub fn goal_reminder_template() -> &'static str {
     include_str!("../../prompts/behaviors/goal.md")
 }
 
+/// Render one append-only model context item for a Behavior transition.
+///
+/// The item is committed in the same Timeline Control event as the selection,
+/// so later assistant output stays after the exact protocol that conditioned
+/// it. Switching to Normal explicitly retires earlier special instructions.
+pub fn behavior_transition_context(admitted: BehaviorId) -> String {
+    let instructions = match admitted {
+        BehaviorId::Normal => {
+            "Normal Behavior is now active. Earlier special Behavior protocols are historical and no longer apply. Follow the active Agent role and the current user request without Clarify, Plan, Workflow, Deep Research, or Goal-specific constraints."
+        }
+        BehaviorId::Clarify => clarify_reminder_template(),
+        BehaviorId::Plan => plan_behavior_template(),
+        BehaviorId::Workflow => workflow_reminder_template(),
+        BehaviorId::DeepResearch => deep_research_reminder_template(),
+        BehaviorId::Goal => goal_reminder_template(),
+    };
+    let escaped = instructions.replace("</behavior-context>", "<\\/behavior-context>");
+    format!("<behavior-context>\n{escaped}\n</behavior-context>")
+}
+
 pub fn plan_execution_reminder_template() -> &'static str {
     include_str!("../../prompts/behaviors/plan/executing.md")
 }
@@ -665,6 +696,24 @@ pub(crate) fn read_plan_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_behavior_transition_has_one_canonical_wrapper() {
+        for behavior in [
+            BehaviorId::Normal,
+            BehaviorId::Clarify,
+            BehaviorId::Plan,
+            BehaviorId::Workflow,
+            BehaviorId::DeepResearch,
+            BehaviorId::Goal,
+        ] {
+            let context = behavior_transition_context(behavior);
+            assert!(context.starts_with("<behavior-context>\n"), "{behavior:?}");
+            assert!(context.ends_with("\n</behavior-context>"), "{behavior:?}");
+            assert_eq!(context.matches("<behavior-context>").count(), 1);
+        }
+        assert!(behavior_transition_context(BehaviorId::Normal).contains("no longer apply"));
+    }
 
     fn controller() -> BehaviorCoordinator {
         BehaviorCoordinator::new()

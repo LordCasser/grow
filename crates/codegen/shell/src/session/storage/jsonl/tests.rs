@@ -3046,6 +3046,7 @@ async fn malformed_timeline_control_bricks_session_load() {
         .record(chat_state::TimelineEventKind::Control(chat_state::ControlEvent {
             revision: 1,
             snapshot: serde_json::json!({ "broken": true }),
+            model_context: None,
         }))
         .unwrap();
     adapter.append_timeline_event(&info, &event).await.unwrap();

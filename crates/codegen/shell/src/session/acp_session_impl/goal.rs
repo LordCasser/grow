@@ -373,7 +373,13 @@ impl SessionActor {
                 } else {
                     self.behavior.lock().snapshot()
                 };
-                if let Err(error) = self.persist_control_snapshot_durably(behavior, next).await {
+                let persisted = if select_normal {
+                    self.persist_behavior_transition_durably(behavior, next)
+                        .await
+                } else {
+                    self.persist_control_snapshot_durably(behavior, next).await
+                };
+                if let Err(error) = persisted {
                     if let Some(previous) = previous {
                         self.goal_tracker.lock().restore_runtime_snapshot(previous);
                     }

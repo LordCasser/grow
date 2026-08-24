@@ -38,7 +38,7 @@ TimelineEvent { version, seq, at_ms, kind }
 SurfaceOp = Append | Replace { start, end, shadowed }
 ```
 
-消息类事件携带一个或多个完整 `ConversationItem` 与 `SurfaceOp`。普通用户、assistant 与工具结果使用 `Append`；压缩和内容重写使用 `Replace`。非消息事件不能携带 `SurfaceOp`。schema v8 的闭合事件族为：
+消息类事件携带一个或多个完整 `ConversationItem` 与 `SurfaceOp`。普通用户、assistant 与工具结果使用 `Append`；压缩和内容重写使用 `Replace`。非消息事件不能携带 `SurfaceOp`。schema v9 允许 `control` 事件额外携带至多一个受类型约束的 synthetic user `model_context`：Idle 时立即进入 Surface；active turn 中只更新 pending projection，并在该 turn 的 durable `TurnEnded` 后激活最后一个。状态与协议仍属于同一事实，且不会把 user 项插进 tool call/result 或排到旧 turn 的迟到输出之前。其余非消息事件不进入 Surface。闭合事件族为：
 
 | 事件族 | 结构约束 |
 | --- | --- |
@@ -50,7 +50,7 @@ SurfaceOp = Append | Replace { start, end, shadowed }
 | `compaction` | started、唯一 summary 与 completed/failed 构成事务；成功路径的唯一 replacement 位于 summary 与 completed 之间 |
 | `recovery` | 只追加中断修复意图和依据，不改写物理尾部 |
 | `observation` | 治理、权限、MCP 等 log-only 事实，不参与 Surface |
-| `control` | Behavior/Goal 原子快照；revision 必须严格递增 |
+| `control` | Behavior/Goal 原子快照；revision 必须严格递增；可选 `model_context` 必须是 system-reminder text，Idle 时原子追加，turn 内则在终态后激活最后一个 pending context |
 | `subagent` | 父 Timeline 记录 spawn/end；end 精确引用 child result |
 | `subagent_seed` / `subagent_result` | child Timeline 记录唯一 seed-source 和唯一终态结果 |
 | `session_title` | 标题事实；用户标题可覆盖自动标题，自动生成或 fallback 永远不能越过用户标题 |
@@ -64,7 +64,7 @@ SurfaceOp = Append | Replace { start, end, shadowed }
 4. 工具结果裁剪可以在一条事件中覆盖完整 Surface，但只能改变 `ToolResult.content`；项目数量、顺序、非工具项目、`tool_call_id` 与图片必须原样保留；
 5. 事件验证失败时 Timeline、Surface 与持久化队列都不变化。
 
-Actor 同时维护唯一的 `surface_revision`，它只在消息 append/replace 时推进，生命周期与 observation 事件不会推进。凡是在 actor 外读取 Surface、异步计算后再提交的完整变换，都必须携带读取时 revision 做 compare-and-swap；revision 已变化则整次变换失败，不合并、不覆盖后来消息。Actor 内的 system head、图片、memory、修复与 pre-prune 变换直接在串行命令循环中计算和提交，不经过外部 read-modify-write。
+Actor 同时维护唯一的 `surface_revision`，它只在消息 append/replace、Idle Control context append，或 `TurnEnded` 激活 pending Control context 时推进；纯生命周期、纯 Control snapshot、尚未激活或被后续 Control 覆盖的 pending context 与 observation 事件不会推进。凡是在 actor 外读取 Surface、异步计算后再提交的完整变换，都必须携带读取时 revision 做 compare-and-swap；revision 已变化则整次变换失败，不合并、不覆盖后来消息。Actor 内的 system head、图片、memory、修复与 pre-prune 变换直接在串行命令循环中计算和提交，不经过外部 read-modify-write。
 
 Timeline 接受的消息是完整原子记录。采样流的 token/delta 只属于 sampler 到实时 UI 的传输链，不进入 Timeline。
 
@@ -148,7 +148,7 @@ Timeline 使用独立的 append-only `timeline.jsonl` 流，每个事件携带 s
 
 普通模型工具调用只走 typed `tool/call -> tool/result` 单轨：执行前等待 call 落盘，结果消息先进入同一 actor 队列，随后等待 result 终态 ACK；actor 顺序保证该 ACK 同时是结果消息的持久化屏障。shell 不再生产第二套 `ToolStarted/ToolCompleted` observation，也不把 stream/phase 伪装成生命周期。
 
-Grow 不为旧的可变 Chat 快照格式或 Timeline schema v1 保留执行兼容层。新格式加载只认 Timeline，Behavior/Goal 同样只从 Timeline `control` 事件恢复，不存在 `session-control.json` sidecar。Workflow 恢复也不扫描目录来发现实体，而是只枚举已验证 Timeline 中最近的有限 `workflow/spawn`，再按 run id 精确读取对应 manifest/script/args；没有 spawn 的孤儿目录不是候选事实。Workflow 的 metadata、epoch、execution 终态与永久关闭状态只从 Timeline 自己维护的 `workflow_lifecycle` fold 读取，shell 不再二次扫描原始事件重建另一份生命周期。Workflow manifest 只是当前运行投影，普通进度与 acknowledged 边界都通过同一个 persistence actor 写入；host service 和 manager 不得绕过 writer 直接锁文件。分叉先在同级 staging 目录完整构造新摘要、Seed Timeline 和附属状态，递归同步 staged 文件与目录后再通过原子 rename 发布；目标已存在时直接拒绝，任何失败都不得暴露目标目录或遗留 staging。分叉后的 prompt/compaction 坐标从新 Timeline 重新派生，不继承父会话的可变标记；fork 截断与 child-context 摘要共享 chat-state 唯一的 complete-turn scanner。若显式继承 control，则只保留无 runtime ownership 的 Normal/Clarify 选择，并在 child Timeline 中追加清除 Plan、Workflow、Goal、Deep Research ownership 及 Plan artifact/approval 残留的新 Control 事实。回退先发布严格、限长的 `rewind-transaction.json` intent，再依次提交文件、完整 rewind-point projection 与 Timeline branch replacement；actor 只在 intent 清除后确认成功。运行中失败会停止该 actor，加载阶段依据 source/target prompt index 幂等向前补齐，因此进程死亡不能把半回退会话暴露给下一条命令。
+Grow 不为旧的可变 Chat 快照格式或旧 Timeline schema 保留执行兼容层；schema v9 直接拒绝缺少 Control/Surface 原子投影语义的 v8 日志。新格式加载只认 Timeline，Behavior/Goal 同样只从 Timeline `control` 事件恢复，不存在 `session-control.json` sidecar。Workflow 恢复也不扫描目录来发现实体，而是只枚举已验证 Timeline 中最近的有限 `workflow/spawn`，再按 run id 精确读取对应 manifest/script/args；没有 spawn 的孤儿目录不是候选事实。Workflow 的 metadata、epoch、execution 终态与永久关闭状态只从 Timeline 自己维护的 `workflow_lifecycle` fold 读取，shell 不再二次扫描原始事件重建另一份生命周期。Workflow manifest 只是当前运行投影，普通进度与 acknowledged 边界都通过同一个 persistence actor 写入；host service 和 manager 不得绕过 writer 直接锁文件。分叉先在同级 staging 目录完整构造新摘要、Seed Timeline 和附属状态，递归同步 staged 文件与目录后再通过原子 rename 发布；目标已存在时直接拒绝，任何失败都不得暴露目标目录或遗留 staging。分叉后的 prompt/compaction 坐标从新 Timeline 重新派生，不继承父会话的可变标记；fork 截断与 child-context 摘要共享 chat-state 唯一的 complete-turn scanner。若显式继承 control，则只保留无 runtime ownership 的 Normal/Clarify 选择，并在 child Timeline 中追加清除 Plan、Workflow、Goal、Deep Research ownership 及 Plan artifact/approval 残留的新 Control 事实。回退先发布严格、限长的 `rewind-transaction.json` intent，再依次提交文件、完整 rewind-point projection 与 Timeline branch replacement；actor 只在 intent 清除后确认成功。运行中失败会停止该 actor，加载阶段依据 source/target prompt index 幂等向前补齐，因此进程死亡不能把半回退会话暴露给下一条命令。
 
 旧事件流和 Chat 快照均已删除。`updates.jsonl` 只保存客户端 replay / display stream，`TurnCompleted` 不再承担 durable terminal 语义。它可以重复、丢失或重建，不能参与 agent 恢复决策；prompt 文本、压缩位置和跨压缩 rewind 同样禁止从它或 compaction checkpoint 恢复。
 

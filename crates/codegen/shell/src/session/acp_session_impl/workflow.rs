@@ -151,7 +151,7 @@ impl SessionActor {
         let report = deep_research_terminal_report(&query, &outcome, artifact_path.as_deref());
         let goal = self.goal_tracker.lock().snapshot().cloned();
         if self
-            .persist_control_snapshot_durably(
+            .persist_behavior_transition_durably(
                 crate::session::behavior::BehaviorSnapshot::normal(),
                 goal,
             )

@@ -170,12 +170,35 @@ impl SessionActor {
         behavior: crate::session::behavior::BehaviorSnapshot,
         goal: Option<crate::session::goal_tracker::GoalState>,
     ) -> std::io::Result<()> {
+        self.persist_control_snapshot_with_context_durably(behavior, goal, None)
+            .await
+    }
+
+    pub(super) async fn persist_behavior_transition_durably(
+        &self,
+        behavior: crate::session::behavior::BehaviorSnapshot,
+        goal: Option<crate::session::goal_tracker::GoalState>,
+    ) -> std::io::Result<()> {
+        let context = crate::session::behavior::behavior_transition_context(behavior.behavior());
+        self.persist_control_snapshot_with_context_durably(behavior, goal, Some(context))
+            .await
+    }
+
+    async fn persist_control_snapshot_with_context_durably(
+        &self,
+        behavior: crate::session::behavior::BehaviorSnapshot,
+        goal: Option<crate::session::goal_tracker::GoalState>,
+        model_context: Option<String>,
+    ) -> std::io::Result<()> {
         let revision = self
             .control_revision
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .saturating_add(1);
         let state = crate::session::control::SessionControlSnapshot::new(revision, behavior, goal);
-        let kind = state.timeline_kind()?;
+        let kind = match model_context {
+            Some(context) => state.timeline_kind_with_model_context(context)?,
+            None => state.timeline_kind()?,
+        };
         self.chat_state_handle
             .record_timeline_event_durably(kind)
             .await

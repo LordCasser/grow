@@ -2566,18 +2566,28 @@ impl JsonlStorageAdapter {
                     // receives a new explicit control fact, not a copied parent
                     // snapshot or sidecar.
                     control.goal = None;
-                    if matches!(
+                    let behavior_normalized = matches!(
                         control.behavior.state,
                         crate::session::behavior::BehaviorState::Plan(_)
                             | crate::session::behavior::BehaviorState::Workflow
                             | crate::session::behavior::BehaviorState::DeepResearch { .. }
                             | crate::session::behavior::BehaviorState::Goal
-                    ) {
+                    );
+                    if behavior_normalized {
                         control.behavior = crate::session::behavior::BehaviorSnapshot::normal();
                     }
                     control.control_revision = control.control_revision.saturating_add(1);
+                    let control_kind = if behavior_normalized {
+                        control.timeline_kind_with_model_context(
+                            crate::session::behavior::behavior_transition_context(
+                                tool_types::BehaviorId::Normal,
+                            ),
+                        )?
+                    } else {
+                        control.timeline_kind()?
+                    };
                     fork_timeline
-                        .record(control.timeline_kind()?)
+                        .record(control_kind)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                     true
                 } else {

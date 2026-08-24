@@ -99,10 +99,18 @@ pub struct TrajectoryProjector {
     surface_rows: BTreeMap<SurfaceId, usize>,
     current_items_per_row: Vec<usize>,
     control_snapshot: Option<serde_json::Value>,
+    active_turn: bool,
+    pending_control_row: Option<(SurfaceId, usize)>,
 }
 
 impl TrajectoryProjector {
     pub fn accept(&mut self, event: &TimelineEvent) {
+        if matches!(
+            &event.kind,
+            TimelineEventKind::Turn(TurnEvent::Started { .. })
+        ) {
+            self.active_turn = true;
+        }
         match &event.kind {
             TimelineEventKind::Request(RequestEvent::Started { id, turn, step, .. }) => {
                 self.request_scopes
@@ -152,6 +160,19 @@ impl TrajectoryProjector {
                 }
                 messages.items.len()
             }
+            TimelineEventKind::Control(ControlEvent {
+                model_context: Some(_),
+                ..
+            }) if !self.active_turn => {
+                self.surface_rows.insert(
+                    SurfaceId {
+                        event: event.seq,
+                        item: 0,
+                    },
+                    row_index,
+                );
+                1
+            }
             _ => 0,
         };
         self.current_items_per_row.push(current_items);
@@ -171,6 +192,29 @@ impl TrajectoryProjector {
             self.control_snapshot = Some(control.snapshot.clone());
         }
         self.rows.push(projected);
+        match &event.kind {
+            TimelineEventKind::Control(ControlEvent {
+                model_context: Some(_),
+                ..
+            }) if self.active_turn => {
+                self.pending_control_row = Some((
+                    SurfaceId {
+                        event: event.seq,
+                        item: 0,
+                    },
+                    row_index,
+                ));
+            }
+            TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
+                self.active_turn = false;
+                if let Some((id, pending_row)) = self.pending_control_row.take() {
+                    self.surface_rows.insert(id, pending_row);
+                    self.current_items_per_row[pending_row] = 1;
+                    self.rows[pending_row].visibility = SurfaceVisibility::Current;
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn rows(&self) -> &[TrajectoryRow] {
@@ -1184,6 +1228,7 @@ mod tests {
             .record(TimelineEventKind::Control(crate::ControlEvent {
                 revision: 3,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
+                model_context: None,
             }))
             .unwrap();
 
@@ -1195,6 +1240,70 @@ mod tests {
         assert_eq!(row.kind, "control.committed");
         assert_eq!(row.state, "committed");
         assert_eq!(row.correlation_id.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn projection_activates_only_the_latest_in_turn_control_context() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ])
+        .unwrap();
+        let turn = crate::TurnId(7);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: crate::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 2,
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: crate::TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        for (revision, behavior) in [(1, "plan"), (2, "normal")] {
+            timeline
+                .record(TimelineEventKind::Control(crate::ControlEvent {
+                    revision,
+                    snapshot: serde_json::json!({ "behavior": behavior }),
+                    model_context: Some(ConversationItem::system_reminder(behavior)),
+                }))
+                .unwrap();
+        }
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: crate::TurnTerminal {
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "completed".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+
+        let snapshot = timeline.trajectory();
+        let first = snapshot
+            .rows
+            .iter()
+            .find(|row| row.correlation_id.as_deref() == Some("1"))
+            .unwrap();
+        let latest = snapshot
+            .rows
+            .iter()
+            .find(|row| row.correlation_id.as_deref() == Some("2"))
+            .unwrap();
+        assert_eq!(first.visibility, SurfaceVisibility::LogOnly);
+        assert_eq!(latest.visibility, SurfaceVisibility::Current);
     }
 
     #[test]
@@ -1238,6 +1347,7 @@ mod tests {
                     "behavior": { "state": "Normal" },
                     "goal": null,
                 }),
+                model_context: None,
             }))
             .unwrap();
         timeline
@@ -1254,6 +1364,7 @@ mod tests {
                         "subagent_tokens_spent": 0,
                     },
                 }),
+                model_context: None,
             }))
             .unwrap();
 

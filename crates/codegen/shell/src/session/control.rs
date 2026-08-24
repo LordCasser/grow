@@ -35,12 +35,29 @@ impl SessionControlSnapshot {
     }
 
     pub fn timeline_kind(&self) -> std::io::Result<chat_state::TimelineEventKind> {
+        self.timeline_kind_inner(None)
+    }
+
+    pub fn timeline_kind_with_model_context(
+        &self,
+        context: impl Into<String>,
+    ) -> std::io::Result<chat_state::TimelineEventKind> {
+        self.timeline_kind_inner(Some(sampling_types::ConversationItem::system_reminder(
+            context,
+        )))
+    }
+
+    fn timeline_kind_inner(
+        &self,
+        model_context: Option<sampling_types::ConversationItem>,
+    ) -> std::io::Result<chat_state::TimelineEventKind> {
         let snapshot = serde_json::to_value(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         Ok(chat_state::TimelineEventKind::Control(
             chat_state::ControlEvent {
                 revision: self.control_revision,
                 snapshot,
+                model_context,
             },
         ))
     }
@@ -108,6 +125,47 @@ mod tests {
     }
 
     #[test]
+    fn control_snapshot_and_model_context_share_one_event() {
+        let mut timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::system(
+                "system",
+            )])
+            .unwrap();
+        let state = SessionControlSnapshot::new(
+            1,
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Plan),
+            None,
+        );
+        let context =
+            crate::session::behavior::behavior_transition_context(tool_types::BehaviorId::Plan);
+        let event = timeline
+            .record(
+                state
+                    .timeline_kind_with_model_context(context.clone())
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let chat_state::TimelineEventKind::Control(control) = event.kind else {
+            unreachable!();
+        };
+        assert_eq!(
+            control.model_context.unwrap().text_content(),
+            context,
+            "the state transition and provider-visible protocol must be one durable fact"
+        );
+        assert_eq!(timeline.surface().last().unwrap().text_content(), context);
+        assert_eq!(
+            SessionControlSnapshot::latest_from_timeline(timeline.events())
+                .unwrap()
+                .unwrap()
+                .behavior
+                .behavior(),
+            tool_types::BehaviorId::Plan
+        );
+    }
+
+    #[test]
     fn malformed_earlier_control_event_fails_closed() {
         let mut timeline = chat_state::Timeline::default();
         timeline
@@ -115,6 +173,7 @@ mod tests {
                 chat_state::ControlEvent {
                     revision: 1,
                     snapshot: serde_json::json!({ "broken": true }),
+                    model_context: None,
                 },
             ))
             .unwrap();

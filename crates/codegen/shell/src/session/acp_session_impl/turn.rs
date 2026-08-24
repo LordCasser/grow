@@ -288,13 +288,6 @@ impl SessionActor {
         // Prompt text and queued metadata never drive Behavior transitions.
         *self.turn_behavior.lock() = admitted_behavior;
         self.signals_handle().increment_turn();
-        self.sync_active_behavior_prompt(admitted_behavior)
-            .await
-            .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "behavior context was not durably published: {error}"
-                ))
-            })?;
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
