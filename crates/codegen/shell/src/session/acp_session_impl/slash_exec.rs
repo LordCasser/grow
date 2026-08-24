@@ -993,8 +993,7 @@ impl SessionActor {
                     .await;
                     return ok_end_turn(0, None);
                 }
-                let current = self.chat_state_handle.get_projected_tokens().await as i64;
-                let used = self.goal_tokens_used(current);
+                let used = self.goal_tokens_used();
                 let previous = self.goal_tracker.lock().snapshot().cloned();
                 let effective_budget = token_budget.or_else(|| {
                     self.goal_tracker
@@ -1102,8 +1101,7 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalStatus => {
-                let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
-                let goal_tokens = self.goal_tokens_used(current_tokens);
+                let goal_tokens = self.goal_tokens_used();
                 let msg = {
                     let mut tracker = self.goal_tracker.lock();
                     tracker.account_elapsed();
@@ -1127,9 +1125,8 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalPause => {
-                let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
                 use crate::session::goal_tracker::{GoalPauseReason, GoalStatus};
-                let tokens_used = self.goal_tokens_used(current_tokens);
+                let tokens_used = self.goal_tokens_used();
                 let previous = self.goal_tracker.lock().snapshot().cloned();
                 let (msg, changed) = {
                     let mut tracker = self.goal_tracker.lock();

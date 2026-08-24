@@ -1944,6 +1944,16 @@ impl SessionActor {
                 api_duration_ms,
                 response.cost_usd_ticks,
             );
+            let goal_charge = crate::session::goal_tracker::model_usage_goal_tokens(u);
+            if self.goal_tracker.lock().account_model_tokens(goal_charge) {
+                // Goal usage is durable Control bookkeeping. It shares the
+                // provider usage transaction but never derives from context
+                // pressure, which compaction and shadow projection may lower.
+                self.record_control_snapshot();
+                let tokens_used = self.goal_tokens_used();
+                self.goal_notify_sender()
+                    .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+            }
             self.signals_handle()
                 .record_response_output_usage(u.completion_tokens, u.reasoning_tokens);
         } else if self.tool_context.task_output_token_budget.is_some() {

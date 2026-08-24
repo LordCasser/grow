@@ -5,23 +5,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub(crate) struct SubagentTokenRecord {
     pub goal_id: Option<String>,
-    pub resume_anchor_cumulative: u64,
-    pub settled_cumulative: u64,
-    pub last_cumulative_reported: u64,
-    pub model: Option<String>,
-    pub finished: bool,
-}
-
-impl SubagentTokenRecord {
-    pub fn marginal(&self) -> u64 {
-        self.last_cumulative_reported
-            .saturating_sub(self.resume_anchor_cumulative)
-    }
-
-    pub fn unsettled(&self) -> u64 {
-        self.last_cumulative_reported
-            .saturating_sub(self.settled_cumulative)
-    }
+    pub usage_accounted: bool,
 }
 
 pub(crate) fn goal_runtime_available_from_tools(goal_enabled: bool, tool_names: &[String]) -> bool {
@@ -44,33 +28,6 @@ pub(crate) fn laziness_injection_active(
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
 ) -> bool {
     goal_runtime_available && goal_status == Some(crate::session::goal_tracker::GoalStatus::Active)
-}
-
-fn fold_tokens_by_model<'a>(
-    records: impl IntoIterator<Item = &'a SubagentTokenRecord>,
-    goal_id: &str,
-    current_model_id: &str,
-) -> Vec<(String, u64)> {
-    let mut by_model = std::collections::HashMap::<String, u64>::new();
-    for record in records {
-        if record.goal_id.as_deref() != Some(goal_id) {
-            continue;
-        }
-        let model = record
-            .model
-            .as_deref()
-            .filter(|model| !model.trim().is_empty())
-            .unwrap_or(current_model_id)
-            .to_string();
-        let entry = by_model.entry(model).or_default();
-        *entry = entry.saturating_add(record.marginal());
-    }
-    let mut result: Vec<_> = by_model
-        .into_iter()
-        .filter(|(_, value)| *value > 0)
-        .collect();
-    result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    result
 }
 
 impl SessionActor {
@@ -326,9 +283,6 @@ impl SessionActor {
         if self.goal_tracker.lock().snapshot().is_none() {
             return;
         }
-        self.settle_live_goal_subagent_tokens();
-        let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
-        let _ = self.goal_tokens(current_tokens);
         self.goal_tracker.lock().account_elapsed();
         let behavior = self.behavior.lock().snapshot();
         let goal = self.goal_tracker.lock().snapshot().cloned();
@@ -434,117 +388,12 @@ impl SessionActor {
         }
     }
 
-    pub(crate) fn goal_tokens(&self, current_session_tokens: i64) -> (i64, i64) {
-        let goal_id = match self.goal_tracker.lock().snapshot() {
-            Some(goal) => goal.goal_id.clone(),
-            None => return (0, 0),
-        };
-        let active_subagents = self
-            .subagent_token_records
-            .lock()
-            .values()
-            .filter(|record| {
-                !record.finished && record.goal_id.as_deref() == Some(goal_id.as_str())
-            })
-            .fold(0i64, |all, record| {
-                let value = i64::try_from(record.marginal()).unwrap_or(i64::MAX);
-                all.saturating_add(value)
-            });
-        let mut tracker = self.goal_tracker.lock();
-        let parent = tracker.account_parent_tokens(current_session_tokens);
-        let finished = tracker.subagent_tokens_spent();
-        let total = parent
-            .saturating_add(finished)
-            .saturating_add(active_subagents);
-        (total, finished)
+    pub(super) fn finish_goal_subagent_accounting(&self, subagent_id: &str) {
+        self.subagent_token_records.lock().remove(subagent_id);
     }
 
-    /// Settle one terminal subagent exactly once into the durable Goal token
-    /// counter while retaining its record as a resume anchor.
-    pub(super) fn settle_goal_subagent_tokens(
-        &self,
-        subagent_id: &str,
-        reported_tokens: u64,
-    ) -> Option<i64> {
-        let (current_goal_id, complete) = self
-            .goal_tracker
-            .lock()
-            .snapshot()
-            .map(|goal| {
-                (
-                    Some(goal.goal_id.clone()),
-                    goal.status == crate::session::goal_tracker::GoalStatus::Complete,
-                )
-            })
-            .unwrap_or((None, false));
-        let delta = {
-            let mut records = self.subagent_token_records.lock();
-            if complete {
-                records.remove(subagent_id);
-                return None;
-            }
-            let record = records.get_mut(subagent_id)?;
-            record.last_cumulative_reported = record.last_cumulative_reported.max(reported_tokens);
-            if record.goal_id != current_goal_id {
-                records.remove(subagent_id);
-                return None;
-            }
-            record.finished = true;
-            let delta = record.unsettled();
-            record.settled_cumulative = record.last_cumulative_reported;
-            i64::try_from(delta).unwrap_or(i64::MAX)
-        };
-        let _ = self.goal_tracker.lock().settle_subagent_tokens(delta);
-        Some(delta)
-    }
-
-    /// Charge delegated Goal work at graceful shutdown before the persistence
-    /// barrier so a reload cannot reuse the same budget.
-    pub(super) fn settle_live_goal_subagent_tokens(&self) -> i64 {
-        let Some(goal_id) = self
-            .goal_tracker
-            .lock()
-            .snapshot()
-            .map(|goal| goal.goal_id.clone())
-        else {
-            return 0;
-        };
-        let delta = {
-            let mut records = self.subagent_token_records.lock();
-            records
-                .values_mut()
-                .filter(|record| {
-                    !record.finished && record.goal_id.as_deref() == Some(goal_id.as_str())
-                })
-                .fold(0i64, |total, record| {
-                    record.finished = true;
-                    let delta = record.unsettled();
-                    record.settled_cumulative = record.last_cumulative_reported;
-                    total.saturating_add(i64::try_from(delta).unwrap_or(i64::MAX))
-                })
-        };
-        if self.goal_tracker.lock().settle_subagent_tokens(delta) {
-            delta
-        } else {
-            0
-        }
-    }
-
-    pub(crate) fn goal_tokens_used(&self, current_session_tokens: i64) -> i64 {
-        self.goal_tokens(current_session_tokens).0
-    }
-
-    pub(crate) fn goal_tokens_by_model(&self, current_model_id: &str) -> Vec<(String, u64)> {
-        let goal_id = match self.goal_tracker.lock().snapshot() {
-            Some(goal) => goal.goal_id.clone(),
-            None => return Vec::new(),
-        };
-        let records = self.subagent_token_records.lock();
-        fold_tokens_by_model(
-            records.values().filter(|record| !record.finished),
-            &goal_id,
-            current_model_id,
-        )
+    pub(crate) fn goal_tokens_used(&self) -> i64 {
+        self.goal_tracker.lock().tokens_used()
     }
 
     pub(super) async fn set_goal_loop_active_resource(&self, active: bool) {

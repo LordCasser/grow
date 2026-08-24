@@ -16,31 +16,92 @@ impl SessionActor {
     /// Apply subagent usage. `Ok` after chat-state acked; `Err` if apply failed.
     pub(super) async fn record_subagent_usage(
         &self,
+        subagent_id: &str,
         by_model: &[(String, chat_state::UsageTotals)],
         parent_prompt_id: Option<&str>,
         incomplete: bool,
     ) -> Result<SubagentUsageApply, ()> {
-        if by_model.is_empty() && !incomplete {
-            return Ok(SubagentUsageApply::AttributedToPrompt);
-        }
         let current = self
             .current_prompt_id
             .lock()
             .expect("current_prompt_id mutex poisoned")
             .clone();
         let attributable = parent_prompt_id.is_some() && parent_prompt_id == current.as_deref();
-        if !self
-            .chat_state_handle
-            .record_subagent_usage(by_model.to_vec(), attributable, incomplete)
-            .await
+        if (!by_model.is_empty() || incomplete)
+            && !self
+                .chat_state_handle
+                .record_subagent_usage(by_model.to_vec(), attributable, incomplete)
+                .await
         {
             return Err(());
         }
+        self.account_goal_subagent_usage(subagent_id, by_model)
+            .await?;
         Ok(if attributable {
             SubagentUsageApply::AttributedToPrompt
         } else {
             SubagentUsageApply::SessionOnly
         })
+    }
+
+    /// Fold delegated Goal usage at the same acknowledged boundary as the
+    /// parent usage ledger. This is the only subagent Goal-accounting writer;
+    /// progress and presentation notifications carry no budget authority.
+    async fn account_goal_subagent_usage(
+        &self,
+        subagent_id: &str,
+        by_model: &[(String, chat_state::UsageTotals)],
+    ) -> Result<(), ()> {
+        let current_goal = self.goal_tracker.lock().snapshot().cloned();
+        let Some(goal) = current_goal.as_ref() else {
+            self.subagent_token_records.lock().remove(subagent_id);
+            return Ok(());
+        };
+        if goal.status == crate::session::goal_tracker::GoalStatus::Complete {
+            self.subagent_token_records.lock().remove(subagent_id);
+            return Ok(());
+        }
+        let previous_record = {
+            let mut records = self.subagent_token_records.lock();
+            let Some(record) = records.get_mut(subagent_id) else {
+                return Ok(());
+            };
+            if record.goal_id.as_deref() != Some(goal.goal_id.as_str()) {
+                records.remove(subagent_id);
+                return Ok(());
+            }
+            if record.usage_accounted {
+                return Ok(());
+            }
+            let previous = record.clone();
+            record.usage_accounted = true;
+            previous
+        };
+        let tokens = by_model.iter().fold(0u64, |total, (_, usage)| {
+            total.saturating_add(usage.uncached_tokens())
+        });
+        let tokens = i64::try_from(tokens).unwrap_or(i64::MAX);
+        if tokens == 0 {
+            return Ok(());
+        }
+        let previous_goal = goal.clone();
+        if !self.goal_tracker.lock().settle_subagent_tokens(tokens) {
+            self.subagent_token_records
+                .lock()
+                .insert(subagent_id.to_string(), previous_record);
+            return Err(());
+        }
+        if let Err(error) = self.commit_goal_mutation_or_restore(previous_goal).await {
+            self.subagent_token_records
+                .lock()
+                .insert(subagent_id.to_string(), previous_record);
+            tracing::error!(%error, subagent_id, "failed to persist Goal subagent usage");
+            return Err(());
+        }
+        let tokens_used = self.goal_tokens_used();
+        self.goal_notify_sender()
+            .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+        Ok(())
     }
     /// True-miss / unpinned fail-closed: sticky for freeze report + pin-aware
     /// ledger marks. Prompt ledger is stained only when the stamped pin is the
@@ -461,14 +522,9 @@ impl SessionActor {
                 subagent_id,
                 subagent_type,
                 description,
-                resumed_from,
-                model,
                 goal_id,
                 ..
             } => {
-                if let Some(parent_id) = resumed_from {
-                    debug_assert_ne!(parent_id, subagent_id, "subagent cannot resume itself");
-                }
                 let goal_owned = goal_id.as_deref().is_some_and(|owner_goal_id| {
                     self.goal_tracker
                         .lock()
@@ -477,20 +533,6 @@ impl SessionActor {
                 });
                 if goal_id.is_some() {
                     let mut records = self.subagent_token_records.lock();
-                    let anchor = resumed_from
-                        .as_deref()
-                        .map(|pid| match records.get(pid) {
-                            Some(r) => r.last_cumulative_reported,
-                            None => {
-                                tracing::debug!(
-                                    parent_id = %pid,
-                                    subagent_id = %subagent_id,
-                                    "resume parent not in token registry; anchoring at 0"
-                                );
-                                0
-                            }
-                        })
-                        .unwrap_or(0);
                     debug_assert!(
                         !records.contains_key(subagent_id),
                         "duplicate SubagentSpawned for {subagent_id}"
@@ -499,17 +541,12 @@ impl SessionActor {
                         subagent_id.clone(),
                         SubagentTokenRecord {
                             goal_id: goal_id.clone(),
-                            resume_anchor_cumulative: anchor,
-                            settled_cumulative: anchor,
-                            last_cumulative_reported: anchor,
-                            model: model.clone(),
-                            finished: false,
+                            usage_accounted: false,
                         },
                     );
                 }
                 if self.goal_runtime_available() && goal_owned {
-                    let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
-                    let tokens_used = self.goal_tokens_used(current_tokens);
+                    let tokens_used = self.goal_tokens_used();
                     self.record_control_snapshot();
                     let notify = self.goal_notify_sender();
                     notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
@@ -535,70 +572,13 @@ impl SessionActor {
                     .await;
                 }
             }
-            GrowSessionUpdate::SubagentFinished {
-                subagent_id,
-                tokens_used,
-                ..
-            } => {
-                let previous_goal = self.goal_tracker.lock().snapshot().cloned();
-                let previous_token_record =
-                    self.subagent_token_records.lock().get(subagent_id).cloned();
-                let goal_tokens_settled = self
-                    .settle_goal_subagent_tokens(subagent_id, *tokens_used)
-                    .is_some();
-                if self.goal_runtime_available() && goal_tokens_settled {
-                    let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
-                    let tokens_used = self.goal_tokens_used(current_tokens);
-                    if let Some(previous) = previous_goal
-                        && let Err(error) = self.commit_goal_mutation_or_restore(previous).await
-                    {
-                        if let Some(previous_record) = previous_token_record {
-                            self.subagent_token_records
-                                .lock()
-                                .insert(subagent_id.clone(), previous_record);
-                        }
-                        tracing::error!(
-                            %error,
-                            subagent_id,
-                            "failed to persist terminal Goal subagent accounting"
-                        );
-                        return;
-                    }
-                    let notify = self.goal_notify_sender();
-                    notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
-                }
+            GrowSessionUpdate::SubagentFinished { subagent_id, .. } => {
+                self.finish_goal_subagent_accounting(subagent_id);
             }
-            GrowSessionUpdate::SubagentProgress {
-                subagent_id,
-                tokens_used,
-                ..
-            } => {
-                let goal_id = self
-                    .goal_tracker
-                    .lock()
-                    .snapshot()
-                    .map(|o| o.goal_id.clone());
-                let progress = {
-                    let mut records = self.subagent_token_records.lock();
-                    match records.get_mut(subagent_id) {
-                        Some(rec)
-                            if !rec.finished && goal_id.is_some() && rec.goal_id == goal_id =>
-                        {
-                            rec.last_cumulative_reported =
-                                rec.last_cumulative_reported.max(*tokens_used);
-                            Some(())
-                        }
-                        Some(_) => None,
-                        None => {
-                            tracing::debug!(
-                                subagent_id = %subagent_id,
-                                "progress tick for unregistered subagent; dropped"
-                            );
-                            None
-                        }
-                    }
-                };
-                let _ = progress;
+            GrowSessionUpdate::SubagentProgress { .. } => {
+                // Progress reports current child context pressure, not
+                // cumulative consumption. Goal accounting happens only from
+                // the terminal usage transaction.
                 return;
             }
             _ => {}
@@ -1223,7 +1203,6 @@ mod grow_event_id_stamping_tests {
                         "completed-goal".into(),
                         "done".into(),
                         None,
-                        0,
                         "now".into(),
                     )
                     .unwrap();
@@ -1259,6 +1238,66 @@ mod grow_event_id_stamping_tests {
                     actor.behavior.lock().behavior(),
                     tool_types::BehaviorId::Clarify
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn goal_subagent_usage_is_accounted_from_the_ledger_fold_once() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = super::acking_persistence_channel();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish delegated work".into(),
+                        Some(10_000),
+                        "now".into(),
+                    )
+                    .unwrap();
+                actor.subagent_token_records.lock().insert(
+                    "sub-1".into(),
+                    SubagentTokenRecord {
+                        goal_id: Some("goal-1".into()),
+                        usage_accounted: false,
+                    },
+                );
+                *actor.current_prompt_id.lock().unwrap() = Some("prompt-1".into());
+                let usage = vec![(
+                    "model".into(),
+                    chat_state::UsageTotals {
+                        input_tokens: 1_000,
+                        cached_read_tokens: 700,
+                        output_tokens: 80,
+                        model_calls: 1,
+                        ..Default::default()
+                    },
+                )];
+
+                assert_eq!(
+                    actor
+                        .record_subagent_usage("sub-1", &usage, Some("prompt-1"), false)
+                        .await,
+                    Ok(SubagentUsageApply::AttributedToPrompt)
+                );
+                assert_eq!(actor.goal_tokens_used(), 380);
+                assert!(
+                    actor.subagent_token_records.lock()["sub-1"].usage_accounted,
+                    "the usage fold itself must own the exactly-once marker"
+                );
+
+                actor
+                    .record_subagent_usage("sub-1", &usage, Some("prompt-1"), false)
+                    .await
+                    .unwrap();
+                assert_eq!(actor.goal_tokens_used(), 380);
+                actor.finish_goal_subagent_accounting("sub-1");
+                assert!(!actor.subagent_token_records.lock().contains_key("sub-1"));
             })
             .await;
     }

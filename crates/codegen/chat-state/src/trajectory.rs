@@ -932,14 +932,9 @@ fn json_string<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str>
 }
 
 fn goal_tokens(goal: &serde_json::Value) -> i64 {
-    goal.get("parent_tokens_spent")
+    goal.get("tokens_used")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0)
-        .saturating_add(
-            goal.get("subagent_tokens_spent")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0),
-        )
 }
 
 fn describe_message(event: &MessageEvent) -> ReturnTuple {
@@ -1421,8 +1416,23 @@ mod tests {
                         "status": "active",
                         "objective": "rebuild",
                         "token_budget": null,
-                        "parent_tokens_spent": 0,
-                        "subagent_tokens_spent": 0,
+                        "tokens_used": 0,
+                    },
+                }),
+                model_context: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 3,
+                snapshot: serde_json::json!({
+                    "behavior": { "state": "Goal" },
+                    "goal": {
+                        "goal_id": "goal-1",
+                        "status": "active",
+                        "objective": "rebuild",
+                        "token_budget": null,
+                        "tokens_used": 380,
                     },
                 }),
                 model_context: None,
@@ -1435,6 +1445,7 @@ mod tests {
             rows[1].summary,
             "behavior normal → goal; goal goal-1 created · active"
         );
+        assert_eq!(rows[2].summary, "goal goal-1 checkpoint · 380 tokens");
     }
 
     #[test]

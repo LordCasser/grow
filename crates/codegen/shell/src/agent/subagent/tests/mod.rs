@@ -120,6 +120,7 @@ async fn usage_ack_precedes_terminal_presentation() {
     let mut fold = Box::pin(
         record_subagent_usage(
             ctx.parent_cmd_tx.as_ref(),
+            "subagent-1".into(),
             Some(by_model),
             Some("parent-prompt".to_string()),
             false,

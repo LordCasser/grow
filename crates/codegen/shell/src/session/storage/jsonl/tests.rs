@@ -2116,7 +2116,6 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
         "goal-1".into(),
         "ship safely".into(),
         None,
-        0,
         "2026-01-01T00:00:00Z".into(),
     )
     .unwrap();
@@ -3012,7 +3011,6 @@ async fn timeline_control_roundtrips_goal_through_light_session_load() {
         "goal-1".into(),
         "verify persistence".into(),
         Some(10_000),
-        50,
         "now".into(),
     )
     .unwrap();
@@ -3240,7 +3238,6 @@ async fn session_copy_does_not_clone_goal_runtime_state() {
         "source-goal".into(),
         "stay in the source session".into(),
         None,
-        0,
         "now".into(),
     )
     .unwrap();

@@ -23,6 +23,7 @@ pub(super) fn usage_is_incomplete(
 }
 pub(super) async fn record_subagent_usage(
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    subagent_id: String,
     by_model: Option<Vec<(String, chat_state::UsageTotals)>>,
     parent_prompt_id: Option<String>,
     incomplete: bool,
@@ -37,6 +38,7 @@ pub(super) async fn record_subagent_usage(
             let (respond_to, ack) = oneshot::channel();
             if cmd_tx
                 .send(SessionCommand::RecordSubagentUsage {
+                    subagent_id,
                     by_model,
                     parent_prompt_id,
                     incomplete,
@@ -1414,6 +1416,7 @@ pub(crate) async fn run_shell_child(
     .ok();
     let fold_acked = record_subagent_usage(
         ctx.parent_cmd_tx.as_ref(),
+        request.id.clone(),
         subagent_usage_by_model,
         request.parent_prompt_id.clone(),
         subagent_usage_incomplete,

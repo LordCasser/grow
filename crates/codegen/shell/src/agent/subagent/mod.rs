@@ -562,7 +562,7 @@ pub(crate) fn present_child_completion(
                 tool_calls: result.tool_calls,
                 turns: result.turns,
                 duration_ms: result.duration_ms,
-                tokens_used: completion_data.diagnostics_tokens,
+                tokens_used: result.total_tokens_used,
                 output: result.success.then(|| result.output.to_string()),
             },
             completion_data.parent_cmd_tx.as_ref(),

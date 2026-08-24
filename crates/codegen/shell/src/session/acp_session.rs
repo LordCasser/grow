@@ -728,8 +728,8 @@ pub(crate) struct SessionActor {
         std::cell::RefCell<Option<crate::session::summary::SessionTitleRoute>>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
-    /// Per-subagent token state keyed by `subagent_id`; sums into
-    /// goal totals via [`Self::goal_tokens`].
+    /// Per-subagent exactly-once marker keyed by `subagent_id`; Goal usage is
+    /// charged from the acknowledged child usage-ledger fold, never progress.
     pub(crate) subagent_token_records: parking_lot::Mutex<HashMap<String, SubagentTokenRecord>>,
     pub(crate) workspace_ops: workspace::WorkspaceOps,
     /// Layer-3 LazinessDetector: monotonic counter bumped whenever a

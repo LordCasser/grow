@@ -1378,7 +1378,6 @@ impl SessionActor {
     /// idle arbiter. Stage scheduling never happens inline with completion.
     pub(crate) async fn handle_turn_end(
         self: &std::sync::Arc<Self>,
-        turn_succeeded: bool,
         suppress_goal_continuation: bool,
     ) {
         let goal_active_now = laziness_injection_active(
@@ -1388,10 +1387,7 @@ impl SessionActor {
         if !goal_active_now {
             return;
         }
-        let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
-        if !turn_succeeded {
-            let _ = self.enforce_goal_token_budget(current_tokens).await;
-        }
+        let _ = self.enforce_goal_token_budget().await;
         if !suppress_goal_continuation {
             self.idle_arbiter.notify_one();
         }

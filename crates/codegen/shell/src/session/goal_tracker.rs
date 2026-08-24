@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-pub const GOAL_ARCHITECTURE_VERSION: u8 = 7;
+pub const GOAL_ARCHITECTURE_VERSION: u8 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,13 +63,11 @@ pub struct GoalState {
     pub objective: String,
     pub status: GoalStatus,
     pub token_budget: Option<i64>,
-    pub token_baseline: i64,
-    #[serde(default)]
-    pub parent_tokens_spent: i64,
-    #[serde(default)]
-    pub subagent_tokens_spent: i64,
-    #[serde(default)]
-    pub last_session_tokens_seen: Option<i64>,
+    /// Durable cumulative Goal charge. This is model consumption, not the
+    /// current provider context length: uncached input plus output for each
+    /// main-Agent call, plus acknowledged usage folds from Goal-owned
+    /// subagents.
+    pub tokens_used: i64,
     #[serde(default)]
     pub elapsed_ms: u64,
     pub created_at: String,
@@ -98,7 +96,7 @@ impl GoalTracker {
         }
     }
 
-    /// Goal v7 intentionally has no compatibility projection. Old
+    /// Goal v8 intentionally has no compatibility projection. Old
     /// planner/blackboard snapshots are rejected instead of reviving two
     /// lifecycle models in one session.
     pub fn from_snapshot(snapshot: GoalState) -> Option<Self> {
@@ -107,9 +105,7 @@ impl GoalTracker {
             || snapshot.definition_revision == 0
             || snapshot.objective.trim().is_empty()
             || snapshot.token_budget.is_some_and(|budget| budget <= 0)
-            || snapshot.token_baseline < 0
-            || snapshot.parent_tokens_spent < 0
-            || snapshot.subagent_tokens_spent < 0
+            || snapshot.tokens_used < 0
         {
             return None;
         }
@@ -153,7 +149,6 @@ impl GoalTracker {
         goal_id: String,
         objective: String,
         token_budget: Option<i64>,
-        token_baseline: i64,
         created_at: String,
     ) -> Result<(), String> {
         let objective = objective.trim();
@@ -180,10 +175,7 @@ impl GoalTracker {
             objective: objective.to_string(),
             status: GoalStatus::Active,
             token_budget,
-            token_baseline: token_baseline.max(0),
-            parent_tokens_spent: 0,
-            subagent_tokens_spent: 0,
-            last_session_tokens_seen: Some(token_baseline.max(0)),
+            tokens_used: 0,
             elapsed_ms: 0,
             created_at: created_at.clone(),
             updated_at: created_at,
@@ -361,22 +353,22 @@ impl GoalTracker {
         )
     }
 
-    pub fn account_parent_tokens(&mut self, current_session_tokens: i64) -> i64 {
-        let Some(goal) = self.goal.as_mut() else {
-            return 0;
-        };
-        let current = current_session_tokens.max(0);
-        let previous = goal
-            .last_session_tokens_seen
-            .unwrap_or(goal.token_baseline)
-            .max(0);
-        if goal.status == GoalStatus::Active {
-            goal.parent_tokens_spent = goal
-                .parent_tokens_spent
-                .saturating_add(current.saturating_sub(previous));
+    /// Charge one main-Agent model call while the Goal is active. Callers pass
+    /// a per-call delta from the provider usage transaction, so compaction,
+    /// shadow projection and provider context anchors cannot lower or replay
+    /// this counter.
+    pub fn account_model_tokens(&mut self, tokens: i64) -> bool {
+        if tokens <= 0 {
+            return false;
         }
-        goal.last_session_tokens_seen = Some(current);
-        goal.parent_tokens_spent
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        if goal.status != GoalStatus::Active {
+            return false;
+        }
+        goal.tokens_used = goal.tokens_used.saturating_add(tokens);
+        true
     }
 
     pub fn settle_subagent_tokens(&mut self, tokens: i64) -> bool {
@@ -386,23 +378,26 @@ impl GoalTracker {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        goal.subagent_tokens_spent = goal.subagent_tokens_spent.saturating_add(tokens);
+        if goal.status == GoalStatus::Complete {
+            return false;
+        }
+        goal.tokens_used = goal.tokens_used.saturating_add(tokens);
         true
     }
 
-    pub fn subagent_tokens_spent(&self) -> i64 {
-        self.goal
-            .as_ref()
-            .map_or(0, |goal| goal.subagent_tokens_spent)
-    }
-
-
     pub fn tokens_used(&self) -> i64 {
-        self.goal.as_ref().map_or(0, |goal| {
-            goal.parent_tokens_spent
-                .saturating_add(goal.subagent_tokens_spent)
-        })
+        self.goal.as_ref().map_or(0, |goal| goal.tokens_used)
     }
+}
+
+/// Codex Goal budget unit: uncached input plus output from one model call.
+/// Reasoning is already included in provider output and must not be added a
+/// second time.
+pub fn model_usage_goal_tokens(usage: &sampling_types::TokenUsage) -> i64 {
+    let uncached_input = usage
+        .prompt_tokens
+        .saturating_sub(usage.cached_prompt_tokens);
+    i64::from(uncached_input).saturating_add(i64::from(usage.completion_tokens))
 }
 
 fn now() -> String {
@@ -416,7 +411,7 @@ mod tests {
     fn tracker() -> GoalTracker {
         let mut tracker = GoalTracker::new();
         tracker
-            .create_goal("g1".into(), "ship it".into(), Some(100), 10, "now".into())
+            .create_goal("g1".into(), "ship it".into(), Some(100), "now".into())
             .unwrap();
         tracker
     }
@@ -480,5 +475,31 @@ mod tests {
         let mut state = tracker().snapshot().unwrap().clone();
         state.architecture_version = GOAL_ARCHITECTURE_VERSION - 1;
         assert!(GoalTracker::from_snapshot(state).is_none());
+    }
+
+    #[test]
+    fn model_usage_is_monotonic_and_excludes_cache_reads() {
+        let mut tracker = tracker();
+        let usage = sampling_types::TokenUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: 80,
+            total_tokens: 1_080,
+            reasoning_tokens: 40,
+            cached_prompt_tokens: 700,
+            cache_creation_prompt_tokens: 0,
+        };
+        let charge = model_usage_goal_tokens(&usage);
+        assert_eq!(charge, 380);
+        assert!(tracker.account_model_tokens(charge));
+        assert!(tracker.account_model_tokens(20));
+        assert_eq!(tracker.tokens_used(), 400);
+    }
+
+    #[test]
+    fn stopped_goal_does_not_charge_new_main_agent_calls() {
+        let mut tracker = tracker();
+        assert!(tracker.pause(GoalPauseReason::User));
+        assert!(!tracker.account_model_tokens(50));
+        assert_eq!(tracker.tokens_used(), 0);
     }
 }

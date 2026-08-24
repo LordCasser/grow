@@ -117,7 +117,6 @@ async fn every_continuation_audits_the_full_goal_before_planning_a_local_slice()
                     "goal-1".into(),
                     "replace the architecture and verify every feature".into(),
                     None,
-                    0,
                     "2026-08-24T00:00:00Z".into(),
                 )
                 .unwrap();

@@ -66,6 +66,14 @@ impl UsageTotals {
         self.input_tokens.saturating_add(self.output_tokens)
     }
 
+    /// Model consumption excluding cache reads. This is the unit used by
+    /// long-running Goal budgets; cache creation remains ordinary input.
+    pub fn uncached_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_sub(self.cached_read_tokens)
+            .saturating_add(self.output_tokens)
+    }
+
     pub fn cost_is_partial(&self) -> bool {
         self.cost_usd_ticks.is_some() && self.cost_missing_calls > 0
     }

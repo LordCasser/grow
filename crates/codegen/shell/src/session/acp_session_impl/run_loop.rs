@@ -607,7 +607,7 @@ pub(super) async fn run_session(
                         .filter(|task| task.prompt_id == prompt_id)
                         .map(|task| task.origin.clone())
                 };
-                let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
+                let (_turn_succeeded, suppress_goal_continuation, infra_pause_message) =
                     SessionActor::post_turn_goal_degradation_plan(
                         &result,
                         completed_origin.as_ref(),
@@ -642,7 +642,7 @@ pub(super) async fn run_session(
                 // foreground promotion had the first chance to claim Idle.
                 if session.state.lock().await.foreground.is_idle() {
                     session
-                        .handle_turn_end(turn_succeeded, suppress_goal_continuation)
+                        .handle_turn_end(suppress_goal_continuation)
                         .await;
                 }
                 // If no user prompt started, check for pending notifications
@@ -1505,6 +1505,7 @@ pub(super) async fn run_session(
                         session.handle_grow_session_notification(notification).await;
                     }
                     SessionCommand::RecordSubagentUsage {
+                        subagent_id,
                         by_model,
                         parent_prompt_id,
                         incomplete,
@@ -1513,6 +1514,7 @@ pub(super) async fn run_session(
                         use super::updates::SubagentUsageApply;
                         match session
                             .record_subagent_usage(
+                                &subagent_id,
                                 &by_model,
                                 parent_prompt_id.as_deref(),
                                 incomplete,

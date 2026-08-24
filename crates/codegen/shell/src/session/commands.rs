@@ -340,6 +340,7 @@ pub enum SessionCommand {
     /// applied (prompt-attributed or session-only). Drop the oneshot on failure
     /// so the child treats the fold as not landed.
     RecordSubagentUsage {
+        subagent_id: String,
         by_model: Vec<(String, chat_state::UsageTotals)>,
         parent_prompt_id: Option<String>,
         /// Nested subagent bill may under-count.

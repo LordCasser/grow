@@ -89,6 +89,56 @@ async fn anchors_projected_context_from_response_usage() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor
+                .goal_tracker
+                .lock()
+                .create_goal(
+                    "goal-1".into(),
+                    "finish the architecture".into(),
+                    Some(10_000),
+                    "now".into(),
+                )
+                .unwrap();
+
+            let mut first = response_with_usage(1_080);
+            first.usage = Some(TokenUsage {
+                prompt_tokens: 1_000,
+                completion_tokens: 80,
+                total_tokens: 1_080,
+                reasoning_tokens: 40,
+                cached_prompt_tokens: 700,
+                cache_creation_prompt_tokens: 0,
+            });
+            actor.record_response_token_usage(&first, None, None);
+            assert_eq!(actor.goal_tokens_used(), 380);
+
+            let mut after_compaction = response_with_usage(400);
+            after_compaction.usage = Some(TokenUsage {
+                prompt_tokens: 350,
+                completion_tokens: 50,
+                total_tokens: 400,
+                reasoning_tokens: 20,
+                cached_prompt_tokens: 300,
+                cache_creation_prompt_tokens: 0,
+            });
+            actor.record_response_token_usage(&after_compaction, None, None);
+
+            assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 400);
+            assert_eq!(actor.goal_tokens_used(), 480);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn preserves_projection_when_response_has_no_usage() {
     let local = tokio::task::LocalSet::new();
     local
@@ -101,10 +151,7 @@ async fn preserves_projection_when_response_has_no_usage() {
 
             actor.record_response_token_usage(&response_without_usage(), None, None);
 
-            assert_eq!(
-                actor.chat_state_handle.get_projected_tokens().await,
-                99_999
-            );
+            assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 99_999);
         })
         .await;
 }

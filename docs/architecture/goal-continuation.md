@@ -1,4 +1,4 @@
-# Long-term Goal runtime v7
+# Long-term Goal runtime v8
 
 Goal is one durable objective plus the right to request another turn after the session becomes idle. It is not a plan executor and owns no blackboard, task graph, planner/verifier child, or finalization phase.
 
@@ -21,10 +21,7 @@ struct GoalState {
     objective: String,
     status: GoalStatus,
     token_budget: Option<i64>,
-    token_baseline: i64,
-    parent_tokens_spent: i64,
-    subagent_tokens_spent: i64,
-    last_session_tokens_seen: Option<i64>,
+    tokens_used: i64,
     elapsed_ms: u64,
     created_at: String,
     updated_at: String,
@@ -34,7 +31,7 @@ struct GoalState {
 
 Goal and the selected Behavior are written together in the versioned Timeline `Control` snapshot. The Timeline is the only persistence authority. A transition publishes UI state only after the durable append succeeds; failure restores the prior in-memory Goal. Create, edit, restart, complete, and clear therefore cannot expose a half-applied Goal/Behavior pair.
 
-Goal architecture v7 deliberately rejects older snapshots. `definition_revision` advances only when the user-controlled objective or token budget changes; lifecycle and accounting checkpoints cannot invalidate model context. Planner/blackboard state is not projected or migrated because that would keep two lifecycle models alive.
+Goal architecture v8 deliberately rejects older snapshots. `definition_revision` advances only when the user-controlled objective or token budget changes; lifecycle and accounting checkpoints cannot invalidate model context. `tokens_used` is cumulative model consumption—uncached input plus output from each active primary-Agent call and each acknowledged usage fold from a Goal-owned child. It never derives from current context pressure, so compaction, pruning, provider anchors, and request shadows cannot decrease or replay the budget. Planner/blackboard state is not projected or migrated because that would keep two lifecycle models alive.
 
 ## Lifecycle ownership
 
@@ -76,7 +73,7 @@ A child spawned during Goal work receives an immutable `GoalView` and `SubagentO
 
 The effective child tool surface remains the intersection of registered tools, Agent definition, Behavior policy, delegated capability, and user permission. Goal ownership adds an object-level restriction; it never expands capability.
 
-Background task ids created by Goal work are remembered only to suppress late auto-wake notifications after the Goal stops. Their token usage is settled into the durable Goal budget, but progress ticks are not persisted as Goal updates.
+Background task ids created by Goal work are remembered only to suppress late auto-wake notifications after the Goal stops. A Goal-owned child's acknowledged usage-ledger fold settles its uncached input plus output exactly once into the durable Goal budget before terminal presentation. Live progress remains a context-pressure diagnostic and is never treated as cumulative consumption or persisted as a Goal update.
 
 ## Observability
 
@@ -91,7 +88,7 @@ The Goal detail overlay is a read-only projection of that same state. It contain
   `todo_write`. A missing required tool pauses an Active Goal with an actionable
   runtime-unavailable message; `task` remains optional bounded delegation.
 - Complete receipts freeze Goal usage; later Normal turns are not charged.
-- Graceful shutdown settles live delegated usage and checkpoints elapsed time before the persistence barrier.
+- Graceful shutdown checkpoints already-accounted usage and elapsed time before the persistence barrier; it never guesses delegated consumption from a live context watermark.
 - Fork/copy does not clone Goal runtime ownership.
 - Rewind requires explicit Goal clear because prompt/file rewind has no prompt-indexed Goal snapshot.
 - An Active Goal keeps the session resident even when foreground is idle; all stopped statuses may unload normally.

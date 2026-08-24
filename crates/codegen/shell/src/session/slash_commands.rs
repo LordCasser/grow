@@ -2929,7 +2929,7 @@ mod tests {
         use crate::session::goal_tracker::{GoalStatus, GoalTracker};
         let mut tracker = GoalTracker::new();
         tracker
-            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .create_goal("g1".into(), "obj".into(), None, "now".into())
             .unwrap();
         assert_eq!(tracker.status(), Some(GoalStatus::Active));
         assert_eq!(tracker.objective(), Some("obj"));
@@ -2940,7 +2940,7 @@ mod tests {
         let mut tracker = GoalTracker::new();
         assert!(!tracker.pause(GoalPauseReason::User));
         tracker
-            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .create_goal("g1".into(), "obj".into(), None, "now".into())
             .unwrap();
         assert!(tracker.pause(GoalPauseReason::User));
         assert_eq!(tracker.status(), Some(GoalStatus::Paused));
@@ -2951,7 +2951,7 @@ mod tests {
         use crate::session::goal_tracker::{GoalPauseReason, GoalStatus, GoalTracker};
         let mut tracker = GoalTracker::new();
         tracker
-            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .create_goal("g1".into(), "obj".into(), None, "now".into())
             .unwrap();
         assert!(!tracker.restart());
         tracker.pause(GoalPauseReason::User);
@@ -2963,7 +2963,7 @@ mod tests {
         use crate::session::goal_tracker::GoalTracker;
         let mut tracker = GoalTracker::new();
         tracker
-            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .create_goal("g1".into(), "obj".into(), None, "now".into())
             .unwrap();
         assert!(tracker.snapshot().is_some());
         tracker.clear();
@@ -2974,11 +2974,11 @@ mod tests {
         use crate::session::goal_tracker::GoalTracker;
         let mut tracker = GoalTracker::new();
         tracker
-            .create_goal("g1".into(), "first".into(), None, 0, "now".into())
+            .create_goal("g1".into(), "first".into(), None, "now".into())
             .unwrap();
         assert!(
             tracker
-                .create_goal("g2".into(), "second".into(), None, 0, "now".into())
+                .create_goal("g2".into(), "second".into(), None, "now".into())
                 .is_err()
         );
         assert_eq!(tracker.objective(), Some("first"));
@@ -2988,7 +2988,7 @@ mod tests {
         use crate::session::goal_tracker::GoalTracker;
         let mut tracker = GoalTracker::new();
         tracker
-            .create_goal("g1".into(), "obj".into(), None, 0, "now".into())
+            .create_goal("g1".into(), "obj".into(), None, "now".into())
             .unwrap();
         let before = tracker.snapshot().unwrap().elapsed_ms;
         assert_eq!(before, 0);

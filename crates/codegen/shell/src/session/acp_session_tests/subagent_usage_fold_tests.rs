@@ -31,7 +31,7 @@ async fn subagent_usage_fold_attribution_gate() {
             *actor.current_prompt_id.lock().unwrap() = Some("p-1".into());
             assert_eq!(
                 actor
-                    .record_subagent_usage(&usage, Some("p-1"), false)
+                    .record_subagent_usage("sub-1", &usage, Some("p-1"), false)
                     .await,
                 Ok(super::updates::SubagentUsageApply::AttributedToPrompt)
             );
@@ -56,7 +56,9 @@ async fn subagent_usage_fold_attribution_gate() {
                 *actor.current_prompt_id.lock().unwrap() = live.map(str::to_string);
                 // Session-only: ledger apply ok, not attributed to live prompt.
                 assert_eq!(
-                    actor.record_subagent_usage(&usage, stamped, false).await,
+                    actor
+                        .record_subagent_usage("sub-1", &usage, stamped, false)
+                        .await,
                     Ok(super::updates::SubagentUsageApply::SessionOnly)
                 );
                 assert!(
@@ -184,7 +186,9 @@ async fn nested_incomplete_fold_marks_parent_ledger() {
             *actor.current_prompt_id.lock().unwrap() = Some("p-1".into());
             let usage = usage_rows();
             assert_eq!(
-                actor.record_subagent_usage(&usage, Some("p-1"), true).await,
+                actor
+                    .record_subagent_usage("sub-1", &usage, Some("p-1"), true)
+                    .await,
                 Ok(super::updates::SubagentUsageApply::AttributedToPrompt)
             );
             let prompt = actor
@@ -296,7 +300,7 @@ async fn session_only_incomplete_does_not_stain_live_open_prompt() {
             // Stamped pin ≠ live pin → session-only.
             assert_eq!(
                 actor
-                    .record_subagent_usage(&usage, Some("p-stamped"), true)
+                    .record_subagent_usage("sub-1", &usage, Some("p-stamped"), true)
                     .await,
                 Ok(super::updates::SubagentUsageApply::SessionOnly)
             );
@@ -331,7 +335,9 @@ async fn snapshot_ors_ledger_incomplete_even_when_reply_complete() {
             *actor.current_prompt_id.lock().unwrap() = Some("p-1".into());
             let usage = usage_rows();
             assert_eq!(
-                actor.record_subagent_usage(&usage, Some("p-1"), true).await,
+                actor
+                    .record_subagent_usage("sub-1", &usage, Some("p-1"), true)
+                    .await,
                 Ok(super::updates::SubagentUsageApply::AttributedToPrompt)
             );
             // Orchestration says complete (no live/sticky); ledger still incomplete.
