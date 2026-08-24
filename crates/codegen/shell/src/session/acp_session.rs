@@ -989,6 +989,9 @@ mod support;
 #[cfg(test)]
 #[path = "acp_session_tests/usage_categories_tests.rs"]
 mod usage_categories_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/workflow_launch_tests.rs"]
+mod workflow_launch_tests;
 /// Drop guard that records aggregate turn metrics on the current tracing span
 struct TurnMetrics {
     turn_tool_count: u64,

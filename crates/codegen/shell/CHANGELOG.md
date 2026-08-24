@@ -24,6 +24,10 @@
 - Text-only model recovery now records route-scoped ImageShadows with Sideband provenance. Original images remain canonical, another model route sees them immediately, and only the request projection is image-free.
 - Timeline schema v12 rejects all earlier logs; no compatibility projection is retained.
 
+## Workflow
+
+- Saved Workflow dynamic commands now run synchronous Rhai preflight on the blocking pool while retaining the Workflow Behavior admission gate. Scripts using `agent()`, `parallel()`, `budget()`, or other reply-bearing Host calls no longer panic the session runtime, and validator task failure remains a fail-closed launch error.
+
 完整发布说明见 [changelogs/1.1.11.md](changelogs/1.1.11.md)。
 
 # 1.1.5 — 2026-08-09

@@ -285,14 +285,34 @@ impl SessionActor {
             Ok(definition) => definition,
             Err(error) => return format!("Workflow '{name}' unavailable: {error}"),
         };
-        if let Err(error) = workflow::validate_script_with_agent_budget(
-            &definition.resolved.script,
-            parse_named_workflow_args(input, &definition.resolved.meta.description)
-                .0
-                .into(),
-            workflow::DEFAULT_AGENT_BUDGET,
-        ) {
-            return format!("Workflow '{name}' failed preflight and was not started: {error}");
+        let (args, objective) =
+            parse_named_workflow_args(input, &definition.resolved.meta.description);
+        let validation_script = definition.resolved.script.clone();
+        let validation_args = args.clone();
+        // Rhai and its Host seam are deliberately synchronous: Host functions
+        // wait with `blocking_recv`. Keep the public-Workflow admission guard,
+        // but execute preflight off the async session worker.
+        match tokio::task::spawn_blocking(move || {
+            workflow::validate_script_with_agent_budget(
+                &validation_script,
+                Some(validation_args),
+                workflow::DEFAULT_AGENT_BUDGET,
+            )
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                return format!(
+                    "Workflow '{name}' failed preflight and was not started: {error}"
+                );
+            }
+            Err(error) => {
+                return format!(
+                    "Workflow '{name}' preflight could not be completed and was not started: \
+                     validator task failed: {error}"
+                );
+            }
         }
         if let Err(error) =
             workspace.record_validated(cwd, &definition_id, &definition.summary.content_hash)
@@ -300,7 +320,6 @@ impl SessionActor {
             return format!("Workflow '{name}' changed during preflight: {error}");
         }
         let resolved = definition.resolved;
-        let (args, objective) = parse_named_workflow_args(input, &resolved.meta.description);
         let spec = crate::session::workflow::manager::LaunchSpec {
             objective,
             args,

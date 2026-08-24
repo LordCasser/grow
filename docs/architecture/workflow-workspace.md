@@ -24,6 +24,13 @@ journal；`agent()`、`parallel()`、`phase()`、`complete()`、`pause()`、`awa
 Run 快照，而不是重新解析当前 Definition。完整的脚本写作契约（meta、函数签名、Agent
 选项、限制与最小示例）见 [workflow-rhai.md](../workflow-rhai.md)。
 
+公共 Run 的启动从实时 Workflow Behavior 复核到预检、validated hash 提交和
+`WorkflowManager::launch` 共用同一 admission 临界区。启动参数只解析一次；预检与 Run
+快照使用同一 JSON 值。Rhai 引擎及 Host 函数是同步协议，Host 返回值通过
+`blocking_recv` 等待，因此任何 async 启动入口都必须把完整预检放进阻塞线程域，不能在
+session runtime worker 上直接执行。阻塞任务异常、预检失败或 Definition hash 漂移均在
+validated hash 与 Run 生成之前 fail closed。
+
 ## 发现与编辑
 
 未指定 Definition 时，主 Agent 先判断焦点是否与请求相关，再按 `name`、`description` 和
