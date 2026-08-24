@@ -1210,7 +1210,7 @@ impl WorkspaceOps {
         &self.handle
     }
 
-    pub fn bind_local_session(
+    pub async fn bind_local_session(
         &self,
         session_id: &str,
         cwd: std::path::PathBuf,
@@ -1232,6 +1232,7 @@ impl WorkspaceOps {
             .handle
             .session(session_id)
             .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.to_owned()))?;
+        let _update_guard = session.update_lock.lock().await;
         session.replace(session.effective_tool_config(), toolset);
         Ok(())
     }
@@ -1374,6 +1375,7 @@ mod tests {
             toolset,
             None,
         )
+        .await
         .expect("bind should succeed");
         assert!(handle.session(sid).is_some(), "session must be bound");
         assert!(
@@ -1389,6 +1391,42 @@ mod tests {
             weak.upgrade().is_none(),
             "end_local_session must drop the toolset (no leaked holder)"
         );
+    }
+    /// A shell bind and a workspace-owned rebuild share the same session lock.
+    /// Whichever finishes last therefore wins atomically; a rebuild can no
+    /// longer pass its final policy check and then overwrite a concurrent
+    /// external toolset install.
+    #[tokio::test]
+    async fn bind_local_session_waits_for_the_workspace_update_lock() {
+        let ops = WorkspaceOps::for_test();
+        let handle = ops.workspace_handle();
+        let sid = "sess-bind-serialization";
+        let session = handle.create_session(sid).expect("create test session");
+        let external_toolset =
+            std::sync::Arc::new(tools::registry::types::FinalizedToolset::empty_for_test());
+        let update_guard = session.update_lock.lock().await;
+        let bind = ops.bind_local_session(
+            sid,
+            handle.root_cwd().unwrap(),
+            hunk_tracker::HunkTrackerHandle::noop(),
+            external_toolset.clone(),
+            None,
+        );
+        tokio::pin!(bind);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut bind)
+                .await
+                .is_err(),
+            "bind must wait while a workspace rebuild owns update_lock"
+        );
+        drop(update_guard);
+        bind.await.expect("bind succeeds after rebuild releases lock");
+
+        assert!(std::sync::Arc::ptr_eq(
+            &session.toolset(),
+            &external_toolset
+        ));
     }
     /// Round-trip serde for HunkActionResponse.
     #[test]

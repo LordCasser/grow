@@ -1601,6 +1601,7 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
         toolset,
         None,
     )
+    .await
     .expect("bind_local_session must succeed");
     assert!(toolset_weak.upgrade().is_some());
     *agent.workspace_ops.borrow_mut() = Some(ops);

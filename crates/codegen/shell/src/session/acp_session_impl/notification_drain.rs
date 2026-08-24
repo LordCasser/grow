@@ -17,6 +17,7 @@ impl SessionActor {
         let producer = tokio::task::spawn_blocking(move || {
             crate::session::notification_inbox::visit_payload_hash_batches(
                 &directory,
+                || batch_tx.is_closed(),
                 |batch| {
                     batch_tx.blocking_send(batch).map_err(|_| {
                         std::io::Error::new(

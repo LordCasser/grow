@@ -13,15 +13,19 @@ const MAX_BYTES_PER_SESSION: f64 = 1024.0;
 /// Creates the per-session state that `remove_session` must clean up, then
 /// removes the session. A full `SessionHandle` would allocate so much
 /// unrelated memory that a small leak would be lost in the noise.
-fn populate_and_evict(agent: &MvpAgent, i: usize) {
+async fn populate_and_evict(agent: &MvpAgent, i: usize) {
     let sid = acp::SessionId::new(format!("soak-{i}"));
 
     // The same workspace binding `spawn_session_actor` creates; if
     // `remove_session` does not release it, the session map holds every
     // toolset for the life of the process.
     {
-        let ops = agent.workspace_ops.borrow();
-        let ops = ops.as_ref().expect("test installs workspace ops");
+        let ops = agent
+            .workspace_ops
+            .borrow()
+            .as_ref()
+            .expect("test installs workspace ops")
+            .clone();
         let toolset =
             std::sync::Arc::new(tools::registry::types::FinalizedToolset::empty_for_test());
         ops.bind_local_session(
@@ -31,6 +35,7 @@ fn populate_and_evict(agent: &MvpAgent, i: usize) {
             toolset,
             None,
         )
+        .await
         .expect("bind_local_session must succeed");
     }
 
@@ -73,13 +78,13 @@ fn leader_session_lifecycle_heap_steady_state() {
         // The first runs fill caches and one-time allocations; do them before
         // the measured window so they do not count as growth.
         for i in 0..WARMUP {
-            populate_and_evict(&agent, i);
+            populate_and_evict(&agent, i).await;
         }
         quiesce().await;
         let before = dhat::HeapStats::get();
 
         for i in WARMUP..(WARMUP + MEASURE) {
-            populate_and_evict(&agent, i);
+            populate_and_evict(&agent, i).await;
         }
         quiesce().await;
         let after = dhat::HeapStats::get();

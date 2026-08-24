@@ -275,6 +275,7 @@ async fn make_subagent_fixture_with_replies(
             actor.agent.borrow().tool_bridge().toolset(),
             None,
         )
+        .await
         .expect("bind_local_session must succeed");
     begin_test_causal_turn(&actor).await;
 

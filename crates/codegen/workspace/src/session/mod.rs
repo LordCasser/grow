@@ -235,7 +235,7 @@ impl WorkspaceSession {
         }
     }
     /// Return the current resolved toolset (snapshot).
-    pub fn toolset(&self) -> Arc<FinalizedToolset> {
+    pub(crate) fn toolset(&self) -> Arc<FinalizedToolset> {
         self.inner.read().toolset.clone()
     }
     /// Whether the current toolset's `Terminal` resource is the session-owned
@@ -268,13 +268,13 @@ impl WorkspaceSession {
             .unwrap_or_else(|e| e.into_inner());
         guard.as_ref() == fingerprint
     }
-    /// Whether the last snapshot-driven rebuild failed and left the live
-    /// toolset stale with respect to the current MCP snapshot.
+    /// Whether the last workspace config rebuild failed and left the live
+    /// toolset stale with respect to the current configuration.
     pub(crate) fn stale_resolve(&self) -> bool {
         self.stale_resolve
             .load(std::sync::atomic::Ordering::Relaxed)
     }
-    /// Mark the live toolset stale: a snapshot-driven rebuild failed and the
+    /// Mark the live toolset stale: a workspace config rebuild failed and the
     /// previous toolset was kept.
     pub(crate) fn mark_stale_resolve(&self) {
         self.stale_resolve

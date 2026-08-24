@@ -1161,6 +1161,18 @@ impl acp::Agent for MvpAgent {
             summary.display_title_opt(),
             &model_state,
         );
+        // The resident actor may terminate during any of the asynchronous
+        // restore work above. Never acknowledge a reconnect that has no live
+        // command endpoint at the response boundary.
+        if self
+            .sessions
+            .borrow()
+            .get(&session_id)
+            .is_none_or(|handle| handle.cmd_tx.is_closed())
+        {
+            return Err(acp::Error::internal_error()
+                .data("Session ended while loading; retry the session load."));
+        }
         let response_meta = serde_json::Value::Object(response_meta_map);
         ::diagnostics::unified_log::info(
             "session loaded",

@@ -177,6 +177,7 @@ fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id()
                             actor.agent.borrow().tool_bridge().toolset(),
                             None,
                         )
+                        .await
                         .expect("bind_local_session");
 
                     let actor = Arc::new(actor);

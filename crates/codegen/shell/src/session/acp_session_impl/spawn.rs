@@ -1587,7 +1587,9 @@ pub(crate) async fn spawn_session_actor(
         tool_context.hunk_tracker_handle.clone(),
         agent.tool_bridge().toolset(),
         None,
-    ) {
+    )
+    .await
+    {
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
     let system_prompt = agent.system_prompt().to_string();

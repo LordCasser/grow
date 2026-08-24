@@ -253,7 +253,9 @@ impl SessionActor {
             self.tool_context.hunk_tracker_handle.clone(),
             self.agent.borrow().tool_bridge().toolset(),
             None,
-        ) {
+        )
+        .await
+        {
             tracing::warn!(error = %e, "failed to rebind local session toolset after agent rebuild");
         }
         {

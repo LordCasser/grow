@@ -55,8 +55,8 @@ pub(crate) enum SwapOutcome {
     /// changed. See `toolset_terminal_is_session_owned`.
     SkippedExternallyOwned,
 }
-/// Public handle to a workspace instance. Owns shared state (sessions,
-/// MCP snapshot, tool config, event bus) and session lifecycle.
+/// Public handle to a workspace instance. Owns shared state (sessions, tool
+/// configuration, event bus) and session lifecycle.
 #[derive(Clone)]
 pub struct WorkspaceHandle {
     pub(crate) shared: Arc<WorkspaceShared>,
@@ -1300,7 +1300,7 @@ impl WorkspaceHandle {
         let _update_guard = session.update_lock.lock().await;
     }
     /// Look up an existing session.
-    pub fn session(&self, session_id: &str) -> Option<Arc<WorkspaceSession>> {
+    pub(crate) fn session(&self, session_id: &str) -> Option<Arc<WorkspaceSession>> {
         self.shared.sessions.read().get(session_id).cloned()
     }
     /// IDs of all sessions currently bound to this workspace.

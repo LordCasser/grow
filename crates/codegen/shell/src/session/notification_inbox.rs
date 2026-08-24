@@ -96,6 +96,7 @@ pub(crate) fn remove_payload(
 /// ignored but never stop the iterator, so they cannot starve later payloads.
 pub(crate) fn visit_payload_hash_batches(
     session: &crate::session::storage::ContainedDirectory,
+    mut is_cancelled: impl FnMut() -> bool,
     mut visit: impl FnMut(Vec<String>) -> io::Result<()>,
 ) -> io::Result<()> {
     let directory = match session.open_relative(
@@ -109,6 +110,12 @@ pub(crate) fn visit_payload_hash_batches(
     };
     let mut batch = Vec::with_capacity(ORPHAN_SWEEP_BATCH_SIZE);
     directory.visit_names(|name| {
+        if is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "notification payload enumeration cancelled",
+            ));
+        }
         if let Some(hash) = name.to_str().and_then(|name| name.strip_suffix(".txt"))
             && hash.len() == 64
             && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -122,6 +129,12 @@ pub(crate) fn visit_payload_hash_batches(
         Ok(())
     })?;
     if !batch.is_empty() {
+        if is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "notification payload enumeration cancelled",
+            ));
+        }
         visit(batch)?;
     }
     Ok(())
@@ -199,7 +212,7 @@ mod tests {
         std::fs::write(artifact_dir.join("unrelated.file"), b"leave me").unwrap();
 
         let mut candidates = Vec::new();
-        visit_payload_hash_batches(&session, |batch| {
+        visit_payload_hash_batches(&session, || false, |batch| {
             candidates.extend(batch);
             Ok(())
         })
@@ -241,7 +254,7 @@ mod tests {
         }
 
         let mut batches = Vec::new();
-        visit_payload_hash_batches(&session, |batch| {
+        visit_payload_hash_batches(&session, || false, |batch| {
             assert!(batch.len() <= ORPHAN_SWEEP_BATCH_SIZE);
             batches.push(batch);
             Ok(())
@@ -252,5 +265,36 @@ mod tests {
             batches.concat().into_iter().collect::<std::collections::BTreeSet<_>>(),
             expected
         );
+    }
+
+    #[test]
+    fn payload_hash_stream_stops_inside_an_unknown_file_tail_when_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = crate::session::storage::ContainedDirectory::open(
+            temp.path(),
+            Path::new(""),
+            "notification cancellation test session",
+            false,
+        )
+        .unwrap();
+        let artifact_dir = temp.path().join(ARTIFACT_DIRECTORY);
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        for index in 0..300 {
+            std::fs::write(artifact_dir.join(format!("unknown-{index}")), b"keep").unwrap();
+        }
+
+        let mut visited = 0usize;
+        let error = visit_payload_hash_batches(
+            &session,
+            || {
+                visited += 1;
+                visited > 8
+            },
+            |_| panic!("unknown files must not produce a payload batch"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(visited, 9);
     }
 }
