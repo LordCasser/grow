@@ -3,7 +3,7 @@
 //! The timeline is the durable causal ledger for a session. Streaming deltas
 //! are transport-only; complete messages and lifecycle boundaries are facts.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sampling_types::{ContentPart, ConversationItem, DanglingToolCallReason, SyntheticReason};
@@ -15,6 +15,10 @@ pub const TIMELINE_SCHEMA_VERSION: u8 = 13;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_PAYLOAD_BYTES: u64 = 1024 * 1024;
+/// A busy turn can accumulate monitor ticks faster than the model can consume
+/// them. Preserve a useful recent window per monitor while the task output
+/// artifact remains the complete stream.
+pub const MAX_PENDING_MONITOR_PROGRESS_PER_TASK: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -878,6 +882,10 @@ pub struct Timeline {
     surface_ids: Vec<SurfaceId>,
     surface_revision: u64,
     pending_control_contexts: BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
+    pending_notifications: BTreeMap<String, PendingNotification>,
+    received_notifications: BTreeMap<(NotificationSource, NotificationSourceVersion), EventSeq>,
+    pending_monitor_notifications: BTreeMap<String, VecDeque<String>>,
+    terminal_monitors: BTreeSet<String>,
     lifecycle: LifecycleFold,
 }
 
@@ -1075,71 +1083,10 @@ impl Timeline {
     /// supersedes still-pending progress for the same monitor, so progress can
     /// be coalesced without ever discarding a terminal signal.
     pub fn pending_notifications(&self) -> Vec<PendingNotification> {
-        let mut pending = BTreeMap::<String, PendingNotification>::new();
-        for event in &self.events {
-            match &event.kind {
-                TimelineEventKind::Notification(NotificationEvent::Received {
-                    id,
-                    owner_session_id,
-                    source,
-                    source_version,
-                    payload_ref,
-                }) => {
-                    pending.insert(
-                        id.clone(),
-                        PendingNotification {
-                            received_seq: event.seq,
-                            id: id.clone(),
-                            owner_session_id: owner_session_id.clone(),
-                            source: source.clone(),
-                            source_version: source_version.clone(),
-                            payload_ref: payload_ref.clone(),
-                        },
-                    );
-                }
-                TimelineEventKind::Notification(NotificationEvent::Consumed {
-                    notification_ids,
-                    ..
-                }) => {
-                    for id in notification_ids {
-                        pending.remove(id);
-                    }
-                }
-                TimelineEventKind::Notification(NotificationEvent::Dismissed {
-                    notification_ids,
-                    ..
-                }) => {
-                    for id in notification_ids {
-                        pending.remove(id);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let terminal_monitors = self
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                TimelineEventKind::Notification(NotificationEvent::Received {
-                    source:
-                        NotificationSource::TaskCompleted {
-                            task_id,
-                            task_kind: NotificationTaskKind::Monitor,
-                        },
-                    ..
-                }) => Some(task_id.clone()),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut pending = pending
-            .into_values()
-            .filter(|notification| {
-                !matches!(
-                    &notification.source,
-                    NotificationSource::MonitorProgress { task_id }
-                        if terminal_monitors.contains(task_id)
-                )
-            })
+        let mut pending = self
+            .pending_notifications
+            .values()
+            .cloned()
             .collect::<Vec<_>>();
         pending.sort_by_key(|notification| notification.received_seq);
         pending
@@ -1151,17 +1098,26 @@ impl Timeline {
         source: &NotificationSource,
         source_version: &NotificationSourceVersion,
     ) -> Option<&str> {
-        self.events.iter().find_map(|event| match &event.kind {
-            TimelineEventKind::Notification(NotificationEvent::Received {
-                id,
-                source: existing_source,
-                source_version: existing_version,
-                ..
-            }) if existing_source == source && existing_version == source_version => {
-                Some(id.as_str())
-            }
-            _ => None,
-        })
+        self.received_notification_event(source, source_version)
+            .and_then(|event| match &event.kind {
+                TimelineEventKind::Notification(NotificationEvent::Received { id, .. }) => {
+                    Some(id.as_str())
+                }
+                _ => None,
+            })
+    }
+
+    pub(crate) fn received_notification_event(
+        &self,
+        source: &NotificationSource,
+        source_version: &NotificationSourceVersion,
+    ) -> Option<&TimelineEvent> {
+        let seq = self
+            .received_notifications
+            .get(&(source.clone(), source_version.clone()))?;
+        usize::try_from(seq.get())
+            .ok()
+            .and_then(|index| self.events.get(index))
     }
 
     pub fn next_seq(&self) -> EventSeq {
@@ -2189,9 +2145,92 @@ impl Timeline {
             }
             _ => {}
         }
+        if let TimelineEventKind::Notification(notification) = &event.kind {
+            self.apply_notification(event.seq, notification);
+        }
         self.lifecycle = lifecycle;
         self.events.push(event);
         Ok(())
+    }
+
+    fn apply_notification(&mut self, seq: EventSeq, event: &NotificationEvent) {
+        match event {
+            NotificationEvent::Received {
+                id,
+                owner_session_id,
+                source,
+                source_version,
+                payload_ref,
+            } => {
+                self.received_notifications
+                    .insert((source.clone(), source_version.clone()), seq);
+                let notification = PendingNotification {
+                    received_seq: seq,
+                    id: id.clone(),
+                    owner_session_id: owner_session_id.clone(),
+                    source: source.clone(),
+                    source_version: source_version.clone(),
+                    payload_ref: payload_ref.clone(),
+                };
+                match source {
+                    NotificationSource::TaskCompleted {
+                        task_id,
+                        task_kind: NotificationTaskKind::Monitor,
+                    } => {
+                        self.terminal_monitors.insert(task_id.clone());
+                        if let Some(progress) = self.pending_monitor_notifications.remove(task_id) {
+                            for progress_id in progress {
+                                self.pending_notifications.remove(&progress_id);
+                            }
+                        }
+                        self.pending_notifications.insert(id.clone(), notification);
+                    }
+                    NotificationSource::MonitorProgress { task_id } => {
+                        if self.terminal_monitors.contains(task_id) {
+                            return;
+                        }
+                        self.pending_notifications.insert(id.clone(), notification);
+                        let progress = self
+                            .pending_monitor_notifications
+                            .entry(task_id.clone())
+                            .or_default();
+                        progress.push_back(id.clone());
+                        while progress.len() > MAX_PENDING_MONITOR_PROGRESS_PER_TASK {
+                            if let Some(superseded) = progress.pop_front() {
+                                self.pending_notifications.remove(&superseded);
+                            }
+                        }
+                    }
+                    NotificationSource::TaskStillRunning { .. }
+                    | NotificationSource::TaskCompleted { .. }
+                    | NotificationSource::SubagentCompleted { .. }
+                    | NotificationSource::WorkflowCompleted { .. } => {
+                        self.pending_notifications.insert(id.clone(), notification);
+                    }
+                }
+            }
+            NotificationEvent::Consumed {
+                notification_ids, ..
+            }
+            | NotificationEvent::Dismissed {
+                notification_ids, ..
+            } => {
+                for id in notification_ids {
+                    let removed = self.pending_notifications.remove(id);
+                    if let Some(PendingNotification {
+                        source: NotificationSource::MonitorProgress { task_id },
+                        ..
+                    }) = removed
+                        && let Some(progress) = self.pending_monitor_notifications.get_mut(&task_id)
+                    {
+                        progress.retain(|progress_id| progress_id != id);
+                        if progress.is_empty() {
+                            self.pending_monitor_notifications.remove(&task_id);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn validate(&self, event: &TimelineEvent) -> Result<LifecycleFold, TimelineError> {
@@ -5958,6 +5997,34 @@ mod tests {
         let pending = timeline.pending_notifications();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, terminal);
+    }
+
+    #[test]
+    fn pending_monitor_progress_keeps_a_bounded_recent_window() {
+        let mut timeline = Timeline::default();
+        for index in 0..(MAX_PENDING_MONITOR_PROGRESS_PER_TASK + 5) {
+            receive_notification(
+                &mut timeline,
+                NotificationSource::MonitorProgress {
+                    task_id: "monitor-1".into(),
+                },
+                NotificationSourceVersion::Opaque {
+                    value: format!("event-{index}"),
+                },
+                "progress",
+            );
+        }
+        let pending = timeline.pending_notifications();
+        assert_eq!(pending.len(), MAX_PENDING_MONITOR_PROGRESS_PER_TASK);
+        assert!(matches!(
+            &pending[0].source_version,
+            NotificationSourceVersion::Opaque { value } if value == "event-5"
+        ));
+        assert!(matches!(
+            &pending.last().unwrap().source_version,
+            NotificationSourceVersion::Opaque { value }
+                if value == &format!("event-{}", MAX_PENDING_MONITOR_PROGRESS_PER_TASK + 4)
+        ));
     }
 
     #[test]

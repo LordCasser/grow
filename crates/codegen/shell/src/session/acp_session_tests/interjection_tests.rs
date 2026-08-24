@@ -184,10 +184,10 @@ async fn terminal_boundary_discards_residual_same_turn_interjections() {
             actor.discard_residual_interjections_at_turn_end().await;
 
             assert!(actor.pending_interjections.is_empty());
-            assert!(
-                actor.chat_state_handle.get_conversation().await.is_empty(),
-                "a terminal fence discards; it must not synthesize input for the next turn"
-            );
+            assert!(matches!(
+                actor.chat_state_handle.get_conversation().await.as_slice(),
+                [sampling_types::ConversationItem::System(_)]
+            ));
         })
         .await;
 }
@@ -262,10 +262,10 @@ async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explic
             );
             drop(state);
 
-            assert!(
-                actor.chat_state_handle.get_conversation().await.is_empty(),
-                "the terminal fence must not synthesize user messages"
-            );
+            assert!(matches!(
+                actor.chat_state_handle.get_conversation().await.as_slice(),
+                [sampling_types::ConversationItem::System(_)]
+            ));
         })
         .await;
 }
@@ -302,7 +302,13 @@ async fn auto_promoted_entry_drained_at_safe_point_is_consumed_not_requeued() {
             );
             drop(state);
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert_eq!(conversation.len(), 1);
+            assert!(matches!(
+                conversation.as_slice(),
+                [
+                    sampling_types::ConversationItem::System(_),
+                    sampling_types::ConversationItem::User(user),
+                ] if user.synthetic_reason == Some(sampling_types::SyntheticReason::Interjection)
+            ));
         })
         .await;
 }

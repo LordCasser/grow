@@ -137,7 +137,10 @@ pub(crate) fn init_metrics() {
             .inc_by(0);
     }
 }
-pub use manager::{PermissionHandle, default_always_allow_scope, spawn_permission_manager};
+pub use manager::{
+    PermissionHandle, command_is_known_observational, default_always_allow_scope,
+    spawn_permission_manager,
+};
 pub use policy::CompiledPolicy;
 pub use prompter::{
     ALLOW_EDITS_SESSION_OPTION_ID, AcpPrompter, BashCommandPermission, BashCommandSelectedTerms,

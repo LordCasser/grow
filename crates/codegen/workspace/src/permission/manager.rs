@@ -821,6 +821,22 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
     }
 }
 
+/// Whether a shell script is fully understood as observational execution.
+///
+/// This is the fail-closed RWX projection boundary used before dispatching a
+/// call into a restricted agent. It intentionally accepts only the same
+/// parsed, built-in-safe command set as the permission manager. Session grants
+/// do not participate: a caller-controlled executable, build tool, or unknown
+/// command can write even when Bash syntax itself contains no redirection.
+pub fn command_is_known_observational(cmd: &str) -> bool {
+    let evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
+    matches!(evaluation.segments, SegmentEvaluation::AutoAllow { .. })
+        && !evaluation.writes_real_file
+        && evaluation.env_risk == EnvRisk::Safe
+        && !evaluation.has_opaque_shell
+        && !evaluation.exec_risk
+}
+
 #[cfg(test)]
 pub(crate) fn evaluate_bash_segments(cmd: &str, state: &PermissionState) -> SegmentEvaluation {
     evaluate_bash(cmd, state, true).segments
@@ -6926,6 +6942,25 @@ mod tests {
         assert!(!is_safe_command("python script.py"));
         assert!(!is_safe_command("kubectl delete"));
         assert!(!is_safe_command("git commit"));
+    }
+
+    #[test]
+    fn observational_projection_rejects_unknown_effects_without_shell_writes() {
+        assert!(command_is_known_observational(
+            "rg TODO src && git status --short"
+        ));
+        for command in [
+            "cargo fmt",
+            "git add .",
+            "git commit -m change",
+            "make format",
+            "./project-tool inspect",
+        ] {
+            assert!(
+                !command_is_known_observational(command),
+                "unknown effect was projected as observational: {command}",
+            );
+        }
     }
 
     #[test]

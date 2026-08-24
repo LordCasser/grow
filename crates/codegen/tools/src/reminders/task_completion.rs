@@ -269,7 +269,9 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
     }
     match output {
         ToolOutput::TaskOutput(TaskOutputOutput::Result(result))
-            if result.status == "completed" =>
+            if crate::implementations::grow_build::task_output::is_terminal_status(
+                &result.status,
+            ) =>
         {
             ids.push(result.task_id.as_str());
         }
@@ -279,7 +281,11 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
                 results
                     .results
                     .iter()
-                    .filter(|result| result.status == "completed")
+                    .filter(|result| {
+                        crate::implementations::grow_build::task_output::is_terminal_status(
+                            &result.status,
+                        )
+                    })
                     .map(|result| result.task_id.as_str()),
             );
         }
@@ -368,6 +374,30 @@ mod tests {
             consumed_completion_task_id: None,
         });
         assert_eq!(consumed_completion_ids(&output), vec!["subagent-1"]);
+    }
+
+    #[test]
+    fn every_terminal_task_output_consumes_its_completion_receipt() {
+        let result = |id: &str, status: &str| tool_types::TaskOutputResult {
+            task_id: id.into(),
+            command: String::new(),
+            status: status.into(),
+            exit_code: None,
+            started: String::new(),
+            ended: None,
+            duration_secs: 0.0,
+            output: String::new(),
+            output_file: String::new(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 0,
+        };
+        for status in ["completed", "failed", "cancelled", "timed_out"] {
+            let output = ToolOutput::TaskOutput(TaskOutputOutput::Result(result("task", status)));
+            assert_eq!(consumed_completion_ids(&output), vec!["task"]);
+        }
+        let running = ToolOutput::TaskOutput(TaskOutputOutput::Result(result("task", "running")));
+        assert!(consumed_completion_ids(&running).is_empty());
     }
 
     #[test]

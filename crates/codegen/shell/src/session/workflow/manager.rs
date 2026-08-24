@@ -1031,13 +1031,15 @@ mod tests {
 
         let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
+            let mut manifest_ack_count = 0usize;
             while let Some(message) = persist_rx.recv().await {
                 if let PersistenceMsg::WorkflowRunStateAndAck { respond_to, .. } = message {
-                    let result = if reject_manifest_ack {
+                    let result = if reject_manifest_ack && manifest_ack_count > 0 {
                         Err(std::io::Error::other("manifest disk failure"))
                     } else {
                         Ok(())
                     };
+                    manifest_ack_count += 1;
                     let _ = respond_to.send(result);
                 }
             }

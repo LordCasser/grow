@@ -52,7 +52,10 @@ async fn anchors_projected_context_from_response_usage() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             let _sync = actor.chat_state_handle.get_projected_tokens().await;
-            assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 0);
+            assert!(
+                actor.chat_state_handle.get_projected_tokens().await > 0,
+                "the immutable System governance head contributes to projected context"
+            );
 
             actor.record_response_token_usage(
                 &response_with_usage(150_000),

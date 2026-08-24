@@ -9,6 +9,11 @@ impl SessionActor {
         source_version: chat_state::NotificationSourceVersion,
         body: String,
     ) -> Result<String, String> {
+        let pending_before = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .unwrap_or_default();
         let directory = self
             .session_directory
             .try_clone()
@@ -19,6 +24,7 @@ impl SessionActor {
         .await
         .map_err(|error| format!("notification payload writer failed: {error}"))?
         .map_err(|error| error.to_string())?;
+        let received_payload = payload_ref.clone();
         let event = self
             .chat_state_handle
             .receive_notification_durably(
@@ -29,6 +35,56 @@ impl SessionActor {
             )
             .await
             .map_err(|error| error.to_string())?;
+        let pending_after = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .unwrap_or_default();
+        let retained_ids = pending_after
+            .iter()
+            .map(|notification| notification.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let retained_hashes = pending_after
+            .iter()
+            .map(|notification| notification.payload_ref.blake3.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut superseded = pending_before
+            .iter()
+            .filter(|notification| !retained_ids.contains(notification.id.as_str()))
+            .map(|notification| notification.payload_ref.clone())
+            .collect::<Vec<_>>();
+        if let chat_state::TimelineEventKind::Notification(
+            chat_state::NotificationEvent::Received { id, .. },
+        ) = &event.kind
+            && !retained_ids.contains(id.as_str())
+        {
+            superseded.push(received_payload);
+        }
+        superseded.retain(|payload| !retained_hashes.contains(payload.blake3.as_str()));
+        superseded.sort_by(|left, right| left.blake3.cmp(&right.blake3));
+        superseded.dedup_by(|left, right| left.blake3 == right.blake3);
+        if !superseded.is_empty() {
+            let directory = self
+                .session_directory
+                .try_clone()
+                .map_err(|error| error.to_string())?;
+            match tokio::task::spawn_blocking(move || {
+                for payload in superseded {
+                    crate::session::notification_inbox::remove_payload(&directory, &payload)?;
+                }
+                Ok::<_, std::io::Error>(())
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "superseded notification payload cleanup failed")
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "superseded notification payload cleanup task failed")
+                }
+            }
+        }
         match event.kind {
             chat_state::TimelineEventKind::Notification(
                 chat_state::NotificationEvent::Received { id, .. },
@@ -604,6 +660,66 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn monitor_progress_window_prunes_superseded_payload_artifacts() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let temp = tempfile::tempdir().unwrap();
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let mut actor = crate::session::acp_session::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                actor.session_dir = temp.path().join("session");
+                std::fs::create_dir_all(&actor.session_dir).unwrap();
+                actor.session_directory = std::sync::Arc::new(
+                    crate::session::storage::ContainedDirectory::open(
+                        temp.path(),
+                        std::path::Path::new("session"),
+                        "monitor notification session",
+                        false,
+                    )
+                    .unwrap(),
+                );
+                let actor = std::sync::Arc::new(actor);
+                for index in 0..(chat_state::MAX_PENDING_MONITOR_PROGRESS_PER_TASK + 3) {
+                    actor
+                        .receive_notification(
+                            chat_state::NotificationSource::MonitorProgress {
+                                task_id: "monitor-bounded".into(),
+                            },
+                            chat_state::NotificationSourceVersion::Opaque {
+                                value: format!("event-{index}"),
+                            },
+                            format!("unique monitor payload {index}"),
+                        )
+                        .await
+                        .expect("receive monitor progress");
+                }
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .expect("pending notifications")
+                        .len(),
+                    chat_state::MAX_PENDING_MONITOR_PROGRESS_PER_TASK,
+                );
+                let artifacts = actor.session_dir.join("artifacts/notifications");
+                assert_eq!(
+                    std::fs::read_dir(artifacts).unwrap().count(),
+                    chat_state::MAX_PENDING_MONITOR_PROGRESS_PER_TASK,
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn active_monitor_progress_is_durably_consumed_into_current_turn() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -720,7 +836,10 @@ mod tests {
                 assert!(state.foreground.is_idle());
                 assert!(state.pending_inputs.is_empty());
                 drop(state);
-                assert!(actor.chat_state_handle.get_conversation().await.is_empty());
+                assert!(matches!(
+                    actor.chat_state_handle.get_conversation().await.as_slice(),
+                    [sampling_types::ConversationItem::System(_)]
+                ));
             })
             .await;
     }
@@ -758,7 +877,10 @@ mod tests {
                     1
                 );
                 assert!(actor.state.lock().await.foreground.is_idle());
-                assert!(actor.chat_state_handle.get_conversation().await.is_empty());
+                assert!(matches!(
+                    actor.chat_state_handle.get_conversation().await.as_slice(),
+                    [sampling_types::ConversationItem::System(_)]
+                ));
 
                 crate::session::acp_session::support::begin_test_causal_turn(&actor).await;
                 assert!(actor.drain_active_notifications().await);

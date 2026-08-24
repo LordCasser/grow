@@ -68,6 +68,29 @@ pub(crate) fn read_payload(
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+pub(crate) fn remove_payload(
+    session: &crate::session::storage::ContainedDirectory,
+    payload: &chat_state::NotificationPayloadRef,
+) -> io::Result<()> {
+    if payload.blake3.len() != 64 || !payload.blake3.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "notification payload reference is invalid",
+        ));
+    }
+    let directory = session.open_relative(
+        Path::new(ARTIFACT_DIRECTORY),
+        "notification payload directory",
+        false,
+    )?;
+    let file_name = format!("{}.txt", payload.blake3);
+    match directory.remove_file(std::ffi::OsStr::new(&file_name), true) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

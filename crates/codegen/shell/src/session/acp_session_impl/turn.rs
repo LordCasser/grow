@@ -673,8 +673,12 @@ impl SessionActor {
         if matches!(&origin, super::super::PromptOrigin::User) {
             self.inject_stopped_goal_interaction_directive().await;
         }
-        self.drain_active_notifications_excluding(&notification_ids)
-            .await;
+        // A real user turn may absorb notifications that were already pending
+        // at admission. An autonomous notification turn must first commit its
+        // queued primary receipt; later arrivals belong after it in Surface.
+        if notification_ids.is_empty() {
+            self.drain_active_notifications().await;
+        }
         if matches!(&origin, super::super::PromptOrigin::User) {
             ::diagnostics::unified_log::info(
                 "shell.task_wake.gate_cleared",
@@ -791,6 +795,9 @@ impl SessionActor {
                 .await?;
                 return Err(acp::Error::internal_error()
                     .data(format!("user message was not durably recorded: {error}")));
+            }
+            if !notification_ids.is_empty() {
+                self.drain_active_notifications().await;
             }
             if !admitted_notification_task_ids.is_empty() {
                 let ids = admitted_notification_task_ids

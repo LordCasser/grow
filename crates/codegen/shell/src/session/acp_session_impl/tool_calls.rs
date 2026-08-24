@@ -193,6 +193,9 @@ fn public_workflow_conflict(
     }
 }
 
+/// Conservative write hint used by hook and Definition path protections.
+/// RWX projection below is stricter and additionally rejects every unknown
+/// executable; these call sites still need the concrete write predicate.
 fn recognizable_shell_write(command: &str) -> bool {
     let parsed_write = workspace::permission::bash_command_splitting::try_parse_shell(command)
         .is_some_and(|tree| {
@@ -226,9 +229,10 @@ fn recognizable_shell_write(command: &str) -> bool {
 }
 
 /// Project a frozen shell invocation into RWX. The parser is shared with the
-/// hard permission boundary: parsed non-mutating commands observe state and
-/// execute; recognized mutations additionally require W; opaque syntax and
-/// common network/process launchers fail closed as All.
+/// hard permission boundary: only its built-in observational command set gets
+/// RX. Unknown executables are opaque effects even when the Bash surface has no
+/// redirection, so they fail closed as All together with writes and network
+/// launchers.
 fn shell_required_access(command: &str) -> tool_protocol::ToolAccess {
     let Some(tree) = workspace::permission::bash_command_splitting::try_parse_shell(command) else {
         return tool_protocol::ToolAccess::All;
@@ -261,10 +265,7 @@ fn shell_required_access(command: &str) -> tool_protocol::ToolAccess {
     ]
     .iter()
     .any(|token| lower.starts_with(token) || lower.contains(&format!(" {token}")));
-    let writes = !workspace::permission::command_write_paths_in_tree(tree.root_node(), command)
-        .is_empty()
-        || recognizable_shell_write(command);
-    if externally_emitting || writes {
+    if externally_emitting || !workspace::permission::command_is_known_observational(command) {
         tool_protocol::ToolAccess::All
     } else {
         tool_protocol::ToolAccess::ReadExecute
@@ -1345,6 +1346,7 @@ impl SessionActor {
             self.signals_handle().record_tool_call(&prepared.tool_name);
             let tool_call_id = prepared.call_id.clone();
             let mut post_tool_use_result: Option<serde_json::Value> = None;
+            let mut post_tool_use_failure: Option<String> = None;
             let tool_result_size_bytes = match &result {
                 Ok(tool_result) => tool_result.prompt_text.len() as i64,
                 Err(_) => 0,
@@ -1360,12 +1362,16 @@ impl SessionActor {
                         .clone()
                         .or_else(|| prepared.dispatch_target_name.clone())
                         .unwrap_or_else(|| prepared.tool_name.clone());
-                    post_tool_use_result = self
-                        .hook_event_active(::hooks::event::HookEventName::PostToolUse)
-                        .then(|| {
-                            serde_json::to_value(&tool_result.output)
-                                .unwrap_or(serde_json::Value::Null)
-                        });
+                    if tool_result.output.is_error() {
+                        post_tool_use_failure = Some(tool_result.prompt_text.clone());
+                    } else {
+                        post_tool_use_result = self
+                            .hook_event_active(::hooks::event::HookEventName::PostToolUse)
+                            .then(|| {
+                                serde_json::to_value(&tool_result.output)
+                                    .unwrap_or(serde_json::Value::Null)
+                            });
+                    }
                     let followups = self
                         .handle_bridge_tool_success(
                             &prepared.tool_call_id,
@@ -1399,28 +1405,7 @@ impl SessionActor {
                         )
                         .await;
                     deferred_followups.extend(err_followups);
-                    if self.hook_event_active(::hooks::event::HookEventName::PostToolUseFailure) {
-                        let raw_input: serde_json::Value =
-                            serde_json::from_str(&prepared.raw_arguments)
-                                .unwrap_or(serde_json::Value::Null);
-                        let (tool_input_value, tool_input_truncated) =
-                            ::hooks::event::truncate_payload(raw_input);
-                        let hook_tool_name = prepared.hook_tool_name();
-                        self.dispatch_hook(
-                            ::hooks::event::HookEventName::PostToolUseFailure,
-                            ::hooks::event::HookPayload::PostToolUseFailure {
-                                tool_name: hook_tool_name.to_owned(),
-                                tool_use_id: prepared.call_id.clone(),
-                                tool_input: tool_input_value,
-                                tool_input_truncated,
-                                error: format!("{err:#}"),
-                                subagent_type: self.subagent_type_label(),
-                            },
-                            None,
-                            Some(hook_tool_name),
-                        )
-                        .await;
-                    }
+                    post_tool_use_failure = Some(format!("{err:#}"));
                     ToolLoop::Continue
                 }
             };
@@ -1435,7 +1420,29 @@ impl SessionActor {
                     }
                 }
             }
-            if let Some(tool_result_value) = post_tool_use_result {
+            if let Some(error) = post_tool_use_failure
+                && self.hook_event_active(::hooks::event::HookEventName::PostToolUseFailure)
+            {
+                let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
+                    .unwrap_or(serde_json::Value::Null);
+                let (tool_input_value, tool_input_truncated) =
+                    ::hooks::event::truncate_payload(raw_input);
+                let hook_tool_name = prepared.hook_tool_name();
+                self.dispatch_hook(
+                    ::hooks::event::HookEventName::PostToolUseFailure,
+                    ::hooks::event::HookPayload::PostToolUseFailure {
+                        tool_name: hook_tool_name.to_owned(),
+                        tool_use_id: prepared.call_id.clone(),
+                        tool_input: tool_input_value,
+                        tool_input_truncated,
+                        error,
+                        subagent_type: self.subagent_type_label(),
+                    },
+                    None,
+                    Some(hook_tool_name),
+                )
+                .await;
+            } else if let Some(tool_result_value) = post_tool_use_result {
                 let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
                     .unwrap_or(serde_json::Value::Null);
                 let (tool_input_value, tool_input_truncated) =
@@ -3814,7 +3821,18 @@ mod rwx_projection_tests {
             shell_required_access("rg TODO src"),
             ToolAccess::ReadExecute
         );
+        assert_eq!(
+            shell_required_access("cat README.md && git status --short"),
+            ToolAccess::ReadExecute
+        );
         assert_eq!(shell_required_access("echo x > out"), ToolAccess::All);
+        assert_eq!(shell_required_access("cargo fmt"), ToolAccess::All);
+        assert_eq!(shell_required_access("git add ."), ToolAccess::All);
+        assert_eq!(shell_required_access("make format"), ToolAccess::All);
+        assert_eq!(
+            shell_required_access("./project-tool inspect"),
+            ToolAccess::All
+        );
         assert_eq!(
             shell_required_access("curl https://example.com"),
             ToolAccess::All

@@ -113,17 +113,24 @@ async fn noop_handle_rejects_durable_append() {
 
 #[tokio::test]
 async fn failed_pending_drain_retains_record_and_skips_durable_update() {
+    let dir = tempfile::tempdir().unwrap();
     let info = Info {
         id: acp::SessionId::new("durable-drain-failure"),
-        cwd: "/test".into(),
+        cwd: dir.path().to_string_lossy().into_owned(),
     };
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let observed = attempts.clone();
-    let storage =
-        JsonlStorageAdapter::with_update_append_probe("/unused".into(), move |durability| {
+    let storage = JsonlStorageAdapter::with_update_append_probe(
+        dir.path().join("durable-drain-failure"),
+        move |durability| {
             observed.lock().unwrap().push(durability);
             Err(io::Error::other("pending append failed"))
-        });
+        },
+    );
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let actor = test_actor(info.clone(), Arc::new(storage));
     actor
         .handle
@@ -155,9 +162,7 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
         id: acp::SessionId::new("durable-update"),
         cwd: dir.path().to_string_lossy().into_owned(),
     };
-    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
-        dir.path().to_path_buf(),
-    ));
+    let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().to_path_buf()));
     storage
         .init_session(&info, default_model_id())
         .await
@@ -206,9 +211,7 @@ async fn current_model_write_preserves_omitted_metadata() {
         id: acp::SessionId::new("catalog-id-write"),
         cwd: dir.path().to_string_lossy().into_owned(),
     };
-    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
-        dir.path().to_path_buf(),
-    ));
+    let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().to_path_buf()));
     let previous = acp::ModelId::new("deepseek/deepseek-v4-flash");
     let replacement = acp::ModelId::new("anthropic/claude-sonnet");
     storage.init_session(&info, previous.clone()).await.unwrap();

@@ -286,6 +286,15 @@ async fn oversized_prompt_blob_is_owned_by_the_explicit_entity_directory() {
             let mut actor = create_test_actor(0, 1_000_000, 85, gateway_tx, persistence_tx).await;
             actor.session_dir = temp.path().join("parent/subagents/child");
             std::fs::create_dir_all(&actor.session_dir).unwrap();
+            actor.session_directory = std::sync::Arc::new(
+                crate::session::storage::ContainedDirectory::open(
+                    temp.path(),
+                    std::path::Path::new("parent/subagents/child"),
+                    "explicit child session",
+                    false,
+                )
+                .unwrap(),
+            );
             let query = "Q".repeat(LARGE_PROMPT_THRESHOLD + 1);
 
             let full = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(

@@ -380,6 +380,7 @@ async fn handle_notification(
                         },
                         source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
                         body,
+                        respond_to: None,
                     });
             }
             let mut notification = crate::extensions::notification::SessionNotification {
@@ -519,6 +520,7 @@ async fn handle_notification(
                         value: uuid::Uuid::now_v7().to_string(),
                     },
                     body: event.event_text,
+                    respond_to: None,
                 });
         }
         ToolNotification::ScheduledTaskRemoved(removed) => {

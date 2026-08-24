@@ -52,12 +52,25 @@ pub(crate) async fn begin_test_causal_turn(actor: &SessionActor) {
 #[cfg(test)]
 pub(crate) async fn replace_test_surface(
     handle: &chat_state::ChatStateHandle,
-    conversation: Vec<crate::sampling::ConversationItem>,
+    mut conversation: Vec<crate::sampling::ConversationItem>,
 ) {
-    let (_, source_surface_revision) = handle
+    let (current, source_surface_revision) = handle
         .get_conversation_with_revision()
         .await
         .expect("test chat-state actor must be live");
+    let system = current
+        .first()
+        .filter(|item| matches!(item, crate::sampling::ConversationItem::System(_)))
+        .cloned()
+        .expect("test actor must start with its immutable System governance head");
+    if matches!(
+        conversation.first(),
+        Some(crate::sampling::ConversationItem::System(_))
+    ) {
+        conversation[0] = system;
+    } else {
+        conversation.insert(0, system);
+    }
     handle
         .replace_context_durably(conversation, source_surface_revision)
         .await
@@ -250,6 +263,14 @@ pub(crate) async fn create_test_actor_ex(
                     });
                     let _ = respond_to.send(Ok(()));
                 }
+                PersistenceMsg::SidebandDurablyAndAck { event, respond_to } => {
+                    let (observed_reply, _observed_ack) = tokio::sync::oneshot::channel();
+                    let _ = persistence_tx.send(PersistenceMsg::SidebandDurablyAndAck {
+                        event,
+                        respond_to: observed_reply,
+                    });
+                    let _ = respond_to.send(Ok(()));
+                }
                 PersistenceMsg::ReplaceRewindPointsAndAck { respond_to, .. } => {
                     let _ = respond_to.send(Ok(()));
                 }
@@ -290,7 +311,9 @@ pub(crate) async fn create_test_actor_ex(
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
     let chat_state_handle = chat_state::ChatStateActor::spawn(
-        vec![],
+        vec![sampling_types::ConversationItem::system(
+            "test system prompt",
+        )],
         sampling_types::SamplingConfig {
             base_url: "http://localhost".to_string(),
             model: "test".to_string(),

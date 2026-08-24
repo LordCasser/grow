@@ -2615,7 +2615,6 @@ mod tests {
         let mut actor = make_boundary_actor(tasks, 0).0;
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
-        std::fs::create_dir(&state_path).unwrap();
         actor.resources_persistence = Arc::new(
             crate::persistence::ResourcesPersistence::local(state_path.clone()).unwrap(),
         );

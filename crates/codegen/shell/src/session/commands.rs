@@ -155,6 +155,10 @@ pub enum SessionCommand {
         source: chat_state::NotificationSource,
         source_version: chat_state::NotificationSourceVersion,
         body: String,
+        /// Optional producer barrier. Goal child completion uses it so a
+        /// waiter cannot observe the terminal result before the durable inbox
+        /// owns the corresponding exactly-once receipt.
+        respond_to: Option<oneshot::Sender<Result<String, String>>>,
     },
     BehaviorChange {
         session_mode: acp::SessionModeId,

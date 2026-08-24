@@ -80,7 +80,7 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
         }
     } else {
         // Summarize early turns, keep last MAX_VERBATIM_TURNS verbatim.
-        let early_end = turns[turns.len() - MAX_VERBATIM_TURNS];
+        let early_end = turns[turns.len() - MAX_VERBATIM_TURNS - 1];
         background.push_str("=== Earlier context (summarized) ===\n");
         render_summary(&mut background, &parent_items[..early_end]);
         background.push_str("\n=== Recent turns (verbatim) ===\n");
@@ -345,9 +345,9 @@ mod tests {
         item
     }
 
-    fn tool_result(content: &str) -> ConversationItem {
+    fn tool_result(tool_call_id: &str, content: &str) -> ConversationItem {
         ConversationItem::ToolResult(ToolResultItem {
-            tool_call_id: "tc-1".to_string(),
+            tool_call_id: tool_call_id.to_string(),
             content: content.into(),
             images: Vec::new(),
         })
@@ -459,8 +459,8 @@ mod tests {
             system_item("System"),
             user_item("Turn 1"),
             assistant_with_tool_calls("Response 1", &["read_file", "grep"]),
-            tool_result("file content"),
-            tool_result("search results"),
+            tool_result("tc-read_file", "file content"),
+            tool_result("tc-grep", "search results"),
             user_item("Turn 2"),
             assistant_item("Response 2"),
             user_item("Turn 3"),
@@ -482,22 +482,21 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("");
             // With 4 turns, the last 3 are verbatim and the first 1 is summarized.
-            // early_end = turns[turns.len()-3] = turns[1] = end of turn 2.
-            // So turns 1-2 are summarized, turns 3-4 are verbatim.
+            // The first turn is summarized and the last three stay verbatim.
             assert!(text.contains("=== Earlier context (summarized) ==="));
-            // Turns 1 + 2 are summarized: 2 user msgs, 2 assistant msgs
+            // Turn 1 is summarized: one user message and one assistant message.
             assert!(
-                text.contains("Messages: 2 user, 2 assistant"),
-                "Expected summary of turns 1-2. Full text:\n{text}"
+                text.contains("Messages: 1 user, 1 assistant"),
+                "Expected summary of turn 1. Full text:\n{text}"
             );
             assert!(text.contains("Tools used: grep, read_file"));
-            // Last 2 turns (3, 4) should be verbatim
+            // Last 3 turns (2, 3, 4) should be verbatim.
             assert!(text.contains("=== Recent turns (verbatim) ==="));
+            assert!(text.contains("[User]: Turn 2"));
             assert!(text.contains("[User]: Turn 3"));
             assert!(text.contains("[User]: Turn 4"));
-            // Turns 1 and 2 should NOT appear verbatim
+            // Turn 1 should not appear verbatim.
             assert!(!text.contains("[User]: Turn 1"));
-            assert!(!text.contains("[User]: Turn 2"));
         } else {
             panic!("Expected User item");
         }
@@ -554,7 +553,7 @@ mod tests {
             system_item("System"),
             user_item("Go"),
             assistant_with_tool_calls("Using tools", &["bash"]),
-            tool_result(&long_content),
+            tool_result("tc-1", &long_content),
         ];
         let (result, _) = normalize_forked_context(items);
 

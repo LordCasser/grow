@@ -918,7 +918,12 @@ pub(super) async fn run_session(
                         let state = session.state.lock().await;
                         let _ = respond_to.send(state.foreground.snapshot());
                     }
-                    SessionCommand::ReceiveNotification { source, source_version, body } => {
+                    SessionCommand::ReceiveNotification {
+                        source,
+                        source_version,
+                        body,
+                        respond_to,
+                    } => {
                         let deferred_subject = match &source {
                             chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
                                 Some(task_id.clone())
@@ -930,10 +935,10 @@ pub(super) async fn run_session(
                             | chat_state::NotificationSource::TaskStillRunning { .. }
                             | chat_state::NotificationSource::WorkflowCompleted { .. } => None,
                         };
-                        match session
+                        let admission = session
                             .receive_notification(source, source_version, body.clone())
-                            .await
-                        {
+                            .await;
+                        match &admission {
                             Ok(notification_id) => {
                                 if let Some(subject) = deferred_subject
                                     && session.completion_delivery.complete(subject.clone())
@@ -953,6 +958,9 @@ pub(super) async fn run_session(
                             Err(error) => {
                                 tracing::error!(%error, "notification admission failed");
                             }
+                        }
+                        if let Some(respond_to) = respond_to {
+                            let _ = respond_to.send(admission);
                         }
                     }
                     SessionCommand::BehaviorChange { session_mode, responds_to } => {

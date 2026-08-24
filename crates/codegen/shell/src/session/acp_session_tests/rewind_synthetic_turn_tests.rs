@@ -36,7 +36,7 @@ fn seed_conversation(mark_turn_starts: bool) -> Vec<ConversationItem> {
         item
     };
     vec![
-        ConversationItem::system("SYS"),
+        ConversationItem::system("test system prompt"),
         ConversationItem::user("<user_info>OS: test</user_info>"),
         turn_user("P0", 0),
         ConversationItem::assistant("A0"),
@@ -89,7 +89,7 @@ async fn run_rewind_over_synthetic_turn(mark_turn_starts: bool) {
     assert_eq!(
         texts,
         vec![
-            "SYS",
+            "test system prompt",
             "<user_info>OS: test</user_info>",
             "P0",
             "A0",
@@ -192,7 +192,11 @@ async fn rewind_to_start_keeps_only_preamble() {
             let texts: Vec<String> = conv.iter().map(|c| c.text_content()).collect();
             assert_eq!(
                 texts,
-                vec!["SYS", "<user_info>OS: test</user_info>", "skills"],
+                vec![
+                    "test system prompt",
+                    "<user_info>OS: test</user_info>",
+                    "skills",
+                ],
                 "target 0 must keep only the preamble prefix"
             );
             assert_eq!(actor.chat_state_handle.get_prompt_index().await, 0);
@@ -237,7 +241,7 @@ async fn rewind_twice_narrows_history_each_time() {
                 item
             };
             let conversation = vec![
-                ConversationItem::system("SYS"),
+                ConversationItem::system("test system prompt"),
                 ConversationItem::user("<user_info>OS: test</user_info>"),
                 marked("P0", 0),
                 ConversationItem::assistant("A0"),
@@ -268,7 +272,7 @@ async fn rewind_twice_narrows_history_each_time() {
             assert_eq!(
                 texts,
                 vec![
-                    "SYS",
+                    "test system prompt",
                     "<user_info>OS: test</user_info>",
                     "P0",
                     "A0",
@@ -296,7 +300,12 @@ async fn rewind_twice_narrows_history_each_time() {
             let texts: Vec<String> = conv.iter().map(|c| c.text_content()).collect();
             assert_eq!(
                 texts,
-                vec!["SYS", "<user_info>OS: test</user_info>", "P0", "A0"],
+                vec![
+                    "test system prompt",
+                    "<user_info>OS: test</user_info>",
+                    "P0",
+                    "A0",
+                ],
                 "second rewind keeps only turn 0"
             );
             assert_eq!(actor.chat_state_handle.get_prompt_index().await, 1);
@@ -340,7 +349,7 @@ async fn rewind_to_midpoint_with_synthetic_turns_on_both_sides() {
                     item
                 };
                 let conversation = vec![
-                    ConversationItem::system("SYS"),
+                    ConversationItem::system("test system prompt"),
                     ConversationItem::user("<user_info>OS: test</user_info>"),
                     user("P0", 0),
                     ConversationItem::assistant("A0"),
@@ -378,7 +387,7 @@ async fn rewind_to_midpoint_with_synthetic_turns_on_both_sides() {
                 assert_eq!(
                     texts,
                     vec![
-                        "SYS",
+                        "test system prompt",
                         "<user_info>OS: test</user_info>",
                         "P0",
                         "A0",
@@ -425,7 +434,12 @@ async fn rewind_to_synthetic_auto_wake_turn_cuts_at_the_wake() {
             let texts: Vec<String> = conv.iter().map(|c| c.text_content()).collect();
             assert_eq!(
                 texts,
-                vec!["SYS", "<user_info>OS: test</user_info>", "P0", "A0"],
+                vec![
+                    "test system prompt",
+                    "<user_info>OS: test</user_info>",
+                    "P0",
+                    "A0",
+                ],
                 "auto-wake turn and everything after it must be removed"
             );
             assert_eq!(actor.chat_state_handle.get_prompt_index().await, 1);

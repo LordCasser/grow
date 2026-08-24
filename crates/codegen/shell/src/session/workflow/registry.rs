@@ -837,10 +837,14 @@ fn open_publish_directory(
     create_missing: bool,
 ) -> Result<crate::session::storage::ContainedDirectory, ResolveError> {
     let (root, relative) = match scope {
-        WorkflowScope::Project => (
-            project_root(session_cwd),
-            PathBuf::from(".grow").join("workflows"),
-        ),
+        WorkflowScope::Project => {
+            let project = project_root(session_cwd);
+            let canonical = dunce::canonicalize(&project).map_err(|error| ResolveError::Io {
+                path: project.display().to_string(),
+                error: error.to_string(),
+            })?;
+            (canonical, PathBuf::from(".grow").join("workflows"))
+        }
         WorkflowScope::User => (
             crate::util::grow_home::grow_home(),
             PathBuf::from("workflows"),

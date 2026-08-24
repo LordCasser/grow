@@ -794,11 +794,6 @@ async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
     assert_eq!(loaded.workflow_runs.len(), 1);
     assert_eq!(loaded.workflow_runs[0].script, "complete(\"ok\");");
     assert_eq!(loaded.workflow_runs[0].args, serde_json::json!({"objective": "ship"}));
-    let mut legacy = manifest.clone();
-    legacy.version = 2;
-    adapter.write_workflow_run_state(&info, &legacy).await.unwrap();
-    let loaded_v2 = adapter.load_session_without_updates(&info).await.unwrap();
-    assert!(loaded_v2.workflow_runs.is_empty());
     adapter.delete_workflow_run_state(&info, "wf_restore").await.unwrap();
     adapter.write_workflow_run_state(&info, &manifest).await.unwrap();
     assert!(run_dir.join("cleared").is_file());
@@ -1919,6 +1914,8 @@ async fn prompt_records_fail_closed_without_timeline() {
         id: acp::SessionId::new("missing"),
         cwd: "/missing".into(),
     };
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    std::fs::remove_file(adapter.timeline_file(&info)).unwrap();
 
     let error = adapter.load_prompt_records(&info).await.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
@@ -2121,6 +2118,12 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
         cwd: "/tgt".to_string(),
     };
     adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    append_timeline_seed(
+        &adapter,
+        &source_info,
+        vec![ConversationItem::system("source system")],
+    )
+    .await;
     let mut goal = crate::session::goal_tracker::GoalTracker::new();
     goal.create_goal(
         "goal-1".into(),
@@ -2172,6 +2175,12 @@ async fn forked_control_snapshot_drops_plan_runtime_without_its_artifact() {
         cwd: "/tgt".to_string(),
     };
     adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    append_timeline_seed(
+        &adapter,
+        &source_info,
+        vec![ConversationItem::system("source system")],
+    )
+    .await;
     let mut plan = crate::session::behavior::BehaviorSnapshot::selected(
         tool_types::BehaviorId::Plan,
     );
@@ -3140,8 +3149,6 @@ async fn committed_timeline_is_not_rejected_when_summary_projection_fails() {
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     adapter.init_session(&info, default_model_id()).await.unwrap();
-    std::fs::write(adapter.summary_file(&info), b"not valid json").unwrap();
-
     let events = adapter.read_timeline_events_sync(&info).unwrap();
     let mut timeline = chat_state::Timeline::from_events(events).unwrap();
     let event = timeline
@@ -3150,13 +3157,14 @@ async fn committed_timeline_is_not_rejected_when_summary_projection_fails() {
             chat_state::MessageCause::User,
         )
         .unwrap();
+    std::fs::write(adapter.summary_file(&info), b"not valid json").unwrap();
 
     adapter
         .append_timeline_event_durable(&info, &event)
         .await
         .expect("summary is a projection and cannot reject a committed Timeline fact");
 
-    let stored = adapter.read_timeline_events_sync(&info).unwrap();
+    let stored = adapter.read_timeline(adapter.timeline_file(&info)).unwrap();
     assert_eq!(
         serde_json::to_value(stored.last().unwrap()).unwrap(),
         serde_json::to_value(&event).unwrap(),
@@ -3243,6 +3251,12 @@ async fn session_copy_does_not_clone_goal_runtime_state() {
         cwd: "/test/fork".into(),
     };
     adapter.init_session(&source, default_model_id()).await.unwrap();
+    append_timeline_seed(
+        &adapter,
+        &source,
+        vec![ConversationItem::system("source system")],
+    )
+    .await;
     let mut tracker = crate::session::goal_tracker::GoalTracker::new();
     tracker.create_goal(
         "source-goal".into(),

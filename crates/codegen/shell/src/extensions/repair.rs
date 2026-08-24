@@ -212,6 +212,7 @@ mod tests {
     async fn disk_repair_strips_orphaned_result_and_rewrites_file() {
         let tmp = TempDir::new().unwrap();
         let (adapter, info) = seed_session(tmp.path(), &corrupted_history()).await;
+        drop(adapter);
 
         let resp = repair_on_disk(tmp.path(), SESSION_ID, false)
             .await
@@ -226,7 +227,7 @@ mod tests {
 
         // The rewritten file must reload as a valid conversation with the
         // orphan gone and the intact pair preserved.
-        let reloaded = adapter
+        let reloaded = JsonlStorageAdapter::with_root(tmp.path().to_path_buf())
             .load_session_without_updates(&info)
             .await
             .expect("reload");

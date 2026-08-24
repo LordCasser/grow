@@ -464,6 +464,59 @@ fn goal_steering_race_still_emits_the_single_receipt() {
     ));
     assert!(cmd_rx.try_recv().is_err());
 }
+#[tokio::test]
+async fn goal_waiter_cannot_outrun_receipt_admission_or_emit_it_twice() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    ctx.parent_cmd_tx = Some(cmd_tx);
+    let mut request = auto_wake_test_request("goal-child");
+    request.owner = SubagentOwner::goal("goal-1");
+    let result = SubagentResult {
+        success: true,
+        subagent_id: request.id.clone(),
+        child_session_id: request.id.clone(),
+        ..Default::default()
+    };
+    let mut completion_data = ShellCompletionData::from_context(&ctx);
+    completion_data.mark_terminal_committed();
+
+    {
+        let admission = admit_goal_completion_receipt(&request, &result, &mut completion_data);
+        tokio::pin!(admission);
+        let command = tokio::select! {
+            command = cmd_rx.recv() => command.expect("receipt command"),
+            () = &mut admission => panic!("completion returned before receipt admission"),
+        };
+        let SessionCommand::ReceiveNotification { respond_to: Some(respond_to), .. } = command else {
+            panic!("expected acknowledged completion receipt");
+        };
+        respond_to.send(Ok("receipt-1".into())).unwrap();
+        admission.await;
+    }
+    assert!(completion_data.completion_receipt_admitted);
+
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    present_child_completion(
+        ChildCompletion {
+            request,
+            result,
+            completion_data,
+            disposition: CompletionDisposition {
+                foreground_delivered: false,
+                backgrounded: true,
+                waiter_delivered: true,
+                explicitly_killed: false,
+                should_surface: false,
+            },
+        },
+        &gateway,
+    );
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(SessionCommand::GrowSessionNotification { .. })
+    ));
+    assert!(cmd_rx.try_recv().is_err());
+}
 #[test]
 fn initializing_snapshot_is_running() {
     let snap = SubagentSnapshot {
@@ -571,6 +624,17 @@ fn write_recovery_child(
     spawn_seq: chat_state::EventSeq,
     spawn: &chat_state::SubagentSpawnEvent,
 ) {
+    let info = crate::session::info::Info {
+        id: acp::SessionId::new(spawn.child_session_id.clone()),
+        cwd: spawn.child_cwd.clone(),
+    };
+    let mut summary = crate::session::persistence::Summary::new(
+        &info,
+        crate::session::persistence::default_model_id(),
+    )
+    .unwrap();
+    summary.parent_session_id = Some(parent_timeline_id.into());
+    summary.session_kind = Some("subagent".into());
     let mut child = chat_state::Timeline::default();
     child
         .record(chat_state::TimelineEventKind::SubagentSeed(
@@ -587,6 +651,11 @@ fn write_recovery_child(
     crate::session::storage::write_jsonl_atomic(
         &dir.join(crate::session::storage::TIMELINE_FILE),
         child.events(),
+    )
+    .unwrap();
+    crate::session::storage::write_bytes_atomic(
+        &dir.join(crate::session::storage::SUMMARY_FILE),
+        &crate::session::storage::serialize_summary(&summary).unwrap(),
     )
     .unwrap();
 }

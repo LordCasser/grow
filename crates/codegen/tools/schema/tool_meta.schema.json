@@ -37,7 +37,7 @@
   ],
   "definitions": {
     "ToolKind": {
-      "description": "Categorizes what a tool does at a high level.\n\nSerializes as snake_case strings (e.g. `\"read\"`, `\"list_dir\"`, `\"web_fetch\"`).\n`Other` is an explicit category for tools that do not fit elsewhere. The\nwire vocabulary is closed: unknown values are rejected instead of silently\nchanging capability and permission classification.",
+      "description": "Categorizes what a tool does at a high level.\n\nSerializes as snake_case strings (e.g. `\"read\"`, `\"list_dir\"`, `\"web_fetch\"`).\n`Other` is an explicit category for tools that do not fit elsewhere. The\nwire vocabulary is closed so templates, UI grouping, and discovery cannot\nsilently drift. Runtime authorization is descriptor-owned and does not\nderive from this taxonomy.",
       "type": "string",
       "enum": [
         "read",
@@ -68,7 +68,6 @@
         "goal_read",
         "goal_lifecycle_update",
         "workflow",
-        "capability_request",
         "other"
       ]
     },
@@ -83,7 +82,7 @@
       ]
     },
     "ToolAccess": {
-      "description": "Coarse read/write/execute authority required by a tool call.\n\n`Read` observes state, `Write` changes durable state or emits externally,\nand `Execute` starts or controls an active execution unit. Combined tools\ndeclare the union. This vocabulary is intentionally closed and replaces the\nold read/write-only `ToolScope` classification.",
+      "description": "Coarse read/write/execute authority required by a tool call.\n\n`Read` observes user reality, `Write` changes durable state or emits into\nit, and `Execute` starts or controls an execution unit in that reality.\n`None` is reserved for framework control whose exact tool identity remains\nauthoritative and whose downstream work is independently gated (for\nexample, spawning a child actor or cancelling a session-owned resource).\nCombined tools declare the union. This vocabulary is intentionally closed\nand replaces the old read/write-only `ToolScope` classification.",
       "oneOf": [
         {
           "type": "string",
@@ -98,7 +97,7 @@
           ]
         },
         {
-          "description": "Pure control-plane operation with no external observation or emission.",
+          "description": "Framework control-plane operation outside user-reality RWX.",
           "type": "string",
           "const": "none"
         }

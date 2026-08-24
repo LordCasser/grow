@@ -270,7 +270,7 @@ async fn auto_recap_below_min_turns_is_noop_and_display_only() {
             let before = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
                 before.len(),
-                2,
+                3,
                 "seed must be applied before the recap call"
             );
 

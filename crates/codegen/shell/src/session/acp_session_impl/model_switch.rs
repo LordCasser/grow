@@ -360,7 +360,7 @@ mod tests {
                     .await
                     .unwrap();
                 let original = vec![
-                    ConversationItem::system("stable-core"),
+                    ConversationItem::system("test system prompt"),
                     ConversationItem::user("historical request"),
                 ];
                 actor
@@ -372,6 +372,16 @@ mod tests {
                 let mut definition = agent::AgentDefinition::default_grow_build();
                 definition.name = "reviewer".into();
                 definition.prompt_body = Some("Review the implementation carefully.".into());
+                let message_events_before = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|event| {
+                        matches!(event.kind, chat_state::TimelineEventKind::Messages(_))
+                    })
+                    .count();
                 actor
                     .handle_rebuild_agent_for_definition(definition)
                     .await
@@ -412,7 +422,7 @@ mod tests {
                             matches!(event.kind, chat_state::TimelineEventKind::Messages(_))
                         })
                         .count(),
-                    1,
+                    message_events_before,
                     "Agent selection must not perform a second ContextRebuild"
                 );
                 let control = events
@@ -490,7 +500,7 @@ mod tests {
                 actor
                     .chat_state_handle
                     .replace_context_durably(
-                        vec![ConversationItem::system("stable-core")],
+                        vec![ConversationItem::system("test system prompt")],
                         revision,
                     )
                     .await
@@ -515,7 +525,7 @@ mod tests {
                 actor
                     .chat_state_handle
                     .replace_context_durably(
-                        vec![ConversationItem::system("stable-core")],
+                        vec![ConversationItem::system("test system prompt")],
                         revision,
                     )
                     .await

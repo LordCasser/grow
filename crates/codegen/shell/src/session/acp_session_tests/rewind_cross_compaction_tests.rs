@@ -12,7 +12,7 @@ fn prompt(text: &str, index: usize) -> ConversationItem {
 
 async fn seed_compacted_timeline(actor: &super::SessionActor) {
     let mut conversation = vec![
-        ConversationItem::system("SYS"),
+        ConversationItem::system("test system prompt"),
         ConversationItem::user("UI0"),
     ];
     for index in 0..5 {
@@ -144,7 +144,7 @@ async fn run_rewind_scenario() {
 
     assert_eq!(
         texts,
-        vec!["SYS", "UI0", "P0", "P1", "P2"],
+        vec!["test system prompt", "UI0", "P0", "P1", "P2"],
         "conversation must truncate to prompts 0..2 (got {texts:?})"
     );
     assert!(
@@ -342,7 +342,7 @@ async fn pending_rewind_transaction_rolls_forward_before_session_use() {
             seed_test_timeline(
                 &actor,
                 vec![
-                    ConversationItem::system("SYS"),
+                    ConversationItem::system("test system prompt"),
                     prompt("P0", 0),
                     ConversationItem::assistant("A0"),
                     prompt("P1", 1),

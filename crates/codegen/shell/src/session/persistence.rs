@@ -2501,8 +2501,36 @@ mod agent_name_persistence_tests {
 }
 
 #[cfg(test)]
+pub(crate) fn write_test_session_summary(
+    sessions_root: &Path,
+    cwd: &str,
+    session_id: &str,
+    configure: impl FnOnce(&mut Summary),
+) {
+    let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
+    let cwd_dir = sessions_root.join(&encoded);
+    std::fs::create_dir_all(&cwd_dir).unwrap();
+    if encoded != urlencoding::encode(cwd).as_ref() {
+        std::fs::write(cwd_dir.join(".cwd"), cwd).unwrap();
+    }
+    let info = Info {
+        id: acp::SessionId::new(session_id),
+        cwd: cwd.into(),
+    };
+    let mut summary = Summary::new(&info, default_model_id()).unwrap();
+    configure(&mut summary);
+    let session_dir = cwd_dir.join(session_id);
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(
+        session_dir.join("summary.json"),
+        crate::session::storage::serialize_summary(&summary).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(test)]
 mod session_exists_tests {
-    use super::session_exists_in_root;
+    use super::{session_exists_in_root, write_test_session_summary};
     use std::fs;
     use tempfile::TempDir;
 
@@ -2528,10 +2556,7 @@ mod session_exists_tests {
     fn returns_true_when_session_dir_exists_under_any_cwd() {
         let tmp = make_root();
         let root = tmp.path().join("sessions");
-        // Simulate sessions/<encoded-cwd>/<session-id>/
-        let session_dir = root.join("some_cwd_dir").join("my-session-id");
-        fs::create_dir_all(&session_dir).unwrap();
-        fs::write(session_dir.join("summary.json"), b"{}").unwrap();
+        write_test_session_summary(&root, "/project", "my-session-id", |_| {});
 
         assert!(session_exists_in_root("my-session-id", &root));
     }
@@ -2563,12 +2588,8 @@ mod session_exists_tests {
         let tmp = make_root();
         let root = tmp.path().join("sessions");
         // Two persisted sessions under different cwd directories.
-        let other = root.join("cwd1").join("other-session");
-        let target = root.join("cwd2").join("target-session");
-        fs::create_dir_all(&other).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        fs::write(other.join("summary.json"), b"{}").unwrap();
-        fs::write(target.join("summary.json"), b"{}").unwrap();
+        write_test_session_summary(&root, "/project/one", "other-session", |_| {});
+        write_test_session_summary(&root, "/project/two", "target-session", |_| {});
 
         assert!(session_exists_in_root("target-session", &root));
         assert!(!session_exists_in_root("missing-session", &root));
@@ -2577,29 +2598,9 @@ mod session_exists_tests {
 
 #[cfg(test)]
 mod find_summary_by_session_id_tests {
-    use super::{SESSION_FORMAT_VERSION, find_summary_by_session_id_in_root};
+    use super::{find_summary_by_session_id_in_root, write_test_session_summary};
     use std::fs;
     use tempfile::TempDir;
-
-    fn write_summary(root: &std::path::Path, cwd_dir: &str, session_id: &str, json: &str) {
-        let dir = root.join(cwd_dir).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("summary.json"), json).unwrap();
-    }
-
-    fn minimal_summary(head_commit: &str, head_branch: &str) -> String {
-        serde_json::json!({
-            "info": { "id": "test-session", "cwd": "/tmp" },
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "num_messages": 0,
-            "session_format_version": SESSION_FORMAT_VERSION,
-            "current_model_id": "grow-3",
-            "head_commit": head_commit,
-            "head_branch": head_branch
-        })
-        .to_string()
-    }
 
     #[test]
     fn returns_none_when_root_missing() {
@@ -2612,7 +2613,10 @@ mod find_summary_by_session_id_tests {
     fn returns_none_when_no_matching_session() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("sessions");
-        write_summary(&root, "cwd1", "other-id", &minimal_summary("abc", "main"));
+        write_test_session_summary(&root, "/project/other", "other-id", |summary| {
+            summary.head_commit = Some("abc".into());
+            summary.head_branch = Some("main".into());
+        });
         assert!(find_summary_by_session_id_in_root("missing-id", &root).is_none());
     }
 
@@ -2620,12 +2624,10 @@ mod find_summary_by_session_id_tests {
     fn finds_summary_across_cwd_dirs() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("sessions");
-        write_summary(
-            &root,
-            "encoded_cwd",
-            "target-session",
-            &minimal_summary("deadbeef", "feature/x"),
-        );
+        write_test_session_summary(&root, "/project/target", "target-session", |summary| {
+            summary.head_commit = Some("deadbeef".into());
+            summary.head_branch = Some("feature/x".into());
+        });
 
         let found = find_summary_by_session_id_in_root("target-session", &root).unwrap();
         assert_eq!(found.head_commit.as_deref(), Some("deadbeef"));
@@ -2637,7 +2639,9 @@ mod find_summary_by_session_id_tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("sessions");
         // Write invalid JSON
-        let dir = root.join("cwd1").join("bad-session");
+        let dir = root
+            .join(crate::util::grow_home::encode_cwd_dirname("/project"))
+            .join("bad-session");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("summary.json"), b"not-json").unwrap();
 
@@ -2896,7 +2900,7 @@ mod resumed_sandbox_profile_tests {
 mod session_exists_for_cwd_tests {
     use super::{
         resolve_local_session_any_cwd_in_root, session_exists_for_cwd_in_root,
-        session_exists_in_root,
+        session_exists_in_root, write_test_session_summary,
     };
     use std::fs;
     use tempfile::TempDir;
@@ -2908,10 +2912,7 @@ mod session_exists_for_cwd_tests {
         let cwd = "/project/alpha";
         let session_id = "my-session";
 
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let dir = root.join(&encoded).join(session_id);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("summary.json"), b"{}").unwrap();
+        write_test_session_summary(&root, cwd, session_id, |_| {});
 
         assert!(session_exists_for_cwd_in_root(session_id, cwd, &root));
     }
@@ -2940,10 +2941,7 @@ mod session_exists_for_cwd_tests {
         let session_id = "cross-cwd-session";
 
         // Create the session only under cwd-A (a real session has a summary.json).
-        let encoded_a = crate::util::grow_home::encode_cwd_dirname("/project/alpha");
-        let dir_a = root.join(&encoded_a).join(session_id);
-        fs::create_dir_all(&dir_a).unwrap();
-        fs::write(dir_a.join("summary.json"), b"{}").unwrap();
+        write_test_session_summary(&root, "/project/alpha", session_id, |_| {});
 
         // Global scan (old behaviour) finds it — this is the incorrect check
         assert!(
@@ -2992,10 +2990,7 @@ mod session_exists_for_cwd_tests {
 
         // Real session under cwd-A.
         let cwd_a = "/project/alpha";
-        let encoded_a = crate::util::grow_home::encode_cwd_dirname(cwd_a);
-        let dir_a = root.join(&encoded_a).join(session_id);
-        fs::create_dir_all(&dir_a).unwrap();
-        fs::write(dir_a.join("summary.json"), b"{}").unwrap();
+        write_test_session_summary(&root, cwd_a, session_id, |_| {});
 
         // Images-only stub for the SAME id under cwd-B.
         let cwd_b = "/project/beta";
@@ -3019,21 +3014,19 @@ mod repo_wide_resolution_tests {
     use super::*;
 
     fn setup_session(root: &Path, cwd: &str, session_id: &str) {
-        let encoded = crate::util::grow_home::encode_cwd_dirname(cwd);
-        let dir = root.join(encoded).join(session_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("summary.json"), "{}").unwrap();
+        write_test_session_summary(root, cwd, session_id, |_| {});
     }
 
     #[test]
     fn resolves_exact_before_later_cwd() {
         let tmp = tempfile::TempDir::new().unwrap();
-        setup_session(tmp.path(), "/repo/main", "session");
-        setup_session(tmp.path(), "/repo/other", "session");
+        let root = tmp.path().join("sessions");
+        setup_session(&root, "/repo/main", "session");
+        setup_session(&root, "/repo/other", "session");
         let resolved = resolve_local_session_for_repo_in_root(
             "session",
             &["/repo/main", "/repo/other"],
-            tmp.path(),
+            &root,
         )
         .unwrap();
         assert_eq!(resolved.cwd, "/repo/main");
@@ -3046,11 +3039,12 @@ mod repo_wide_resolution_tests {
     #[test]
     fn resolves_same_repo_different_cwd() {
         let tmp = tempfile::TempDir::new().unwrap();
-        setup_session(tmp.path(), "/repo/other", "session");
+        let root = tmp.path().join("sessions");
+        setup_session(&root, "/repo/other", "session");
         let resolved = resolve_local_session_for_repo_in_root(
             "session",
             &["/repo/main", "/repo/other"],
-            tmp.path(),
+            &root,
         )
         .unwrap();
         assert_eq!(resolved.cwd, "/repo/other");
@@ -3063,9 +3057,9 @@ mod repo_wide_resolution_tests {
     #[test]
     fn returns_none_without_local_match() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("sessions");
         assert!(
-            resolve_local_session_for_repo_in_root("missing", &["/repo/main"], tmp.path(),)
-                .is_none()
+            resolve_local_session_for_repo_in_root("missing", &["/repo/main"], &root,).is_none()
         );
     }
 }

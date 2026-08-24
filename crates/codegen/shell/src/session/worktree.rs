@@ -624,18 +624,20 @@ mod tests {
     fn repo_wide_resolve_finds_session_in_sibling_cwd_skipping_remote() {
         use crate::session::persistence::LocalSessionResolutionKind;
         let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path();
+        let sessions_root = tmp.path().join("sessions");
         let exact_cwd = "/project/main";
         let sibling_cwd = "/project/worktree-1";
-        let encoded = crate::util::grow_home::encode_cwd_dirname(sibling_cwd);
-        let session_dir = root.join(&encoded).join("sess-remote-123");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(session_dir.join("summary.json"), b"{}").unwrap();
+        crate::session::persistence::write_test_session_summary(
+            &sessions_root,
+            sibling_cwd,
+            "sess-remote-123",
+            |_| {},
+        );
         let candidates: &[&str] = &[exact_cwd, sibling_cwd];
         let result = crate::session::persistence::resolve_local_session_for_repo_in_root(
             "sess-remote-123",
             candidates,
-            root,
+            &sessions_root,
         );
         let resolved = result.expect("should find session in sibling cwd");
         assert_eq!(resolved.session_id, "sess-remote-123");

@@ -314,31 +314,26 @@ impl ChatStateActor {
                 payload_ref,
                 reply,
             } => {
-                let existing =
-                    self.state
-                        .timeline
-                        .events()
-                        .iter()
-                        .find_map(|event| match &event.kind {
-                            TimelineEventKind::Notification(
-                                crate::NotificationEvent::Received {
-                                    owner_session_id: existing_owner,
-                                    source: existing_source,
-                                    source_version: existing_version,
-                                    payload_ref: existing_payload,
-                                    ..
-                                },
-                            ) if existing_source == &source
-                                && existing_version == &source_version =>
-                            {
-                                Some((
-                                    event.clone(),
-                                    existing_owner == &owner_session_id
-                                        && existing_payload == &payload_ref,
-                                ))
-                            }
-                            _ => None,
-                        });
+                let existing = self
+                    .state
+                    .timeline
+                    .received_notification_event(&source, &source_version)
+                    .and_then(|event| match &event.kind {
+                        TimelineEventKind::Notification(crate::NotificationEvent::Received {
+                            owner_session_id: existing_owner,
+                            source: existing_source,
+                            source_version: existing_version,
+                            payload_ref: existing_payload,
+                            ..
+                        }) if existing_source == &source && existing_version == &source_version => {
+                            Some((
+                                event.clone(),
+                                existing_owner == &owner_session_id
+                                    && existing_payload == &payload_ref,
+                            ))
+                        }
+                        _ => None,
+                    });
                 let result = match existing {
                     Some((event, true)) => Ok(event),
                     Some((_, false)) => Err(crate::commands::TimelineWriteError::Invalid(

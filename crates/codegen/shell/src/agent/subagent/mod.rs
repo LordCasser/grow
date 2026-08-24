@@ -428,6 +428,7 @@ pub(crate) struct ShellCompletionData {
     spawned_notification_emitted: bool,
     persisted_output_ref: Option<String>,
     terminal_committed: bool,
+    completion_receipt_admitted: bool,
 }
 impl ShellCompletionData {
     fn from_context(ctx: &SubagentSpawnContext) -> Self {
@@ -439,6 +440,7 @@ impl ShellCompletionData {
             spawned_notification_emitted: false,
             persisted_output_ref: None,
             terminal_committed: false,
+            completion_receipt_admitted: false,
         }
     }
     pub(crate) fn persisted_output_ref(&self) -> Option<&str> {
@@ -499,7 +501,10 @@ pub(crate) fn present_child_completion(
         && request.surface_completion
         && !result.cancelled
         && !disposition.explicitly_killed;
-    if parent_channel_open && (disposition.should_surface || steering_wait_may_own_completion) {
+    if parent_channel_open
+        && !completion_data.completion_receipt_admitted
+        && (disposition.should_surface || steering_wait_may_own_completion)
+    {
         // A Goal wait can be displaced after the coordinator successfully
         // sends its result but before the wait future observes it. The actor's
         // completion tracker resolves that race against this single durable
@@ -518,6 +523,7 @@ pub(crate) fn present_child_completion(
                 },
                 source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
                 body,
+                respond_to: None,
             });
         }
     }
@@ -538,6 +544,59 @@ pub(crate) fn present_child_completion(
             },
             completion_data.parent_cmd_tx.as_ref(),
         );
+    }
+}
+
+/// Commit the Goal child receipt before returning its terminal result to the
+/// coordinator. The coordinator may immediately wake a blocking waiter; this
+/// producer barrier ensures the tool-result path can always acknowledge an
+/// already-durable receipt instead of racing a later actor command.
+pub(super) async fn admit_goal_completion_receipt(
+    request: &SubagentRequest,
+    result: &SubagentResult,
+    completion_data: &mut ShellCompletionData,
+) {
+    if request.owner.goal_id().is_none()
+        || !request.surface_completion
+        || result.cancelled
+        || !completion_data.terminal_committed
+    {
+        return;
+    }
+    let Some(cmd_tx) = completion_data.parent_cmd_tx.as_ref() else {
+        return;
+    };
+    let summary = tools::implementations::grow_build::task::completion_summary(request, result);
+    let body = tools::reminders::task_completion::format_subagent_completion(
+        &summary,
+        Some(&completion_data.task_output_tool_name),
+    );
+    let (respond_to, admitted) = oneshot::channel();
+    if cmd_tx
+        .send(SessionCommand::ReceiveNotification {
+            source: chat_state::NotificationSource::SubagentCompleted {
+                subagent_id: request.id.clone(),
+            },
+            source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+            body,
+            respond_to: Some(respond_to),
+        })
+        .is_err()
+    {
+        return;
+    }
+    match admitted.await {
+        Ok(Ok(_)) => completion_data.completion_receipt_admitted = true,
+        Ok(Err(error)) => tracing::error!(
+            subagent_id = %request.id,
+            %error,
+            "Goal completion receipt admission failed"
+        ),
+        Err(error) => tracing::error!(
+            subagent_id = %request.id,
+            %error,
+            "Goal completion receipt admission was dropped"
+        ),
     }
 }
 /// Resolve the sampling config and model ID for a subagent.

@@ -292,7 +292,7 @@ async fn ordinary_and_durable_appends_keep_every_physical_line_parseable() {
     const N: usize = 100;
     let dir = tempfile::tempdir().unwrap();
     let info = info();
-    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let adapter = JsonlStorageAdapter::with_root(dir.path().to_path_buf());
     adapter
         .init_session(&info, default_model_id())
         .await
@@ -323,7 +323,7 @@ async fn ordinary_and_durable_appends_keep_every_physical_line_parseable() {
     ordinary.await.unwrap();
     durable.await.unwrap();
 
-    let bytes = std::fs::read(dir.path().join("updates.jsonl")).unwrap();
+    let bytes = std::fs::read(adapter.session_dir(&info).join("updates.jsonl")).unwrap();
     let parsed = bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -337,12 +337,12 @@ async fn ordinary_and_durable_appends_keep_every_physical_line_parseable() {
 async fn append_commit_is_reported_when_bookkeeping_fails() {
     let dir = tempfile::tempdir().unwrap();
     let info = info();
-    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let adapter = JsonlStorageAdapter::with_root(dir.path().to_path_buf());
     adapter
         .init_session(&info, default_model_id())
         .await
         .unwrap();
-    let summary = dir.path().join("summary.json");
+    let summary = adapter.session_dir(&info).join("summary.json");
     std::fs::remove_file(&summary).unwrap();
     std::fs::create_dir(&summary).unwrap();
 
@@ -353,7 +353,7 @@ async fn append_commit_is_reported_when_bookkeeping_fails() {
         Err(crate::session::storage::AppendUpdateError::Committed(_))
     ));
     assert_eq!(
-        std::fs::read_to_string(dir.path().join("updates.jsonl"))
+        std::fs::read_to_string(adapter.session_dir(&info).join("updates.jsonl"))
             .unwrap()
             .lines()
             .count(),

@@ -287,7 +287,7 @@ mod tests {
     }
 
     /// Regression guard for the `/resume` "frozen `last_active_at`" lost-update
-    /// race. Two adapters (standing in for two persistence actors) hammer the
+    /// race. Two tasks sharing the entity's one writer capability hammer the
     /// SAME `summary.json` concurrently: one appends, the other writes metadata.
     /// Every write is a whole-summary read-modify-write, so without the sidecar
     /// lock the metadata writer reverts the appender's `num_messages` /
@@ -306,8 +306,8 @@ mod tests {
             .await
             .unwrap();
 
-        let appender = JsonlStorageAdapter::with_explicit_session_dir(session_dir.clone());
-        let metadata = JsonlStorageAdapter::with_explicit_session_dir(session_dir.clone());
+        let appender = init.clone();
+        let metadata = init.clone();
         let barrier = Arc::new(Barrier::new(2));
 
         let info_a = info.clone();

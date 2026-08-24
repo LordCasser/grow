@@ -5057,11 +5057,10 @@ async fn prune_tool_results_is_idempotent() {
     );
 }
 
-/// The re-estimate is clamped to the pre-prune total: pruning must never
-/// appear to increase usage, even when the provider-reported total is far
-/// below the static byte estimate.
+/// An under-reported provider anchor is ignored, then pruning applies the
+/// signed Surface delta while retaining the bounded replacement marker.
 #[tokio::test]
-async fn prune_tool_results_clamps_signed_delta_at_zero() {
+async fn prune_tool_results_clamps_after_underreported_anchor_is_ignored() {
     use crate::actor::state::EstimatedItemTokenCounter;
     use compaction::plan_tool_result_pruning;
 
@@ -5069,7 +5068,7 @@ async fn prune_tool_results_clamps_signed_delta_at_zero() {
     let mut h = TestHarness::with_conversation(conv.clone());
     h.handle.record_provider_context_anchor(10);
     // Sync point: the query is ordered after the fire-and-forget anchor.
-    assert_eq!(h.handle.get_projected_tokens().await, 10);
+    assert_eq!(h.handle.get_projected_tokens().await, 1000);
     h.drain_events();
 
     let plan = plan_tool_result_pruning(&conv, &EstimatedItemTokenCounter, 50, 100);
@@ -5079,9 +5078,9 @@ async fn prune_tool_results_clamps_signed_delta_at_zero() {
         .await
         .expect("prune succeeds");
     assert_eq!(report.pruned_count, 1, "content is still pruned");
-    assert_eq!(report.tokens_before, 10);
-    assert_eq!(report.tokens_after, 0, "signed deltas clamp at zero");
-    assert_eq!(h.handle.get_projected_tokens().await, 0);
+    assert_eq!(report.tokens_before, 1000);
+    assert!(report.tokens_after < report.tokens_before);
+    assert_eq!(h.handle.get_projected_tokens().await, report.tokens_after);
     assert!(h.drain_events().is_empty());
 }
 

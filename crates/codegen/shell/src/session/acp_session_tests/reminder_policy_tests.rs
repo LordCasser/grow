@@ -260,15 +260,15 @@ async fn same_session_rolls_over_once_when_local_date_advances() {
             actor.maybe_inject_date_rollover_reminder().await;
             assert_eq!(
                 actor.chat_state_handle.get_conversation_len().await,
-                0,
+                1,
                 "same-day turn must not inject a rollover reminder"
             );
             let yesterday = today.pred_opt().expect("today is never the min date");
             actor.last_announced_local_date.set(yesterday);
             actor.maybe_inject_date_rollover_reminder().await;
             let conv = actor.chat_state_handle.get_conversation().await;
-            assert_eq!(conv.len(), 1, "rollover must inject exactly one reminder");
-            let text = conv[0].text_content();
+            assert_eq!(conv.len(), 2, "rollover must inject exactly one reminder");
+            let text = conv[1].text_content();
             assert!(
                 text.contains("<system-reminder>"),
                 "rollover reminder must be wrapped in system-reminder tags: {text}"
@@ -285,7 +285,7 @@ async fn same_session_rolls_over_once_when_local_date_advances() {
             actor.maybe_inject_date_rollover_reminder().await;
             assert_eq!(
                 actor.chat_state_handle.get_conversation_len().await,
-                1,
+                2,
                 "rollover must not re-fire on a later same-day turn"
             );
         })

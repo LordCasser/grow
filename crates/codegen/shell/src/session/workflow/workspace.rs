@@ -132,18 +132,17 @@ impl WorkflowWorkspace {
         cwd: &Path,
     ) -> Result<Self, WorkspaceError> {
         let root = session
-            .open_relative(
-                Path::new("workflow-workspace"),
-                "Workflow workspace",
-                true,
-            )
-            .map_err(|error| WorkspaceError::Io {
-                path: session
-                    .display_path()
-                    .join("workflow-workspace")
-                    .display()
-                    .to_string(),
-                error: error.to_string(),
+            .open_relative(Path::new("workflow-workspace"), "Workflow workspace", true)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::InvalidData => WorkspaceError::InvalidState(error.to_string()),
+                _ => WorkspaceError::Io {
+                    path: session
+                        .display_path()
+                        .join("workflow-workspace")
+                        .display()
+                        .to_string(),
+                    error: error.to_string(),
+                },
             })?;
         let state = load_state(&root)?.unwrap_or_default();
         let mut workspace = Self { root, state };
@@ -679,14 +678,17 @@ impl WorkflowWorkspace {
                 "Workflow draft directory",
                 create_missing,
             )
-            .map_err(|error| WorkspaceError::Io {
-                path: self
-                    .root
-                    .display_path()
-                    .join("drafts")
-                    .display()
-                    .to_string(),
-                error: error.to_string(),
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::InvalidData => WorkspaceError::InvalidState(error.to_string()),
+                _ => WorkspaceError::Io {
+                    path: self
+                        .root
+                        .display_path()
+                        .join("drafts")
+                        .display()
+                        .to_string(),
+                    error: error.to_string(),
+                },
             })
     }
 
@@ -948,6 +950,9 @@ fn load_state(
     ) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return Err(WorkspaceError::InvalidState(error.to_string()));
+        }
         Err(error) => {
             return Err(WorkspaceError::Io {
                 path: path.display().to_string(),

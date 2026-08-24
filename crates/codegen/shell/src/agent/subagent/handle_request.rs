@@ -1081,6 +1081,7 @@ pub(crate) async fn run_shell_child(
                 .is_ok()
             {
                 completion_data.mark_terminal_committed();
+                admit_goal_completion_receipt(&request, &result, &mut completion_data).await;
             }
             return child_run_output(result, completion_data);
         }
@@ -1119,6 +1120,7 @@ pub(crate) async fn run_shell_child(
             .is_ok()
         {
             completion_data.mark_terminal_committed();
+            admit_goal_completion_receipt(&request, &result, &mut completion_data).await;
         }
         return child_run_output(result, completion_data);
     }
@@ -1657,5 +1659,6 @@ pub(crate) async fn run_shell_child(
             "error": &result.error,
         })),
     );
+    admit_goal_completion_receipt(&request, &result, &mut completion_data).await;
     child_run_output(result, completion_data)
 }

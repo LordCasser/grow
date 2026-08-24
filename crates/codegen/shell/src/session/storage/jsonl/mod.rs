@@ -75,7 +75,16 @@ impl OpenedSession {
     }
 
     pub(crate) fn timeline_events(&self) -> io::Result<Vec<chat_state::TimelineEvent>> {
-        JsonlStorageAdapter::read_timeline_from_directory(&self.directory)
+        JsonlStorageAdapter::read_timeline_from_directory(&self.directory).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "mandatory Timeline ledger is missing",
+                )
+            } else {
+                error
+            }
+        })
     }
 
     /// Read the exact committed `updates.jsonl` envelopes. Unlike replay,
@@ -757,7 +766,7 @@ impl JsonlStorageAdapter {
         durability: AppendDurability,
     ) -> io::Result<()> {
         self.ensure_writer_lease(info)?;
-        let directory = self.open_session(info)?.directory;
+        let directory = self.bound_session_directory(info)?;
         let prefix_state = self.timeline_prefix_state(info)?;
         Self::append_timeline_event_with_durability(directory, prefix_state, event, durability)
             .await?;
@@ -1472,12 +1481,18 @@ impl JsonlStorageAdapter {
                 "session is already bound to this storage adapter",
             ));
         }
-        let target_name = info.id.to_string();
-        let (result, directory) = Self::build_and_publish_session_opened(
-            parent,
-            std::ffi::OsStr::new(&target_name),
-            build,
-        )?;
+        let target_name = self
+            .session_dir(info)
+            .file_name()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "session path has no final entity name",
+                )
+            })?
+            .to_os_string();
+        let (result, directory) =
+            Self::build_and_publish_session_opened(parent, &target_name, build)?;
         cache.insert(key, std::sync::Arc::new(directory));
         Ok(result)
     }
@@ -1584,7 +1599,7 @@ impl JsonlStorageAdapter {
         let mut line = serde_json::to_vec(&envelope)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
-        let directory = self.open_session(info)?.directory;
+        let directory = self.bound_session_directory(info)?;
         let path = directory.display_path().join(super::UPDATES_FILE);
         tokio::task::spawn_blocking(move || {
             Self::append_jsonl_line_in_directory_sync(
@@ -1718,6 +1733,27 @@ impl JsonlStorageAdapter {
         Ok(OpenedSession { directory, summary })
     }
 
+    /// Return the already identity-checked entity capability used by this
+    /// adapter's live writer. Canonical Timeline commits must not be blocked by
+    /// a later-corrupted Summary projection; an unbound adapter still performs
+    /// the full Summary identity check before obtaining the capability.
+    fn bound_session_directory(
+        &self,
+        info: &Info,
+    ) -> io::Result<std::sync::Arc<super::ContainedDirectory>> {
+        let key = format!("{}\0{}", info.id, info.cwd);
+        if let Some(directory) = self
+            .opened_sessions
+            .lock()
+            .map_err(|_| io::Error::other("session capability cache poisoned"))?
+            .get(&key)
+            .cloned()
+        {
+            return Ok(directory);
+        }
+        Ok(self.open_session(info)?.directory)
+    }
+
     pub(crate) fn open_session_by_id(&self, session_id: &str) -> io::Result<Option<OpenedSession>> {
         if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
             return Err(io::Error::new(
@@ -1751,7 +1787,11 @@ impl JsonlStorageAdapter {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error),
                 };
-            let summary = Self::read_summary_from_directory(&session)?;
+            let summary = match Self::read_summary_from_directory(&session) {
+                Ok(summary) => summary,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             Self::validate_physical_session_identity(
                 &cwd_name,
                 &cwd_dir,
@@ -2223,7 +2263,7 @@ impl JsonlStorageAdapter {
         patch: super::summary_write::SummaryPatch,
     ) -> io::Result<bool> {
         self.ensure_writer_lease(info)?;
-        let directory = self.open_session(info)?.directory;
+        let directory = self.bound_session_directory(info)?;
         tokio::task::spawn_blocking(move || {
             super::summary_write::apply_patch_locked_in_directory(
                 &directory,
@@ -3020,9 +3060,9 @@ impl StorageAdapter for JsonlStorageAdapter {
         .map_err(|e| io::Error::other(format!("spawn_blocking panicked: {e}")))?
     }
     async fn load_prompt_records(&self, info: &Info) -> io::Result<Vec<chat_state::PromptRecord>> {
-        let directory = self.open_session(info)?.directory;
+        let opened = self.open_session(info)?;
         tokio::task::spawn_blocking(move || {
-            let events = Self::read_timeline_from_directory(&directory)?;
+            let events = opened.timeline_events()?;
             let timeline = chat_state::Timeline::from_events(events)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             Ok(timeline.prompt_records())

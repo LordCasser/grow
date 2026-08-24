@@ -351,8 +351,13 @@ async fn post_tool_use_and_failure_never_double_fire() {
             let (persistence_tx, _persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            // The agent's tool bridge must know `todo_write` for it to parse + dispatch.
-            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+            // `get_goal` is valid but its test bridge has no Goal runtime resource,
+            // so dispatch reaches the real tool and returns a structured failure.
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::update_goal::GetGoalTool,
+                >()])
+                .await;
             begin_test_causal_turn(&actor).await;
 
             let mut client_hooks = crate::extensions::hooks::ClientHooks::new();
@@ -397,9 +402,14 @@ async fn post_tool_use_and_failure_never_double_fire() {
                 ),
             };
 
-            // Failure: no workspace session is bound, so the dispatch hard-errors.
+            // Failure: the finalized bridge is the execution authority; the
+            // registered Goal tool fails because this actor has no Goal runtime.
             actor
-                .execute_tool_calls(vec![todo_call("call_err")])
+                .execute_tool_calls(vec![crate::sampling::types::ToolCallResponse {
+                    id: "call_err".to_string(),
+                    kind: "function".to_string(),
+                    function: crate::sampling::types::ToolCallFunction::new("get_goal", "{}"),
+                }])
                 .await
                 .expect("execute_tool_calls must not error");
             assert_eq!(
@@ -408,16 +418,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
                 "an errored tool must fire only PostToolUseFailure, never PostToolUse"
             );
 
-            actor
-                .workspace_ops
-                .bind_local_session(
-                    &actor.session_id_string(),
-                    actor.tool_context.cwd.as_path().to_path_buf(),
-                    actor.tool_context.hunk_tracker_handle.clone(),
-                    actor.agent.borrow().tool_bridge().toolset(),
-                    None,
-                )
-                .expect("bind_local_session must succeed");
+            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
             actor
                 .execute_tool_calls(vec![todo_call("call_ok")])
                 .await
