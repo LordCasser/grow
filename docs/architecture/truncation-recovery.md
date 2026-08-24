@@ -421,7 +421,7 @@ open to the summary path.
 ### 8.3 Fallback (fail-safe, implemented)
 
 `run_compact_inner` checks, on **every** path after
-the Timeline range replacement, whether `get_total_tokens()` still
+the Timeline range replacement, whether `get_projected_tokens()` still
 exceeds the context window (the fork-scenario trigger-threshold check is
 unchanged and orthogonal). If it does:
 
@@ -690,7 +690,7 @@ classification; update `sampling/error.rs` ACP mapping.
 - `run_compact_only(trigger_info: AutoCompactTriggerInfo)` (`compaction.rs:2041`) is the
   compaction entry used by both the error path (`sampler_turn.rs:700-729`) and pre-sampling
   checks; `AutoCompactTriggerInfo` needs `tokens_used` / `context_window` / `percentage`
-  (use `get_estimated_total_tokens()` + `get_sampling_config().context_window` +
+  (use `get_projected_tokens()` + `get_sampling_config().context_window` +
   `token_estimation::usage_percentage_u8`). For `ModelContextWindowExceeded` compaction
   must be triggered **unconditionally** (client-side estimation can under-count; the server
   reported the overflow), not gated on `check_auto_compact_needed()`.
@@ -730,7 +730,7 @@ SamplingError variants or new ACP error codes.
   the items-persistence loop, before the `tool_calls.is_empty()` turn-end check), all guarded
   by `tool_calls.is_empty()`. `Length` -> `push_user_message(truncation_continue(TRUNCATION_CONTINUE_PROMPT))`
   + `tracing::info` + `unified_log` + `continue`; `ModelContextWindowExceeded` -> build
-  `AutoCompactTriggerInfo` from `get_estimated_total_tokens()` /
+  `AutoCompactTriggerInfo` from `get_projected_tokens()` /
   `get_sampling_config().context_window` / `usage_percentage_u8`, `run_compact_only`,
   `is_auth_compact_error` -> `surface_compact_auth_failure`, else `Err`, then `continue`;
   `PauseTurn` -> log + `continue` (no prompt injection). Plus one `persisted_items` counter

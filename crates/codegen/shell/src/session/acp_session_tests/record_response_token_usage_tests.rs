@@ -40,12 +40,10 @@ fn response_without_usage() -> ConversationResponse {
     }
 }
 
-/// `record_response_token_usage` must update `chat_state.total_tokens`
-/// to the model-reported value. Without this call, `total_tokens`
-/// stays frozen at the seed from `ChatState::new`, freezing
-/// `/context` and corrupting resume restore (the original bug).
+/// A provider response with usage must replace the local projection with the
+/// provider's canonical context anchor while recording lifetime usage.
 #[tokio::test(flavor = "current_thread")]
-async fn updates_chat_state_total_tokens_from_response_usage() {
+async fn anchors_projected_context_from_response_usage() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -53,12 +51,19 @@ async fn updates_chat_state_total_tokens_from_response_usage() {
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            let _sync = actor.chat_state_handle.get_total_tokens().await;
-            assert_eq!(actor.chat_state_handle.get_total_tokens().await, 0);
+            let _sync = actor.chat_state_handle.get_projected_tokens().await;
+            assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 0);
 
-            actor.record_response_token_usage(&response_with_usage(150_000), None);
+            actor.record_response_token_usage(
+                &response_with_usage(150_000),
+                None,
+                Some("provider/model".into()),
+            );
 
-            assert_eq!(actor.chat_state_handle.get_total_tokens().await, 150_000);
+            assert_eq!(
+                actor.chat_state_handle.get_projected_tokens().await,
+                150_000
+            );
             let prompt = actor
                 .chat_state_handle
                 .try_get_prompt_usage()
@@ -68,6 +73,7 @@ async fn updates_chat_state_total_tokens_from_response_usage() {
             assert_eq!(prompt.totals.model_calls, 1);
             assert_eq!(prompt.totals.input_tokens, 149_950);
             assert!(prompt.totals.cost_usd_ticks.is_none());
+            assert_eq!(prompt.by_model["provider/model"].model_calls, 1);
             assert_eq!(
                 actor
                     .chat_state_handle
@@ -83,7 +89,7 @@ async fn updates_chat_state_total_tokens_from_response_usage() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn preserves_total_tokens_when_response_has_no_usage() {
+async fn preserves_projection_when_response_has_no_usage() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -91,11 +97,14 @@ async fn preserves_total_tokens_when_response_has_no_usage() {
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(99_999, 256_000, 85, gateway_tx, persistence_tx).await;
-            let _sync = actor.chat_state_handle.get_total_tokens().await;
+            let _sync = actor.chat_state_handle.get_projected_tokens().await;
 
-            actor.record_response_token_usage(&response_without_usage(), None);
+            actor.record_response_token_usage(&response_without_usage(), None, None);
 
-            assert_eq!(actor.chat_state_handle.get_total_tokens().await, 99_999);
+            assert_eq!(
+                actor.chat_state_handle.get_projected_tokens().await,
+                99_999
+            );
         })
         .await;
 }
@@ -136,7 +145,7 @@ async fn build_session_info_used_reflects_recorded_response() {
                 .await
                 .unwrap();
 
-            actor.record_response_token_usage(&response_with_usage(120_000), None);
+            actor.record_response_token_usage(&response_with_usage(120_000), None, None);
 
             let info = actor.build_session_info().await;
             assert_eq!(info.context.used, 120_000);
@@ -226,7 +235,7 @@ async fn stashes_per_turn_usage_in_chat_state() {
             );
 
             // Use existing fixture: total=200_000 → prompt=199_950, completion=50.
-            actor.record_response_token_usage(&response_with_usage(200_000), None);
+            actor.record_response_token_usage(&response_with_usage(200_000), None, None);
 
             let stashed = actor
                 .chat_state_handle

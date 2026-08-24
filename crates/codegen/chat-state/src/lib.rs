@@ -13,7 +13,7 @@
 //!                                     │  - append-only Timeline              │
 //! ┌────────────────┐                  │  - sampling_config: SamplingConfig   │
 //! │   Query (e.g.  │ ── Cmd+Oneshot ─▶│  - derived Timeline projections    │
-//! │  get_conv)     │ ◀── Response ────│  - total_tokens: u64                │
+//! │  get_conv)     │ ◀── Response ────│  - projected_tokens: u64            │
 //! └────────────────┘                  │                                      │
 //!                                     │         │ ChatStateEvent             │
 //!                                     │         ▼                            │

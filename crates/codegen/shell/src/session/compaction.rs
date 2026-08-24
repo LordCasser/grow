@@ -206,7 +206,7 @@ impl SessionActor {
             return Err(acp::Error::internal_error().data("compaction already in progress"));
         };
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
-        let total_tokens = self.chat_state_handle.get_total_tokens().await;
+        let total_tokens = self.chat_state_handle.get_projected_tokens().await;
         tracing::Span::current().record("pre_tokens", total_tokens as i64);
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
         let context_window = sampling_config
@@ -228,7 +228,7 @@ impl SessionActor {
             return Err(e);
         }
         use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
-        let tokens_after = self.chat_state_handle.get_total_tokens().await;
+        let tokens_after = self.chat_state_handle.get_projected_tokens().await;
         let span = tracing::Span::current();
         span.record("post_tokens", tokens_after as i64);
         span.record("success", true);
@@ -503,7 +503,7 @@ impl SessionActor {
         trigger: ::diagnostics::events::CompactionTrigger,
     ) -> Result<(), acp::Error> {
         let (cancel, _cancel_scope) = self.compaction.cancel.enter();
-        let tokens_before = self.chat_state_handle.get_total_tokens().await;
+        let tokens_before = self.chat_state_handle.get_projected_tokens().await;
         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
         self.signals_handle().record_compaction(tokens_before);
         let trigger_str = match trigger {
@@ -1320,7 +1320,7 @@ impl SessionActor {
                 ))
             })?;
         let new_len = self.chat_state_handle.get_conversation_len().await;
-        let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
+        let post_replace_tokens = self.chat_state_handle.get_projected_tokens().await;
         self.compaction
             .auto_compact_suppressed
             .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
@@ -1374,7 +1374,7 @@ impl SessionActor {
             None,
         )
         .await;
-        let tokens_after = self.chat_state_handle.get_total_tokens().await;
+        let tokens_after = self.chat_state_handle.get_projected_tokens().await;
         {
             let span = tracing::Span::current();
             span.record("compaction_tokens_after", tokens_after as i64);
@@ -1432,19 +1432,19 @@ impl SessionActor {
     /// Returns Some(AutoCompactTriggerInfo) if threshold is reached, None otherwise.
     pub(crate) fn should_auto_compact(
         &self,
-        total_tokens: u64,
+        projected_tokens: u64,
         context_window: std::num::NonZeroU64,
         source: &'static str,
     ) -> Option<AutoCompactTriggerInfo> {
         let cw = context_window.get();
         if token_estimation::exceeds_threshold(
-            total_tokens,
+            projected_tokens,
             cw,
             self.compaction.threshold_percent.get(),
         ) {
-            let percentage = token_estimation::usage_percentage_u8(total_tokens, cw);
+            let percentage = token_estimation::usage_percentage_u8(projected_tokens, cw);
             Some(AutoCompactTriggerInfo {
-                tokens_used: total_tokens,
+                tokens_used: projected_tokens,
                 context_window: cw,
                 percentage,
                 source,
@@ -1478,12 +1478,11 @@ impl SessionActor {
         if context_window == 0 {
             return false;
         }
-        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
-        estimated_total > context_window
+        let projected_tokens = self.chat_state_handle.get_projected_tokens().await;
+        projected_tokens > context_window
     }
-    /// Pre-sampling compaction check. Uses `get_estimated_total_tokens()`
-    /// (exact prior count + byte-estimate of items since last response) so
-    /// tool results are accounted for. Returns `None` when `is_flushing`.
+    /// Pre-sampling compaction check against the canonical projected context
+    /// pressure. Returns `None` when `is_flushing`.
     pub(crate) async fn check_auto_compact_needed(&self) -> Option<AutoCompactTriggerInfo> {
         if self
             .memory
@@ -1499,9 +1498,9 @@ impl SessionActor {
             .as_ref()
             .map(|c| c.model.clone())
             .unwrap_or_default();
-        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+        let projected_tokens = self.chat_state_handle.get_projected_tokens().await;
         self.signals_handle()
-            .update_context_usage(estimated_total, cw);
+            .update_context_usage(projected_tokens, cw);
         if self
             .compaction
             .auto_compact_suppressed
@@ -1521,20 +1520,20 @@ impl SessionActor {
             )
             .is_ok()
         {
-            let percentage = token_estimation::usage_percentage_u8(estimated_total, cw);
+            let percentage = token_estimation::usage_percentage_u8(projected_tokens, cw);
             tracing::info!(
                 "Forced auto-compact trigger (debug): model={model}, \
-                 {percentage}% full ({estimated_total}/{cw} tokens)",
+                 {percentage}% full ({projected_tokens}/{cw} tokens)",
             );
             return Some(AutoCompactTriggerInfo {
-                tokens_used: estimated_total,
+                tokens_used: projected_tokens,
                 context_window: cw,
                 percentage,
                 source: "pre_sampling",
             });
         }
         if let Some(trigger_info) =
-            self.should_auto_compact(estimated_total, context_window, "pre_sampling")
+            self.should_auto_compact(projected_tokens, context_window, "pre_sampling")
         {
             tracing::info!(
                 "Pre-sampling auto-compact trigger: model={model}, \
@@ -1547,7 +1546,7 @@ impl SessionActor {
         }
         None
     }
-    /// Returns `Some` when tool call outputs have pushed the estimated token
+    /// Returns `Some` when tool call outputs have pushed projected context
     /// count past the context window, indicating pre-emptive compaction is needed.
     pub(crate) async fn check_preflight_overflow(&self) -> Option<AutoCompactTriggerInfo> {
         if self
@@ -1558,16 +1557,16 @@ impl SessionActor {
         {
             return None;
         }
-        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+        let projected_tokens = self.chat_state_handle.get_projected_tokens().await;
         let cfg = self.chat_state_handle.get_sampling_config().await?;
         let cw = cfg.context_window.get();
-        if estimated_total <= cw {
+        if projected_tokens <= cw {
             return None;
         }
-        let overflow = estimated_total.saturating_sub(cw);
-        let percentage = token_estimation::usage_percentage_u8(estimated_total, cw);
+        let overflow = projected_tokens.saturating_sub(cw);
+        let percentage = token_estimation::usage_percentage_u8(projected_tokens, cw);
         tracing::warn!(
-            estimated_total,
+            projected_tokens,
             context_window = cw,
             overflow,
             model = %cfg.model,
@@ -1575,7 +1574,7 @@ impl SessionActor {
              after tool call outputs"
         );
         Some(AutoCompactTriggerInfo {
-            tokens_used: estimated_total,
+            tokens_used: projected_tokens,
             context_window: cw,
             percentage,
             source: "preflight_overflow",
@@ -1604,9 +1603,9 @@ impl SessionActor {
         if prev.context_window <= cfg.context_window.get() {
             return Ok(());
         }
-        let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+        let projected_tokens = self.chat_state_handle.get_projected_tokens().await;
         let Some(trigger_info) =
-            self.should_auto_compact(total_tokens, cfg.context_window, "model_switch")
+            self.should_auto_compact(projected_tokens, cfg.context_window, "model_switch")
         else {
             return Ok(());
         };
@@ -1639,7 +1638,7 @@ impl SessionActor {
     }
     /// Pre-prune ladder: model-free tool-result pruning that runs inside
     /// `run_compact_only` before the summary LLM call. Returns `true` when
-    /// pruning alone brought the estimated total back under the trigger
+    /// pruning alone brought projected pressure back under the trigger
     /// threshold (the caller then skips `run_compact_inner`).
     ///
     /// Suppress gate: account-state suppression ([`SUPPRESS_UNTIL_SUCCESS`],
@@ -1657,11 +1656,8 @@ impl SessionActor {
     /// summary is skipped only when the post-prune estimate is genuinely below
     /// the trigger threshold.
     ///
-    /// Conservativeness note (Task B residual risk): pruning re-estimates
-    /// `total_tokens` but leaves `estimated_tokens_since_model` untouched, so
-    /// `get_estimated_total_tokens()` may over-count the pruned bytes. The
-    /// gate therefore errs toward running the summary (fail-safe); the code
-    /// must never fudge the estimate to make the gate pass.
+    /// Pruning and summary replacement share the actor's signed Surface-delta
+    /// transaction, so this gate reads the exact post-transaction projection.
     pub(crate) async fn maybe_pre_prune(
         &self,
         trigger_info: &AutoCompactTriggerInfo,
@@ -1726,7 +1722,7 @@ impl SessionActor {
         if report.pruned_count == 0 {
             return Ok(false);
         }
-        let tokens_after = self.chat_state_handle.get_estimated_total_tokens().await;
+        let tokens_after = self.chat_state_handle.get_projected_tokens().await;
         if token_estimation::exceeds_threshold(tokens_after, context_window, threshold_percent) {
             // Still at/over the trigger threshold: continue with the summary
             // path. Its input is smaller now (the pruned content is persisted),
@@ -1832,7 +1828,7 @@ impl SessionActor {
             return Ok(());
         };
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
-        let tokens_before = self.chat_state_handle.get_total_tokens().await;
+        let tokens_before = self.chat_state_handle.get_projected_tokens().await;
         tracing::Span::current().record("pre_tokens", tokens_before as i64);
         ::diagnostics::session_ctx::log_event(::diagnostics::events::AutoCompactFired {
             tokens_before: trigger_info.tokens_used,
@@ -1880,7 +1876,7 @@ impl SessionActor {
         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
         match result {
             Ok(()) => {
-                let tokens_after = self.chat_state_handle.get_total_tokens().await;
+                let tokens_after = self.chat_state_handle.get_projected_tokens().await;
                 let span = tracing::Span::current();
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);

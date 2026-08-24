@@ -348,7 +348,7 @@ impl ChatStateActor {
                 item,
                 rejection_item,
                 expected_surface_revision,
-                max_estimated_total_tokens,
+                max_context_tokens,
                 max_result_tokens,
                 reply,
             } => {
@@ -357,14 +357,16 @@ impl ChatStateActor {
                         item,
                         rejection_item,
                         expected_surface_revision,
-                        max_estimated_total_tokens,
+                        max_context_tokens,
                         max_result_tokens,
                     )
                     .await;
                 let _ = reply.send(result);
             }
-            ChatStateCommand::RecordTokenUsage { total_tokens } => {
-                self.record_token_usage(total_tokens);
+            ChatStateCommand::RecordProviderContextAnchor {
+                provider_total_tokens,
+            } => {
+                self.record_provider_context_anchor(provider_total_tokens);
             }
             ChatStateCommand::RecordLastTurnUsage { usage } => {
                 self.record_last_turn_usage(usage);
@@ -439,13 +441,6 @@ impl ChatStateActor {
                     self.replace_compaction_range_durably(target, items).await
                 };
                 let _ = reply.send(result);
-            }
-            ChatStateCommand::SeedTokenAccounting {
-                total_tokens,
-                reply,
-            } => {
-                self.seed_token_accounting(total_tokens);
-                let _ = reply.send(());
             }
             ChatStateCommand::RewindDurably {
                 target_prompt_index,
@@ -590,8 +585,8 @@ impl ChatStateActor {
             ChatStateCommand::GetLastCompactionPromptIndex { reply } => {
                 let _ = reply.send(self.state.timeline.last_completed_compaction_prompt_index());
             }
-            ChatStateCommand::GetTotalTokens { reply } => {
-                let _ = reply.send(self.state.total_tokens);
+            ChatStateCommand::GetProjectedTokens { reply } => {
+                let _ = reply.send(self.state.projected_tokens);
             }
             ChatStateCommand::GetLastTurnUsage { reply } => {
                 let _ = reply.send(self.state.last_turn_usage.clone());
@@ -601,10 +596,6 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetSessionUsage { reply } => {
                 let _ = reply.send(self.state.session_usage.clone());
-            }
-            ChatStateCommand::GetEstimatedTotalTokens { reply } => {
-                let _ =
-                    reply.send(self.state.total_tokens + self.state.estimated_tokens_since_model);
             }
             ChatStateCommand::GetSamplingConfig { reply } => {
                 let _ = reply.send(self.state.sampling_config.clone());

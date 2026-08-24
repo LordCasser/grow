@@ -9,9 +9,9 @@ pub enum ChatStateEvent {
     /// Prompt index changed (session uses this to update hunk tracker attribution).
     PromptIndexChanged { new_index: usize },
 
-    /// Token count updated (session uses this for notification meta,
-    /// auto-compact threshold checks).
-    TokensUpdated { total_tokens: u64 },
+    /// Projected context pressure changed (session uses this for notification
+    /// metadata and auto-compaction threshold checks).
+    ContextPressureUpdated { projected_tokens: u64 },
 
     /// Conversation was replaced (compaction/rewind) — session may need to
     /// reset idle-flush counters, memory injection flags, etc.
@@ -46,7 +46,9 @@ mod tests {
     #[test]
     fn event_variants_are_constructible() {
         let _ = ChatStateEvent::PromptIndexChanged { new_index: 1 };
-        let _ = ChatStateEvent::TokensUpdated { total_tokens: 500 };
+        let _ = ChatStateEvent::ContextPressureUpdated {
+            projected_tokens: 500,
+        };
         let _ = ChatStateEvent::ConversationReset { new_len: 3 };
     }
 }

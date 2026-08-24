@@ -129,7 +129,7 @@ impl ChatStateHandle {
         item: ConversationItem,
         rejection_item: ConversationItem,
         expected_surface_revision: u64,
-        max_estimated_total_tokens: u64,
+        max_context_tokens: u64,
         max_result_tokens: u64,
     ) -> Result<ConditionalToolResultOutcome, TimelineWriteError> {
         self.query("PushToolResultConditionally", |reply| {
@@ -137,7 +137,7 @@ impl ChatStateHandle {
                 item,
                 rejection_item,
                 expected_surface_revision,
-                max_estimated_total_tokens,
+                max_context_tokens,
                 max_result_tokens,
                 reply,
             }
@@ -146,11 +146,11 @@ impl ChatStateHandle {
         .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
-    /// Record accumulated token usage.
-    pub fn record_token_usage(&self, total_tokens: u64) {
-        let _ = self
-            .cmd_tx
-            .send(ChatStateCommand::RecordTokenUsage { total_tokens });
+    /// Record the provider's canonical current-context total.
+    pub fn record_provider_context_anchor(&self, provider_total_tokens: u64) {
+        let _ = self.cmd_tx.send(ChatStateCommand::RecordProviderContextAnchor {
+            provider_total_tokens,
+        });
     }
 
     /// Stash the per-turn `TokenUsage` from the most recent model response.
@@ -361,18 +361,6 @@ impl ChatStateHandle {
             .send(ChatStateCommand::UpdateCredentials { credentials });
     }
 
-    /// Restore only provider token accounting from the session summary.
-    pub async fn seed_token_accounting(&self, total_tokens: u64) -> bool {
-        self.query("SeedTokenAccounting", |reply| {
-            ChatStateCommand::SeedTokenAccounting {
-                total_tokens,
-                reply,
-            }
-        })
-        .await
-        .is_some()
-    }
-
     /// Begin capturing turn messages. Call at the start of a real user turn
     /// (in `handle_prompt`), before `push_user_message`.
     pub fn begin_turn_capture(&self) {
@@ -518,10 +506,10 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Get total accumulated tokens.
-    pub async fn get_total_tokens(&self) -> u64 {
-        self.query("GetTotalTokens", |reply| ChatStateCommand::GetTotalTokens {
-            reply,
+    /// Get provider-anchored projected context pressure.
+    pub async fn get_projected_tokens(&self) -> u64 {
+        self.query("GetProjectedTokens", |reply| {
+            ChatStateCommand::GetProjectedTokens { reply }
         })
         .await
         .unwrap_or(0)
@@ -557,16 +545,6 @@ impl ChatStateHandle {
         })
         .await
         .ok_or(())
-    }
-
-    /// `total_tokens` plus bytes/4 estimate of tool results pushed since the
-    /// last model response. Used by `check_preflight_overflow`.
-    pub async fn get_estimated_total_tokens(&self) -> u64 {
-        self.query("GetEstimatedTotalTokens", |reply| {
-            ChatStateCommand::GetEstimatedTotalTokens { reply }
-        })
-        .await
-        .unwrap_or(0)
     }
 
     /// Bytes/4 estimate of all non-system conversation items.

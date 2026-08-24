@@ -1524,7 +1524,7 @@ impl SessionActor {
                 .and_then(|m| m.context_window)
                 .expect("should_compact_on_error guarantees context_window");
             {
-                let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+                let total_tokens = self.chat_state_handle.get_projected_tokens().await;
                 let percentage = token_estimation::usage_percentage_u8(total_tokens, cw);
                 if let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await
                     && let Some(new_cw) = std::num::NonZeroU64::new(cw)
@@ -1924,32 +1924,28 @@ impl SessionActor {
     /// Propagate the model-reported token usage from a turn response into
     /// chat state, the per-prompt usage ledger, and per-turn signals.
     ///
-    /// This is the only place per-turn `total_tokens` is refreshed in the
-    /// post-sampler-refactor path; without it `state.total_tokens` would
-    /// stay frozen at the Timeline Surface estimate seeded by `ChatState::new`,
-    /// freezing `/context` and distorting the next compaction decision.
-    /// Resetting `estimated_tokens_since_model = 0` here also keeps the
-    /// preflight-overflow guard accurate against the next turn's
-    /// tool-result deltas.
+    /// The provider total replaces current-context pressure. Per-prompt and
+    /// lifetime billing remain independent `UsageLedger` transactions.
     pub(crate) fn record_response_token_usage(
         &self,
         response: &ConversationResponse,
         api_duration_ms: Option<u64>,
+        response_model_id: Option<String>,
     ) {
         if let Some(ref u) = response.usage {
             self.tool_context
                 .record_task_model_output(u64::from(u.completion_tokens));
             self.chat_state_handle
-                .record_token_usage(u64::from(u.total_tokens));
+                .record_provider_context_anchor(u64::from(u.total_tokens));
             self.chat_state_handle.record_last_turn_usage(u.clone());
             self.chat_state_handle.record_model_call_usage(
-                response.assistant().and_then(|a| a.model_id.clone()),
+                response_model_id,
                 u.clone(),
                 api_duration_ms,
                 response.cost_usd_ticks,
             );
             self.signals_handle()
-                .record_token_usage(u.completion_tokens, u.reasoning_tokens);
+                .record_response_output_usage(u.completion_tokens, u.reasoning_tokens);
         } else if self.tool_context.task_output_token_budget.is_some() {
             self.tool_context.fail_task_output_usage_closed();
             let handle = self.chat_state_handle.clone();

@@ -1123,7 +1123,7 @@ impl SessionActor {
                 let usage = self.freeze_prompt_usage(prompt_id).await;
                 drop(turn_scope_guard);
                 self.chat_state_handle.flush();
-                let total_tokens = self.chat_state_handle.get_total_tokens().await;
+                let total_tokens = self.chat_state_handle.get_projected_tokens().await;
                 let (stop_reason, mut snapshot, completion_kind, structured_output) = match outcome
                 {
                     TurnOutcome::Completed {
@@ -1388,7 +1388,7 @@ impl SessionActor {
         if !goal_active_now {
             return;
         }
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
         if !turn_succeeded {
             let _ = self.enforce_goal_token_budget(current_tokens).await;
         }
@@ -2027,7 +2027,7 @@ impl SessionActor {
                 })),
             );
             let model_timer = std::time::Instant::now();
-            let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
+            let (mut response, latency) = match self.run_turn_via_sampler(request.clone()).await {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
@@ -2137,11 +2137,6 @@ impl SessionActor {
                     "tokens_per_sec": tokens_per_sec,
                 })),
             );
-            if let Some(usage) = response.usage.as_ref() {
-                self.chat_state_handle
-                    .record_token_usage(u64::from(usage.total_tokens));
-                self.send_available_commands_update().await;
-            }
             turn_span_totals.record(&tracing::Span::current(), &response);
             let _ = self.compaction.auto_compact_suppressed.compare_exchange(
                 crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS,
@@ -2171,7 +2166,6 @@ impl SessionActor {
                     },
                 );
             }
-            self.record_response_token_usage(&response, Some(model_duration_ms));
             let response_completed = self.response_completed_update(&response);
             if let Some(pt) = prompt_timing.take() {
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
@@ -2212,8 +2206,10 @@ impl SessionActor {
             let turn_refused = stop_reason == Some(sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
+            let response_model_id = response.assistant().and_then(|item| item.model_id.clone());
             let persisted_items = response.items.len();
-            for item in response.items {
+            let response_items = std::mem::take(&mut response.items);
+            for item in response_items {
                 match item {
                     sampling_types::ConversationItem::Assistant(_) => {
                         self.record_assistant_response(item).await;
@@ -2222,6 +2218,17 @@ impl SessionActor {
                         self.chat_state_handle.push_tool_result(item);
                     }
                 }
+            }
+            // The response Surface facts must precede the provider anchor.
+            // With usage, the anchor replaces their local estimates; without
+            // usage, the estimates remain as fail-safe context pressure.
+            self.record_response_token_usage(
+                &response,
+                Some(model_duration_ms),
+                response_model_id,
+            );
+            if response.usage.is_some() {
+                self.send_available_commands_update().await;
             }
             if let Some(text) = fallback_text {
                 tracing::warn!(
@@ -2298,7 +2305,7 @@ impl SessionActor {
                     // overflow, so compaction is triggered unconditionally
                     // (client-side estimation can under-count) — not gated on
                     // `check_auto_compact_needed()`.
-                    let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+                    let total_tokens = self.chat_state_handle.get_projected_tokens().await;
                     let context_window = self
                         .chat_state_handle
                         .get_sampling_config()
@@ -2341,7 +2348,7 @@ impl SessionActor {
                         // diagnostic message instead.
                         Err(e) if compaction::is_compact_converged_over_window(&e) => {
                             let post_tokens =
-                                self.chat_state_handle.get_estimated_total_tokens().await;
+                                self.chat_state_handle.get_projected_tokens().await;
                             let message = format!(
                                 "Compaction could not shrink the conversation \
                                  enough: it still exceeds the model's \

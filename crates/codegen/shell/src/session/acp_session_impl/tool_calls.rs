@@ -3034,7 +3034,7 @@ impl SessionActor {
                 call_id.to_string(),
                 "Context recall was not inserted because the active context changed or no longer has safe headroom. Re-run context_recall if the evidence is still needed.",
             );
-            let (max_estimated_total_tokens, max_result_tokens) =
+            let (max_context_tokens, max_result_tokens) =
                 crate::session::context_recall::context_recall_admission_limits(context_window);
             let outcome = self
                 .chat_state_handle
@@ -3042,7 +3042,7 @@ impl SessionActor {
                     tool_chat,
                     rejection_item,
                     expected_surface_revision,
-                    max_estimated_total_tokens,
+                    max_context_tokens,
                     max_result_tokens,
                 )
                 .await

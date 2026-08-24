@@ -54,16 +54,16 @@ impl ImageProjectionReport {
 
 /// Result of an actor-serialized tool-result prune.
 ///
-/// `tokens_before` / `tokens_after` are the actor's `total_tokens` before and
-/// after the command. `tokens_after` is the provider anchor minus the signed
-/// Surface reduction, clamped at zero, so `tokens_after <= tokens_before`.
+/// `tokens_before` / `tokens_after` are the actor's projected context pressure
+/// before and after the command. `tokens_after` is the provider anchor minus
+/// the signed Surface reduction, clamped at zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PruneReport {
     /// Number of tool results actually trimmed in this execution.
     pub pruned_count: usize,
-    /// `total_tokens` before pruning.
+    /// Projected context pressure before pruning.
     pub tokens_before: u64,
-    /// Provider-anchored `total_tokens` after applying the Surface delta.
+    /// Provider-anchored context pressure after applying the Surface delta.
     pub tokens_after: u64,
 }
 
@@ -148,13 +148,14 @@ pub enum ChatStateCommand {
         item: ConversationItem,
         rejection_item: ConversationItem,
         expected_surface_revision: u64,
-        max_estimated_total_tokens: u64,
+        max_context_tokens: u64,
         max_result_tokens: u64,
         reply: oneshot::Sender<Result<ConditionalToolResultOutcome, TimelineWriteError>>,
     },
 
-    /// Record accumulated token usage from a streaming response.
-    RecordTokenUsage { total_tokens: u64 },
+    /// Replace projected context pressure with the provider's canonical
+    /// total for the just-completed response.
+    RecordProviderContextAnchor { provider_total_tokens: u64 },
 
     /// Stash the per-turn `TokenUsage` from the most recent model response.
     /// Overwrites any previously stashed value.
@@ -213,13 +214,6 @@ pub enum ChatStateCommand {
         items: Vec<ConversationItem>,
         expected_surface_revision: u64,
         reply: oneshot::Sender<Result<(), TimelineWriteError>>,
-    },
-
-    /// Seed provider token accounting from the session summary. Conversation,
-    /// prompt coordinates, and compaction state remain Timeline-derived.
-    SeedTokenAccounting {
-        total_tokens: u64,
-        reply: oneshot::Sender<()>,
     },
 
     /// Select an earlier prompt boundary as the active Surface. The Timeline
@@ -338,8 +332,8 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Option<usize>>,
     },
 
-    /// Get total accumulated tokens.
-    GetTotalTokens { reply: oneshot::Sender<u64> },
+    /// Get provider-anchored projected context pressure.
+    GetProjectedTokens { reply: oneshot::Sender<u64> },
 
     /// Retrieve the most recent stashed per-turn `TokenUsage`. Returns
     /// `None` until at least one `RecordLastTurnUsage` has been processed.
@@ -354,9 +348,6 @@ pub enum ChatStateCommand {
     GetSessionUsage {
         reply: oneshot::Sender<crate::usage::UsageLedger>,
     },
-
-    /// `total_tokens` + bytes/4 delta from tool results since last model response.
-    GetEstimatedTotalTokens { reply: oneshot::Sender<u64> },
 
     /// Bytes/4 estimate of all non-system conversation items.
     GetEstimatedMessagesTokens { reply: oneshot::Sender<u64> },
@@ -487,7 +478,9 @@ mod tests {
         let _ = ChatStateCommand::PushToolResult {
             item: ConversationItem::tool_result("call-1", "result"),
         };
-        let _ = ChatStateCommand::RecordTokenUsage { total_tokens: 100 };
+        let _ = ChatStateCommand::RecordProviderContextAnchor {
+            provider_total_tokens: 100,
+        };
         let _ = ChatStateCommand::UpdateSamplingConfig {
             config: SamplingConfig {
                 base_url: String::new(),
@@ -521,11 +514,6 @@ mod tests {
             reply: tx,
         };
         let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::SeedTokenAccounting {
-            total_tokens: 100,
-            reply: tx,
-        };
-        let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::RewindDurably {
             target_prompt_index: 0,
             reply: tx,
@@ -548,10 +536,7 @@ mod tests {
         let _ = ChatStateCommand::GetLastCompactionPromptIndex { reply: tx };
 
         let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::GetTotalTokens { reply: tx };
-
-        let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::GetEstimatedTotalTokens { reply: tx };
+        let _ = ChatStateCommand::GetProjectedTokens { reply: tx };
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetSamplingConfig { reply: tx };

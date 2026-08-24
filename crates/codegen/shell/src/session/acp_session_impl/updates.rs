@@ -112,7 +112,7 @@ impl SessionActor {
                 }
             }
         }
-        let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+        let total_tokens = self.chat_state_handle.get_projected_tokens().await;
         let meta_info = self.chat_state_handle.get_notification_meta().await;
         let (stream_start_ms, turn_start_ms) = meta_info
             .map(|m| (m.stream_start_ms, m.turn_start_ms))
@@ -508,7 +508,7 @@ impl SessionActor {
                     );
                 }
                 if self.goal_runtime_available() && goal_owned {
-                    let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+                    let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
                     let tokens_used = self.goal_tokens_used(current_tokens);
                     self.record_control_snapshot();
                     let notify = self.goal_notify_sender();
@@ -547,7 +547,7 @@ impl SessionActor {
                     .settle_goal_subagent_tokens(subagent_id, *tokens_used)
                     .is_some();
                 if self.goal_runtime_available() && goal_tokens_settled {
-                    let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+                    let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
                     let tokens_used = self.goal_tokens_used(current_tokens);
                     if let Some(previous) = previous_goal
                         && let Err(error) = self.commit_goal_mutation_or_restore(previous).await

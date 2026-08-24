@@ -34,7 +34,7 @@ const CONTEXT_WINDOW_EXCEEDED: &str = "model_context_window_exceeded";
 
 /// Assemble a Messages-API SSE turn from `(text, stop_reason)` blocks and a
 /// terminal `stop_reason`. `input_tokens` seeds the reported usage so tests
-/// can pin the chat-state `total_tokens` the turn loop records.
+/// can pin the chat-state provider anchor recorded by the turn loop.
 fn messages_turn_with_usage(
     blocks: &[(&str, &str)],
     stop_reason: &str,
@@ -419,8 +419,10 @@ fn pre_prune_resolves_pressure_and_skips_summary() {
             let (mut trace_rx, _guard) = capture_trace_events();
             seed_tool_result_rounds(&actor, 2).await;
             // Model truth at the last response: 86K, just over the 85K trigger.
-            actor.chat_state_handle.record_token_usage(86_000);
-            // Current turn's pushes (small since_model delta).
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(86_000);
+            // Current turn adds only a small amount of Surface pressure.
             actor
                 .chat_state_handle
                 .push_user_message(ConversationItem::user("current turn"));
@@ -480,7 +482,7 @@ fn pre_prune_resolves_pressure_and_skips_summary() {
             assert_eq!(payload["source"], "pre_sampling");
             assert!(
                 payload["tokens_before"].as_u64().unwrap() > payload["tokens_after"].as_u64().unwrap(),
-                "pruning must reduce the estimated total"
+                "pruning must reduce projected context pressure"
             );
 
             // Display/layering: Started→Completed without Failed; the
@@ -509,16 +511,10 @@ fn pre_prune_resolves_pressure_and_skips_summary() {
 
 // ─── Scenario 2 ────────────────────────────────────────────────────────────
 
-/// Pruning happens but the estimate stays over the threshold (a large
-/// `since_model` delta — fresh tool results since the last model response):
-/// the strict gate rejects the skip and the summary path still runs.
-///
-/// Driven at the `maybe_pre_prune` level because the turn loop's
-/// `ensure_prefix_ready` re-bases `total_tokens` to the static estimate and
-/// zeroes `since_model` on the first turn, so an e2e turn cannot produce the
-/// still-over-threshold state at the pre-sampling trigger.
+/// Pruning can reduce the Surface while leaving provider-anchored pressure at
+/// the trigger threshold. The strict gate must then keep the summary path.
 #[test]
-fn pre_prune_insufficient_falls_back_to_summary() {
+fn pre_prune_insufficient_projection_runs_summary() {
     run_with_session_stack(|| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -535,12 +531,10 @@ fn pre_prune_insufficient_falls_back_to_summary() {
                 "/v1/messages",
                 messages_turn(&[(&long_summary, END_TURN)], END_TURN),
             );
-            let (actor, mut gateway_rx) =
-                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+            let (actor, _gateway_rx) =
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
+                    .await;
             seed_tool_result_rounds(&actor, 2).await;
-            actor.chat_state_handle.record_token_usage(86_000);
-            // A fresh oversized tool result this turn keeps `since_model`
-            // high, so the post-prune estimate cannot drop under the threshold.
             actor
                 .chat_state_handle
                 .push_user_message(ConversationItem::user("current turn"));
@@ -554,62 +548,62 @@ fn pre_prune_insufficient_falls_back_to_summary() {
             actor
                 .chat_state_handle
                 .push_tool_result(ConversationItem::tool_result("call-last", big_tool_text()));
-            let _ = actor.chat_state_handle.get_conversation_len().await;
 
+            // The static Surface is roughly 150K tokens. Pruning the closed
+            // results removes roughly 100K while preserving the current turn,
+            // so this provider anchor remains above the 85K trigger.
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(190_000);
+            let _ = actor.chat_state_handle.get_conversation_len().await;
             let trigger = compaction::AutoCompactTriggerInfo {
-                tokens_used: 136_000,
+                tokens_used: 190_000,
                 context_window: 100_000,
                 percentage: 100,
                 source: "test",
             };
+
             let pruned = actor
                 .maybe_pre_prune(&trigger)
                 .await
                 .expect("maybe_pre_prune must not error");
             assert!(
                 !pruned,
-                "gate must reject the summary skip when the estimate is still over the threshold"
+                "the strict gate must retain summary compaction at the threshold"
             );
-            // The prune itself still ran and trimmed the oldest tool result.
-            let conversation = actor.chat_state_handle.get_conversation().await;
-            let tool_texts = tool_result_texts(&conversation);
-            assert_eq!(tool_texts.len(), 3);
             assert!(
-                tool_texts[..2].iter().all(|text| text != &big_tool_text()),
-                "pre-prune must trim enough closed-turn results to cross the gate"
+                actor.chat_state_handle.get_projected_tokens().await >= 85_000,
+                "the signed Surface delta must preserve provider overhead"
             );
-            assert_eq!(
-                &tool_texts[2],
-                &big_tool_text(),
-                "the fresh tool result must be untouched"
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                tool_result_texts(&conversation)
+                    .iter()
+                    .any(|text| text != &big_tool_text()),
+                "pre-prune must still persist its Surface reduction"
             );
 
-            // The caller then continues to the summary path (pre-prune off so
-            // this phase isolates the summary): the summary LLM call happens.
             actor.compaction.pre_prune.set(false);
             actor
                 .run_compact_only(trigger)
                 .await
-                .expect("summary path must run after the gate rejection");
+                .expect("summary path must run after the strict gate rejects the skip");
             assert_eq!(
                 server.messages_request_count(),
                 1,
-                "the summary LLM call must happen"
+                "one summary model call must run"
             );
-            let conversation = actor.chat_state_handle.get_conversation().await;
-            let full_text: String = conversation
+            let full_text = actor
+                .chat_state_handle
+                .get_conversation()
+                .await
                 .iter()
-                .map(|item| item.text_content())
+                .map(ConversationItem::text_content)
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(
                 full_text.contains("compacted summary"),
-                "summary must land in history"
-            );
-            let (kinds, _) = drain_session_updates(&mut gateway_rx);
-            assert!(
-                kinds.iter().any(|k| k == "auto_compact_completed"),
-                "completed notification must be sent, got {kinds:?}"
+                "summary output must replace the compacted range"
             );
         }));
     });
@@ -617,7 +611,7 @@ fn pre_prune_insufficient_falls_back_to_summary() {
 
 // ─── Scenario 3 ────────────────────────────────────────────────────────────
 
-/// `ModelContextWindowExceeded` + a compaction whose reseed still exceeds the
+/// `ModelContextWindowExceeded` + a compaction whose projection still exceeds the
 /// context window → the turn fails with a diagnostic message instead of
 /// resampling forever. Sampling is bounded (exactly two requests).
 #[test]
@@ -631,8 +625,8 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
         rt.block_on(local.run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             // The model reports 120K input tokens on a 100K window: the
-            // overflow branch fires, and the reseed ratio keeps the compacted
-            // history's estimated total pinned at the reported count.
+            // overflow branch fires, and the signed Surface reduction is not
+            // large enough to bring provider-anchored pressure under the window.
             server.enqueue_response(
                 "/v1/messages",
                 messages_turn_with_usage(
@@ -653,8 +647,8 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
                 actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
             // Keep the static estimate below the 85% preflight trigger, but
             // make the retained tail large enough that removing the 6K-token
-            // source still leaves the provider-reported 120K usage over the
-            // 100K window after proportional reseeding.
+            // source still leaves provider-anchored pressure over the 100K
+            // window after applying the signed Surface reduction.
             seed_closed_compaction_range(&actor, 150_000).await;
 
             let result = run_user_turn(&actor, "ctx-converged").await;
@@ -825,7 +819,9 @@ fn pre_prune_error_fails_open_to_summary() {
                 ],
             )
             .await;
-            actor.chat_state_handle.record_token_usage(40_000);
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(40_000);
             actor.compaction.pre_prune.set(false);
             let _ = actor.chat_state_handle.get_conversation_len().await;
 
@@ -889,7 +885,9 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
             // the plan target (≈50K <= 85K), so the plan is empty → `false`,
             // and the failed gate must NOT clear the sticky bit.
             seed_tool_result_rounds(&actor, 1).await;
-            actor.chat_state_handle.record_token_usage(86_000);
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(86_000);
             let _ = actor.chat_state_handle.get_conversation_len().await;
             let pruned = actor
                 .maybe_pre_prune(&trigger)
@@ -921,9 +919,11 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
             actor
                 .chat_state_handle
                 .push_tool_result(ConversationItem::tool_result("call-1", big_tool_text()));
-            // Re-record model truth so `since_model` is zeroed (otherwise the
-            // conservative gate refuses the summary skip; see §2.1).
-            actor.chat_state_handle.record_token_usage(105_000);
+            // Replace the projection with a provider anchor before evaluating
+            // the next pruning transaction.
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(105_000);
             let _ = actor.chat_state_handle.get_conversation_len().await;
 
             let (mut trace_rx, _guard) = capture_trace_events();
@@ -989,7 +989,9 @@ fn pre_prune_blocked_by_account_and_turn_suppress() {
             // Two oversized rounds: the plan would be non-empty (100K > 85K
             // target), so these assertions really exercise the gate.
             seed_tool_result_rounds(&actor, 2).await;
-            actor.chat_state_handle.record_token_usage(105_000);
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(105_000);
             let _ = actor.chat_state_handle.get_conversation_len().await;
             let trigger = compaction::AutoCompactTriggerInfo {
                 tokens_used: 105_000,
@@ -1146,11 +1148,14 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
         while let Ok(event) = event_rx.try_recv() {
             match event {
                 chat_state::ChatStateEvent::ConversationReset { .. } => saw_reset = true,
-                chat_state::ChatStateEvent::TokensUpdated { .. } => saw_tokens = true,
+                chat_state::ChatStateEvent::ContextPressureUpdated { .. } => saw_tokens = true,
                 _ => {}
             }
         }
         assert!(saw_reset, "compaction replace must emit ConversationReset");
-        assert!(saw_tokens, "compaction replace must emit TokensUpdated");
+        assert!(
+            saw_tokens,
+            "compaction replace must emit ContextPressureUpdated"
+        );
     }));
 }

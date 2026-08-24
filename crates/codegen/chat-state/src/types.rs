@@ -27,12 +27,8 @@ pub struct ChatStateSnapshot {
     pub sampling_config: SamplingConfig,
     /// Current prompt index (incremented per user turn).
     pub prompt_index: usize,
-    /// Accumulated token usage.
-    pub total_tokens: u64,
-    /// Bytes/4 estimate of the conversation as of the last `record_token_usage`.
-    /// `0` means unknown (pre-field snapshot); restore re-estimates instead.
-    #[serde(default)]
-    pub estimate_at_last_response: u64,
+    /// Provider-anchored projection of the current model-visible context.
+    pub projected_tokens: u64,
     /// File paths the agent has edited.
     pub agent_edited_paths: BTreeSet<String>,
     /// User-authored prompt coordinates projected from the Timeline.
@@ -120,8 +116,8 @@ impl ConversationCounts {
 /// Info returned when auto-compact threshold is exceeded.
 #[derive(Debug, Clone)]
 pub struct AutoCompactTrigger {
-    /// Current total token count.
-    pub total_tokens: u64,
+    /// Current projected context pressure.
+    pub projected_tokens: u64,
     /// Model's context window size.
     pub context_window: NonZeroU64,
     /// Current utilization as a percentage (0–100).
@@ -151,8 +147,7 @@ mod tests {
                 stream_tool_calls: None,
             },
             prompt_index: 0,
-            total_tokens: 0,
-            estimate_at_last_response: 0,
+            projected_tokens: 0,
             agent_edited_paths: BTreeSet::new(),
             prompt_records: vec![],
             stream_start_ms: None,
@@ -165,7 +160,7 @@ mod tests {
         let deserialized: ChatStateSnapshot = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(deserialized.prompt_index, 0);
-        assert_eq!(deserialized.total_tokens, 0);
+        assert_eq!(deserialized.projected_tokens, 0);
         assert!(deserialized.conversation.is_empty());
         assert!(deserialized.agent_edited_paths.is_empty());
         assert!(deserialized.last_compaction_prompt_index.is_none());
@@ -196,8 +191,7 @@ mod tests {
                 stream_tool_calls: None,
             },
             prompt_index: 5,
-            total_tokens: 1234,
-            estimate_at_last_response: 900,
+            projected_tokens: 1234,
             agent_edited_paths: BTreeSet::from([
                 "src/main.rs".to_string(),
                 "src/lib.rs".to_string(),
@@ -224,7 +218,7 @@ mod tests {
         let deserialized: ChatStateSnapshot = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(deserialized.prompt_index, 5);
-        assert_eq!(deserialized.total_tokens, 1234);
+        assert_eq!(deserialized.projected_tokens, 1234);
         assert_eq!(deserialized.conversation.len(), 3);
         assert_eq!(deserialized.agent_edited_paths.len(), 2);
         assert_eq!(deserialized.prompt_records, snapshot.prompt_records);

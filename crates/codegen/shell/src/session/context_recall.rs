@@ -143,7 +143,7 @@ impl SessionActor {
             .await
             .ok_or_else(|| "sampling configuration is unavailable".to_string())?;
         let context_window = sampling_config.context_window.get();
-        let parent_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+        let parent_tokens = self.chat_state_handle.get_projected_tokens().await;
         let result_wrapper_tokens = chat_state::estimate_item_tokens(&ConversationItem::user(
             format!("Recalled topic: {query}\n\nRecalled content:\n"),
         ));
@@ -398,10 +398,10 @@ fn context_recall_output_budget(
     parent_tokens: u64,
     wrapper_tokens: u64,
 ) -> Option<u32> {
-    let (max_estimated_total_tokens, max_result_tokens) =
+    let (max_context_tokens, max_result_tokens) =
         context_recall_admission_limits(context_window);
     let budget = context_window
-        .min(max_estimated_total_tokens)
+        .min(max_context_tokens)
         .saturating_sub(parent_tokens)
         .saturating_sub(wrapper_tokens)
         .min(max_result_tokens);

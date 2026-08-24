@@ -2528,7 +2528,7 @@ pub(crate) async fn spawn_session_actor(
         }
     }
     if goal_was_restored {
-        let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
+        let current_tokens = session.chat_state_handle.get_projected_tokens().await as i64;
         let tokens_used = session.goal_tokens_used(current_tokens);
         // The durable write above also captures any fail-closed sanitization
         // performed by `from_snapshot`; do not enqueue a second, weaker copy.

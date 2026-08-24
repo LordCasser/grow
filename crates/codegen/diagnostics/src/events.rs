@@ -359,11 +359,9 @@ pub struct AutoCompactFired {
 /// trimmed in the stored conversation and the summary LLM call was skipped.
 #[derive(Serialize)]
 pub struct AutoCompactPruned {
-    /// Chat-state `total_tokens` before pruning (the actor's authoritative count).
+    /// Projected context pressure before pruning.
     pub tokens_before: u64,
-    /// Post-prune estimated total (`total_tokens` + `estimated_tokens_since_model`).
-    /// The `since_model` component is untouched by pruning, so this value is
-    /// conservative (may over-count pruned bytes) — the gate errs fail-safe.
+    /// Projected context pressure after the signed Surface-delta transaction.
     pub tokens_after: u64,
     /// Number of tool results actually trimmed.
     pub pruned_count: usize,

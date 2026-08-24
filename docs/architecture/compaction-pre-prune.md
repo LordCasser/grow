@@ -60,23 +60,19 @@ pre-compaction flush and **before** `run_compact_inner`. The ladder function is
    accepted in memory only after storage confirms it.
    **Any `Err` fails open**: `warn` log + `false` (continue the summary path).
    Pruning is an optimization, never a correctness requirement.
-5. **Strict gate**: re-read `get_estimated_total_tokens()`; only when it is
+5. **Strict gate**: re-read `get_projected_tokens()`; only when it is
    **below** the trigger threshold (same `exceeds_threshold` helper as
    `should_auto_compact`) does the ladder return `true` — the caller skips
    `run_compact_inner`. Otherwise `false`: the summary path runs, and its input
    is now the pruned (smaller) conversation.
 
-### 2.1 Gate conservativeness (Task B residual risk)
+### 2.1 Projection transaction
 
-Pruning subtracts the signed before/after Surface estimate from chat-state's
-latest provider anchor and **leaves `estimated_tokens_since_model` untouched**, so
-`get_estimated_total_tokens()` may over-count the pruned bytes. The gate
-therefore errs fail-safe: when the post-prune estimate is still at/over the
-threshold, the summary runs even though it might not have been needed. The code
-must never fudge the estimate to make the gate pass. (Note: the turn-start
-`ensure_prefix_ready` history replace re-bases `total_tokens` to a fresh static
-estimate and zeroes `since_model`; the conservative component matters most for
-mid-turn triggers such as the preflight-overflow path.)
+Pruning applies the signed before/after Surface estimate to chat-state's latest
+provider anchor. Appends, pruning, compaction, rewind, and repair all share this
+same projection transaction, so the strict gate reads one canonical current-
+context waterline. Lifetime and per-prompt billing remain separate
+`UsageLedger` state and never participate in the gate.
 
 ## 3. Success Path Observability
 
@@ -87,8 +83,8 @@ When the gate passes, the ladder emits, in order:
 
   | Field | Semantics |
   |---|---|
-  | `tokens_before` | chat-state `total_tokens` before pruning |
-  | `tokens_after` | post-prune `get_estimated_total_tokens()` (conservative, see §2.1) |
+  | `tokens_before` | chat-state projected pressure before pruning |
+  | `tokens_after` | post-prune `get_projected_tokens()` |
   | `pruned_count` | number of tool results actually trimmed |
   | `threshold_percent` | the trigger threshold the gate compared against |
   | `budget_tokens` | the per-item token budget the plan applied |
@@ -156,7 +152,7 @@ lives on `CompactionConfig` as `Cell<bool>` / `Cell<Option<u64>>` (the `!Send`
 
 `run_compact_inner` now runs a **unified** post-replace convergence check on
 every path (previously fork-scenario-only): after
-the Timeline range replacement, if `get_total_tokens()` still exceeds
+the Timeline range replacement, if `get_projected_tokens()` still exceeds
 the context window itself, the outcome is:
 
 - `SUPPRESS_STICKY` on `auto_compact_suppressed` (reusing the existing state;

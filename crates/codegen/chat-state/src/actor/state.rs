@@ -141,8 +141,9 @@ pub(crate) struct ChatState {
     pub timeline: Timeline,
     /// Current sampling configuration (model, context window, etc.).
     pub sampling_config: SamplingConfig,
-    /// Accumulated token usage.
-    pub total_tokens: u64,
+    /// Provider-anchored projection of the current model-visible context.
+    /// Lifetime and per-prompt billing live exclusively in `UsageLedger`.
+    pub projected_tokens: u64,
     /// Timestamp when the current stream started (epoch ms).
     pub stream_start_ms: Option<i64>,
     /// Timestamp when the current turn started (epoch ms).
@@ -152,14 +153,6 @@ pub(crate) struct ChatState {
     /// Opaque credential secrets (api key, optional extra auth, client version).
     /// Stored opaquely — the actor never interprets them.
     pub credentials: Credentials,
-    /// Bytes/4 estimate of tokens added since the last `record_token_usage`.
-    /// Used by `check_preflight_overflow` to detect context window overflows
-    /// between model responses.
-    pub estimated_tokens_since_model: u64,
-    /// Bytes/4 estimate of the conversation as of the last `record_token_usage`
-    /// (or last reseed). `total_tokens − estimate_at_last_response` is the
-    /// provider-side overhead carried across compaction.
-    pub estimate_at_last_response: u64,
     /// Per-turn token usage from the most recent model response.
     /// Stashed by `record_last_turn_usage()` and read at `PromptResponse`
     /// construction to enrich `_meta` with `inputTokens` / `outputTokens` /
@@ -229,13 +222,11 @@ impl ChatState {
         Self {
             timeline,
             sampling_config,
-            total_tokens: initial_tokens,
+            projected_tokens: initial_tokens,
             stream_start_ms: None,
             turn_start_ms: None,
             agent_edited_paths: BTreeSet::new(),
             credentials: Credentials::default(),
-            estimated_tokens_since_model: 0,
-            estimate_at_last_response: initial_tokens,
             last_turn_usage: None,
             prompt_usage: None,
             session_usage: UsageLedger::default(),
@@ -289,7 +280,7 @@ mod tests {
     fn new_state_has_correct_defaults() {
         let state = ChatState::new(vec![], test_sampling_config());
         assert_eq!(state.timeline.next_prompt_index(), 0);
-        assert_eq!(state.total_tokens, 0); // empty conversation → 0
+        assert_eq!(state.projected_tokens, 0); // empty conversation → 0
         assert!(state.timeline.surface().is_empty());
         assert!(state.agent_edited_paths.is_empty());
         assert!(state.timeline.prompt_records().is_empty());
@@ -323,7 +314,7 @@ mod tests {
             ConversationItem::tool_result("call-1", "w".repeat(4000).as_str()),
         ];
         let state = ChatState::new(items, test_sampling_config());
-        assert_eq!(state.total_tokens, 4000); // 4 * (4000/4)
+        assert_eq!(state.projected_tokens, 4000); // 4 * (4000/4)
     }
 
     #[test]

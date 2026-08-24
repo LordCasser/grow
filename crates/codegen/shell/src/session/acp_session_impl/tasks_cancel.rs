@@ -395,7 +395,7 @@ impl SessionActor {
             }
         }
 
-        let total_tokens = self.chat_state_handle.get_total_tokens().await;
+        let total_tokens = self.chat_state_handle.get_projected_tokens().await;
         let (running_task, pending_inputs, rewound_input, had_queued_user_prompt) = {
             let mut state = self.state.lock().await;
             debug_assert!(

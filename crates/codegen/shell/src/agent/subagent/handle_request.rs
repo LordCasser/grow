@@ -1189,7 +1189,7 @@ pub(crate) async fn run_shell_child(
                 .get_last_assistant_text()
                 .await
                 .unwrap_or_default();
-            let result_tokens = child_handle.chat_state_handle.get_total_tokens().await;
+            let result_tokens = child_handle.chat_state_handle.get_projected_tokens().await;
             match *turn_result {
                 Ok(Ok(crate::session::commands::PromptTurnOk {
                     completion_kind: PromptCompletionKind::Cancelled { category, context },
@@ -1350,7 +1350,7 @@ pub(crate) async fn run_shell_child(
     };
     let snapshot_dispose_enabled = ctx.resolve_subagent_worktree_snapshot_enabled();
     let diagnostics_tokens = if result.tool_calls > 0 || result.success {
-        child_handle.chat_state_handle.get_total_tokens().await
+        child_handle.chat_state_handle.get_projected_tokens().await
     } else {
         0
     };

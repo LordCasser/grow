@@ -554,7 +554,7 @@ pub enum SignalEvent {
     RecordInferenceMetrics(InferenceLatencyStats),
     /// Record token usage from a model response (completion + reasoning tokens).
     /// Accumulated per turn and reset at each `TakeTurnEndSnapshot`.
-    RecordTokenUsage {
+    RecordResponseOutputUsage {
         completion_tokens: u32,
         reasoning_tokens: u32,
     },
@@ -872,11 +872,15 @@ impl SessionSignalsHandle {
     /// Response tokens = completion_tokens - reasoning_tokens.
     /// Multiple calls per turn are accumulated (e.g. multi-round tool use).
     #[tracing::instrument(skip_all, fields(completion_tokens, reasoning_tokens))]
-    pub fn record_token_usage(&self, completion_tokens: u32, reasoning_tokens: u32) {
+    pub fn record_response_output_usage(
+        &self,
+        completion_tokens: u32,
+        reasoning_tokens: u32,
+    ) {
         let span = tracing::Span::current();
         span.record("completion_tokens", i64::from(completion_tokens));
         span.record("reasoning_tokens", i64::from(reasoning_tokens));
-        let _ = self.tx.send(SignalEvent::RecordTokenUsage {
+        let _ = self.tx.send(SignalEvent::RecordResponseOutputUsage {
             completion_tokens,
             reasoning_tokens,
         });
@@ -1010,11 +1014,11 @@ pub struct SessionSignalsActor {
     /// Accumulated ITL intervals for the current turn (cleared at turn end).
     turn_itl_intervals: Vec<u64>,
     /// Accumulated response (completion - reasoning) tokens for the current turn.
-    /// `None` until the first `RecordTokenUsage` event in this turn.
+    /// `None` until the first `RecordResponseOutputUsage` event in this turn.
     /// Reset to `None` after each `TakeTurnEndSnapshot`.
     turn_response_tokens: Option<u32>,
     /// Accumulated thinking (reasoning) tokens for the current turn.
-    /// `None` until the first `RecordTokenUsage` event in this turn.
+    /// `None` until the first `RecordResponseOutputUsage` event in this turn.
     /// Reset to `None` after each `TakeTurnEndSnapshot`.
     turn_thinking_tokens: Option<u32>,
     /// PRs created during the current turn.
@@ -1282,7 +1286,7 @@ impl SessionSignalsActor {
                         self.update_latency_stats(ttfb, stats.time_to_last_byte_ms);
                     }
                 }
-                SignalEvent::RecordTokenUsage {
+                SignalEvent::RecordResponseOutputUsage {
                     completion_tokens,
                     reasoning_tokens,
                 } => {
@@ -2446,7 +2450,7 @@ mod tests {
         // Turn 1: one response with completion and reasoning tokens
         handle.increment_turn();
         handle.record_assistant_message();
-        handle.record_token_usage(500, 200); // 500 completion, 200 reasoning → 300 response
+        handle.record_response_output_usage(500, 200); // 500 completion, 200 reasoning → 300 response
 
         let snap1 = handle.take_turn_end_snapshot().await.unwrap();
         assert_eq!(snap1.delta.response_tokens, Some(300)); // 500 - 200
@@ -2455,9 +2459,9 @@ mod tests {
         // Turn 2: multi-round tool use — two responses accumulate
         handle.increment_turn();
         handle.record_tool_call("bash");
-        handle.record_token_usage(100, 50); // first response: 50 response + 50 thinking
+        handle.record_response_output_usage(100, 50); // first response: 50 response + 50 thinking
         handle.record_assistant_message();
-        handle.record_token_usage(400, 0); // second response: 400 response, 0 thinking
+        handle.record_response_output_usage(400, 0); // second response: 400 response, 0 thinking
 
         let snap2 = handle.take_turn_end_snapshot().await.unwrap();
         assert_eq!(snap2.delta.response_tokens, Some(450)); // (100-50) + (400-0)

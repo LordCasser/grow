@@ -532,7 +532,7 @@ pub(super) async fn run_session(
                         );
                     }
                     Some(chat_state::ChatStateEvent::PromptIndexChanged { .. }) |
-                    Some(chat_state::ChatStateEvent::TokensUpdated { .. }) => {
+                    Some(chat_state::ChatStateEvent::ContextPressureUpdated { .. }) => {
                         // Prompt index and token updates are informational —
                         // consumers query the actor directly when they need them.
                     }

@@ -19,8 +19,7 @@ impl ChatStateActor {
             conversation: self.state.timeline.surface().to_vec(),
             sampling_config: self.state.sampling_config.clone(),
             prompt_index: self.state.timeline.next_prompt_index(),
-            total_tokens: self.state.total_tokens,
-            estimate_at_last_response: self.state.estimate_at_last_response,
+            projected_tokens: self.state.projected_tokens,
             agent_edited_paths: self.state.agent_edited_paths.clone(),
             prompt_records: self.state.timeline.prompt_records(),
             stream_start_ms: self.state.stream_start_ms,
@@ -35,7 +34,7 @@ impl ChatStateActor {
 
     /// Check if auto-compact is needed based on token utilization.
     ///
-    /// Returns `Some(AutoCompactTrigger)` if `total_tokens` exceeds
+    /// Returns `Some(AutoCompactTrigger)` if `projected_tokens` exceeds
     /// `context_window * threshold_percent / 100`, otherwise `None`.
     pub(super) fn check_auto_compact_needed(
         &self,
@@ -44,11 +43,15 @@ impl ChatStateActor {
         let context_window = self.state.sampling_config.context_window;
         let cw = context_window.get();
 
-        if token_estimation::exceeds_threshold(self.state.total_tokens, cw, threshold_percent) {
+        if token_estimation::exceeds_threshold(
+            self.state.projected_tokens,
+            cw,
+            threshold_percent,
+        ) {
             let utilization_percent =
-                token_estimation::usage_percentage_truncated_u8(self.state.total_tokens, cw);
+                token_estimation::usage_percentage_truncated_u8(self.state.projected_tokens, cw);
             Some(AutoCompactTrigger {
-                total_tokens: self.state.total_tokens,
+                projected_tokens: self.state.projected_tokens,
                 context_window,
                 utilization_percent,
             })

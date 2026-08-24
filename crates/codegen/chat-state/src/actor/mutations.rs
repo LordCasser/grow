@@ -64,11 +64,16 @@ impl ChatStateActor {
             );
             return false;
         };
+        let item_tokens = super::state::estimate_item_tokens(&item);
         let mut candidate = self.state.timeline.clone();
         let event = candidate
-            .append(item.clone(), cause)
+            .append(item, cause)
             .expect("an assembled conversation item must append to the timeline");
-        self.commit_buffered_timeline_event(event).await
+        let committed = self.commit_buffered_timeline_event(event).await;
+        if committed {
+            self.apply_projected_token_delta(0, item_tokens);
+        }
+        committed
     }
 
     /// Repair any dangling tool calls in the conversation and persist the fix.
@@ -164,32 +169,21 @@ impl ChatStateActor {
                 synthetic_results_inserted = report.synthetic_results_inserted,
                 "History repair modified the conversation"
             );
+            let surface_tokens_before =
+                super::state::estimate_conversation_tokens(self.state.timeline.surface());
             debug_assert_eq!(events.len(), 1, "explicit repair is one Surface event");
             for event in events {
                 self.commit_timeline_event(event).await?;
             }
-            let pre_replace_total = self.state.total_tokens;
-            self.refresh_surface_projection(false, pre_replace_total);
+            self.finish_surface_replacement(surface_tokens_before);
         }
         Ok(report)
     }
 
     /// Push any conversation item (user, assistant, or tool result) and persist it.
     pub(super) async fn push_message(&mut self, item: ConversationItem) {
-        let count_in_delta = !matches!(item, ConversationItem::Assistant(_));
-        if !self.append_message_fact(item.clone()).await {
+        if !self.append_message_fact(item).await {
             return;
-        }
-        if count_in_delta {
-            let estimated_tokens = super::state::estimate_item_tokens(&item);
-            self.state.estimated_tokens_since_model += estimated_tokens;
-            tracing::debug!(
-                item_kind = item_kind_str(&item),
-                estimated_tokens_delta = estimated_tokens,
-                estimated_total = self.state.total_tokens + self.state.estimated_tokens_since_model,
-                model_reported_total = self.state.total_tokens,
-                "ChatState: push_message updated estimated_tokens_since_model"
-            );
         }
     }
 
@@ -198,19 +192,19 @@ impl ChatStateActor {
         item: ConversationItem,
         rejection_item: ConversationItem,
         expected_surface_revision: u64,
-        max_estimated_total_tokens: u64,
+        max_context_tokens: u64,
         max_result_tokens: u64,
     ) -> Result<crate::commands::ConditionalToolResultOutcome, crate::commands::TimelineWriteError>
     {
         use crate::commands::ConditionalToolResultOutcome;
 
         let actual_revision = self.state.timeline.surface_revision();
-        let current_tokens = self.state.total_tokens + self.state.estimated_tokens_since_model;
+        let current_tokens = self.state.projected_tokens;
         let item_tokens = super::state::estimate_item_tokens(&item);
         let outcome = if actual_revision != expected_surface_revision {
             ConditionalToolResultOutcome::RejectedSurfaceChanged
         } else if item_tokens > max_result_tokens
-            || current_tokens.saturating_add(item_tokens) > max_estimated_total_tokens
+            || current_tokens.saturating_add(item_tokens) > max_context_tokens
         {
             ConditionalToolResultOutcome::RejectedHeadroom
         } else {
@@ -225,7 +219,7 @@ impl ChatStateActor {
         let mut candidate = self.state.timeline.clone();
         let event = candidate.append(selected, MessageCause::ToolResult)?;
         self.commit_timeline_event(event).await?;
-        self.state.estimated_tokens_since_model += selected_tokens;
+        self.apply_projected_token_delta(0, selected_tokens);
         Ok(outcome)
     }
 
@@ -248,20 +242,12 @@ impl ChatStateActor {
     ) -> Result<(), crate::commands::TimelineWriteError> {
         self.ensure_conversation_integrity_durably(DanglingToolCallReason::UserCancelled)
             .await?;
+        let item_tokens = super::state::estimate_item_tokens(&item);
         let cause = message_cause(&item)?;
         let mut candidate = self.state.timeline.clone();
-        let event = candidate.append(item.clone(), cause)?;
+        let event = candidate.append(item, cause)?;
         self.commit_timeline_event(event).await?;
-
-        let estimated_tokens = super::state::estimate_item_tokens(&item);
-        self.state.estimated_tokens_since_model += estimated_tokens;
-        tracing::debug!(
-            item_kind = item_kind_str(&item),
-            estimated_tokens_delta = estimated_tokens,
-            estimated_total = self.state.total_tokens + self.state.estimated_tokens_since_model,
-            model_reported_total = self.state.total_tokens,
-            "ChatState: durable user message updated estimated_tokens_since_model"
-        );
+        self.apply_projected_token_delta(0, item_tokens);
         Ok(())
     }
 
@@ -272,18 +258,9 @@ impl ChatStateActor {
         reason: DanglingToolCallReason,
     ) {
         self.ensure_conversation_integrity_with_reason(reason).await;
-        if !self.append_message_fact(item.clone()).await {
+        if !self.append_message_fact(item).await {
             return;
         }
-        let estimated_tokens = super::state::estimate_item_tokens(&item);
-        self.state.estimated_tokens_since_model += estimated_tokens;
-        tracing::debug!(
-            item_kind = item_kind_str(&item),
-            estimated_tokens_delta = estimated_tokens,
-            estimated_total = self.state.total_tokens + self.state.estimated_tokens_since_model,
-            model_reported_total = self.state.total_tokens,
-            "ChatState: push_user_message updated estimated_tokens_since_model"
-        );
     }
 
     /// Apply a [`compaction::PrunePlan`] to the stored conversation in one
@@ -323,12 +300,8 @@ impl ChatStateActor {
     /// Items whose content already contains [`PRUNE_MARKER`] or already fits
     /// the budget are skipped, so replaying the same plan never re-prunes.
     /// The before/after Surface estimate is applied as a signed delta to the
-    /// latest provider anchor and clamped at zero. This preserves provider-side
-    /// accounting instead of replacing it with a fresh local estimate.
-    /// `estimated_tokens_since_model` and `estimate_at_last_response` are
-    /// left untouched: the compaction overhead ratio must keep measuring
-    /// against the last-response snapshot, and the post-response delta
-    /// self-heals at the next `record_token_usage`.
+    /// latest provider anchor and clamped at zero. This is the same projection
+    /// transaction used by compaction, rewind, and repair.
     pub(super) async fn prune_tool_results(
         &mut self,
         plan: compaction::PrunePlan,
@@ -339,7 +312,7 @@ impl ChatStateActor {
             return Err(PruneError::EmptyConversation);
         }
 
-        let tokens_before = self.state.total_tokens;
+        let tokens_before = self.state.projected_tokens;
         let surface_tokens_before =
             super::state::estimate_conversation_tokens(self.state.timeline.surface());
         let mut pruned_count = 0usize;
@@ -390,19 +363,12 @@ impl ChatStateActor {
 
         let mut tokens_after = tokens_before;
         if pruned_count > 0 {
-            let reestimated = super::state::estimate_conversation_tokens(&conversation);
             let mut candidate = self.state.timeline.clone();
             let event = candidate
                 .replace_all(conversation, MessageCause::ToolResultPrune)
                 .map_err(crate::commands::TimelineWriteError::Invalid)?;
             self.commit_timeline_event(event).await?;
-            // Project the signed Surface delta from the latest provider
-            // anchor. This preserves provider-side overhead instead of
-            // replacing it with a fresh local estimate. The independent
-            // post-response addition estimate stays untouched below.
-            let removed_tokens = surface_tokens_before.saturating_sub(reestimated);
-            tokens_after = tokens_before.saturating_sub(removed_tokens);
-            self.state.total_tokens = tokens_after;
+            tokens_after = self.apply_surface_token_delta(surface_tokens_before);
             tracing::info!(
                 pruned_count,
                 tokens_before,
@@ -419,13 +385,13 @@ impl ChatStateActor {
         })
     }
 
-    /// Record accumulated token usage and emit an event.
-    pub(super) fn record_token_usage(&mut self, total_tokens: u64) {
-        self.state.estimated_tokens_since_model = 0;
-        self.state.estimate_at_last_response =
-            super::state::estimate_conversation_tokens(self.state.timeline.surface());
-        self.state.total_tokens = total_tokens;
-        self.send_event(ChatStateEvent::TokensUpdated { total_tokens });
+    /// Replace projected context pressure with the provider's canonical total
+    /// for the just-completed response. Billing remains in `UsageLedger`.
+    pub(super) fn record_provider_context_anchor(&mut self, provider_total_tokens: u64) {
+        self.state.projected_tokens = provider_total_tokens;
+        self.send_event(ChatStateEvent::ContextPressureUpdated {
+            projected_tokens: provider_total_tokens,
+        });
     }
 
     /// Stash the per-turn `TokenUsage` from the most recent model response.
@@ -514,11 +480,12 @@ impl ChatStateActor {
         let items = self.state.timeline.rewind_surface(target_prompt_index)?;
         let mut candidate = self.state.timeline.clone();
         let event = candidate.replace_all(items, MessageCause::Rewind)?;
-        let pre_replace_total = self.state.total_tokens;
+        let surface_tokens_before =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
         self.commit_timeline_event(event).await?;
         self.state.turn_capture = None;
         self.state.prompt_usage = None;
-        self.refresh_surface_projection(false, pre_replace_total);
+        self.finish_surface_replacement(surface_tokens_before);
         Ok(())
     }
 
@@ -539,9 +506,10 @@ impl ChatStateActor {
         }
         let mut candidate = self.state.timeline.clone();
         let event = candidate.replace_all(items, cause)?;
-        let pre_replace_total = self.state.total_tokens;
+        let surface_tokens_before =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
         self.commit_timeline_event(event).await?;
-        self.refresh_surface_projection(false, pre_replace_total);
+        self.finish_surface_replacement(surface_tokens_before);
         Ok(())
     }
 
@@ -553,12 +521,13 @@ impl ChatStateActor {
     ) -> Result<(), crate::commands::TimelineWriteError> {
         let mut candidate = self.state.timeline.clone();
         let event = candidate.replace_compaction_range(target, items)?;
-        let pre_replace_total = self.state.total_tokens;
+        let surface_tokens_before =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
         self.commit_timeline_event(event).await?;
         if let Some(cap) = &mut self.state.turn_capture {
             cap.compaction_occurred = true;
         }
-        self.refresh_surface_projection(true, pre_replace_total);
+        self.finish_surface_replacement(surface_tokens_before);
         Ok(())
     }
 
@@ -570,45 +539,58 @@ impl ChatStateActor {
         items: Vec<ConversationItem>,
         cause: MessageCause,
     ) {
-        let pre_replace_total = self.state.total_tokens;
         let surface_changed = serde_json::to_value(self.state.timeline.surface())
             .expect("conversation surface must serialize")
             != serde_json::to_value(&items).expect("replacement surface must serialize");
-        if surface_changed {
-            let mut candidate = self.state.timeline.clone();
-            let event = candidate
-                .replace_all(items, cause)
-                .expect("a current surface must accept a complete replacement");
-            if !self.commit_buffered_timeline_event(event).await {
-                return;
-            }
+        if !surface_changed {
+            return;
         }
-        self.refresh_surface_projection(false, pre_replace_total);
+        let surface_tokens_before =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
+        let mut candidate = self.state.timeline.clone();
+        let event = candidate
+            .replace_all(items, cause)
+            .expect("a current surface must accept a complete replacement");
+        if !self.commit_buffered_timeline_event(event).await {
+            return;
+        }
+        self.finish_surface_replacement(surface_tokens_before);
     }
 
-    fn refresh_surface_projection(&mut self, is_compaction: bool, pre_replace_total: u64) {
-        let base_estimate =
+    /// Apply the signed static-estimate delta of a committed Surface mutation
+    /// to the latest provider anchor. Provider overhead is preserved exactly;
+    /// no mutation type gets a separate ratio or reset policy.
+    pub(super) fn apply_surface_token_delta(&mut self, surface_tokens_before: u64) -> u64 {
+        let surface_tokens_after =
             super::state::estimate_conversation_tokens(self.state.timeline.surface());
-        let mut estimated_tokens =
-            if is_compaction && pre_replace_total > 0 && self.state.estimate_at_last_response > 0 {
-                let ratio = pre_replace_total as f64 / self.state.estimate_at_last_response as f64;
-                (base_estimate as f64 * ratio).round() as u64
-            } else {
-                base_estimate
-            };
-        // Compaction must never appear to increase usage.
-        if is_compaction && pre_replace_total > 0 {
-            estimated_tokens = estimated_tokens.min(pre_replace_total);
-        }
-        self.state.estimated_tokens_since_model = 0;
-        self.state.total_tokens = estimated_tokens;
-        self.state.estimate_at_last_response =
-            super::state::estimate_conversation_tokens(self.state.timeline.surface());
+        self.apply_projected_token_delta(surface_tokens_before, surface_tokens_after)
+    }
+
+    /// Apply one signed estimate delta to the current provider anchor.
+    pub(super) fn apply_projected_token_delta(
+        &mut self,
+        tokens_before: u64,
+        tokens_after: u64,
+    ) -> u64 {
+        self.state.projected_tokens = if tokens_after >= tokens_before {
+            self.state
+                .projected_tokens
+                .saturating_add(tokens_after - tokens_before)
+        } else {
+            self.state
+                .projected_tokens
+                .saturating_sub(tokens_before - tokens_after)
+        };
+        self.state.projected_tokens
+    }
+
+    fn finish_surface_replacement(&mut self, surface_tokens_before: u64) {
+        let projected_tokens = self.apply_surface_token_delta(surface_tokens_before);
         self.send_event(ChatStateEvent::ConversationReset {
             new_len: self.state.timeline.surface_len(),
         });
-        self.send_event(ChatStateEvent::TokensUpdated {
-            total_tokens: estimated_tokens,
+        self.send_event(ChatStateEvent::ContextPressureUpdated {
+            projected_tokens,
         });
     }
 
@@ -645,13 +627,4 @@ impl ChatStateActor {
         Ok(report)
     }
 
-    /// Seed provider-reported accounting without mutating Timeline-derived
-    /// conversation or branch coordinates.
-    pub(super) fn seed_token_accounting(&mut self, total_tokens: u64) {
-        self.state.total_tokens = total_tokens;
-        self.state.estimated_tokens_since_model = 0;
-        self.state.estimate_at_last_response =
-            super::state::estimate_conversation_tokens(self.state.timeline.surface());
-        self.send_event(ChatStateEvent::TokensUpdated { total_tokens });
-    }
 }

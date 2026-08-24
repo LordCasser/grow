@@ -317,7 +317,7 @@ pub(crate) async fn create_test_actor_ex(
         chat_event_tx,
         tokio_util::sync::CancellationToken::new(),
     );
-    chat_state_handle.record_token_usage(total_tokens);
+    chat_state_handle.record_provider_context_anchor(total_tokens);
     let events = crate::session::events::EventTracker::new(chat_state_handle.clone());
     let (goal_command_tx, goal_command_rx) = tokio::sync::mpsc::unbounded_channel();
     let session_dir = cwd.as_path().join(".grow-test-session");

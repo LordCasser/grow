@@ -326,7 +326,7 @@ impl SessionActor {
             return;
         }
         self.settle_live_goal_subagent_tokens();
-        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        let current_tokens = self.chat_state_handle.get_projected_tokens().await as i64;
         let _ = self.goal_tokens(current_tokens);
         self.goal_tracker.lock().account_elapsed();
         let behavior = self.behavior.lock().snapshot();

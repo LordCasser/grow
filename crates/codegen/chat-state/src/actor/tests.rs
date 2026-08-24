@@ -695,16 +695,18 @@ async fn push_tool_result_appends_and_persists() {
 }
 
 #[tokio::test]
-async fn record_token_usage_emits_event() {
+async fn provider_context_anchor_emits_event() {
     let mut h = TestHarness::new();
-    h.handle.record_token_usage(1000);
+    h.handle.record_provider_context_anchor(1000);
     let event = h.next_event().await;
     assert!(matches!(
         event,
-        ChatStateEvent::TokensUpdated { total_tokens: 1000 }
+        ChatStateEvent::ContextPressureUpdated {
+            projected_tokens: 1000
+        }
     ));
 
-    let tokens = h.handle.get_total_tokens().await;
+    let tokens = h.handle.get_projected_tokens().await;
     assert_eq!(tokens, 1000);
 }
 
@@ -815,41 +817,35 @@ async fn prompt_usage_ledger_via_handle_resets_and_clears() {
 }
 
 #[tokio::test]
-async fn estimated_tokens_tracks_tool_result_delta() {
+async fn projected_tokens_track_tool_result_growth() {
     let h = TestHarness::new();
-    h.handle.record_token_usage(100_000);
+    h.handle.record_provider_context_anchor(100_000);
 
     // Push a tool result with 4000 chars → ~1000 estimated tokens
     h.handle
         .push_tool_result(ConversationItem::tool_result("call-1", "x".repeat(4000)));
 
-    let estimated = h.handle.get_estimated_total_tokens().await;
-    assert_eq!(estimated, 101_000); // 100K model-reported + 1K delta
-
-    // model-reported total_tokens is unchanged
-    let actual = h.handle.get_total_tokens().await;
-    assert_eq!(actual, 100_000);
+    assert_eq!(h.handle.get_projected_tokens().await, 101_000);
 }
 
 #[tokio::test]
-async fn estimated_tokens_resets_on_model_response() {
+async fn provider_anchor_replaces_local_projection() {
     let h = TestHarness::new();
-    h.handle.record_token_usage(100_000);
+    h.handle.record_provider_context_anchor(100_000);
     h.handle
         .push_tool_result(ConversationItem::tool_result("call-1", "x".repeat(4000)));
 
-    assert_eq!(h.handle.get_estimated_total_tokens().await, 101_000);
+    assert_eq!(h.handle.get_projected_tokens().await, 101_000);
 
-    // Model responds with a new total — delta resets
-    h.handle.record_token_usage(105_000);
-    assert_eq!(h.handle.get_estimated_total_tokens().await, 105_000);
-    assert_eq!(h.handle.get_total_tokens().await, 105_000);
+    // The next provider total already includes the tool result.
+    h.handle.record_provider_context_anchor(105_000);
+    assert_eq!(h.handle.get_projected_tokens().await, 105_000);
 }
 
 #[tokio::test]
-async fn estimated_tokens_tracks_synthetic_user_message_delta() {
+async fn projected_tokens_track_synthetic_user_message_growth() {
     let h = TestHarness::new();
-    h.handle.record_token_usage(100_000);
+    h.handle.record_provider_context_anchor(100_000);
 
     // Simulate a 4MB background-task completion notification pushed as a
     // synthetic User item between turns.
@@ -857,65 +853,68 @@ async fn estimated_tokens_tracks_synthetic_user_message_delta() {
         "Background task completed:\n".to_string() + &"x".repeat(4_000_000),
     ));
 
-    let estimated = h.handle.get_estimated_total_tokens().await;
+    let projected = h.handle.get_projected_tokens().await;
     // 100K model-reported + ~1M tokens for the 4MB reminder.
     assert!(
-        (1_099_000..=1_101_000).contains(&estimated),
-        "expected ~1.1M tokens estimated, got {estimated}",
+        (1_099_000..=1_101_000).contains(&projected),
+        "expected ~1.1M projected tokens, got {projected}",
     );
-
-    // model-reported `total_tokens` is unchanged — only the delta moved.
-    assert_eq!(h.handle.get_total_tokens().await, 100_000);
 }
 
 /// Regression: a normal user prompt pushed at turn start must increment
-/// the delta. The bump is voided when the model responds and
-/// `record_token_usage` includes the prompt in `usage.total_tokens`,
-/// keeping the post-response total accurate.
+/// current context pressure. The next provider anchor already includes it.
 #[tokio::test]
-async fn estimated_tokens_tracks_real_user_message_and_resets_on_response() {
+async fn projected_tokens_track_real_user_message_then_accept_provider_anchor() {
     let h = TestHarness::new();
-    h.handle.record_token_usage(100_000);
+    h.handle.record_provider_context_anchor(100_000);
 
     // Real user turn — 4000 chars / 4 = ~1000 tokens.
     h.handle
         .push_user_message(ConversationItem::user("u".repeat(4000)));
 
-    let pre = h.handle.get_estimated_total_tokens().await;
+    let pre = h.handle.get_projected_tokens().await;
     assert!(
         (101_000..=101_010).contains(&pre),
         "expected ~101K after user push, got {pre}",
     );
 
-    // Model responds; the API's `usage.total_tokens` already includes
-    // the new user message. Delta must reset to zero.
-    h.handle.record_token_usage(103_000);
-    assert_eq!(h.handle.get_estimated_total_tokens().await, 103_000);
-    assert_eq!(h.handle.get_total_tokens().await, 103_000);
+    h.handle.record_provider_context_anchor(103_000);
+    assert_eq!(h.handle.get_projected_tokens().await, 103_000);
 }
 
-/// Regression: pushing the assistant response back into the chat
-/// must NOT bump the delta — the model already counted it in
-/// `usage.completion_tokens` (which is folded into the just-applied
-/// `total_tokens`). Bumping again would double-count the assistant.
+/// Response facts are estimated first, then replaced by the provider anchor.
 #[tokio::test]
-async fn assistant_response_push_does_not_bump_estimated_delta() {
+async fn provider_anchor_replaces_response_item_estimates() {
     let h = TestHarness::new();
-    h.handle.record_token_usage(100_000);
+    h.handle.record_provider_context_anchor(100_000);
     h.handle
         .push_assistant_response(ConversationItem::assistant("a".repeat(4000)));
+    h.handle
+        .push_assistant_response(reasoning_sibling("reasoning-1", None));
 
-    let estimated = h.handle.get_estimated_total_tokens().await;
+    assert!(h.handle.get_projected_tokens().await > 100_000);
+    h.handle.record_provider_context_anchor(103_000);
     assert_eq!(
-        estimated, 100_000,
-        "assistant push must not increment the delta (already in `usage.total_tokens`)"
+        h.handle.get_projected_tokens().await,
+        103_000,
+        "provider anchor must replace response-item estimates"
     );
 }
 
 #[tokio::test]
-async fn estimated_tokens_resets_on_truncate() {
+async fn response_items_without_provider_usage_remain_estimated() {
+    let h = TestHarness::new();
+    h.handle.record_provider_context_anchor(100_000);
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("a".repeat(4000)));
+
+    assert_eq!(h.handle.get_projected_tokens().await, 101_000);
+}
+
+#[tokio::test]
+async fn rewind_applies_signed_surface_delta() {
     let mut h = TestHarness::new();
-    h.handle.record_token_usage(100_000);
+    h.handle.record_provider_context_anchor(100_000);
     h.handle.push_user_message(marked_user("q1", 0));
     record_prompt(&h.handle, "q1").await;
     h.handle
@@ -923,15 +922,18 @@ async fn estimated_tokens_resets_on_truncate() {
     h.handle
         .push_tool_result(ConversationItem::tool_result("call-1", "x".repeat(4000)));
 
-    assert_eq!(h.handle.get_estimated_total_tokens().await, 101_000);
+    assert_eq!(h.handle.get_projected_tokens().await, 101_000);
 
-    // Rewind removes the tool result — delta must reset
+    // Rewind removes Surface content but preserves provider overhead.
     h.drain_events();
+    let surface_before =
+        crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
     h.handle.rewind_durably(0).await.unwrap();
-    let post_rewind = h.handle.get_estimated_total_tokens().await;
-    assert!(
-        post_rewind < 100_000,
-        "post-rewind tokens should reflect truncated conversation, not stale model count"
+    let surface_after =
+        crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
+    assert_eq!(
+        h.handle.get_projected_tokens().await,
+        101_000u64.saturating_sub(surface_before - surface_after)
     );
 }
 
@@ -1497,8 +1499,8 @@ async fn conditional_tool_result_rechecks_headroom_at_commit() {
 
     // Provider accounting can advance without changing Surface revision while
     // recall synthesis is in flight.
-    h.handle.record_token_usage(7_900);
-    assert_eq!(h.handle.get_total_tokens().await, 7_900);
+    h.handle.record_provider_context_anchor(7_900);
+    assert_eq!(h.handle.get_projected_tokens().await, 7_900);
     let outcome = h
         .handle
         .push_tool_result_conditionally(
@@ -1528,30 +1530,21 @@ async fn conditional_tool_result_rechecks_headroom_at_commit() {
 }
 
 #[tokio::test]
-async fn compaction_reseed_carries_provider_overhead() {
+async fn compaction_preserves_provider_overhead_when_surface_estimate_is_unchanged() {
     let h = TestHarness::new();
     // ~1k estimated tokens; provider reports 51k → 50k overhead.
     h.handle
         .push_user_message(ConversationItem::user("x".repeat(4000)));
-    h.handle.record_token_usage(51_000);
+    h.handle.record_provider_context_anchor(51_000);
 
     let compacted = vec![ConversationItem::user("summary ".repeat(500))];
     commit_compaction_range(&h.handle, compacted).await;
 
-    let total = h.handle.get_total_tokens().await;
-    let estimate_only = 1_000u64;
-    assert!(
-        total > estimate_only * 10,
-        "reseed must carry provider overhead, got {total}"
-    );
-    assert!(
-        total <= 51_000,
-        "reseed must never exceed the pre-compaction provider total, got {total}"
-    );
+    assert_eq!(h.handle.get_projected_tokens().await, 51_000);
 }
 
 #[tokio::test]
-async fn compaction_reseed_scales_overhead_down_with_deleted_content() {
+async fn compaction_applies_signed_surface_delta_to_provider_anchor() {
     let h = TestHarness::new();
     h.handle
         .push_user_message(ConversationItem::user("x".repeat(160_000)));
@@ -1559,46 +1552,37 @@ async fn compaction_reseed_scales_overhead_down_with_deleted_content() {
         crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
     assert_eq!(estimate_at_response, 40_000);
     let provider_total = 87_000;
-    h.handle.record_token_usage(provider_total);
+    h.handle.record_provider_context_anchor(provider_total);
 
     let compacted = vec![ConversationItem::user("z".repeat(12_000))];
     let compacted_estimate = crate::estimate_conversation_tokens(&compacted);
     assert_eq!(compacted_estimate, 3_000);
     commit_compaction_range(&h.handle, compacted).await;
 
-    let total = h.handle.get_total_tokens().await;
-    assert_eq!(total, 6_525, "expected ratio-scaled overhead, got {total}");
-    let additive_model = compacted_estimate + (provider_total - estimate_at_response);
-    assert_eq!(additive_model, 50_000);
-    assert!(
-        total < additive_model / 4,
-        "ratio reseed ({total}) must be far below the additive over-count ({additive_model})"
-    );
-    assert!(
-        total > compacted_estimate,
-        "some overhead must still be carried"
-    );
+    let expected = provider_total - (estimate_at_response - compacted_estimate);
+    assert_eq!(expected, 50_000);
+    assert_eq!(h.handle.get_projected_tokens().await, expected);
 }
 
 #[tokio::test]
-async fn compaction_reseed_excludes_post_response_deltas_from_overhead() {
+async fn compaction_delta_includes_post_response_surface_growth_once() {
     let h = TestHarness::new();
     h.handle
         .push_user_message(ConversationItem::user("y".repeat(4000)));
-    h.handle.record_token_usage(11_000);
+    h.handle.record_provider_context_anchor(11_000);
     h.handle
         .push_tool_result(ConversationItem::tool_result("c1", "z".repeat(100_000)));
 
+    let before = h.handle.get_conversation().await;
+    let surface_before = crate::estimate_conversation_tokens(&before);
+    assert_eq!(h.handle.get_projected_tokens().await, 36_000);
+
     let compacted = vec![ConversationItem::user("s".repeat(2_000))];
+    let surface_after = crate::estimate_conversation_tokens(&compacted);
     commit_compaction_range(&h.handle, compacted).await;
 
-    let total = h.handle.get_total_tokens().await;
-    assert_eq!(
-        total, 5_500,
-        "overhead ratio must be measured against the last-response estimate \
-         (1k), not the live estimate inflated by the 25k post-response tool \
-         result, got {total}"
-    );
+    let expected = 36_000 - (surface_before - surface_after);
+    assert_eq!(h.handle.get_projected_tokens().await, expected);
 }
 
 #[tokio::test]
@@ -1622,7 +1606,7 @@ async fn pruning_projects_signed_surface_delta_from_provider_anchor() {
 
     let estimate_at_response = crate::estimate_conversation_tokens(&conv);
     let provider_total = estimate_at_response + estimate_at_response / 2;
-    h.handle.record_token_usage(provider_total);
+    h.handle.record_provider_context_anchor(provider_total);
 
     let plan = compaction::plan_tool_result_pruning(
         &conv,
@@ -1641,40 +1625,40 @@ async fn pruning_projects_signed_surface_delta_from_provider_anchor() {
     );
     let expected = provider_total.saturating_sub(estimate_at_response - pruned_estimate);
     assert_eq!(
-        h.handle.get_total_tokens().await,
+        h.handle.get_projected_tokens().await,
         expected,
         "pruning must subtract only its signed Surface delta from the provider anchor"
     );
 }
 
 #[tokio::test]
-async fn compaction_reseed_without_provider_count_matches_plain_estimate() {
+async fn compaction_without_provider_anchor_tracks_signed_surface_growth() {
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("hello"));
 
     let compacted = vec![ConversationItem::user("w".repeat(8000))];
     commit_compaction_range(&h.handle, compacted).await;
 
-    let total = h.handle.get_total_tokens().await;
+    let total = h.handle.get_projected_tokens().await;
     assert_eq!(
         total, 2_000,
-        "fresh-session reseed must be the raw estimate"
+        "fresh-session projection must follow Surface growth"
     );
 }
 
 #[tokio::test]
-async fn non_compaction_replace_does_not_carry_overhead() {
+async fn non_compaction_replace_preserves_provider_overhead() {
     let h = TestHarness::new();
     h.handle
         .push_user_message(ConversationItem::user("x".repeat(4000)));
-    h.handle.record_token_usage(51_000);
+    h.handle.record_provider_context_anchor(51_000);
 
     replace_test_surface(&h.handle, vec![ConversationItem::user("q".repeat(4000))]).await;
 
-    let total = h.handle.get_total_tokens().await;
+    let total = h.handle.get_projected_tokens().await;
     assert_eq!(
-        total, 1_000,
-        "non-compaction replace (e.g. rewind) keeps the plain estimate"
+        total, 51_000,
+        "equal-sized replacement must preserve provider overhead"
     );
 }
 
@@ -1695,7 +1679,7 @@ async fn flush_calls_persistence_flush() {
 async fn snapshot_projects_timeline_and_token_accounting() {
     let mut h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("msg"));
-    h.handle.record_token_usage(500);
+    h.handle.record_provider_context_anchor(500);
     record_prompt(&h.handle, "msg").await;
 
     // Drain events from the mutations above
@@ -1704,7 +1688,7 @@ async fn snapshot_projects_timeline_and_token_accounting() {
 
     let snapshot = h.handle.snapshot().await.unwrap();
     assert_eq!(snapshot.prompt_index, 1);
-    assert_eq!(snapshot.total_tokens, 500);
+    assert_eq!(snapshot.projected_tokens, 500);
     assert_eq!(snapshot.conversation.len(), 1);
 
     assert_eq!(
@@ -1734,9 +1718,9 @@ async fn get_conversation_returns_current_state() {
 }
 
 #[tokio::test]
-async fn get_total_tokens_returns_zero_initially() {
+async fn get_projected_tokens_returns_zero_initially() {
     let h = TestHarness::new();
-    let tokens = h.handle.get_total_tokens().await;
+    let tokens = h.handle.get_projected_tokens().await;
     assert_eq!(tokens, 0);
 }
 
@@ -1745,16 +1729,16 @@ async fn empty_conversation_queries_return_defaults() {
     let h = TestHarness::new();
     assert!(h.handle.get_conversation().await.is_empty());
     assert_eq!(h.handle.get_prompt_index().await, 0);
-    assert_eq!(h.handle.get_total_tokens().await, 0);
+    assert_eq!(h.handle.get_projected_tokens().await, 0);
     assert!(h.handle.get_agent_edited_paths().await.is_empty());
 }
 
 #[tokio::test]
 async fn check_auto_compact_returns_none_when_under_threshold() {
     let h = TestHarness::with_context_window(10000);
-    h.handle.record_token_usage(100);
+    h.handle.record_provider_context_anchor(100);
     // Sync point
-    let _ = h.handle.get_total_tokens().await;
+    let _ = h.handle.get_projected_tokens().await;
 
     let trigger = h.handle.check_auto_compact_needed(85).await;
     assert!(trigger.is_none());
@@ -1763,13 +1747,13 @@ async fn check_auto_compact_returns_none_when_under_threshold() {
 #[tokio::test]
 async fn check_auto_compact_triggers_at_threshold() {
     let h = TestHarness::with_context_window(10000);
-    h.handle.record_token_usage(8600);
-    let _ = h.handle.get_total_tokens().await;
+    h.handle.record_provider_context_anchor(8600);
+    let _ = h.handle.get_projected_tokens().await;
 
     let trigger = h.handle.check_auto_compact_needed(85).await;
     assert!(trigger.is_some());
     let t = trigger.unwrap();
-    assert_eq!(t.total_tokens, 8600);
+    assert_eq!(t.projected_tokens, 8600);
     assert_eq!(t.context_window.get(), 10000);
     assert_eq!(t.utilization_percent, 86);
 }
@@ -1993,7 +1977,7 @@ async fn snapshot_combines_timeline_projection_and_runtime_metadata() {
     h.handle.push_user_message(marked_user("q1", 0));
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
-    h.handle.record_token_usage(999);
+    h.handle.record_provider_context_anchor(999);
     record_prompt(&h.handle, "query 1").await;
     h.handle.record_agent_edited_path("src/foo.rs".to_string());
     h.handle.record_agent_edited_path("src/bar.rs".to_string());
@@ -2001,7 +1985,7 @@ async fn snapshot_combines_timeline_projection_and_runtime_metadata() {
     h.handle.record_turn_start(12340);
     let snapshot = h.handle.snapshot().await.unwrap();
     assert_eq!(snapshot.conversation.len(), 2);
-    assert_eq!(snapshot.total_tokens, 999);
+    assert_eq!(snapshot.projected_tokens, 999);
     assert_eq!(snapshot.prompt_index, 1);
     assert_eq!(
         snapshot
@@ -2019,8 +2003,8 @@ async fn snapshot_combines_timeline_projection_and_runtime_metadata() {
 #[tokio::test]
 async fn auto_compact_does_not_trigger_below_threshold() {
     let h = TestHarness::with_context_window(10000);
-    h.handle.record_token_usage(8400);
-    let _ = h.handle.get_total_tokens().await;
+    h.handle.record_provider_context_anchor(8400);
+    let _ = h.handle.get_projected_tokens().await;
 
     let trigger = h.handle.check_auto_compact_needed(85).await;
     assert!(trigger.is_none());
@@ -3947,7 +3931,7 @@ async fn context_window_downgrade_triggers_auto_compact() {
     let h = TestHarness::with_config(vec![], config);
 
     // Simulate 217k tokens of conversation (matching turn 587's total_tokens)
-    h.handle.record_token_usage(217_000);
+    h.handle.record_provider_context_anchor(217_000);
 
     // Pre-downgrade: 217k / 500k = 43% — well under auto-compact threshold
     let pre = h.handle.get_sampling_config().await.unwrap();
@@ -3987,7 +3971,7 @@ async fn context_window_downgrade_triggers_auto_compact() {
     );
     let info = trigger.unwrap();
     assert_eq!(info.context_window, NonZeroU64::new(128_000).unwrap());
-    assert_eq!(info.total_tokens, 217_000);
+    assert_eq!(info.projected_tokens, 217_000);
     // utilization_percent is u8 so it caps at 255, but we just need >85
     assert!(
         info.utilization_percent > 85,
@@ -4616,7 +4600,7 @@ async fn repair_history_retries_an_uncertain_timeline_commit() {
 // ============================================================================
 
 /// Full happy path: a planned oversized tool result is replaced by
-/// head + marker + tail, structural fields survive, `total_tokens` drops,
+/// head + marker + tail, structural fields survive, projected pressure drops,
 /// one Timeline replacement is persisted, and no UI
 /// event is published (the pager renders streamed wire events and must not
 /// be disturbed by pruning stored state).
@@ -4648,7 +4632,7 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
     );
     assert_eq!(plan.items[0].index, 1);
 
-    let before = h.handle.get_total_tokens().await;
+    let before = h.handle.get_projected_tokens().await;
     let report = h
         .handle
         .prune_tool_results(plan)
@@ -4658,7 +4642,7 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
     assert_eq!(report.tokens_before, before);
     assert!(
         report.tokens_after < report.tokens_before,
-        "pruning must reduce the estimated total"
+        "pruning must reduce projected context pressure"
     );
 
     let conversation = h.handle.get_conversation().await;
@@ -4688,7 +4672,7 @@ async fn prune_tool_results_trims_content_preserves_structure_and_persists() {
         "content must be head + marker + tail"
     );
 
-    assert_eq!(h.handle.get_total_tokens().await, report.tokens_after);
+    assert_eq!(h.handle.get_projected_tokens().await, report.tokens_after);
 
     // Persisted as exactly one Timeline replacement.
     let records = h.drain_persistence();
@@ -4774,10 +4758,9 @@ async fn prune_tool_results_clamps_signed_delta_at_zero() {
 
     let conv = vec![ConversationItem::tool_result("call-1", "x".repeat(4000))];
     let mut h = TestHarness::with_conversation(conv.clone());
-    h.handle.record_token_usage(10);
-    // Sync point: the query is ordered after the fire-and-forget record, so
-    // the TokensUpdated event is in the channel before we drain.
-    assert_eq!(h.handle.get_total_tokens().await, 10);
+    h.handle.record_provider_context_anchor(10);
+    // Sync point: the query is ordered after the fire-and-forget anchor.
+    assert_eq!(h.handle.get_projected_tokens().await, 10);
     h.drain_events();
 
     let plan = plan_tool_result_pruning(&conv, &EstimatedItemTokenCounter, 50, 100);
@@ -4789,7 +4772,7 @@ async fn prune_tool_results_clamps_signed_delta_at_zero() {
     assert_eq!(report.pruned_count, 1, "content is still pruned");
     assert_eq!(report.tokens_before, 10);
     assert_eq!(report.tokens_after, 0, "signed deltas clamp at zero");
-    assert_eq!(h.handle.get_total_tokens().await, 0);
+    assert_eq!(h.handle.get_projected_tokens().await, 0);
     assert!(h.drain_events().is_empty());
 }
 

@@ -344,7 +344,7 @@ impl SessionActor {
 
         self.flush_to_disk().await;
 
-        let total_tokens = self.chat_state_handle.get_total_tokens().await;
+        let total_tokens = self.chat_state_handle.get_projected_tokens().await;
         ok_end_turn(total_tokens, None)
     }
 }

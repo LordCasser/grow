@@ -397,7 +397,7 @@ impl SessionActor {
         let model = config.as_ref().map(|c| c.model.clone());
         let context_window = config.as_ref().map(|c| c.context_window.get()).unwrap_or(0);
         let model_metadata = self.chat_state_handle.get_last_model_metadata().await;
-        let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+        let total_tokens = self.chat_state_handle.get_projected_tokens().await;
         let counts = self.chat_state_handle.get_conversation_counts().await;
         let turns = counts.user;
         let turn_index = self.chat_state_handle.get_prompt_index().await as u64;

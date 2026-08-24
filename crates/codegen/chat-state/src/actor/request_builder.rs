@@ -45,13 +45,11 @@ impl ChatStateActor {
                 )
             });
             if !already_present {
+                let item_tokens = super::state::estimate_item_tokens(&item);
                 let mut candidate = self.state.timeline.clone();
-                let event = candidate.append(item.clone(), MessageCause::MemoryContext)?;
+                let event = candidate.append(item, MessageCause::MemoryContext)?;
                 self.commit_timeline_event(event).await?;
-                self.state.estimated_tokens_since_model = self
-                    .state
-                    .estimated_tokens_since_model
-                    .saturating_add(super::state::estimate_item_tokens(&item));
+                self.apply_projected_token_delta(0, item_tokens);
             }
         }
         let mut items = self.state.timeline.surface().to_vec();

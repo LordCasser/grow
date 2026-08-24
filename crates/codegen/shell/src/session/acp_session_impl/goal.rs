@@ -77,7 +77,7 @@ impl SessionActor {
         objective: &str,
         token_budget: Option<i64>,
     ) -> Result<(), String> {
-        let token_baseline = self.chat_state_handle.get_total_tokens().await as i64;
+        let token_baseline = self.chat_state_handle.get_projected_tokens().await as i64;
         let created_at = chrono::Utc::now().to_rfc3339();
         let previous = self.goal_tracker.lock().snapshot().cloned();
         self.goal_tracker.lock().create_goal(
@@ -118,7 +118,7 @@ impl SessionActor {
             if let Err(error) = self.commit_goal_activation_or_restore(previous).await {
                 return format!("Goal was not restarted: {error}");
             }
-            let current = self.chat_state_handle.get_total_tokens().await as i64;
+            let current = self.chat_state_handle.get_projected_tokens().await as i64;
             let used = self.goal_tokens_used(current);
             self.goal_notify_sender()
                 .emit_goal_updated(&self.goal_tracker.lock(), used);
@@ -145,7 +145,7 @@ impl SessionActor {
         reason: crate::session::goal_tracker::GoalPauseReason,
         message: String,
     ) -> bool {
-        let current = self.chat_state_handle.get_total_tokens().await as i64;
+        let current = self.chat_state_handle.get_projected_tokens().await as i64;
         let used = self.goal_tokens_used(current);
         let previous = self.goal_tracker.lock().snapshot().cloned();
         if !self
@@ -250,7 +250,7 @@ impl SessionActor {
                 return;
             }
         }
-        let current = self.chat_state_handle.get_total_tokens().await as i64;
+        let current = self.chat_state_handle.get_projected_tokens().await as i64;
         if self.enforce_goal_token_budget(current).await {
             return;
         }
@@ -321,7 +321,7 @@ impl SessionActor {
 
         match command {
             GoalCommand::Get { respond_to } => {
-                let current = self.chat_state_handle.get_total_tokens().await as i64;
+                let current = self.chat_state_handle.get_projected_tokens().await as i64;
                 let used = self.goal_tokens_used(current);
                 let (snapshot, elapsed_ms) = {
                     let tracker = self.goal_tracker.lock();
@@ -343,7 +343,7 @@ impl SessionActor {
                 return;
             }
             GoalCommand::Update { input, respond_to } => {
-                let current = self.chat_state_handle.get_total_tokens().await as i64;
+                let current = self.chat_state_handle.get_projected_tokens().await as i64;
                 let used = self.goal_tokens_used(current);
                 let previous = self.goal_tracker.lock().snapshot().cloned();
                 let (changed, summary, select_normal) = match input.status {
