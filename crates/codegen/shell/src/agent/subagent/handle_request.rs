@@ -139,24 +139,26 @@ pub(crate) async fn run_shell_child(
         &definition,
     );
     let prompt = request.prompt.clone();
-    // Normalize the historical implicit default before any worktree, MCP, or
-    // session side effect. Nested authority is a strict subset relation, not a
-    // permission request: widening fails the spawn rather than prompting or
-    // silently clamping the requested child definition.
-    let initial_capability_mode = effective_runtime
-        .capability_mode
-        .unwrap_or(tool_types::SubagentCapabilityMode::All);
-    if let Some(ceiling) = ctx.parent_capability_ceiling.as_ref()
-        && !ceiling.permits_mode(initial_capability_mode)
-    {
-        let msg = format!(
-            "Nested subagent capability widening denied: requested '{}' exceeds the immediate \
-             parent's immutable delegation ceiling",
-            initial_capability_mode.as_str()
+    // Resolve the initial grant before any worktree, MCP, or session side
+    // effect. The Agent definition supplies the default, the Task call may
+    // narrow or widen that request, and the immediate security parent's
+    // immutable ceiling is the final upper bound. Incomparable read/write and
+    // execute branches meet at read-only.
+    let requested_capability_mode = effective_runtime.capability_mode;
+    let initial_capability_mode = ctx
+        .parent_capability_ceiling
+        .as_ref()
+        .map_or(requested_capability_mode, |ceiling| {
+            ceiling.constrain_mode(requested_capability_mode)
+        });
+    if initial_capability_mode != requested_capability_mode {
+        tracing::info!(
+            requested = requested_capability_mode.as_str(),
+            effective = initial_capability_mode.as_str(),
+            "constrained nested subagent initial capability to the parent delegation ceiling"
         );
-        return child_run_output(failure_result(&request, &msg), completion_data);
     }
-    effective_runtime.capability_mode = Some(initial_capability_mode);
+    effective_runtime.capability_mode = initial_capability_mode;
     let resume_source = if let Some(resume_id) = request
         .resume_from
         .as_deref()
@@ -293,17 +295,15 @@ pub(crate) async fn run_shell_child(
             None => request.cwd = None,
         }
     }
-    if effective_runtime.reasoning_effort.is_some() || effective_runtime.capability_mode.is_some() {
-        tracing::info!(
-            subagent_id = %request.id,
-            reasoning_effort = ?effective_runtime.reasoning_effort,
-            capability_mode = ?effective_runtime.capability_mode,
-            "Resolved runtime overrides for subagent"
-        );
-    }
+    tracing::info!(
+        subagent_id = %request.id,
+        reasoning_effort = ?effective_runtime.reasoning_effort,
+        capability_mode = ?effective_runtime.capability_mode,
+        "Resolved subagent runtime configuration"
+    );
     // Preserve the normalized, confinement-checked initial grant on the
     // definition for session-state construction.
-    definition.capability_mode = effective_runtime.capability_mode;
+    definition.capability_mode = Some(effective_runtime.capability_mode);
     let child_depth = request
         .runtime_overrides
         .spawn_depth
@@ -317,14 +317,12 @@ pub(crate) async fn run_shell_child(
     if request.owner.goal_id().is_some() {
         crate::agent::subagent::resolution::apply_goal_object_tool_policy(&mut definition);
     }
-    if let Some(mode) = effective_runtime.capability_mode {
-        tracing::info!(
-            subagent_id = %request.id,
-            capability_mode = ?mode,
-            eligible_tools = definition.tool_config.tools.len(),
-            "Configured subagent initial capability grant"
-        );
-    }
+    tracing::info!(
+        subagent_id = %request.id,
+        capability_mode = ?effective_runtime.capability_mode,
+        eligible_tools = definition.tool_config.tools.len(),
+        "Configured subagent initial capability grant"
+    );
     if !allow_nested_subagents && definition.tool_config.tools.len() < tools_before_policy {
         tracing::info!(
             subagent_id = %request.id,
@@ -470,10 +468,7 @@ pub(crate) async fn run_shell_child(
         InitialContextSource::Resumed => chat_state::SubagentContextSource::Resumed,
     };
     let context_normalized = fork_context_normalized(&context_source, context_verbatim_fork);
-    let capability_mode = effective_runtime
-        .capability_mode
-        .and_then(|mode| serde_json::to_value(mode).ok())
-        .and_then(|value| value.as_str().map(String::from));
+    let capability_mode = Some(effective_runtime.capability_mode.as_str().to_owned());
     let permission_mode = serde_json::to_value(ctx.subagent_permission_mode)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned));

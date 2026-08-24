@@ -158,25 +158,6 @@ pub fn resolve_agent_definition(
     Ok(definition)
 }
 
-/// Fill runtime values whose defaults live on the resolved agent definition.
-pub fn apply_definition_runtime_defaults(
-    runtime: &mut EffectiveRuntimeConfig,
-    definition: &AgentDefinition,
-) {
-    if runtime.capability_mode.is_none() {
-        runtime.capability_mode = definition.capability_mode;
-    }
-    if runtime.reasoning_effort.is_none() {
-        runtime.reasoning_effort = definition
-            .effort
-            .map(|effort| <&str>::from(effort).to_string());
-    }
-    if runtime.isolation == SubagentIsolationMode::None
-        && definition.isolation == Some(IsolationMode::Worktree)
-    {
-        runtime.isolation = SubagentIsolationMode::Worktree;
-    }
-}
 /// Apply capability filtering and recursion depth to the exact production
 /// definition toolset.
 pub fn apply_child_tool_policy(definition: &mut AgentDefinition, allow_nested_subagents: bool) {
@@ -202,14 +183,25 @@ pub fn resolve_runtime_config(
     overrides: &SubagentRuntimeOverrides,
     definition: &AgentDefinition,
 ) -> EffectiveRuntimeConfig {
-    let mut runtime = EffectiveRuntimeConfig {
+    EffectiveRuntimeConfig {
         model: overrides.model.clone(),
-        reasoning_effort: overrides.reasoning_effort.clone(),
-        capability_mode: overrides.capability_mode,
-        isolation: overrides.isolation.unwrap_or_default(),
-    };
-    apply_definition_runtime_defaults(&mut runtime, definition);
-    runtime
+        reasoning_effort: overrides.reasoning_effort.clone().or_else(|| {
+            definition
+                .effort
+                .map(|effort| <&str>::from(effort).to_string())
+        }),
+        capability_mode: overrides
+            .capability_mode
+            .or(definition.capability_mode)
+            .unwrap_or_default(),
+        isolation: overrides.isolation.unwrap_or_else(|| {
+            if definition.isolation == Some(IsolationMode::Worktree) {
+                SubagentIsolationMode::Worktree
+            } else {
+                SubagentIsolationMode::None
+            }
+        }),
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -264,9 +256,31 @@ mod tests {
         let mut definition =
             resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
         definition.isolation = Some(IsolationMode::Worktree);
-        let mut runtime = EffectiveRuntimeConfig::default();
-        apply_definition_runtime_defaults(&mut runtime, &definition);
+        let runtime = resolve_runtime_config(&SubagentRuntimeOverrides::default(), &definition);
         assert_eq!(runtime.isolation, SubagentIsolationMode::Worktree);
+        assert_eq!(
+            runtime.capability_mode,
+            tool_types::SubagentCapabilityMode::ReadOnly
+        );
+
+        let explicit = resolve_runtime_config(
+            &SubagentRuntimeOverrides {
+                capability_mode: Some(tool_types::SubagentCapabilityMode::Execute),
+                ..Default::default()
+            },
+            &definition,
+        );
+        assert_eq!(
+            explicit.capability_mode,
+            tool_types::SubagentCapabilityMode::Execute
+        );
+
+        let general =
+            resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
+        assert_eq!(
+            resolve_runtime_config(&SubagentRuntimeOverrides::default(), &general).capability_mode,
+            tool_types::SubagentCapabilityMode::ReadWrite
+        );
     }
 
     #[test]

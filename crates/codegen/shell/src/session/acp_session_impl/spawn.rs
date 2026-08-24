@@ -1552,7 +1552,7 @@ pub(crate) async fn spawn_session_actor(
         let initial_mode = agent
             .definition()
             .capability_mode
-            .unwrap_or(tool_types::SubagentCapabilityMode::All);
+            .unwrap_or_default();
         let bound_mcp_client_ids = mcp_state.lock().await.shared_client_ids();
         let state = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
             agent.tool_bridge(),

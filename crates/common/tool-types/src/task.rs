@@ -145,10 +145,11 @@ fn default_true() -> bool {
 }
 
 /// Capability mode controlling which tool classes a child agent can use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum SubagentCapabilityMode {
     ReadOnly,
+    #[default]
     ReadWrite,
     Execute,
     All,
@@ -165,17 +166,19 @@ impl SubagentCapabilityMode {
         }
     }
 
-    /// Capability confinement order used for nested delegation. Read/write
-    /// and execute are independent branches: neither may silently grant the
-    /// other, while read-only is their common minimum and all is the maximum.
-    pub const fn is_subset_of(self, ceiling: Self) -> bool {
-        matches!(
-            (self, ceiling),
-            (Self::ReadOnly, _)
-                | (Self::ReadWrite, Self::ReadWrite | Self::All)
-                | (Self::Execute, Self::Execute | Self::All)
-                | (Self::All, Self::All)
-        )
+    /// Greatest capability mode allowed by both operands. Capability
+    /// delegation is a lattice intersection: incomparable read/write and
+    /// execute branches meet at read-only instead of widening or rejecting a
+    /// nested child.
+    pub const fn intersection(self, other: Self) -> Self {
+        use SubagentCapabilityMode as Mode;
+        match (self, other) {
+            (Mode::All, mode) | (mode, Mode::All) => mode,
+            (Mode::ReadOnly, _) | (_, Mode::ReadOnly) => Mode::ReadOnly,
+            (Mode::ReadWrite, Mode::ReadWrite) => Mode::ReadWrite,
+            (Mode::Execute, Mode::Execute) => Mode::Execute,
+            (Mode::ReadWrite, Mode::Execute) | (Mode::Execute, Mode::ReadWrite) => Mode::ReadOnly,
+        }
     }
 }
 
@@ -959,23 +962,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nested_capability_subset_matrix_is_non_escalating() {
-        use SubagentCapabilityMode::{All, Execute, ReadOnly, ReadWrite};
-        for requested in [ReadOnly, ReadWrite, Execute, All] {
-            for ceiling in [ReadOnly, ReadWrite, Execute, All] {
-                let expected = matches!(
-                    (requested, ceiling),
-                    (ReadOnly, _)
-                        | (ReadWrite, ReadWrite | All)
-                        | (Execute, Execute | All)
-                        | (All, All)
-                );
-                assert_eq!(
-                    requested.is_subset_of(ceiling),
-                    expected,
-                    "requested={requested:?}, ceiling={ceiling:?}"
-                );
-            }
+    fn subagent_capability_default_is_read_write() {
+        assert_eq!(
+            SubagentCapabilityMode::default(),
+            SubagentCapabilityMode::ReadWrite
+        );
+    }
+
+    #[test]
+    fn subagent_capability_intersection_is_the_delegation_meet() {
+        use SubagentCapabilityMode as Mode;
+        for (left, right, expected) in [
+            (Mode::All, Mode::Execute, Mode::Execute),
+            (Mode::ReadWrite, Mode::All, Mode::ReadWrite),
+            (Mode::ReadWrite, Mode::ReadWrite, Mode::ReadWrite),
+            (Mode::Execute, Mode::Execute, Mode::Execute),
+            (Mode::ReadWrite, Mode::Execute, Mode::ReadOnly),
+            (Mode::Execute, Mode::ReadWrite, Mode::ReadOnly),
+            (Mode::ReadOnly, Mode::All, Mode::ReadOnly),
+        ] {
+            assert_eq!(left.intersection(right), expected);
         }
     }
 

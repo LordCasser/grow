@@ -11,6 +11,10 @@
 - Goal and Behavior transitions commit through one versioned Timeline Control snapshot and roll back on persistence failure.
 - Pager Goal UI and Timeline updates now show durable lifecycle state only; streaming phase/progress noise is not persisted.
 
+## Delegated authority
+
+- Subagent capability resolution now has one default (`read-write`) and one parent-confinement rule: the requested/Agent mode is intersected with the immediate parent's immutable delegation ceiling before child resources are created. The former implicit `all` and spawn-rejection path were removed.
+
 完整发布说明见 [changelogs/1.1.11.md](changelogs/1.1.11.md)。
 
 # 1.1.5 — 2026-08-09

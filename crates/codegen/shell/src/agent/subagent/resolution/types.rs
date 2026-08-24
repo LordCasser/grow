@@ -14,8 +14,10 @@ pub struct EffectiveRuntimeConfig {
     // TODO(phase2): consider a typed `ReasoningEffort` enum to prevent typos.
     // Currently stringly-typed for compatibility with the shell's existing API.
     pub reasoning_effort: Option<String>,
-    /// Resolved capability mode controlling tool access.
-    pub capability_mode: Option<tool_types::SubagentCapabilityMode>,
+    /// Fully resolved initial capability request. Agent-definition and global
+    /// defaults have already been applied; parent confinement is the only
+    /// remaining transformation.
+    pub capability_mode: tool_types::SubagentCapabilityMode,
     /// Isolation mode for the child execution environment.
     pub isolation: tool_types::SubagentIsolationMode,
 }
@@ -73,7 +75,10 @@ mod tests {
         let config = EffectiveRuntimeConfig::default();
         assert!(config.model.is_none());
         assert!(config.reasoning_effort.is_none());
-        assert!(config.capability_mode.is_none());
+        assert_eq!(
+            config.capability_mode,
+            tool_types::SubagentCapabilityMode::ReadWrite
+        );
         assert_eq!(config.isolation, SubagentIsolationMode::None);
     }
 }

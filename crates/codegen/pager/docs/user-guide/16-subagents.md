@@ -95,6 +95,8 @@ The Agent definition establishes a hard-eligible tool ceiling. The live capabili
 | `execute` | Yes | No | Yes |
 | `all` | Yes | Yes | Yes |
 
+When neither the `Task` call nor the Agent definition selects a mode, the initial grant is `read-write`. For a nested child, Grow intersects that requested/default mode with the immediate parent's immutable delegation ceiling before creating any child-side resources. Thus an `execute` child requested by a `read-write` parent starts `read-only`; runtime grants held by the parent never enlarge what it may delegate.
+
 Tools outside the current grant are not exposed to the model. A child can request one eligible boundary expansion with `request_tool_access`:
 
 ```json

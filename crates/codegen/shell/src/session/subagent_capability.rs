@@ -38,8 +38,11 @@ impl DelegableCapabilityCeiling {
         }
     }
 
-    pub(crate) fn permits_mode(&self, requested: tool_types::SubagentCapabilityMode) -> bool {
-        requested.is_subset_of(self.initial_mode)
+    pub(crate) fn constrain_mode(
+        &self,
+        requested: tool_types::SubagentCapabilityMode,
+    ) -> tool_types::SubagentCapabilityMode {
+        requested.intersection(self.initial_mode)
     }
 
     pub(crate) fn permits_mcp_binding(&self, server: &str, client_id: u64) -> bool {
@@ -349,15 +352,36 @@ mod tests {
             bindings.clone(),
         );
         assert_eq!(all.initial_mode(), tool_types::SubagentCapabilityMode::All);
-        assert!(all.permits_mode(tool_types::SubagentCapabilityMode::Execute));
+        assert_eq!(
+            all.constrain_mode(tool_types::SubagentCapabilityMode::Execute),
+            tool_types::SubagentCapabilityMode::Execute
+        );
         assert!(all.permits_mcp_binding("github", 7));
         assert!(!all.permits_mcp_binding("github", 8));
 
         let read_only =
             DelegableCapabilityCeiling::new(tool_types::SubagentCapabilityMode::ReadOnly, bindings);
-        assert!(read_only.permits_mode(tool_types::SubagentCapabilityMode::ReadOnly));
-        assert!(!read_only.permits_mode(tool_types::SubagentCapabilityMode::Execute));
+        assert_eq!(
+            read_only.constrain_mode(tool_types::SubagentCapabilityMode::ReadOnly),
+            tool_types::SubagentCapabilityMode::ReadOnly
+        );
+        assert_eq!(
+            read_only.constrain_mode(tool_types::SubagentCapabilityMode::Execute),
+            tool_types::SubagentCapabilityMode::ReadOnly
+        );
         assert!(!read_only.permits_mcp_binding("github", 7));
+    }
+
+    #[test]
+    fn delegation_ceiling_intersects_incomparable_native_branches() {
+        let read_write = DelegableCapabilityCeiling::new(
+            tool_types::SubagentCapabilityMode::ReadWrite,
+            HashMap::new(),
+        );
+        assert_eq!(
+            read_write.constrain_mode(tool_types::SubagentCapabilityMode::Execute),
+            tool_types::SubagentCapabilityMode::ReadOnly
+        );
     }
 
     fn state(
