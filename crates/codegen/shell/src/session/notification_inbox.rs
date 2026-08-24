@@ -91,6 +91,48 @@ pub(crate) fn remove_payload(
     }
 }
 
+/// Reclaim well-formed payload artifacts that have no pending Timeline
+/// receipt. The Timeline projection is the only liveness authority; unknown
+/// files are left untouched so garbage collection never broadens its scope.
+pub(crate) fn sweep_orphaned_payloads(
+    session: &crate::session::storage::ContainedDirectory,
+    retained_hashes: &std::collections::BTreeSet<String>,
+) -> io::Result<usize> {
+    let directory = match session.open_relative(
+        Path::new(ARTIFACT_DIRECTORY),
+        "notification payload directory",
+        false,
+    ) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0usize;
+    for name in directory.list_names()? {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(hash) = name.strip_suffix(".txt") else {
+            continue;
+        };
+        if hash.len() != 64
+            || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || retained_hashes.contains(hash)
+        {
+            continue;
+        }
+        match directory.remove_file(std::ffi::OsStr::new(name), false) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if removed > 0 {
+        directory.sync()?;
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +151,39 @@ mod tests {
         let second = write_payload(&session, "terminal result").unwrap();
         assert_eq!(first, second);
         assert_eq!(read_payload(&session, &first).unwrap(), "terminal result");
+    }
+
+    #[test]
+    fn orphan_sweep_keeps_only_timeline_referenced_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = crate::session::storage::ContainedDirectory::open(
+            temp.path(),
+            Path::new(""),
+            "notification test session",
+            false,
+        )
+        .unwrap();
+        let retained = write_payload(&session, "pending receipt").unwrap();
+        let orphaned = write_payload(&session, "write before failed admission").unwrap();
+        let artifact_dir = temp.path().join(ARTIFACT_DIRECTORY);
+        std::fs::write(artifact_dir.join("unrelated.file"), b"leave me").unwrap();
+
+        let retained_hashes = std::collections::BTreeSet::from([retained.blake3.clone()]);
+        assert_eq!(
+            sweep_orphaned_payloads(&session, &retained_hashes).unwrap(),
+            1
+        );
+        assert_eq!(
+            read_payload(&session, &retained).unwrap(),
+            "pending receipt"
+        );
+        assert!(matches!(
+            read_payload(&session, &orphaned),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        ));
+        assert_eq!(
+            std::fs::read(artifact_dir.join("unrelated.file")).unwrap(),
+            b"leave me"
+        );
     }
 }

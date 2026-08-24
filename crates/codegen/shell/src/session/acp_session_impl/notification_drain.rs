@@ -3,6 +3,48 @@
 use super::*;
 
 impl SessionActor {
+    /// Reconcile write-ahead payload artifacts against the replayed Timeline
+    /// before this session begins accepting new notification work.
+    pub(super) async fn reconcile_notification_payloads(&self) {
+        let _artifact_guard = self.notification_artifact_gate.lock().await;
+        let Some(pending) = self.chat_state_handle.pending_notifications().await else {
+            tracing::warn!(
+                "notification payload reconciliation skipped because Timeline is unavailable"
+            );
+            return;
+        };
+        let retained_hashes = pending
+            .into_iter()
+            .map(|notification| notification.payload_ref.blake3)
+            .collect::<std::collections::BTreeSet<_>>();
+        let directory = match self.session_directory.try_clone() {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(%error, "notification payload reconciliation directory unavailable");
+                return;
+            }
+        };
+        match tokio::task::spawn_blocking(move || {
+            crate::session::notification_inbox::sweep_orphaned_payloads(
+                &directory,
+                &retained_hashes,
+            )
+        })
+        .await
+        {
+            Ok(Ok(0)) => {}
+            Ok(Ok(removed)) => {
+                tracing::info!(removed, "reclaimed orphaned notification payloads")
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "notification payload reconciliation failed")
+            }
+            Err(error) => {
+                tracing::warn!(%error, "notification payload reconciliation task failed")
+            }
+        }
+    }
+
     /// Remove payload artifacts only after their resolving Timeline fact is
     /// durable, and only when no remaining receipt references the same
     /// content-addressed blob.
@@ -113,7 +155,7 @@ impl SessionActor {
         .map_err(|error| format!("notification payload writer failed: {error}"))?
         .map_err(|error| error.to_string())?;
         let received_payload = payload_ref.clone();
-        let event = self
+        let event = match self
             .chat_state_handle
             .receive_notification_durably(
                 self.session_info.id.0.to_string(),
@@ -122,7 +164,14 @@ impl SessionActor {
                 payload_ref,
             )
             .await
-            .map_err(|error| error.to_string())?;
+        {
+            Ok(event) => event,
+            Err(error) => {
+                self.cleanup_notification_payloads(vec![received_payload])
+                    .await;
+                return Err(error.to_string());
+            }
+        };
         let pending_after = self
             .chat_state_handle
             .pending_notifications()
@@ -712,6 +761,55 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_notification_admission_reclaims_its_write_ahead_payload() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::acp_session::support::build_actor().await;
+                let source = chat_state::NotificationSource::TaskCompleted {
+                    task_id: "conflicting-retry".into(),
+                    task_kind: chat_state::NotificationTaskKind::Task,
+                };
+                let version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };
+                actor
+                    .receive_notification(
+                        source.clone(),
+                        version.clone(),
+                        "canonical result".into(),
+                    )
+                    .await
+                    .expect("initial notification");
+                let pending = actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .expect("pending notifications");
+                let retained_path = actor
+                    .session_dir
+                    .join("artifacts/notifications")
+                    .join(format!("{}.txt", pending[0].payload_ref.blake3));
+                let orphan_hash = blake3::hash(b"conflicting result").to_hex();
+                let orphan_path = actor
+                    .session_dir
+                    .join("artifacts/notifications")
+                    .join(format!("{orphan_hash}.txt"));
+
+                assert!(
+                    actor
+                        .receive_notification(source, version, "conflicting result".into())
+                        .await
+                        .is_err()
+                );
+                assert!(retained_path.exists());
+                assert!(
+                    !orphan_path.exists(),
+                    "failed admission must not strand its write-ahead payload"
+                );
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn monitor_progress_window_prunes_superseded_payload_artifacts() {

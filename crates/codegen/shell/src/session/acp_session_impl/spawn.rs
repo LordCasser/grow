@@ -2408,6 +2408,7 @@ pub(crate) async fn spawn_session_actor(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
     });
+    session.reconcile_notification_payloads().await;
     session.recover_pending_rewind().await.map_err(|error| {
         agent::AgentBuildError::IoError(std::io::Error::other(format!(
             "failed to recover pending rewind transaction: {error}"
