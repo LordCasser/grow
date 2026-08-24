@@ -25,6 +25,9 @@ pub struct ContextRecallOutput {
     pub text: String,
     pub frozen_surface_revision: u64,
     pub context_window: u64,
+    /// Frozen upper bound for the complete ToolResult, including its wrapper.
+    /// The chat-state actor rechecks the actual item against this coordinate.
+    pub max_result_tokens: u64,
 }
 
 impl ContextRecallInput {

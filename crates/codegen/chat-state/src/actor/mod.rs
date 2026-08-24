@@ -569,7 +569,8 @@ impl ChatStateActor {
                             last_seq: event.seq.get(),
                         },
                         surface_revision: self.state.timeline.surface_revision(),
-                        need_surface_ids: self.state.timeline.surface_ids().to_vec(),
+                        surface: self.state.timeline.surface().to_vec(),
+                        surface_ids: self.state.timeline.surface_ids().to_vec(),
                         transcript,
                         transcript_ids,
                         unloaded_surface_ids: self

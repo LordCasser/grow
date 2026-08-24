@@ -80,8 +80,11 @@ pub struct TimelineMaterialization {
 pub struct RecallMaterialization {
     pub source_ref: TimelineRangeRef,
     pub surface_revision: u64,
-    /// Current model-visible coordinates that explain why recall is needed.
-    pub need_surface_ids: Vec<crate::SurfaceId>,
+    /// Current model-visible projection from which the caller derives a
+    /// bounded need context. Keeping values and identities in this one actor
+    /// snapshot prevents a shell-side read/read race.
+    pub surface: Vec<ConversationItem>,
+    pub surface_ids: Vec<crate::SurfaceId>,
     /// Uncompressed transcript for the selected rewind branch.
     pub transcript: Vec<ConversationItem>,
     pub transcript_ids: Vec<crate::SurfaceId>,
@@ -426,6 +429,11 @@ impl SidebandTimeline {
             .completed_compaction_unloaded_branch_ids()
             .into_iter()
             .collect::<BTreeSet<_>>();
+        let live = frozen
+            .surface_ids()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
         let readable = branch_ids
             .intersection(&unloaded)
             .copied()
@@ -436,7 +444,10 @@ impl SidebandTimeline {
             _ => None,
         }) {
             if manifest.source_revision != Some(frozen.surface_revision())
-                || manifest.context_surface_ids != frozen.surface_ids()
+                || manifest
+                    .context_surface_ids
+                    .iter()
+                    .any(|id| !live.contains(id))
                 || manifest
                     .selected_surface_ids
                     .iter()
@@ -999,6 +1010,7 @@ mod tests {
                 }),
             }))
             .unwrap();
+        let control_context_id = *parent.surface_ids().last().unwrap();
         let source_ref = TimelineRangeRef {
             timeline_id: "parent".into(),
             first_seq: 0,
@@ -1034,7 +1046,7 @@ mod tests {
                     strategy: "hybrid-causal-units".into(),
                     strategy_version: 1,
                     source_revision: Some(parent.surface_revision()),
-                    context_surface_ids: parent.surface_ids().to_vec(),
+                    context_surface_ids: vec![control_context_id],
                     selected_surface_ids: Vec::new(),
                     materialized_input_tokens: 8,
                     max_output_tokens: Some(8),

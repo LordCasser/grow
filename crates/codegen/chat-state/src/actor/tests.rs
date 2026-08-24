@@ -503,7 +503,11 @@ async fn partial_compaction_preserves_unselected_surface_identity() {
         branch.unloaded_surface_ids,
         before.surface_ids[2..=3].to_vec()
     );
-    assert_eq!(branch.need_surface_ids, after.surface_ids);
+    assert_eq!(
+        serde_json::to_value(&branch.surface).unwrap(),
+        serde_json::to_value(&after.surface).unwrap()
+    );
+    assert_eq!(branch.surface_ids, after.surface_ids);
 }
 
 #[tokio::test]

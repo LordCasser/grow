@@ -2948,9 +2948,11 @@ impl SessionActor {
                 .await;
         }
         let context_recall_coordinates = match &result.output {
-            ToolsToolOutput::ContextRecall(output) => {
-                Some((output.frozen_surface_revision, output.context_window))
-            }
+            ToolsToolOutput::ContextRecall(output) => Some((
+                output.frozen_surface_revision,
+                output.context_window,
+                output.max_result_tokens,
+            )),
             _ => None,
         };
         let mut prompt_text = if concatenated_json_count > 0 {
@@ -3029,13 +3031,15 @@ impl SessionActor {
                 inline_images,
             )
         };
-        if let Some((expected_surface_revision, context_window)) = context_recall_coordinates {
+        if let Some((expected_surface_revision, context_window, max_result_tokens)) =
+            context_recall_coordinates
+        {
             let rejection_item = ConversationItem::tool_result(
                 call_id.to_string(),
                 "Context recall was not inserted because the active context changed or no longer has safe headroom. Re-run context_recall if the evidence is still needed.",
             );
-            let (max_context_tokens, max_result_tokens) =
-                crate::session::context_recall::context_recall_admission_limits(context_window);
+            let max_context_tokens =
+                crate::session::context_recall::context_recall_max_context_tokens(context_window);
             let outcome = self
                 .chat_state_handle
                 .push_tool_result_conditionally(
