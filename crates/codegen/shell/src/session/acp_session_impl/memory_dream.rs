@@ -324,6 +324,7 @@ impl SessionActor {
                 chat_state::SidebandPurpose::MemoryDream,
                 user_message.to_owned(),
                 SidebandSource::None,
+                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -504,6 +505,7 @@ impl SessionActor {
                     chat_state::SidebandPurpose::MemoryFlush,
                     sideband_prompt,
                     SidebandSource::Frozen(vec![input_ref]),
+                    chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                     chat_state::SidebandRoute {
                         model,
                         backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -831,6 +833,7 @@ impl SessionActor {
                 chat_state::SidebandPurpose::MemoryRewrite,
                 sideband_prompt,
                 SidebandSource::None,
+                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),

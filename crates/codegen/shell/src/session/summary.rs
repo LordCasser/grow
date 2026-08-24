@@ -65,6 +65,7 @@ impl SessionActor {
                 chat_state::SidebandPurpose::SessionTitle,
                 session_title::SESSION_TITLE_PROMPT.into(),
                 SidebandSource::Frozen(vec![input_ref]),
+                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: route.model.clone(),
                     backend: sideband_backend(route.client.api_backend()).into(),

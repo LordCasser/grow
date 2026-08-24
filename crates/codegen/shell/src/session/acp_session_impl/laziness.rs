@@ -616,6 +616,7 @@ impl SessionActor {
                 chat_state::SidebandPurpose::LazinessJudgment,
                 format!("{LAZINESS_CLASSIFIER_PROMPT}\n\n{LAZINESS_USER_PREAMBLE}{runtime_state}"),
                 SidebandSource::Frozen(vec![input_ref]),
+                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: model_id.clone(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),

@@ -218,6 +218,13 @@ impl SessionActor {
                 chat_state::SidebandPurpose::ContextRecall,
                 sideband_prompt,
                 SidebandSource::Frozen(vec![materialized.source_ref]),
+                chat_state::SidebandBudgetPolicy {
+                    max_attempts: MAX_RECALL_SYNTHESIS_ATTEMPTS as u32,
+                    max_input_tokens_per_attempt: context_window
+                        .saturating_sub(u64::from(output_budget))
+                        .saturating_sub(context_recall_provider_reserve(context_window)),
+                    max_output_tokens_per_attempt: Some(u64::from(output_budget)),
+                },
                 chat_state::SidebandRoute {
                     model: sampling_config.model.clone(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),

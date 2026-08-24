@@ -521,6 +521,11 @@ async fn timeline_round_trip_folds_the_current_surface() {
             purpose: chat_state::SidebandPurpose::CompactionSummary,
             prompt: "summarize".into(),
             source_refs: vec![input_ref.clone()],
+            budget_policy: chat_state::SidebandBudgetPolicy {
+                max_attempts: 1,
+                max_input_tokens_per_attempt: 1,
+                max_output_tokens_per_attempt: Some(1),
+            },
             route: chat_state::SidebandRoute {
                 model: "test-model".into(),
                 backend: "responses".into(),
@@ -690,6 +695,11 @@ async fn sideband_writer_rejects_symlinked_directory_roots() {
                 purpose: chat_state::SidebandPurpose::PermissionJudgment,
                 prompt: "judge".into(),
                 source_refs: Vec::new(),
+                budget_policy: chat_state::SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 1,
+                    max_output_tokens_per_attempt: None,
+                },
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
                     backend: "responses".into(),
@@ -3280,6 +3290,11 @@ async fn durable_sideband_append_is_sequence_aware_and_idempotent() {
                 purpose: chat_state::SidebandPurpose::PermissionJudgment,
                 prompt: "summarize".into(),
                 source_refs: Vec::new(),
+                budget_policy: chat_state::SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 1,
+                    max_output_tokens_per_attempt: None,
+                },
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
                     backend: "responses".into(),
@@ -3338,6 +3353,11 @@ async fn session_load_closes_an_interrupted_sideband_once() {
                 purpose: chat_state::SidebandPurpose::PermissionJudgment,
                 prompt: "judge".into(),
                 source_refs: Vec::new(),
+                budget_policy: chat_state::SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 1,
+                    max_output_tokens_per_attempt: None,
+                },
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
                     backend: "responses".into(),

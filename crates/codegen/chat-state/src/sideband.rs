@@ -7,10 +7,10 @@
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sampling_types::ConversationItem;
+use sampling_types::{ConversationItem, ConversationRequest};
 use serde::{Deserialize, Serialize};
 
-pub const SIDEBAND_SCHEMA_VERSION: u8 = 4;
+pub const SIDEBAND_SCHEMA_VERSION: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -133,6 +133,31 @@ pub struct SidebandRoute {
     pub backend: String,
 }
 
+/// Cross-attempt admission envelope frozen by request seq 0.
+///
+/// An attempt may use less, but never more. Together with `max_attempts`, the
+/// per-attempt bounds prevent retry/refinement code from silently expanding
+/// the request after the transaction has been admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SidebandBudgetPolicy {
+    pub max_attempts: u32,
+    pub max_input_tokens_per_attempt: u64,
+    /// `None` freezes the route/provider default and requires every attempt to
+    /// leave `max_output_tokens` unset too.
+    pub max_output_tokens_per_attempt: Option<u64>,
+}
+
+impl SidebandBudgetPolicy {
+    pub fn for_request(request: &ConversationRequest, max_attempts: u32) -> Self {
+        Self {
+            max_attempts,
+            max_input_tokens_per_attempt: crate::estimate_request_input_tokens(request),
+            max_output_tokens_per_attempt: request.max_output_tokens.map(u64::from),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SidebandRequest {
@@ -142,6 +167,7 @@ pub struct SidebandRequest {
     pub prompt: String,
     /// Frozen upper bound on every Timeline range that any attempt may read.
     pub source_refs: Vec<TimelineRangeRef>,
+    pub budget_policy: SidebandBudgetPolicy,
     pub route: SidebandRoute,
     pub initiator_ref: String,
     pub executor: String,
@@ -270,10 +296,14 @@ pub enum SidebandError {
     InvalidRequestBoundary,
     #[error("sideband request route and executor must be non-empty")]
     IncompleteRequest,
+    #[error("sideband request budget policy is invalid")]
+    InvalidBudgetPolicy,
     #[error("sideband attempt input is not covered by the request source refs")]
     InputOutsideSource,
     #[error("sideband attempt assembly manifest is invalid")]
     InvalidAssemblyManifest,
+    #[error("sideband attempt exceeds the frozen request budget policy")]
+    AttemptBudgetExceeded,
     #[error("sideband attempt selected Surface ids are not canonical or covered by input refs")]
     InvalidSurfaceSelection,
     #[error("sideband attempt requires an open request")]
@@ -489,6 +519,12 @@ impl SidebandTimeline {
                 {
                     return Err(SidebandError::IncompleteRequest);
                 }
+                if request.budget_policy.max_attempts == 0
+                    || request.budget_policy.max_input_tokens_per_attempt == 0
+                    || request.budget_policy.max_output_tokens_per_attempt == Some(0)
+                {
+                    return Err(SidebandError::InvalidBudgetPolicy);
+                }
                 for source_ref in &request.source_refs {
                     source_ref.validate()?;
                 }
@@ -510,6 +546,21 @@ impl SidebandTimeline {
                         expected,
                         actual: attempt.attempt_no,
                     });
+                }
+                let output_within_policy = match (
+                    request.budget_policy.max_output_tokens_per_attempt,
+                    attempt.assembly_manifest.max_output_tokens,
+                ) {
+                    (None, None) => true,
+                    (Some(maximum), Some(actual)) => actual <= maximum,
+                    (None, Some(_)) | (Some(_), None) => false,
+                };
+                if attempt.attempt_no > request.budget_policy.max_attempts
+                    || attempt.assembly_manifest.materialized_input_tokens
+                        > request.budget_policy.max_input_tokens_per_attempt
+                    || !output_within_policy
+                {
+                    return Err(SidebandError::AttemptBudgetExceeded);
                 }
                 for input_ref in &attempt.input_refs {
                     input_ref.validate()?;
@@ -697,6 +748,11 @@ mod tests {
                 first_seq: 0,
                 last_seq: 4,
             }],
+            budget_policy: SidebandBudgetPolicy {
+                max_attempts: 2,
+                max_input_tokens_per_attempt: 32,
+                max_output_tokens_per_attempt: Some(16),
+            },
             route: SidebandRoute {
                 model: "test-model".into(),
                 backend: "responses".into(),
@@ -704,6 +760,27 @@ mod tests {
             initiator_ref: "t:parent/5".into(),
             executor: "main".into(),
             output_schema: Some(serde_json::json!({"type": "object"})),
+        }
+    }
+
+    fn attempt(
+        attempt_no: u32,
+        materialized_input_tokens: u64,
+        max_output_tokens: Option<u64>,
+    ) -> SidebandAttempt {
+        SidebandAttempt {
+            attempt_no,
+            input_refs: request().source_refs,
+            assembly_manifest: SidebandAssemblyManifest {
+                strategy: "all-sources".into(),
+                strategy_version: 1,
+                source_revision: None,
+                context_surface_ids: Vec::new(),
+                selected_surface_ids: Vec::new(),
+                materialized_input_tokens,
+                max_output_tokens,
+            },
+            feedback: None,
         }
     }
 
@@ -824,14 +901,102 @@ mod tests {
         let mut event = timeline
             .prepare(SidebandEventKind::Request(request()))
             .unwrap();
-        event.version = 2;
+        let previous_version = SIDEBAND_SCHEMA_VERSION - 1;
+        event.version = previous_version;
 
         assert!(matches!(
             SidebandTimeline::from_events(vec![event]),
             Err(SidebandError::UnsupportedVersion {
                 expected: SIDEBAND_SCHEMA_VERSION,
-                actual: 2,
-            })
+                actual,
+            }) if actual == previous_version
+        ));
+    }
+
+    #[test]
+    fn request_rejects_an_empty_budget_policy() {
+        for budget_policy in [
+            SidebandBudgetPolicy {
+                max_attempts: 0,
+                max_input_tokens_per_attempt: 32,
+                max_output_tokens_per_attempt: Some(16),
+            },
+            SidebandBudgetPolicy {
+                max_attempts: 1,
+                max_input_tokens_per_attempt: 0,
+                max_output_tokens_per_attempt: Some(16),
+            },
+            SidebandBudgetPolicy {
+                max_attempts: 1,
+                max_input_tokens_per_attempt: 32,
+                max_output_tokens_per_attempt: Some(0),
+            },
+        ] {
+            let id = uuid::Uuid::now_v7().to_string();
+            let timeline = SidebandTimeline::new(id).unwrap();
+            let mut invalid = request();
+            invalid.budget_policy = budget_policy;
+            assert!(matches!(
+                timeline.prepare(SidebandEventKind::Request(invalid)),
+                Err(SidebandError::InvalidBudgetPolicy)
+            ));
+        }
+    }
+
+    #[test]
+    fn every_attempt_is_bounded_by_the_frozen_request_policy() {
+        let new_timeline = |budget_policy| {
+            let id = uuid::Uuid::now_v7().to_string();
+            let mut timeline = SidebandTimeline::new(id).unwrap();
+            let mut bounded = request();
+            bounded.budget_policy = budget_policy;
+            let event = timeline
+                .prepare(SidebandEventKind::Request(bounded))
+                .unwrap();
+            timeline.accept(event).unwrap();
+            timeline
+        };
+        let policy = SidebandBudgetPolicy {
+            max_attempts: 1,
+            max_input_tokens_per_attempt: 32,
+            max_output_tokens_per_attempt: Some(16),
+        };
+
+        let mut exhausted = new_timeline(policy);
+        let first = exhausted
+            .prepare(SidebandEventKind::Attempt(attempt(1, 32, Some(16))))
+            .unwrap();
+        exhausted.accept(first).unwrap();
+        assert!(matches!(
+            exhausted.prepare(SidebandEventKind::Attempt(attempt(2, 1, Some(1)))),
+            Err(SidebandError::AttemptBudgetExceeded)
+        ));
+
+        let oversized_input = new_timeline(policy);
+        assert!(matches!(
+            oversized_input.prepare(SidebandEventKind::Attempt(attempt(1, 33, Some(16)))),
+            Err(SidebandError::AttemptBudgetExceeded)
+        ));
+
+        let oversized_output = new_timeline(policy);
+        assert!(matches!(
+            oversized_output.prepare(SidebandEventKind::Attempt(attempt(1, 32, Some(17)))),
+            Err(SidebandError::AttemptBudgetExceeded)
+        ));
+
+        let missing_output_cap = new_timeline(policy);
+        assert!(matches!(
+            missing_output_cap.prepare(SidebandEventKind::Attempt(attempt(1, 32, None))),
+            Err(SidebandError::AttemptBudgetExceeded)
+        ));
+
+        let provider_default = new_timeline(SidebandBudgetPolicy {
+            max_output_tokens_per_attempt: None,
+            ..policy
+        });
+        assert!(matches!(
+            provider_default.prepare(SidebandEventKind::Attempt(attempt(1, 32, Some(16)))),
+            Err(SidebandError::AttemptBudgetExceeded)
         ));
     }
 
@@ -957,6 +1122,11 @@ mod tests {
                 purpose: SidebandPurpose::ContextRecall,
                 prompt: "recall a decision".into(),
                 source_refs: vec![source_ref.clone()],
+                budget_policy: SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 8,
+                    max_output_tokens_per_attempt: Some(8),
+                },
                 route: SidebandRoute {
                     model: "test-model".into(),
                     backend: "responses".into(),
@@ -1031,6 +1201,11 @@ mod tests {
                 purpose: SidebandPurpose::ContextRecall,
                 prompt: "recall a decision".into(),
                 source_refs: vec![source_ref],
+                budget_policy: SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 8,
+                    max_output_tokens_per_attempt: Some(8),
+                },
                 route: SidebandRoute {
                     model: "test-model".into(),
                     backend: "responses".into(),

@@ -55,9 +55,10 @@ pub use persistence::{
 };
 pub use sideband::{
     RecallMaterialization, SIDEBAND_SCHEMA_VERSION, SidebandAssemblyManifest, SidebandAttempt,
-    SidebandEnd, SidebandError, SidebandEvent, SidebandEventKind, SidebandOutcome, SidebandPurpose,
-    SidebandRequest, SidebandResult, SidebandRoute, SidebandSpawnEvent, SidebandTimeline,
-    SidebandUsage, TimelineMaterialization, TimelineRangeRef, validate_sideband_id,
+    SidebandBudgetPolicy, SidebandEnd, SidebandError, SidebandEvent, SidebandEventKind,
+    SidebandOutcome, SidebandPurpose, SidebandRequest, SidebandResult, SidebandRoute,
+    SidebandSpawnEvent, SidebandTimeline, SidebandUsage, TimelineMaterialization, TimelineRangeRef,
+    validate_sideband_id,
 };
 pub use timeline::{
     ActiveControlContext, CompactionEvent, ControlContext, ControlContextActivation,

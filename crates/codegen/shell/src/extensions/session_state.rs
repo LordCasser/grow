@@ -691,6 +691,11 @@ mod tests {
                 purpose: chat_state::SidebandPurpose::PermissionJudgment,
                 prompt: "judge".into(),
                 source_refs: Vec::new(),
+                budget_policy: chat_state::SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 1,
+                    max_output_tokens_per_attempt: Some(1),
+                },
                 route: chat_state::SidebandRoute {
                     model: "test-model".into(),
                     backend: "responses".into(),

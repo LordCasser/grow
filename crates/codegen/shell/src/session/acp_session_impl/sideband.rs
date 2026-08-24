@@ -39,6 +39,7 @@ impl SessionActor {
         purpose: chat_state::SidebandPurpose,
         prompt: String,
         source: SidebandSource,
+        budget_policy: chat_state::SidebandBudgetPolicy,
         route: chat_state::SidebandRoute,
         output_schema: Option<serde_json::Value>,
     ) -> Result<SidebandRun, SidebandRunError> {
@@ -64,6 +65,7 @@ impl SessionActor {
                 purpose,
                 prompt,
                 source_refs,
+                budget_policy,
                 route,
                 initiator_ref: format!(
                     "t:{}/sideband:{}",
@@ -353,6 +355,11 @@ mod tests {
                     purpose: chat_state::SidebandPurpose::PermissionJudgment,
                     prompt: "judge".into(),
                     source_refs: Vec::new(),
+                    budget_policy: chat_state::SidebandBudgetPolicy {
+                        max_attempts: 2,
+                        max_input_tokens_per_attempt: 32,
+                        max_output_tokens_per_attempt: None,
+                    },
                     route: chat_state::SidebandRoute {
                         model: "test-model".into(),
                         backend: "responses".into(),

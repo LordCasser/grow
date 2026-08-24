@@ -187,14 +187,34 @@ fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleE
 }
 
 fn sideband_error_to_sample_error(error: SidebandRunError) -> CompactionSampleError {
-    let message = error.to_string();
     match error {
-        SidebandRunError::Invalid(_) => CompactionSampleError::Deterministic(message),
-        SidebandRunError::Parent(_)
-        | SidebandRunError::Persistence(_)
-        | SidebandRunError::InterruptedAppendRecovered => {
-            CompactionSampleError::Transient(message)
+        SidebandRunError::Invalid(chat_state::SidebandError::AttemptBudgetExceeded) => {
+            CompactionSampleError::Deterministic(
+                "compaction current message exceeds budget: sideband admission rejected it".into(),
+            )
         }
+        SidebandRunError::Invalid(error) => CompactionSampleError::Deterministic(error.to_string()),
+        error @ (SidebandRunError::Parent(_)
+        | SidebandRunError::Persistence(_)
+        | SidebandRunError::InterruptedAppendRecovered) => {
+            CompactionSampleError::Transient(error.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sideband_budget_rejection_drives_the_compaction_input_ladder() {
+        let error = sideband_error_to_sample_error(SidebandRunError::Invalid(
+            chat_state::SidebandError::AttemptBudgetExceeded,
+        ));
+        let CompactionSampleError::Deterministic(message) = error else {
+            panic!("budget admission must be a deterministic compaction failure")
+        };
+        assert!(compaction::is_context_length_error(&message));
     }
 }
 

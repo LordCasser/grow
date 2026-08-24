@@ -389,6 +389,7 @@ impl SessionActor {
                         chat_state::SidebandPurpose::ImageDescription,
                         prompt_text,
                         SidebandSource::Frozen(vec![input_ref.clone()]),
+                        chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                         chat_state::SidebandRoute {
                             model: model.clone(),
                             backend: sideband_backend(client.api_backend()).into(),
@@ -1173,6 +1174,18 @@ impl SessionActor {
                         tokio::time::timeout_at(judgment_deadline, setup)
                             .await
                             .map_err(|_| workspace::permission::ClassifierFailure::Timeout)??;
+                    let mut maximum_attempt_items = items.clone();
+                    maximum_attempt_items.push(ConversationItem::user(
+                        PERMISSION_JUDGMENT_RETRY_MESSAGE,
+                    ));
+                    let budget_policy = chat_state::SidebandBudgetPolicy {
+                        max_attempts: PERMISSION_JUDGMENT_MAX_ATTEMPTS as u32,
+                        max_input_tokens_per_attempt:
+                            chat_state::estimate_conversation_tokens(&maximum_attempt_items),
+                        max_output_tokens_per_attempt: Some(u64::from(
+                            PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS,
+                        )),
+                    };
                     let mut sideband = session
                         .begin_sideband(
                             chat_state::SidebandPurpose::PermissionJudgment,
@@ -1182,6 +1195,7 @@ impl SessionActor {
                             } else {
                                 SidebandSource::Frozen(input_refs)
                             },
+                            budget_policy,
                             chat_state::SidebandRoute {
                                 model: model.clone(),
                                 backend: sideband_backend(sampling_client.api_backend()).into(),

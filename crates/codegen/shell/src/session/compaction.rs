@@ -690,6 +690,11 @@ impl SessionActor {
                 crate::session::sideband::SidebandSource::Frozen(vec![
                     compaction_input_ref.clone(),
                 ]),
+                chat_state::SidebandBudgetPolicy {
+                    max_attempts: max_retries.saturating_mul(3),
+                    max_input_tokens_per_attempt: context_window,
+                    max_output_tokens_per_attempt: None,
+                },
                 chat_state::SidebandRoute {
                     model: sampling_config.model.clone(),
                     backend: crate::session::sideband::sideband_backend(

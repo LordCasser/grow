@@ -1940,6 +1940,11 @@ mod tests {
                 purpose: chat_state::SidebandPurpose::ContextRecall,
                 prompt: byte.to_string().repeat(10_000),
                 source_refs: Vec::new(),
+                budget_policy: chat_state::SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 1,
+                    max_output_tokens_per_attempt: None,
+                },
                 route: chat_state::SidebandRoute {
                     model: "model".into(),
                     backend: "backend".into(),
@@ -2521,6 +2526,11 @@ mod tests {
                     first_seq: 0,
                     last_seq: 0,
                 }],
+                budget_policy: chat_state::SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 1,
+                    max_output_tokens_per_attempt: Some(1),
+                },
                 route: chat_state::SidebandRoute {
                     model: "model".into(),
                     backend: "responses".into(),

@@ -134,6 +134,7 @@ impl SessionActor {
                 chat_state::SidebandPurpose::SideQuestion,
                 wrapped_question,
                 SidebandSource::Frozen(vec![input_ref]),
+                chat_state::SidebandBudgetPolicy::for_request(&base_request, 3),
                 chat_state::SidebandRoute {
                     model: model.clone(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -333,6 +334,7 @@ impl SessionActor {
                 chat_state::SidebandPurpose::SessionRecap,
                 session_recap::recap_instruction(tag),
                 SidebandSource::Frozen(vec![input_ref]),
+                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: model.clone(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -548,6 +550,7 @@ impl SessionActor {
                 chat_state::SidebandPurpose::PromptSuggestion,
                 sideband_prompt,
                 SidebandSource::None,
+                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
@@ -725,6 +728,7 @@ impl SessionActor {
                 chat_state::SidebandPurpose::PromptSuggestion,
                 format!("{}\n\nCWD: {cwd}", prompt_suggest::SUGGEST_PROMPT_SYSTEM),
                 SidebandSource::Frozen(vec![input_ref]),
+                chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                 chat_state::SidebandRoute {
                     model: request.model.clone().unwrap_or_default(),
                     backend: sideband_backend(sampling_client.api_backend()).into(),
