@@ -441,6 +441,10 @@ pub(crate) struct SessionActor {
     /// `session_dir` is only a display label; all session-contained I/O must
     /// descend from this capability.
     pub(crate) session_directory: std::sync::Arc<crate::session::storage::ContainedDirectory>,
+    /// Serializes notification artifact writes, Timeline admission/resolution,
+    /// and post-commit reclamation so a same-content receipt cannot race an
+    /// in-flight content-addressed payload deletion.
+    pub(crate) notification_artifact_gate: TokioMutex<()>,
     /// ACP method selected for this BYOK-only session.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     /// Memoized per-model auth state, read through

@@ -308,14 +308,11 @@ impl SessionActor {
         let mut input = sampling_types::ConversationItem::notification_drain(body);
         input.set_prompt_index(self.chat_state_handle.get_prompt_index().await);
         if let Err(error) = self
-            .chat_state_handle
-            .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
-                chat_state::NotificationEvent::Consumed {
-                    notification_ids,
-                    turn,
-                    input: Some(input),
-                },
-            ))
+            .record_notification_resolution_durably(chat_state::NotificationEvent::Consumed {
+                notification_ids,
+                turn,
+                input: Some(input),
+            })
             .await
         {
             tracing::error!(task_ids = ?ids, %error, "failed to consume deferred completion receipts");

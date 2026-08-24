@@ -64,6 +64,19 @@ fn record_tool_span_outcome(
     success
 }
 
+/// A terminal Task failure is still the unique delivery surface for its
+/// durable completion receipt. The tool carries this internal correlation in
+/// error metadata so the failed tool_result can acknowledge the receipt after
+/// it is committed, without changing the model-visible failure semantics.
+fn consumed_completion_id_from_tool_error(error: &tool_runtime::ToolError) -> Option<&str> {
+    error
+        .details
+        .as_ref()?
+        .get("consumed_completion_task_id")?
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+}
+
 fn undispatched_tool_outcome(action: &ToolLoop) -> &'static str {
     match action {
         ToolLoop::Continue => "not_dispatched",
@@ -1393,6 +1406,8 @@ impl SessionActor {
                     ToolLoop::Continue
                 }
                 Err(err) => {
+                    let consumed_completion_id =
+                        consumed_completion_id_from_tool_error(&err).map(str::to_owned);
                     let err: anyhow::Error = err.into();
                     let err_followups = self
                         .handle_tool_error(
@@ -1405,6 +1420,13 @@ impl SessionActor {
                         )
                         .await;
                     deferred_followups.extend(err_followups);
+                    if let Some(consumed_completion_id) = consumed_completion_id.as_deref() {
+                        let consumed_ids = [consumed_completion_id];
+                        self.completion_delivery.consume(&consumed_ids);
+                        self.drop_pending_items_for_consumed_completions(&consumed_ids)
+                            .await;
+                        self.acknowledge_consumed_notifications(&consumed_ids).await;
+                    }
                     post_tool_use_failure = Some(format!("{err:#}"));
                     ToolLoop::Continue
                 }
@@ -3091,14 +3113,11 @@ impl SessionActor {
             return;
         }
         if let Err(error) = self
-            .chat_state_handle
-            .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
-                chat_state::NotificationEvent::Consumed {
-                    notification_ids,
-                    turn,
-                    input: None,
-                },
-            ))
+            .record_notification_resolution_durably(chat_state::NotificationEvent::Consumed {
+                notification_ids,
+                turn,
+                input: None,
+            })
             .await
         {
             tracing::error!(%error, "failed to acknowledge tool-consumed notifications");
@@ -3764,7 +3783,10 @@ fn execute_tool_call_parts(
 }
 #[cfg(test)]
 mod tool_call_pipeline_tests {
-    use super::{ToolLoop, execute_tool_call_parts, undispatched_tool_outcome};
+    use super::{
+        ToolLoop, consumed_completion_id_from_tool_error, execute_tool_call_parts,
+        undispatched_tool_outcome,
+    };
     use std::path::Path;
 
     #[test]
@@ -3789,6 +3811,19 @@ mod tool_call_pipeline_tests {
                 hook_name: "guard".into(),
             }),
             "hook_denied"
+        );
+    }
+
+    #[test]
+    fn terminal_task_failure_carries_its_receipt_identity() {
+        let error =
+            tool_runtime::ToolError::new(tool_runtime::ToolErrorKind::Execution, "child failed")
+                .with_details(serde_json::json!({
+                    "consumed_completion_task_id": "goal-child",
+                }));
+        assert_eq!(
+            consumed_completion_id_from_tool_error(&error),
+            Some("goal-child")
         );
     }
 

@@ -2222,6 +2222,7 @@ pub(crate) async fn spawn_session_actor(
         session_info: session_info.clone(),
         session_dir: session_dir.clone(),
         session_directory: session_directory.clone(),
+        notification_artifact_gate: TokioMutex::new(()),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
         state,

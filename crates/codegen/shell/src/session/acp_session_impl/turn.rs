@@ -760,14 +760,13 @@ impl SessionActor {
                 });
                 match turn {
                     Ok(turn) => self
-                        .chat_state_handle
-                        .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
+                        .record_notification_resolution_durably(
                             chat_state::NotificationEvent::Consumed {
                                 notification_ids: notification_ids.clone(),
                                 turn,
                                 input: Some(user_chat),
                             },
-                        ))
+                        )
                         .await
                         .map(|_| ()),
                     Err(error) => Err(error),

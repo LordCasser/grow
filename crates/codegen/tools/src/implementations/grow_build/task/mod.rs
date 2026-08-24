@@ -496,11 +496,15 @@ impl tool_runtime::Tool for TaskTool {
                 worktree_path: result.worktree_path,
             }))
         } else {
-            Err(tool_runtime::ToolError::invalid_arguments(
+            Err(tool_runtime::ToolError::new(
+                tool_runtime::ToolErrorKind::Execution,
                 result
                     .error
                     .unwrap_or_else(|| "Unknown subagent error".to_string()),
-            ))
+            )
+            .with_details(serde_json::json!({
+                "consumed_completion_task_id": id,
+            })))
         }
     }
 }
@@ -877,16 +881,25 @@ mod tests {
                 resume_from: None,
                 cwd: None,
                 model: None,
-                task_id: None,
+                task_id: Some("failed-task".into()),
             },
         )
         .await;
 
         handle.await.unwrap();
 
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Child session crashed"), "error: {err}");
+        let err = result.expect_err("failed child must fail the Task tool call");
+        assert_eq!(err.kind, tool_runtime::ToolErrorKind::Execution);
+        assert!(
+            err.to_string().contains("Child session crashed"),
+            "error: {err}"
+        );
+        assert_eq!(
+            err.details
+                .as_ref()
+                .and_then(|details| details["consumed_completion_task_id"].as_str()),
+            Some("failed-task")
+        );
     }
 
     #[tokio::test]

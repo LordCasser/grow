@@ -3,12 +3,100 @@
 use super::*;
 
 impl SessionActor {
+    /// Remove payload artifacts only after their resolving Timeline fact is
+    /// durable, and only when no remaining receipt references the same
+    /// content-addressed blob.
+    async fn cleanup_notification_payloads(
+        &self,
+        mut candidates: Vec<chat_state::NotificationPayloadRef>,
+    ) {
+        if candidates.is_empty() {
+            return;
+        }
+        let Some(pending) = self.chat_state_handle.pending_notifications().await else {
+            tracing::warn!("notification payload cleanup skipped because Timeline is unavailable");
+            return;
+        };
+        let retained_hashes = pending
+            .into_iter()
+            .map(|notification| notification.payload_ref.blake3)
+            .collect::<std::collections::BTreeSet<_>>();
+        candidates.retain(|payload| !retained_hashes.contains(&payload.blake3));
+        candidates.sort_by(|left, right| left.blake3.cmp(&right.blake3));
+        candidates.dedup_by(|left, right| left.blake3 == right.blake3);
+        if candidates.is_empty() {
+            return;
+        }
+        let directory = match self.session_directory.try_clone() {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(%error, "notification payload cleanup directory unavailable");
+                return;
+            }
+        };
+        match tokio::task::spawn_blocking(move || {
+            for payload in candidates {
+                crate::session::notification_inbox::remove_payload(&directory, &payload)?;
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "notification payload cleanup failed"),
+            Err(error) => tracing::warn!(%error, "notification payload cleanup task failed"),
+        }
+    }
+
+    /// Commit a receipt resolution and reclaim its shell-owned payloads. The
+    /// Timeline remains the sole delivery state; artifact deletion is a
+    /// post-commit garbage-collection side effect.
+    pub(super) async fn record_notification_resolution_durably(
+        &self,
+        resolution: chat_state::NotificationEvent,
+    ) -> Result<chat_state::TimelineEvent, chat_state::TimelineWriteError> {
+        let _artifact_guard = self.notification_artifact_gate.lock().await;
+        let notification_ids = match &resolution {
+            chat_state::NotificationEvent::Consumed {
+                notification_ids, ..
+            }
+            | chat_state::NotificationEvent::Dismissed {
+                notification_ids, ..
+            } => notification_ids,
+            chat_state::NotificationEvent::Received { .. } => {
+                return Err(chat_state::TimelineWriteError::Invalid(
+                    chat_state::TimelineError::InvalidNotification,
+                ));
+            }
+        };
+        let notification_ids = notification_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let payloads = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?
+            .into_iter()
+            .filter(|notification| notification_ids.contains(notification.id.as_str()))
+            .map(|notification| notification.payload_ref)
+            .collect::<Vec<_>>();
+        let event = self
+            .chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(resolution))
+            .await?;
+        self.cleanup_notification_payloads(payloads).await;
+        Ok(event)
+    }
+
     pub(super) async fn receive_notification(
         &self,
         source: chat_state::NotificationSource,
         source_version: chat_state::NotificationSourceVersion,
         body: String,
     ) -> Result<String, String> {
+        let _artifact_guard = self.notification_artifact_gate.lock().await;
         let pending_before = self
             .chat_state_handle
             .pending_notifications()
@@ -44,10 +132,6 @@ impl SessionActor {
             .iter()
             .map(|notification| notification.id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        let retained_hashes = pending_after
-            .iter()
-            .map(|notification| notification.payload_ref.blake3.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
         let mut superseded = pending_before
             .iter()
             .filter(|notification| !retained_ids.contains(notification.id.as_str()))
@@ -60,31 +144,7 @@ impl SessionActor {
         {
             superseded.push(received_payload);
         }
-        superseded.retain(|payload| !retained_hashes.contains(payload.blake3.as_str()));
-        superseded.sort_by(|left, right| left.blake3.cmp(&right.blake3));
-        superseded.dedup_by(|left, right| left.blake3 == right.blake3);
-        if !superseded.is_empty() {
-            let directory = self
-                .session_directory
-                .try_clone()
-                .map_err(|error| error.to_string())?;
-            match tokio::task::spawn_blocking(move || {
-                for payload in superseded {
-                    crate::session::notification_inbox::remove_payload(&directory, &payload)?;
-                }
-                Ok::<_, std::io::Error>(())
-            })
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "superseded notification payload cleanup failed")
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "superseded notification payload cleanup task failed")
-                }
-            }
-        }
+        self.cleanup_notification_payloads(superseded).await;
         match event.kind {
             chat_state::TimelineEventKind::Notification(
                 chat_state::NotificationEvent::Received { id, .. },
@@ -325,14 +385,11 @@ impl SessionActor {
         let mut input = sampling_types::ConversationItem::notification_drain(body);
         input.set_prompt_index(self.chat_state_handle.get_prompt_index().await);
         if let Err(error) = self
-            .chat_state_handle
-            .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
-                chat_state::NotificationEvent::Consumed {
-                    notification_ids,
-                    turn,
-                    input: Some(input),
-                },
-            ))
+            .record_notification_resolution_durably(chat_state::NotificationEvent::Consumed {
+                notification_ids,
+                turn,
+                input: Some(input),
+            })
             .await
         {
             tracing::error!(%error, "failed to consume active notifications");
@@ -388,13 +445,10 @@ impl SessionActor {
                 .map(|notification| notification.id.clone())
                 .collect::<Vec<_>>();
             if let Err(error) = self
-                .chat_state_handle
-                .record_timeline_event_durably(chat_state::TimelineEventKind::Notification(
-                    chat_state::NotificationEvent::Dismissed {
-                        notification_ids,
-                        reason: chat_state::NotificationDismissReason::GoalOwnedAutostart,
-                    },
-                ))
+                .record_notification_resolution_durably(chat_state::NotificationEvent::Dismissed {
+                    notification_ids,
+                    reason: chat_state::NotificationDismissReason::GoalOwnedAutostart,
+                })
                 .await
             {
                 tracing::error!(%error, "failed to dismiss Goal-owned notification autostart");
@@ -738,15 +792,17 @@ mod tests {
                     )
                     .await
                     .expect("receive monitor notification");
-                assert_eq!(
-                    actor
-                        .chat_state_handle
-                        .pending_notifications()
-                        .await
-                        .expect("pending notifications")
-                        .len(),
-                    1
-                );
+                let pending = actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .expect("pending notifications");
+                assert_eq!(pending.len(), 1);
+                let payload_path = actor
+                    .session_dir
+                    .join("artifacts/notifications")
+                    .join(format!("{}.txt", pending[0].payload_ref.blake3));
+                assert!(payload_path.exists());
 
                 assert!(actor.drain_active_notifications().await);
                 assert!(
@@ -756,6 +812,10 @@ mod tests {
                         .await
                         .expect("pending notifications")
                         .is_empty()
+                );
+                assert!(
+                    !payload_path.exists(),
+                    "durably consumed notification payload must be reclaimed"
                 );
                 let conversation = actor.chat_state_handle.get_conversation().await;
                 let delivered = conversation.last().expect("monitor input materialized");

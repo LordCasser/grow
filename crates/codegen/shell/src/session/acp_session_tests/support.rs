@@ -358,6 +358,7 @@ pub(crate) async fn create_test_actor_ex(
             )
             .expect("pin test session directory"),
         ),
+        notification_artifact_gate: TokioMutex::new(()),
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
         state,

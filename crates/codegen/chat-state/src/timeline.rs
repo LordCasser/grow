@@ -883,9 +883,11 @@ pub struct Timeline {
     surface_revision: u64,
     pending_control_contexts: BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
     pending_notifications: BTreeMap<String, PendingNotification>,
+    received_notification_ids: BTreeSet<String>,
     received_notifications: BTreeMap<(NotificationSource, NotificationSourceVersion), EventSeq>,
     pending_monitor_notifications: BTreeMap<String, VecDeque<String>>,
     terminal_monitors: BTreeSet<String>,
+    subagent_result_recorded: bool,
     lifecycle: LifecycleFold,
 }
 
@@ -2148,6 +2150,9 @@ impl Timeline {
         if let TimelineEventKind::Notification(notification) = &event.kind {
             self.apply_notification(event.seq, notification);
         }
+        if matches!(&event.kind, TimelineEventKind::SubagentResult(_)) {
+            self.subagent_result_recorded = true;
+        }
         self.lifecycle = lifecycle;
         self.events.push(event);
         Ok(())
@@ -2162,6 +2167,7 @@ impl Timeline {
                 source_version,
                 payload_ref,
             } => {
+                self.received_notification_ids.insert(id.clone());
                 self.received_notifications
                     .insert((source.clone(), source_version.clone()), seq);
                 let notification = PendingNotification {
@@ -2234,11 +2240,7 @@ impl Timeline {
     }
 
     fn validate(&self, event: &TimelineEvent) -> Result<LifecycleFold, TimelineError> {
-        if self
-            .events
-            .iter()
-            .any(|event| matches!(event.kind, TimelineEventKind::SubagentResult(_)))
-        {
+        if self.subagent_result_recorded {
             return Err(TimelineError::SubagentTimelineEnded);
         }
         if event.version != TIMELINE_SCHEMA_VERSION {
@@ -2646,15 +2648,7 @@ impl Timeline {
                 {
                     return Err(TimelineError::InvalidNotification);
                 }
-                if self.events.iter().any(|event| {
-                    matches!(
-                        &event.kind,
-                        TimelineEventKind::Notification(NotificationEvent::Received {
-                            id: existing,
-                            ..
-                        }) if existing == id
-                    )
-                }) {
+                if self.received_notification_ids.contains(id) {
                     return Err(TimelineError::InvalidNotification);
                 }
                 if self
@@ -2678,28 +2672,15 @@ impl Timeline {
                 {
                     return Err(TimelineError::InvalidNotification);
                 }
-                let pending = self
-                    .pending_notifications()
-                    .into_iter()
-                    .map(|notification| notification.id)
-                    .collect::<BTreeSet<_>>();
                 let mut unique = BTreeSet::new();
                 for id in notification_ids {
                     if !unique.insert(id) {
                         return Err(TimelineError::InvalidNotification);
                     }
-                    if !self.events.iter().any(|event| {
-                        matches!(
-                            &event.kind,
-                            TimelineEventKind::Notification(NotificationEvent::Received {
-                                id: existing,
-                                ..
-                            }) if existing == id
-                        )
-                    }) {
+                    if !self.received_notification_ids.contains(id) {
                         return Err(TimelineError::NotificationNotFound(id.clone()));
                     }
-                    if !pending.contains(id) {
+                    if !self.pending_notifications.contains_key(id) {
                         return Err(TimelineError::NotificationAlreadyConsumed(id.clone()));
                     }
                 }
@@ -2713,28 +2694,15 @@ impl Timeline {
                 {
                     return Err(TimelineError::InvalidNotification);
                 }
-                let pending = self
-                    .pending_notifications()
-                    .into_iter()
-                    .map(|notification| notification.id)
-                    .collect::<BTreeSet<_>>();
                 let mut unique = BTreeSet::new();
                 for id in notification_ids {
                     if !unique.insert(id) {
                         return Err(TimelineError::InvalidNotification);
                     }
-                    if !self.events.iter().any(|event| {
-                        matches!(
-                            &event.kind,
-                            TimelineEventKind::Notification(NotificationEvent::Received {
-                                id: existing,
-                                ..
-                            }) if existing == id
-                        )
-                    }) {
+                    if !self.received_notification_ids.contains(id) {
                         return Err(TimelineError::NotificationNotFound(id.clone()));
                     }
-                    if !pending.contains(id) {
+                    if !self.pending_notifications.contains_key(id) {
                         return Err(TimelineError::NotificationAlreadyConsumed(id.clone()));
                     }
                 }
@@ -5864,7 +5832,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Notification(
                 NotificationEvent::Consumed {
-                    notification_ids: vec![id],
+                    notification_ids: vec![id.clone()],
                     turn,
                     input: Some(input),
                 },
@@ -5873,12 +5841,22 @@ mod tests {
         assert!(timeline.pending_notifications().is_empty());
         assert_eq!(timeline.surface().len(), 1);
 
-        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        let mut replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
         assert!(replayed.pending_notifications().is_empty());
         assert_eq!(
             replayed.surface()[0].text_content(),
             timeline.surface()[0].text_content()
         );
+        assert!(matches!(
+            replayed.record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![id],
+                    turn,
+                    input: None,
+                },
+            )),
+            Err(TimelineError::NotificationAlreadyConsumed(_))
+        ));
     }
 
     #[test]
