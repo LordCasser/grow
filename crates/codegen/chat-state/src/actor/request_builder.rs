@@ -1,6 +1,9 @@
-//! ConversationRequest assembly — image projection, repair, memory projection.
+//! Final ConversationRequest assembly and context-pressure projection.
 
-use sampling_types::{ContentPart, ConversationItem, ConversationRequest, ToolSpec};
+use sampling_types::{
+    ContentPart, ConversationItem, ConversationRequest, GoalDirectiveTag, JsonOutputFormat,
+    ToolSpec,
+};
 
 use super::ChatStateActor;
 use crate::MessageCause;
@@ -9,9 +12,10 @@ use crate::events::ChatStateEvent;
 impl ChatStateActor {
     /// Build a `ConversationRequest` from the current actor state.
     ///
-    /// 1. Evict oldest inline images when the inline-image bytes near 50 MB
-    /// 2. Append retrieved memory context to Timeline exactly once
-    /// 3. Assemble and return the `ConversationRequest`
+    /// 1. Repair Surface and append retrieved memory context exactly once
+    /// 2. Apply request-only Goal and target-model image projections
+    /// 3. Evict oldest projected images when the request nears 50 MB
+    /// 4. Assemble the final request and project its complete input envelope
     ///
     /// # Repair invariant
     ///
@@ -24,6 +28,8 @@ impl ChatStateActor {
         timeline_id: &str,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
+        active_goal: Option<GoalDirectiveTag>,
+        json_output: Option<JsonOutputFormat>,
     ) -> Result<ConversationRequest, crate::commands::TimelineWriteError> {
         self.ensure_conversation_integrity_durably(
             sampling_types::DanglingToolCallReason::UserCancelled,
@@ -55,6 +61,7 @@ impl ChatStateActor {
         let mut items = self.state.timeline.surface().to_vec();
         let runtime = sampling_types::model_image_input_key(&self.state.sampling_config);
         project_image_shadows(&self.state.timeline, &runtime, &mut items);
+        items = sampling_types::project_conversation_for_goal_scope(items, active_goal.as_ref());
 
         // Measure the exact serialized body and evict only once it approaches
         // the 50 MB ceiling. `conversation_body_bytes` is wire-accurate yet
@@ -98,7 +105,7 @@ impl ChatStateActor {
         }
 
         // Step 3: Assemble request
-        Ok(ConversationRequest {
+        let request = ConversationRequest {
             items,
             tools: tool_definitions,
             tool_choice: None,
@@ -112,8 +119,11 @@ impl ChatStateActor {
                 &self.state.sampling_config,
             )),
             reasoning_effort: self.state.sampling_config.reasoning_effort,
-            json_output: None,
-        })
+            json_output,
+        };
+        let request_input_tokens = super::state::estimate_request_input_tokens(&request);
+        self.apply_request_projection(request_input_tokens);
+        Ok(request)
     }
 }
 

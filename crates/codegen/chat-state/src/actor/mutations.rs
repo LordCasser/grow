@@ -388,6 +388,22 @@ impl ChatStateActor {
     /// Replace projected context pressure with the provider's canonical total
     /// for the just-completed response. Billing remains in `UsageLedger`.
     pub(super) fn record_provider_context_anchor(&mut self, provider_total_tokens: u64) {
+        let surface_tokens =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
+        let heuristic_minimum = self
+            .state
+            .projected_request_input_tokens
+            .saturating_add(
+                surface_tokens.saturating_sub(self.state.projected_request_surface_tokens),
+            );
+        if provider_total_tokens < heuristic_minimum {
+            tracing::warn!(
+                provider_total_tokens,
+                heuristic_minimum,
+                "ignored provider context anchor below its final request estimate"
+            );
+            return;
+        }
         self.state.projected_tokens = provider_total_tokens;
         self.send_event(ChatStateEvent::ContextPressureUpdated {
             projected_tokens: provider_total_tokens,
@@ -582,6 +598,28 @@ impl ChatStateActor {
                 .saturating_sub(tokens_before - tokens_after)
         };
         self.state.projected_tokens
+    }
+
+    /// Replace the prior request-envelope adjustment with the final estimate
+    /// for this request. Surface mutations remain one signed stream; this only
+    /// accounts for provider-visible projections outside canonical Surface
+    /// (tool schemas, Goal shadows, ImageShadows, and native output schemas).
+    pub(super) fn apply_request_projection(&mut self, request_input_tokens: u64) {
+        let projected_before = self.state.projected_tokens;
+        self.apply_projected_token_delta(
+            self.state.projected_request_input_tokens,
+            self.state.projected_request_surface_tokens,
+        );
+        let surface_tokens =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
+        self.apply_projected_token_delta(surface_tokens, request_input_tokens);
+        self.state.projected_request_surface_tokens = surface_tokens;
+        self.state.projected_request_input_tokens = request_input_tokens;
+        if self.state.projected_tokens != projected_before {
+            self.send_event(ChatStateEvent::ContextPressureUpdated {
+                projected_tokens: self.state.projected_tokens,
+            });
+        }
     }
 
     fn finish_surface_replacement(&mut self, surface_tokens_before: u64) {

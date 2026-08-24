@@ -74,6 +74,18 @@ same projection transaction, so the strict gate reads one canonical current-
 context waterline. Lifetime and per-prompt billing remain separate
 `UsageLedger` state and never participate in the gate.
 
+Immediately before sampling, `build_request` performs the final request-only
+projection in the same actor transaction: Goal directive shadows, model-bound
+ImageShadows, tool schemas, tool choice, and native JSON schemas are measured as
+one input envelope. The meter replaces the previous `(request − Surface)`
+adjustment with the new signed adjustment; repeated assembly is therefore
+idempotent, and a provider anchor keeps its protocol/tool overhead until the
+next envelope changes. The pre-sampling auto-compact check runs only after this
+final assembly, so dynamic schemas cannot bypass pressure accounting.
+Provider usage below the complete final-envelope estimate is rejected as an
+anchor (billing is still recorded), preventing an invalid low sample from
+destroying the signed-adjustment basis.
+
 ## 3. Success Path Observability
 
 When the gate passes, the ladder emits, in order:

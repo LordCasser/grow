@@ -166,10 +166,7 @@ impl SidebandRun {
                     source_revision,
                     context_surface_ids,
                     selected_surface_ids,
-                    materialized_input_tokens: chat_state::estimate_conversation_tokens(
-                        &request.items,
-                    )
-                    .saturating_add(chat_state::estimate_tool_specs_tokens(&request.tools)),
+                    materialized_input_tokens: chat_state::estimate_request_input_tokens(request),
                     max_output_tokens: request.max_output_tokens.map(u64::from),
                 },
                 feedback,

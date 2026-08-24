@@ -1936,15 +1936,6 @@ impl SessionActor {
             if self.tool_context.task_output_token_budget.is_none() {
                 self.refresh_byok_credential().await;
             }
-            if self.tool_context.task_output_token_budget.is_none()
-                && let Some(trigger_info) = self.check_auto_compact_needed().await
-                && let Err(e) = self.run_compact_only(trigger_info).await
-            {
-                tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
-                if Self::is_auth_compact_error(&e) {
-                    return Err(self.surface_compact_auth_failure(e).await);
-                }
-            }
             let projected_images = self.project_images_for_known_text_model().await?;
             if projected_images.total_images() > 0 {
                 tracing::info!(
@@ -1965,13 +1956,23 @@ impl SessionActor {
                     parameters: schema,
                 });
             }
+            let active_goal = self.active_goal_directive_tag();
+            let request_json_output = structured_output_native
+                .then(|| {
+                    json_schema
+                        .clone()
+                        .map(sampling_types::JsonOutputFormat::JsonSchema)
+                })
+                .flatten();
             let build_req_start = std::time::Instant::now();
-            let request = self
+            let mut request = self
                 .chat_state_handle
                 .build_request(
                     self.session_info.id.0.as_ref(),
                     effective_tools,
                     memory_reminder,
+                    active_goal,
+                    request_json_output,
                 )
                 .await
                 .map_err(|error| {
@@ -1986,16 +1987,21 @@ impl SessionActor {
                     "loop_index": loop_index,
                 })),
             );
-            let mut request = request;
-            let active_goal = self.active_goal_directive_tag();
-            request.items = sampling_types::project_conversation_for_goal_scope(
-                request.items,
-                active_goal.as_ref(),
-            );
-            if structured_output_native {
-                request.json_output = json_schema
-                    .clone()
-                    .map(sampling_types::JsonOutputFormat::JsonSchema);
+            if self.tool_context.task_output_token_budget.is_none()
+                && let Some(trigger_info) = self.check_auto_compact_needed().await
+            {
+                let revision_before = self.chat_state_handle.get_surface_revision().await;
+                if let Err(e) = self.run_compact_only(trigger_info).await {
+                    tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
+                    if Self::is_auth_compact_error(&e) {
+                        return Err(self.surface_compact_auth_failure(e).await);
+                    }
+                }
+                if self.chat_state_handle.get_surface_revision().await != revision_before {
+                    // The request projection was built from the pre-compaction
+                    // Surface. Re-enter assembly before sampling.
+                    continue;
+                }
             }
             if request.image_count() > 0
                 && let Some(model) = self.unsupported_current_model_for_images().await

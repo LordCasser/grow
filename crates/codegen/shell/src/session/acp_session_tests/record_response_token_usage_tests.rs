@@ -1,6 +1,6 @@
 use super::support::*;
 use super::*;
-use sampling_types::{ConversationItem, ConversationResponse, TokenUsage};
+use sampling_types::{ConversationItem, ConversationResponse, TokenUsage, ToolSpec};
 
 fn response_with_usage(total_tokens: u32) -> ConversationResponse {
     ConversationResponse {
@@ -105,6 +105,41 @@ async fn preserves_projection_when_response_has_no_usage() {
                 actor.chat_state_handle.get_projected_tokens().await,
                 99_999
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn final_request_schema_is_visible_to_pre_sampling_pressure() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 100_000, 85, gateway_tx, persistence_tx).await;
+            actor
+                .chat_state_handle
+                .build_request(
+                    "test-timeline",
+                    vec![ToolSpec {
+                        name: "large_schema".into(),
+                        description: Some("x".repeat(360_000)),
+                        parameters: serde_json::json!({"type": "object"}),
+                    }],
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let trigger = actor
+                .check_auto_compact_needed()
+                .await
+                .expect("the final request envelope must cross the 85% threshold");
+            assert!(trigger.tokens_used >= 90_000);
+            assert_eq!(trigger.source, "pre_sampling");
         })
         .await;
 }

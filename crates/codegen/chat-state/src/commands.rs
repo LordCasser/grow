@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use compaction::PrunePlan;
 use sampling_types::{
-    ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
-    ToolSpec,
+    ConversationItem, ConversationRequest, DanglingToolCallReason, GoalDirectiveTag,
+    JsonOutputFormat, SamplingConfig, TokenUsage, ToolSpec,
 };
 use tokio::sync::oneshot;
 
@@ -283,6 +283,8 @@ pub enum ChatStateCommand {
         timeline_id: String,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
+        active_goal: Option<GoalDirectiveTag>,
+        json_output: Option<JsonOutputFormat>,
         reply: oneshot::Sender<Result<ConversationRequest, TimelineWriteError>>,
     },
 
@@ -549,6 +551,8 @@ mod tests {
             timeline_id: "main".into(),
             tool_definitions: vec![],
             memory_reminder: None,
+            active_goal: None,
+            json_output: None,
             reply: tx,
         };
 

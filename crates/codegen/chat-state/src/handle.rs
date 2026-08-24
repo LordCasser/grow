@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use sampling_types::{
-    ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
-    ToolSpec,
+    ConversationItem, ConversationRequest, DanglingToolCallReason, GoalDirectiveTag,
+    JsonOutputFormat, SamplingConfig, TokenUsage, ToolSpec,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -400,19 +400,23 @@ impl ChatStateHandle {
         }
     }
 
-    /// Build a ConversationRequest from the current state.
-    /// Prunes, repairs, injects memory, and returns a ready-to-send request.
+    /// Build the final provider request from current Surface plus request-only
+    /// Goal/image/schema projections, updating context pressure atomically.
     pub async fn build_request(
         &self,
         timeline_id: &str,
         tool_definitions: Vec<ToolSpec>,
         memory_reminder: Option<String>,
+        active_goal: Option<GoalDirectiveTag>,
+        json_output: Option<JsonOutputFormat>,
     ) -> Result<ConversationRequest, TimelineWriteError> {
         self.query("BuildConversationRequest", |reply| {
             ChatStateCommand::BuildConversationRequest {
                 timeline_id: timeline_id.to_owned(),
                 tool_definitions,
                 memory_reminder,
+                active_goal,
+                json_output,
                 reply,
             }
         })

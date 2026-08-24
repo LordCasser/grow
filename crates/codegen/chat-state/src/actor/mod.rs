@@ -504,6 +504,8 @@ impl ChatStateActor {
                 timeline_id,
                 tool_definitions,
                 memory_reminder,
+                active_goal,
+                json_output,
                 reply,
             } => {
                 let result = self
@@ -511,6 +513,8 @@ impl ChatStateActor {
                         &timeline_id,
                         tool_definitions,
                         memory_reminder,
+                        active_goal,
+                        json_output,
                     )
                     .await;
                 let _ = reply.send(result);

@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use sampling_types::{
-    ConversationItem, DanglingToolCallReason, SamplingConfig, TokenUsage,
+    ConversationItem, ConversationRequest, DanglingToolCallReason, JsonOutputFormat,
+    SamplingConfig, TokenUsage,
     dedup_duplicate_tool_results, repair_dangling_tool_calls,
 };
 
@@ -42,6 +43,27 @@ pub fn estimate_tool_specs_tokens(tools: &[sampling_types::ToolSpec]) -> u64 {
         .iter()
         .map(|tool| estimate_tool_tokens(&tool.name, tool.description.as_deref(), &tool.parameters))
         .sum()
+}
+
+/// Estimate the provider-visible input envelope. Sampling controls and model
+/// routing do not consume context tokens; messages, tool schemas, tool choice,
+/// and native output schemas do.
+pub fn estimate_request_input_tokens(request: &ConversationRequest) -> u64 {
+    let tool_choice_tokens = request
+        .tool_choice
+        .as_ref()
+        .and_then(|choice| serde_json::to_string(choice).ok())
+        .map_or(0, |choice| token_estimation::estimate_tokens(&choice));
+    let output_schema_tokens = match request.json_output.as_ref() {
+        None => 0,
+        Some(JsonOutputFormat::JsonObject) => token_estimation::estimate_tokens("json_object"),
+        Some(JsonOutputFormat::JsonSchema(schema)) => serde_json::to_string(schema)
+            .map_or(0, |schema| token_estimation::estimate_tokens(&schema)),
+    };
+    estimate_conversation_tokens(&request.items)
+        .saturating_add(estimate_tool_specs_tokens(&request.tools))
+        .saturating_add(tool_choice_tokens)
+        .saturating_add(output_schema_tokens)
 }
 
 fn estimate_tool_tokens(
@@ -144,6 +166,12 @@ pub(crate) struct ChatState {
     /// Provider-anchored projection of the current model-visible context.
     /// Lifetime and per-prompt billing live exclusively in `UsageLedger`.
     pub projected_tokens: u64,
+    /// Canonical Surface estimate at the last final request projection.
+    pub projected_request_surface_tokens: u64,
+    /// Provider-visible input estimate at the last final request projection.
+    /// The difference from `projected_request_surface_tokens` is the sole
+    /// request-envelope adjustment carried across provider anchors.
+    pub projected_request_input_tokens: u64,
     /// Timestamp when the current stream started (epoch ms).
     pub stream_start_ms: Option<i64>,
     /// Timestamp when the current turn started (epoch ms).
@@ -223,6 +251,8 @@ impl ChatState {
             timeline,
             sampling_config,
             projected_tokens: initial_tokens,
+            projected_request_surface_tokens: initial_tokens,
+            projected_request_input_tokens: initial_tokens,
             stream_start_ms: None,
             turn_start_ms: None,
             agent_edited_paths: BTreeSet::new(),

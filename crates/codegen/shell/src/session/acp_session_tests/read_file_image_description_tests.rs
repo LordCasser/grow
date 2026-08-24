@@ -105,7 +105,7 @@ async fn known_text_only_model_degrades_read_file_image_before_sampling() {
 
             let request = actor
                 .chat_state_handle
-                .build_request(&actor.session_info.id.to_string(), vec![], None)
+                .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
                 .await
                 .unwrap();
             assert!(
@@ -186,7 +186,7 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
 
             let text_request = actor
                 .chat_state_handle
-                .build_request(&actor.session_info.id.to_string(), vec![], None)
+                .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
                 .await
                 .unwrap();
             assert!(
@@ -199,7 +199,7 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
             actor.chat_state_handle.update_sampling_config(vision_config);
             let vision_request = actor
                 .chat_state_handle
-                .build_request(&actor.session_info.id.to_string(), vec![], None)
+                .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
                 .await
                 .unwrap();
             assert_eq!(
