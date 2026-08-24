@@ -664,6 +664,19 @@ impl acp::Agent for MvpAgent {
         let persisted_behavior = control_snapshot
             .as_ref()
             .map(|control| control.behavior.clone());
+        let persisted_agent_name = control_snapshot
+            .as_ref()
+            .map(|control| control.agent_name.clone())
+            .or_else(|| summary.agent_name.clone());
+        if summary.agent_name != persisted_agent_name {
+            tracing::warn!(
+                session_id = %session_id.0,
+                summary_agent = ?summary.agent_name,
+                control_agent = ?persisted_agent_name,
+                "session Agent summary projection diverged from Timeline Control; using Control"
+            );
+            summary.agent_name.clone_from(&persisted_agent_name);
+        }
         let _persisted_goal_mode = control_snapshot.and_then(|control| control.goal);
         let configured_models = self.models_manager.models();
         let available_models = self.models_manager.available();
@@ -901,7 +914,6 @@ impl acp::Agent for MvpAgent {
             );
             let mut spawn_timer = crate::instrumentation_timer!("session.spawn_and_register_session");
             spawn_timer.with_field("session_id", session_id.0.as_ref());
-            let persisted_agent_name = summary.agent_name.clone();
             let session_title_route = if summary.display_title().is_empty() {
                 let (client, model) = self.build_session_title_client(&load_session_sampling)?;
                 Some(crate::session::summary::SessionTitleRoute::new(

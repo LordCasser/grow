@@ -2072,6 +2072,7 @@ async fn copy_without_control_inheritance_has_no_control_event() {
         &source_info,
         &crate::session::control::SessionControlSnapshot::new(
             1,
+            "grow",
             crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Clarify),
             None,
         ),
@@ -2124,6 +2125,7 @@ async fn forked_control_snapshot_drops_goal_runtime_ownership() {
         &source_info,
         &crate::session::control::SessionControlSnapshot::new(
             7,
+            "grow",
             crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
             goal.snapshot().cloned(),
         ),
@@ -2174,7 +2176,7 @@ async fn forked_control_snapshot_drops_plan_runtime_without_its_artifact() {
     append_control_snapshot(
         &adapter,
         &source_info,
-        &crate::session::control::SessionControlSnapshot::new(8, plan, None),
+        &crate::session::control::SessionControlSnapshot::new(8, "grow", plan, None),
     )
     .await;
 
@@ -3016,6 +3018,7 @@ async fn timeline_control_roundtrips_goal_through_light_session_load() {
     .unwrap();
     let snapshot = crate::session::control::SessionControlSnapshot::new(
         7,
+        "grow",
         crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
         tracker.snapshot().cloned(),
     );
@@ -3024,6 +3027,7 @@ async fn timeline_control_roundtrips_goal_through_light_session_load() {
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
     let control = loaded.control_snapshot.expect("control state should load");
     assert_eq!(control.control_revision, 7);
+    assert_eq!(control.agent_name, "grow");
     assert_eq!(control.behavior.state, crate::session::behavior::BehaviorState::Goal);
     let goal = control.goal.expect("Goal state should load");
     assert_eq!(goal.goal_id, "goal-1");
@@ -3245,6 +3249,7 @@ async fn session_copy_does_not_clone_goal_runtime_state() {
         &source,
         &crate::session::control::SessionControlSnapshot::new(
             3,
+            "grow",
             crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
             tracker.snapshot().cloned(),
         ),

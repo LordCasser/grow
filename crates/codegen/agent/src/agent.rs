@@ -29,8 +29,12 @@ pub struct Agent {
     /// Stored for inspection, re-rendering, and serialization.
     prompt_context: PromptContext,
 
-    /// The rendered system prompt (cached from prompt_context.render()).
+    /// The rendered stable system prompt (cached from prompt_context.render()).
     system_prompt: String,
+
+    /// The rendered Agent-authored role. The shell projects this through an
+    /// append-only Timeline Control event instead of mutating `system_prompt`.
+    role_prompt: Option<String>,
 
     /// The tool bridge — owns ToolRegistry + ToolState + SessionContext.
     tool_bridge: Arc<ToolBridge>,
@@ -49,6 +53,7 @@ impl Agent {
         definition: AgentDefinition,
         prompt_context: PromptContext,
         system_prompt: String,
+        role_prompt: Option<String>,
         tool_bridge: Arc<ToolBridge>,
         reminder_policy: ReminderPolicy,
         compaction_policy: CompactionPolicy,
@@ -57,6 +62,7 @@ impl Agent {
             definition,
             prompt_context,
             system_prompt,
+            role_prompt,
             tool_bridge,
             reminder_policy,
             compaction_policy,
@@ -90,6 +96,11 @@ impl Agent {
     /// The rendered system prompt.
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    /// Rendered Agent-authored role for the Timeline `system.role` layer.
+    pub fn role_prompt(&self) -> Option<&str> {
+        self.role_prompt.as_deref()
     }
 
     /// Compact system prompt for post-compaction use.

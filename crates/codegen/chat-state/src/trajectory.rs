@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CompactionEvent, ControlEvent, MessageEvent, ObservationEvent, RecoveryEvent, RequestEvent,
-    SessionTitleEvent, SessionTitleSource, SidebandSpawnEvent, StepEvent, SubagentEvent,
-    SubagentResultEvent, SubagentSeedEvent, SurfaceId, SurfaceOp, Timeline, TimelineEvent,
-    TimelineEventKind, ToolEvent, TurnEvent, WorkflowEvent,
+    CompactionEvent, ControlContextLayer, ControlEvent, MessageEvent, ObservationEvent,
+    RecoveryEvent, RequestEvent, SessionTitleEvent, SessionTitleSource, SidebandSpawnEvent,
+    StepEvent, SubagentEvent, SubagentResultEvent, SubagentSeedEvent, SurfaceId, SurfaceOp,
+    Timeline, TimelineEvent, TimelineEventKind, ToolEvent, TurnEvent, WorkflowEvent,
 };
 
 /// Wire schema for the read-only Trajectory projection.
@@ -313,9 +313,16 @@ fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String
                 format!("{}.{}", observation.scope, observation.name),
             )
         }
-        TimelineEventKind::Control(_) => {
-            coordinates("system.behavior", "lifecycle", "core", "control", state)
-        }
+        TimelineEventKind::Control(control) => coordinates(
+            match control.model_context.as_ref().map(|context| context.layer) {
+                Some(ControlContextLayer::AgentRole) => "system.role",
+                Some(ControlContextLayer::Behavior) | None => "system.behavior",
+            },
+            "lifecycle",
+            "core",
+            "control",
+            state,
+        ),
         TimelineEventKind::SessionTitle(title) => coordinates(
             "meta",
             "lifecycle",
@@ -796,6 +803,16 @@ fn describe_control_transition(
     current: &serde_json::Value,
 ) -> String {
     let mut changes = Vec::new();
+    let previous_agent = previous.and_then(|snapshot| json_string(snapshot, "agent_name"));
+    let current_agent = json_string(current, "agent_name");
+    if previous_agent != current_agent {
+        changes.push(match (previous_agent, current_agent) {
+            (None, Some(current)) => format!("Agent {current} selected"),
+            (Some(previous), Some(current)) => format!("Agent {previous} → {current}"),
+            (Some(previous), None) => format!("Agent {previous} cleared"),
+            (None, None) => "Agent changed".into(),
+        });
+    }
     let previous_behavior = previous.and_then(control_behavior);
     let current_behavior = control_behavior(current);
     if previous_behavior != current_behavior {
@@ -1243,6 +1260,27 @@ mod tests {
     }
 
     #[test]
+    fn projection_preserves_the_typed_agent_role_dimension() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Control(crate::ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "agent_name": "reviewer" }),
+                model_context: Some(crate::ControlContext {
+                    layer: crate::ControlContextLayer::AgentRole,
+                    activation: crate::ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("role"),
+                }),
+            }))
+            .unwrap();
+
+        let row = timeline.trajectory().rows.pop().unwrap();
+        assert_eq!(row.layer, "system.role");
+        assert_eq!(row.visibility, SurfaceVisibility::Current);
+        assert_eq!(row.summary, "Agent reviewer selected");
+    }
+
+    #[test]
     fn projection_activates_only_the_latest_in_turn_control_context() {
         let mut timeline = Timeline::from_seed(vec![
             ConversationItem::system("system"),
@@ -1272,7 +1310,11 @@ mod tests {
                 .record(TimelineEventKind::Control(crate::ControlEvent {
                     revision,
                     snapshot: serde_json::json!({ "behavior": behavior }),
-                    model_context: Some(ConversationItem::system_reminder(behavior)),
+                    model_context: Some(crate::ControlContext {
+                        layer: crate::ControlContextLayer::Behavior,
+                        activation: crate::ControlContextActivation::Transition,
+                        item: ConversationItem::system_reminder(behavior),
+                    }),
                 }))
                 .unwrap();
         }

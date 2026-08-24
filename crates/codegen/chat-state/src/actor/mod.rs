@@ -588,6 +588,7 @@ impl ChatStateActor {
                         surface_revision: self.state.timeline.surface_revision(),
                         surface: self.state.timeline.surface().to_vec(),
                         surface_ids: self.state.timeline.surface_ids().to_vec(),
+                        active_control_contexts: self.state.timeline.active_control_contexts(),
                     }
                 });
                 let _ = reply.send(materialized);

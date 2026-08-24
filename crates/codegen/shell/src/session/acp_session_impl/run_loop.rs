@@ -2011,8 +2011,7 @@ pub(super) async fn run_session(
                         }
                     }
                     SessionCommand::GetActiveAgent { responds_to } => {
-                        let agent_type = session.active_agent_type.lock().clone();
-                        let _ = responds_to.send(agent_type);
+                        let _ = responds_to.send(Some(session.agent.borrow().name().to_owned()));
                     }
                     SessionCommand::SideQuestion { question, respond_to } => {
                         let s = session.clone();

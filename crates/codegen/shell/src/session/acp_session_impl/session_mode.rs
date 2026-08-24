@@ -423,6 +423,7 @@ impl SessionActor {
             .saturating_add(1);
         let snapshot = crate::session::control::SessionControlSnapshot::new(
             revision,
+            self.agent.borrow().name(),
             self.behavior.lock().snapshot(),
             self.goal_tracker.lock().snapshot().cloned(),
         );

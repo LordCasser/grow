@@ -559,12 +559,6 @@ pub(crate) struct SessionActor {
     /// ChatState's SamplingConfig; keeping the catalog axis here prevents UI
     /// mirrors from inventing the `from` side of durable model transitions.
     pub(crate) selected_model_id: std::cell::RefCell<acp::ModelId>,
-    /// The active agent type for this session. Initialized from the
-    /// `AgentDefinition` at spawn, updated when the session mode changes
-    /// via `request_behavior_change()`. Used by the model-switch guard to
-    /// determine whether a model's `agent_type` is compatible with the
-    /// current session.
-    pub(crate) active_agent_type: parking_lot::Mutex<Option<String>>,
     /// First skill the current prompt activated via its slash-skill path,
     /// recorded as `skill.name` on the turn span. Reset at the start of each
     /// prompt (`handle_prompt`), so it never leaks across turns.

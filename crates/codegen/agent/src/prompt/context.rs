@@ -1,8 +1,9 @@
 //! First-class system prompt rendering context.
 //!
 //! `PromptContext` captures the agent-specific inputs to prompt rendering
-//! in memory. The rendered system message is recorded in Timeline; this
-//! builder state is never a parallel persistence format.
+//! in memory. The rendered stable system core and mutable Agent role are
+//! recorded separately in Timeline; this builder state is never a parallel
+//! persistence format.
 use crate::config::PromptComposition;
 use crate::prompt::agents_md::{self, AgentConfigFile};
 use crate::prompt::template::{
@@ -44,9 +45,10 @@ pub struct PromptContext {
     /// Whether this is a primary (parent) or subagent (child) session.
     /// Controls base template choice and catalog section rendering.
     pub audience: PromptAudience,
-    /// Agent role body: appended after standard guidance in Extend mode, or
-    /// used as the complete role layer in Full mode. Mandatory foundation and
-    /// audience layers always remain.
+    /// Agent role body. It is rendered separately from the stable system head
+    /// and enters Timeline as an append-only `system.role` control context.
+    /// In Full mode the optional standard guidance is omitted, while the
+    /// mandatory foundation and audience layers remain.
     pub prompt_body: Option<String>,
     /// Which base template to use for `Extend` mode.
     /// `TemplateOverride::None` = standard base/subagent template.
@@ -110,21 +112,27 @@ impl PromptContext {
             "system_prompt_label": self.system_prompt_label.as_str(),
         })
     }
-    /// Render the full system prompt via `ToolBridge`.
+    /// Render the stable system prompt via `ToolBridge`.
     ///
     /// Tool names (`${{ tools.by_kind.* }}`) are resolved by the
     /// `TemplateRenderer` inside the bridge. Agent-specific fields
     /// (`memory_enabled`, `is_non_interactive`, and the system label) are
     /// passed as placeholders.
     ///
-    /// Both the base template AND the `prompt_body` are rendered through
-    /// MiniJinja so that `${{ tools.by_kind.* }}` variables resolve
-    /// correctly regardless of prompt mode.
+    /// The mutable Agent role is deliberately excluded; use
+    /// [`Self::render_role`] for the Timeline control projection.
     pub async fn render(&self, tool_bridge: &ToolBridge) -> Option<String> {
         let renderer = tool_bridge.template_renderer_snapshot().await?;
         self.render_with_renderer(&renderer)
     }
-    /// Render the full system prompt from a finalized tool-name renderer.
+
+    /// Render the mutable Agent role through the same finalized tool-name
+    /// renderer as the stable system prompt.
+    pub async fn render_role(&self, tool_bridge: &ToolBridge) -> Option<String> {
+        let renderer = tool_bridge.template_renderer_snapshot().await?;
+        self.render_role_with_renderer(&renderer)
+    }
+    /// Render the stable system prompt from a finalized tool-name renderer.
     ///
     /// Hosts that do not own a [`ToolBridge`] use this path so they still
     /// consume the production base-template and prompt-body composition.
@@ -143,9 +151,6 @@ impl PromptContext {
             };
             sections.push(render(standard)?);
         }
-        if let Some(body) = &self.prompt_body {
-            sections.push(render(body).unwrap_or_else(|| body.clone()));
-        }
         sections.push(render(SESSION_EXTENSIONS_PROMPT)?);
         let prompt = sections
             .into_iter()
@@ -153,6 +158,16 @@ impl PromptContext {
             .collect::<Vec<_>>()
             .join("\n\n");
         Some(prompt)
+    }
+
+    /// Render only the Agent-authored role layer.
+    pub fn render_role_with_renderer(&self, renderer: &TemplateRenderer) -> Option<String> {
+        let body = self.prompt_body.as_ref()?;
+        Some(
+            renderer
+                .render_with_extra(body, &self.placeholders())
+                .unwrap_or_else(|_| body.clone()),
+        )
     }
 }
 #[cfg(test)]
@@ -643,7 +658,7 @@ mod tests {
         );
     }
     #[test]
-    fn agent_role_system_prompt_contains_no_runtime_or_behavior_state() {
+    fn agent_role_is_separate_from_the_stable_system_head() {
         let mut ctx = test_context();
         ctx.prompt_body = Some("ROLE_LAYER_SENTINEL".to_string());
         let renderer = tools::types::template_renderer::TemplateRenderer::new(
@@ -651,9 +666,13 @@ mod tests {
             std::collections::HashMap::new(),
         );
         let prompt = ctx.render_with_renderer(&renderer).unwrap();
-        assert!(prompt.contains("ROLE_LAYER_SENTINEL"), "{prompt}");
+        assert!(!prompt.contains("ROLE_LAYER_SENTINEL"), "{prompt}");
         assert!(!prompt.contains("<runtime_context>"), "{prompt}");
         assert!(!prompt.contains("<behavior-context>"), "{prompt}");
+        assert_eq!(
+            ctx.render_role_with_renderer(&renderer).as_deref(),
+            Some("ROLE_LAYER_SENTINEL")
+        );
     }
     /// Verify that AGENTS.md file paths rewritten to the display cwd are
     /// rendered into the system prompt correctly. When `AgentConfigFile.file_path`

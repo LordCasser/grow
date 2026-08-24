@@ -6,14 +6,14 @@ Grow composes an Agent session from independent layers. The layers have a fixed 
 Mandatory Core
   + Audience (primary | subagent)
   + Standard Guidance (extend only)
-  + Agent Role (Markdown body)
   + Session Extensions (memory)
 
 Timeline Surface
+  + Control-event-anchored Agent Role transition items in the live tail
   + Control-event-anchored Active Behavior transition items in the live tail
 ```
 
-Mandatory Core contains instruction priority, action safety, tool-use rules, project-instruction scoping, output rules, and Grow client context. It is always rendered. `promptComposition: full` replaces the optional standard guidance; it does not replace Mandatory Core, Audience, Timeline-anchored Behavior transitions, or Session Extensions.
+Mandatory Core contains instruction priority, action safety, tool-use rules, project-instruction scoping, output rules, and Grow client context. It is always rendered. `promptComposition: full` removes the optional standard guidance and uses the Agent Markdown body as the complete role layer; it does not replace Mandatory Core, Audience, Timeline-anchored Behavior transitions, or Session Extensions.
 
 Runtime facts do not belong to the system prompt. At session start, the shell renders one typed `RuntimeContextSnapshot` as a user-role message containing the visible workspace, OS, shell, local date, and optional VCS snapshot, then durably appends it to Timeline. Agent definitions cannot override its shape. Skills, project instructions, MCP catalogs, capability changes, and reminders each publish their own Timeline-backed messages instead of being copied into either the system prompt or the runtime snapshot.
 
@@ -21,7 +21,7 @@ Every ordinary model request carries one provider-routing cache key derived from
 
 Audience defines ownership boundaries: the primary Agent owns the user-facing result, the task-wide understanding needed to produce it, and the integration of delegated results, while a subagent owns only its delegated task. Primary ownership cannot be transferred wholesale: delegation may extend coverage or isolate bounded work, but the primary Agent directly examines central evidence, retains cross-cutting synthesis, and continues independent work while children run whenever useful work remains. Audience never declares a role, toolset, or Behavior.
 
-Built-in and user-defined Agents are Markdown files with YAML frontmatter. The Markdown body is the role and use-case prompt. Tool configuration is explicit and independent:
+Built-in and user-defined Agents are Markdown files with YAML frontmatter. The Markdown body is the role and use-case prompt. The rendered role is not copied into the system head: the initial selection and every later switch append one typed `system.role` Control context whose snapshot carries the same Agent identity. A role-less Agent emits an explicit reset, so selecting it retires earlier role instructions rather than leaving them active by omission. Tool configuration is explicit and independent:
 
 ```yaml
 promptComposition: extend
@@ -45,7 +45,7 @@ and does not rewrite this architectural purpose.
 
 The built-in Agent, tool, and session surface is Grow-native. External vendor schemas are not exposed as Agent profiles, tool presets, namespaces, ignored frontmatter fields, or session scanners. Agent files use the documented Grow schema and reject unknown keys; source provenance does not create a vendor execution mode.
 
-Behavior is mutually-exclusive primary-session state, not part of `AgentDefinition`. The state is exactly `Normal | Clarify | Plan(phase) | Workflow | DeepResearch { run_id } | Goal`. ACP maps these to `default`, `ask`, `plan`, `workflow`, `deep_research`, and `goal`. Every external mode request passes through the same gateway and shares the foreground-admission mutex, so it commits only while idle. A selection and its synthetic user protocol item are one durable Timeline Control event. Idle contexts enter Surface immediately; turn-internal transitions such as Goal completion remain pending until that turn's durable terminal, with only the latest pending context activated. Thus later output stays after the protocol that conditioned it, tool call/result adjacency remains valid, and subsequent requests preserve the provider-visible prefix. Later switches append a new transition; switching to `Normal` appends an explicit reset that retires earlier special protocols. No transition mutates the system head. Delegated Agents receive an explicit role and task; they never inherit or select a user-facing Behavior. A Behavior never adds a tool, changes which Agent may be delegated to, changes capability mode, or bypasses permission checks.
+Behavior is mutually-exclusive primary-session state, not part of `AgentDefinition`. The state is exactly `Normal | Clarify | Plan(phase) | Workflow | DeepResearch { run_id } | Goal`. ACP maps these to `default`, `ask`, `plan`, `workflow`, `deep_research`, and `goal`. Every external mode request passes through the same gateway and shares the foreground-admission mutex, so it commits only while idle. Agent selection follows the same admission and persistence discipline: build the candidate harness, durably append its typed role context and Agent identity, then swap the live harness; a failed append leaves the prior Agent intact. A selection and its synthetic user protocol item are one durable Timeline Control event. Idle contexts enter Surface immediately; turn-internal transitions such as Goal completion remain pending until that turn's durable terminal, with only the latest pending context activated. Thus later output stays after the protocol that conditioned it, tool call/result adjacency remains valid, and subsequent requests preserve the provider-visible prefix. Later switches append a new transition; switching to `Normal` appends an explicit reset that retires earlier special protocols. Neither Agent nor Behavior transitions mutate the system head or rebuild message history. If compaction shadows the effective context of either typed layer, the compaction path immediately appends the exact effective item again before sampling can resume; a transition still pending at that boundary does not displace the context that currently governs the turn. Reload and turn admission repeat this deterministic repair for crash gaps. Older shadowed contexts never reactivate. Delegated Agents receive an explicit role and task; they never inherit or select a user-facing Behavior. A Behavior never adds a tool, changes which Agent may be delegated to, changes capability mode, or bypasses permission checks.
 
 The layers have different owners and must not be substituted for one another:
 

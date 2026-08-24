@@ -1287,7 +1287,7 @@ pub(crate) async fn spawn_session_actor(
         };
     let resources_persistence =
         crate::session::storage::resources_persistence(session_directory.clone());
-    let initial_agent_type = Some(agent_definition.name.clone());
+    let agent_name_for_handle = agent_definition.name.clone();
     let subagent_filter_for_handle = agent_definition.subagent_filter();
     let harness_metrics = {
         let plugin_names = plugin_registry
@@ -1762,10 +1762,6 @@ pub(crate) async fn spawn_session_actor(
         sampler_retry_policy,
         sampler_event_tx,
     );
-    let agent_name_for_handle = initial_agent_type
-        .as_deref()
-        .unwrap_or(crate::agent::config::DEFAULT_AGENT_TYPE)
-        .to_owned();
     let mut hook_discovery_errors: Vec<::hooks::error::HookError> = Vec::new();
     let built_hook_registry: Option<Arc<::hooks::discovery::HookRegistry>> =
         if let Some(override_reg) = hook_registry_override {
@@ -2408,7 +2404,6 @@ pub(crate) async fn spawn_session_actor(
             lock
         },
         selected_model_id: std::cell::RefCell::new(session_model_id.clone()),
-        active_agent_type: parking_lot::Mutex::new(initial_agent_type),
         active_skill: parking_lot::Mutex::new(None),
         turn_behavior: Arc::new(parking_lot::Mutex::new(behavior.lock().behavior())),
         behavior: behavior.clone(),
@@ -2482,6 +2477,31 @@ pub(crate) async fn spawn_session_actor(
             "failed to recover pending rewind transaction: {error}"
         )))
     })?;
+    if persisted_control_revision == 0 {
+        let (agent_name, role_prompt) = {
+            let agent = session.agent.borrow();
+            (
+                agent.name().to_owned(),
+                agent.role_prompt().map(str::to_owned),
+            )
+        };
+        session
+            .persist_agent_transition_durably(&agent_name, role_prompt.as_deref())
+            .await
+            .map_err(|error| {
+                agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                    "initial Agent role was not durably recorded: {error}"
+                )))
+            })?;
+    }
+    session
+        .repair_missing_control_contexts_durably()
+        .await
+        .map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "active Control context was not restored: {error}"
+            )))
+        })?;
     crate::session::context_recall::serve_context_recall(&session, context_recall_receiver);
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.

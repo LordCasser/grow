@@ -248,9 +248,8 @@ pub enum SessionCommand {
     },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the
     /// session's `AgentRebuildSpec` and the new `AgentDefinition`,
-    /// re-register MCP tools, swap the live `Agent`, rewrite the
-    /// system message in the conversation, persist the new prompt
-    /// artifacts, and update `active_agent_type`.
+    /// durably append the selected role through Timeline Control, swap the
+    /// live `Agent`, and re-register its MCP tools and resource projections.
     ///
     /// Triggered by `MvpAgent::set_session_model` when the new model's
     /// `agent_type` differs from the session's current one and no user

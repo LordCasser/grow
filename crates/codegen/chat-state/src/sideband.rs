@@ -68,6 +68,8 @@ pub struct TimelineMaterialization {
     pub surface_revision: u64,
     pub surface: Vec<ConversationItem>,
     pub surface_ids: Vec<crate::SurfaceId>,
+    pub active_control_contexts:
+        std::collections::BTreeMap<crate::ControlContextLayer, crate::ActiveControlContext>,
 }
 
 #[derive(Debug, Clone)]

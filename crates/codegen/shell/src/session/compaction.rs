@@ -586,6 +586,17 @@ impl SessionActor {
                 "Compaction skipped: no closed Surface range is large enough to summarize while preserving the recent verbatim tail",
             )
         })?;
+        let shadowed_control_contexts = materialized
+            .active_control_contexts
+            .iter()
+            .filter_map(|(layer, context)| {
+                range_plan
+                    .target
+                    .shadowed
+                    .contains(&context.surface_id)
+                    .then_some((*layer, context.item.clone()))
+            })
+            .collect::<Vec<_>>();
         let context_recall_tool_name = {
             let agent_ref = self.agent.borrow();
             agent_ref
@@ -1299,6 +1310,13 @@ impl SessionActor {
             .map_err(|error| {
                 acp::Error::internal_error().data(format!(
                     "compaction replacement was not durably recorded: {error}"
+                ))
+            })?;
+        self.reproject_control_contexts_durably(shadowed_control_contexts)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "compaction Control context was not durably re-projected: {error}"
                 ))
             })?;
         let new_len = self.chat_state_handle.get_conversation_len().await;

@@ -170,7 +170,7 @@ impl SessionActor {
         behavior: crate::session::behavior::BehaviorSnapshot,
         goal: Option<crate::session::goal_tracker::GoalState>,
     ) -> std::io::Result<()> {
-        self.persist_control_snapshot_with_context_durably(behavior, goal, None)
+        self.persist_control_snapshot_with_context_durably(behavior, goal, None, None)
             .await
     }
 
@@ -180,23 +180,118 @@ impl SessionActor {
         goal: Option<crate::session::goal_tracker::GoalState>,
     ) -> std::io::Result<()> {
         let context = crate::session::behavior::behavior_transition_context(behavior.behavior());
-        self.persist_control_snapshot_with_context_durably(behavior, goal, Some(context))
+        self.persist_control_snapshot_with_context_durably(
+            behavior,
+            goal,
+            None,
+            Some((
+                chat_state::ControlContextLayer::Behavior,
+                chat_state::ControlContextActivation::Transition,
+                context,
+            )),
+        )
+        .await
+    }
+
+    pub(super) async fn persist_agent_transition_durably(
+        &self,
+        agent_name: &str,
+        role_prompt: Option<&str>,
+    ) -> std::io::Result<()> {
+        let context =
+            crate::session::control::agent_role_transition_context(agent_name, role_prompt);
+        self.persist_control_snapshot_with_context_durably(
+            self.behavior.lock().snapshot(),
+            self.goal_tracker.lock().snapshot().cloned(),
+            Some(agent_name),
+            Some((
+                chat_state::ControlContextLayer::AgentRole,
+                chat_state::ControlContextActivation::Transition,
+                context,
+            )),
+        )
+        .await
+    }
+
+    pub(super) async fn reproject_control_contexts_durably(
+        &self,
+        contexts: impl IntoIterator<
+            Item = (
+                chat_state::ControlContextLayer,
+                sampling_types::ConversationItem,
+            ),
+        >,
+    ) -> std::io::Result<()> {
+        for (layer, context) in contexts {
+            let agent_name = self.agent.borrow().name().to_owned();
+            self.persist_control_snapshot_with_context_durably(
+                self.behavior.lock().snapshot(),
+                self.goal_tracker.lock().snapshot().cloned(),
+                Some(&agent_name),
+                Some((
+                    layer,
+                    chat_state::ControlContextActivation::Reprojection,
+                    context.text_content(),
+                )),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Restore active Control layers whose latest model context was shadowed
+    /// by a committed compaction. The Control snapshot remains the fact source;
+    /// this appends a new typed projection rather than reviving an older item.
+    pub(super) async fn repair_missing_control_contexts_durably(&self) -> std::io::Result<()> {
+        let Some(materialized) = self
+            .chat_state_handle
+            .materialize_timeline(self.session_id_string())
             .await
+        else {
+            return Ok(());
+        };
+        let current = materialized
+            .surface_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let missing = materialized
+            .active_control_contexts
+            .into_iter()
+            .filter_map(|(layer, context)| {
+                (!current.contains(&context.surface_id)).then_some((layer, context.item))
+            })
+            .collect::<Vec<_>>();
+        self.reproject_control_contexts_durably(missing).await
     }
 
     async fn persist_control_snapshot_with_context_durably(
         &self,
         behavior: crate::session::behavior::BehaviorSnapshot,
         goal: Option<crate::session::goal_tracker::GoalState>,
-        model_context: Option<String>,
+        agent_name: Option<&str>,
+        model_context: Option<(
+            chat_state::ControlContextLayer,
+            chat_state::ControlContextActivation,
+            String,
+        )>,
     ) -> std::io::Result<()> {
         let revision = self
             .control_revision
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .saturating_add(1);
-        let state = crate::session::control::SessionControlSnapshot::new(revision, behavior, goal);
+        let agent_name = agent_name
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.agent.borrow().name().to_owned());
+        let state = crate::session::control::SessionControlSnapshot::new(
+            revision,
+            agent_name,
+            behavior,
+            goal,
+        );
         let kind = match model_context {
-            Some(context) => state.timeline_kind_with_model_context(context)?,
+            Some((layer, activation, context)) => {
+                state.timeline_kind_with_model_context(layer, activation, context)?
+            }
             None => state.timeline_kind()?,
         };
         self.chat_state_handle

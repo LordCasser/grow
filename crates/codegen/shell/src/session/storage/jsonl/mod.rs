@@ -150,6 +150,7 @@ impl OpenedSession {
             surface_revision: timeline.surface_revision(),
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
+            active_control_contexts: timeline.active_control_contexts(),
         })
     }
 }
@@ -238,6 +239,7 @@ impl JsonlStorageAdapter {
             surface_revision: timeline.surface_revision(),
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
+            active_control_contexts: timeline.active_control_contexts(),
         })
     }
     pub(crate) fn read_timeline_events_sync(
@@ -2579,6 +2581,8 @@ impl JsonlStorageAdapter {
                     control.control_revision = control.control_revision.saturating_add(1);
                     let control_kind = if behavior_normalized {
                         control.timeline_kind_with_model_context(
+                            chat_state::ControlContextLayer::Behavior,
+                            chat_state::ControlContextActivation::Transition,
                             crate::session::behavior::behavior_transition_context(
                                 tool_types::BehaviorId::Normal,
                             ),

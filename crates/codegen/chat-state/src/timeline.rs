@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 9;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 10;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -396,14 +396,49 @@ pub struct ObservationEvent {
 /// durability and revision monotonicity. A transition may also carry its one
 /// model-visible context item. Applying both from the same event prevents a
 /// crash from committing state without its context. If a turn is active, the
-/// fold activates only the latest pending item after that turn's durable end.
+/// fold activates only the latest pending transition after that turn's durable
+/// end. A re-projection restores an already-effective item immediately after
+/// compaction shadows its former Surface anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlContextLayer {
+    AgentRole,
+    Behavior,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlContextActivation {
+    Transition,
+    Reprojection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlContext {
+    pub layer: ControlContextLayer,
+    pub activation: ControlContextActivation,
+    pub item: ConversationItem,
+}
+
+/// The context item currently governing one Control layer.
+///
+/// The anchor remains meaningful after compaction shadows it from Surface so
+/// the exact effective context can be projected again. A transition waiting
+/// for the active turn to end is deliberately not represented here.
+#[derive(Debug, Clone)]
+pub struct ActiveControlContext {
+    pub surface_id: SurfaceId,
+    pub item: ConversationItem,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlEvent {
     pub revision: u64,
     pub snapshot: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_context: Option<ConversationItem>,
+    pub model_context: Option<ControlContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -710,6 +745,8 @@ pub enum TimelineError {
     NonMonotonicControlRevision { previous: u64, actual: u64 },
     #[error("control model context must be one non-empty synthetic text reminder after system")]
     InvalidControlContext,
+    #[error("control context re-projection requires a shadowed latest context in the same layer")]
+    InvalidControlReprojection,
     #[error("turn {actual:?} cannot start while {active:?} is active")]
     TurnAlreadyActive { active: TurnId, actual: TurnId },
     #[error("turn {0:?} already has a start event")]
@@ -872,6 +909,52 @@ impl Timeline {
 
     pub fn surface_ids(&self) -> &[SurfaceId] {
         &self.surface_ids
+    }
+
+    /// Effective model context for each Control layer, whether or not its
+    /// anchor is still present on the current Surface.
+    ///
+    /// This replays the same turn-boundary activation rule as Surface. A
+    /// transition recorded inside the active turn remains pending and does
+    /// not displace the context that still governs provider requests.
+    pub fn active_control_contexts(
+        &self,
+    ) -> std::collections::BTreeMap<ControlContextLayer, ActiveControlContext> {
+        let mut active = std::collections::BTreeMap::new();
+        let mut active_turn = false;
+        let mut pending = None;
+        for event in &self.events {
+            match &event.kind {
+                TimelineEventKind::Turn(TurnEvent::Started { .. }) => active_turn = true,
+                TimelineEventKind::Control(ControlEvent {
+                    model_context: Some(context),
+                    ..
+                }) => {
+                    let projection = ActiveControlContext {
+                        surface_id: SurfaceId {
+                            event: event.seq,
+                            item: 0,
+                        },
+                        item: context.item.clone(),
+                    };
+                    if active_turn
+                        && context.activation == ControlContextActivation::Transition
+                    {
+                        pending = Some((context.layer, projection));
+                    } else {
+                        active.insert(context.layer, projection);
+                    }
+                }
+                TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
+                    active_turn = false;
+                    if let Some((layer, projection)) = pending.take() {
+                        active.insert(layer, projection);
+                    }
+                }
+                _ => {}
+            }
+        }
+        active
     }
 
     pub fn session_title(&self) -> Option<(EventSeq, &SessionTitleEvent)> {
@@ -1819,15 +1902,17 @@ impl Timeline {
         match &event.kind {
             TimelineEventKind::Messages(messages) => self.apply_messages(event.seq, messages),
             TimelineEventKind::Control(ControlEvent {
-                model_context: Some(item),
+                model_context: Some(context),
                 ..
-            }) if self.lifecycle.active_turn.is_some() => {
-                self.pending_control_context = Some((event.seq, item.clone()));
+            }) if self.lifecycle.active_turn.is_some()
+                && context.activation == ControlContextActivation::Transition =>
+            {
+                self.pending_control_context = Some((event.seq, context.item.clone()));
             }
             TimelineEventKind::Control(ControlEvent {
-                model_context: Some(item),
+                model_context: Some(context),
                 ..
-            }) => self.append_surface_items(event.seq, std::slice::from_ref(item)),
+            }) => self.append_surface_items(event.seq, std::slice::from_ref(&context.item)),
             TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
                 if let Some((source, item)) = self.pending_control_context.take() {
                     self.append_surface_items(source, std::slice::from_ref(&item));
@@ -1905,13 +1990,33 @@ impl Timeline {
             self.validate_messages(messages)?;
         }
         if let TimelineEventKind::Control(ControlEvent {
-            model_context: Some(item),
+            model_context: Some(context),
             ..
         }) = &event.kind
             && (!matches!(self.surface.first(), Some(ConversationItem::System(_)))
-                || !is_valid_control_context(item))
+                || !is_valid_control_context(&context.item))
         {
             return Err(TimelineError::InvalidControlContext);
+        }
+        if let TimelineEventKind::Control(ControlEvent {
+            model_context:
+                Some(ControlContext {
+                    layer,
+                    activation: ControlContextActivation::Reprojection,
+                    ..
+                }),
+            ..
+        }) = &event.kind
+        {
+            let active = self.active_control_contexts();
+            let active = active.get(layer);
+            if active.is_none()
+                || active.is_some_and(|context| {
+                    self.surface_ids.contains(&context.surface_id)
+                })
+            {
+                return Err(TimelineError::InvalidControlReprojection);
+            }
         }
         if let TimelineEventKind::Sideband(sideband) = &event.kind {
             sideband.validate()?;
@@ -2809,16 +2914,16 @@ fn fold_control_context_activation(
             None
         }
         TimelineEventKind::Control(ControlEvent {
-            model_context: Some(item),
+            model_context: Some(context),
             ..
-        }) if *active_turn => {
-            *pending = Some((event.seq, item.clone()));
+        }) if *active_turn && context.activation == ControlContextActivation::Transition => {
+            *pending = Some((event.seq, context.item.clone()));
             None
         }
         TimelineEventKind::Control(ControlEvent {
-            model_context: Some(item),
+            model_context: Some(context),
             ..
-        }) => Some((event.seq, item.clone())),
+        }) => Some((event.seq, context.item.clone())),
         TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
             *active_turn = false;
             pending.take()
@@ -3274,9 +3379,13 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: Some(ConversationItem::system_reminder(
-                    "<behavior-context>plan</behavior-context>",
-                )),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::Behavior,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder(
+                        "<behavior-context>plan</behavior-context>",
+                    ),
+                }),
             }))
             .unwrap();
         let first_request = serde_json::to_value(timeline.surface()).unwrap();
@@ -3296,9 +3405,13 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 2,
                 snapshot: serde_json::json!({ "behavior": "normal" }),
-                model_context: Some(ConversationItem::system_reminder(
-                    "<behavior-context>normal; earlier modes retired</behavior-context>",
-                )),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::Behavior,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder(
+                        "<behavior-context>normal; earlier modes retired</behavior-context>",
+                    ),
+                }),
             }))
             .unwrap();
         assert_eq!(
@@ -3324,7 +3437,11 @@ mod tests {
             timeline.record(TimelineEventKind::Control(ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: Some(ConversationItem::system_reminder("plan")),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::Behavior,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("plan"),
+                }),
             })),
             Err(TimelineError::InvalidControlContext)
         ));
@@ -3354,14 +3471,22 @@ mod tests {
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 1,
                 snapshot: serde_json::json!({ "behavior": "plan" }),
-                model_context: Some(ConversationItem::system_reminder("plan")),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::Behavior,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("plan"),
+                }),
             }))
             .unwrap();
         timeline
             .record(TimelineEventKind::Control(ControlEvent {
                 revision: 2,
                 snapshot: serde_json::json!({ "behavior": "normal" }),
-                model_context: Some(ConversationItem::system_reminder("normal")),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::Behavior,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("normal"),
+                }),
             }))
             .unwrap();
         assert_eq!(timeline.surface().len(), 2);
@@ -3409,6 +3534,119 @@ mod tests {
             .unwrap(),
             serde_json::to_value(timeline.surface()).unwrap()
         );
+    }
+
+    #[test]
+    fn shadow_reprojection_activates_immediately_at_an_in_turn_compaction_boundary() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "agent_name": "reviewer" }),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::AgentRole,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("role-v1"),
+                }),
+            }))
+            .unwrap();
+        timeline
+            .replace_all(
+                vec![
+                    ConversationItem::system("system"),
+                    ConversationItem::user("retained turn"),
+                ],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(77),
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: 2,
+                prompt_index: 0,
+                prompt_text: "retained turn".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 2,
+                snapshot: serde_json::json!({ "agent_name": "writer" }),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::AgentRole,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("role-v2"),
+                }),
+            }))
+            .unwrap();
+        let active = timeline.active_control_contexts();
+        assert_eq!(
+            active
+                .get(&ControlContextLayer::AgentRole)
+                .unwrap()
+                .item
+                .text_content(),
+            "role-v1",
+            "a pending transition must not masquerade as the effective context"
+        );
+
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 3,
+                snapshot: serde_json::json!({ "agent_name": "writer" }),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::AgentRole,
+                    activation: ControlContextActivation::Reprojection,
+                    item: ConversationItem::system_reminder("role-v1"),
+                }),
+            }))
+            .unwrap();
+
+        assert_eq!(timeline.surface().last().unwrap().text_content(), "role-v1");
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: TurnId(77),
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        assert_eq!(timeline.surface().last().unwrap().text_content(), "role-v2");
+    }
+
+    #[test]
+    fn control_reprojection_cannot_duplicate_a_current_context() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "agent_name": "reviewer" }),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::AgentRole,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("role"),
+                }),
+            }))
+            .unwrap();
+
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Control(ControlEvent {
+                revision: 2,
+                snapshot: serde_json::json!({ "agent_name": "reviewer" }),
+                model_context: Some(ControlContext {
+                    layer: ControlContextLayer::AgentRole,
+                    activation: ControlContextActivation::Reprojection,
+                    item: ConversationItem::system_reminder("duplicate"),
+                }),
+            })),
+            Err(TimelineError::InvalidControlReprojection)
+        ));
     }
 
     #[test]

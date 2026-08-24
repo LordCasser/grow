@@ -61,7 +61,7 @@ pub struct AgentBuilder {
     disallowed_tools: Vec<String>,
     skill_names: Vec<String>,
     agents_md: bool,
-    custom_system_prompt: Option<String>,
+    custom_agent_role: Option<String>,
     compaction_policy: CompactionPolicy,
     reminder_policy: ReminderPolicy,
     memory_enabled: bool,
@@ -184,7 +184,7 @@ impl AgentBuilder {
             disallowed_tools: vec![],
             skill_names: vec![],
             agents_md: true,
-            custom_system_prompt: None,
+            custom_agent_role: None,
             compaction_policy: CompactionPolicy::default(),
             reminder_policy: ReminderPolicy::default(),
             memory_enabled: false,
@@ -276,8 +276,8 @@ impl AgentBuilder {
         self.agents_md = enabled;
         self
     }
-    pub fn with_custom_system_prompt(mut self, prompt: String) -> Self {
-        self.custom_system_prompt = Some(prompt);
+    pub fn with_agent_role(mut self, prompt: String) -> Self {
+        self.custom_agent_role = Some(prompt);
         self
     }
     pub fn with_compaction_policy(mut self, policy: CompactionPolicy) -> Self {
@@ -489,7 +489,7 @@ impl AgentBuilder {
         }
         def.prompt_composition = self.prompt_composition.clone();
         def.agents_md = self.agents_md;
-        if let Some(ref prompt) = self.custom_system_prompt {
+        if let Some(ref prompt) = self.custom_agent_role {
             def.prompt_body = Some(prompt.clone());
         }
         if !self.skill_names.is_empty() {
@@ -880,6 +880,7 @@ impl AgentBuilder {
             .render(&tool_bridge)
             .await
             .unwrap_or_default();
+        let role_prompt = prompt_context.render_role(&tool_bridge).await;
         if let Some(rendered) = tool_bridge
             .render_prompt(&definition.description, &prompt_context.placeholders())
             .await
@@ -892,6 +893,7 @@ impl AgentBuilder {
             definition,
             prompt_context,
             system_prompt,
+            role_prompt,
             tool_bridge,
             self.reminder_policy,
             self.compaction_policy,

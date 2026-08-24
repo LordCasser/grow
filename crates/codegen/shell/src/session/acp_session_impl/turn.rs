@@ -1746,14 +1746,19 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
+        self.repair_missing_control_contexts_durably()
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "active Control context could not be restored before sampling: {error}"
+                ))
+            })?;
         self.maybe_compact_on_model_switch().await?;
         self.chat_state_handle
             .record_turn_start(chrono::Utc::now().timestamp_millis());
         {
             let span = tracing::Span::current();
-            if let Some(agent) = self.active_agent_type.lock().clone() {
-                span.record("agent.name", agent.as_str());
-            }
+            span.record("agent.name", self.agent.borrow().name());
             if let Some(skill) = self.active_skill.lock().clone() {
                 span.record("skill.name", skill.as_str());
             }

@@ -1,6 +1,5 @@
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
-use chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
     async fn commit_model_change(
         &self,
@@ -216,8 +215,8 @@ impl SessionActor {
     /// Builds a fresh [`agent::Agent`] from the cached
     /// [`crate::session::agent_rebuild::AgentRebuildSpec`] + the supplied
     /// [`agent::AgentDefinition`], replaces `self.agent`,
-    /// rewrites the system message in the conversation, persists the
-    /// new prompt artifacts, and updates the active Agent name.
+    /// commits the rendered role as an append-only Timeline Control fact, and
+    /// only then replaces the live harness.
     /// Agent selection is independent from model selection; this command
     /// preserves the current sampling configuration. Defense-in-depth:
     /// rejects if a turn is in flight.
@@ -225,17 +224,15 @@ impl SessionActor {
         &self,
         definition: agent::AgentDefinition,
     ) -> Result<(), acp::Error> {
-        {
-            let state = self.state.lock().await;
-            if state.foreground.regular().is_some() {
-                tracing::warn!(
-                    session_id = %self.session_info.id.0,
-                    new_agent_type = %definition.name,
-                    "handle_rebuild_agent_for_definition: turn in flight, rejecting rebuild"
-                );
-                return Err(acp::Error::internal_error()
-                    .data("rebuild_agent: turn in flight, refusing to rebuild harness"));
-            }
+        let foreground_admission = self.state.lock().await;
+        if !foreground_admission.foreground.is_idle() {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                new_agent_type = %definition.name,
+                "handle_rebuild_agent_for_definition: foreground active, rejecting rebuild"
+            );
+            return Err(acp::Error::internal_error()
+                .data("rebuild_agent: foreground active, refusing to rebuild harness"));
         }
         let new_agent_name = definition.name.clone();
         let current_sampling = self
@@ -267,9 +264,18 @@ impl SessionActor {
                     "rebuild_agent: build failed for agent_type={new_agent_name}: {e}"
                 ))
             })?;
-        let new_system_prompt = new_agent.system_prompt().to_string();
+        self.persist_agent_transition_durably(new_agent.name(), new_agent.role_prompt())
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "rebuilt agent role was not durably recorded: {error}"
+                ))
+            })?;
         *self.agent.borrow_mut() = new_agent;
-        *self.active_agent_type.lock() = Some(new_agent_name.clone());
+        // The candidate identity and role are now both durable and live. The
+        // remaining resource refreshes may query foreground-derived command
+        // availability, so release admission before those projections.
+        drop(foreground_admission);
         if let Err(e) = self.workspace_ops.bind_local_session(
             &self.session_id_string(),
             self.tool_context.cwd.as_path().to_path_buf(),
@@ -337,40 +343,6 @@ impl SessionActor {
             }
         }
         self.re_register_mcp_tools_on_rebuilt_bridge().await;
-        if let Some(old_handle) = self.deferred_prefix.take() {
-            old_handle.abort();
-        }
-        let new_user_prefix = self.build_user_message_prefix().await;
-        {
-            let Some((mut conversation, source_surface_revision)) = self
-                .chat_state_handle
-                .get_conversation_with_revision()
-                .await
-            else {
-                return Err(acp::Error::internal_error()
-                    .data("rebuilt agent context unavailable: chat-state actor stopped"));
-            };
-            let _ = replace_or_insert_system_head(&mut conversation, &new_system_prompt);
-            Self::rewrite_zero_turn_prefix(&mut conversation, new_user_prefix);
-            if !conversation_has_project_instructions(&conversation)
-                && let Some(agents_md_reminder) = self.agent.borrow().agents_md_user_reminder()
-            {
-                let agents_md_at = conversation.len().min(2);
-                conversation.insert(
-                    agents_md_at,
-                    ConversationItem::project_instructions(agents_md_reminder),
-                );
-            }
-            self.inject_baseline_skill_reminder(&mut conversation).await;
-            self.chat_state_handle
-                .replace_context_durably(conversation, source_surface_revision)
-                .await
-                .map_err(|error| {
-                    acp::Error::internal_error().data(format!(
-                        "rebuilt agent context was not durably recorded: {error}"
-                    ))
-                })?;
-        }
         let _ = self
             .notifications
             .persistence_tx
@@ -430,5 +402,216 @@ impl SessionActor {
                 "handle_replace_system_prompt: head already matches, no-op"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn agent_switch_appends_one_typed_role_without_rebuilding_history() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = super::super::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let (_, revision) = actor
+                    .chat_state_handle
+                    .get_conversation_with_revision()
+                    .await
+                    .unwrap();
+                let original = vec![
+                    ConversationItem::system("stable-core"),
+                    ConversationItem::user("historical request"),
+                ];
+                actor
+                    .chat_state_handle
+                    .replace_context_durably(original.clone(), revision)
+                    .await
+                    .unwrap();
+
+                let mut definition = agent::AgentDefinition::default_grow_build();
+                definition.name = "reviewer".into();
+                definition.prompt_body = Some("Review the implementation carefully.".into());
+                actor
+                    .handle_rebuild_agent_for_definition(definition)
+                    .await
+                    .unwrap();
+
+                let surface = actor.chat_state_handle.get_conversation().await;
+                assert_eq!(
+                    serde_json::to_value(&surface[..original.len()]).unwrap(),
+                    serde_json::to_value(&original).unwrap()
+                );
+                assert_eq!(surface.len(), original.len() + 1);
+                assert!(
+                    surface
+                        .last()
+                        .unwrap()
+                        .text_content()
+                        .contains("<agent-role>")
+                );
+                assert!(
+                    surface
+                        .last()
+                        .unwrap()
+                        .text_content()
+                        .contains("`reviewer`")
+                );
+                assert_eq!(actor.agent.borrow().name(), "reviewer");
+
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| {
+                            matches!(event.kind, chat_state::TimelineEventKind::Messages(_))
+                        })
+                        .count(),
+                    1,
+                    "Agent selection must not perform a second ContextRebuild"
+                );
+                let control = events
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Control(control) => Some(control),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(control.snapshot["agent_name"], "reviewer");
+                assert_eq!(
+                    control.model_context.as_ref().unwrap().layer,
+                    chat_state::ControlContextLayer::AgentRole
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn agent_switch_rejects_every_non_idle_foreground_without_surface_append() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = super::super::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                actor.state.lock().await.foreground = ForegroundState::Compaction;
+                let surface_before = actor.chat_state_handle.get_conversation().await;
+                let mut definition = agent::AgentDefinition::default_grow_build();
+                definition.name = "reviewer".into();
+
+                let error = actor
+                    .handle_rebuild_agent_for_definition(definition)
+                    .await
+                    .unwrap_err();
+                assert!(format!("{error:?}").contains("foreground active"));
+                assert_eq!(
+                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(),
+                    serde_json::to_value(surface_before).unwrap()
+                );
+                assert_ne!(actor.agent.borrow().name(), "reviewer");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn shadowed_agent_role_is_reprojected_before_the_next_sample() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = super::super::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let (_, revision) = actor
+                    .chat_state_handle
+                    .get_conversation_with_revision()
+                    .await
+                    .unwrap();
+                actor
+                    .chat_state_handle
+                    .replace_context_durably(
+                        vec![ConversationItem::system("stable-core")],
+                        revision,
+                    )
+                    .await
+                    .unwrap();
+                let (agent_name, role_prompt) = {
+                    let agent = actor.agent.borrow();
+                    (
+                        agent.name().to_owned(),
+                        agent.role_prompt().map(str::to_owned),
+                    )
+                };
+                actor
+                    .persist_agent_transition_durably(&agent_name, role_prompt.as_deref())
+                    .await
+                    .unwrap();
+
+                let (_, revision) = actor
+                    .chat_state_handle
+                    .get_conversation_with_revision()
+                    .await
+                    .unwrap();
+                actor
+                    .chat_state_handle
+                    .replace_context_durably(
+                        vec![ConversationItem::system("stable-core")],
+                        revision,
+                    )
+                    .await
+                    .unwrap();
+                actor
+                    .repair_missing_control_contexts_durably()
+                    .await
+                    .unwrap();
+
+                let surface = actor.chat_state_handle.get_conversation().await;
+                assert!(surface.last().unwrap().text_content().contains("<agent-role>"));
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Control(chat_state::ControlEvent {
+                                model_context: Some(chat_state::ControlContext {
+                                    layer: chat_state::ControlContextLayer::AgentRole,
+                                    activation: chat_state::ControlContextActivation::Reprojection,
+                                    ..
+                                }),
+                                ..
+                            })
+                        ))
+                        .count(),
+                    1
+                );
+            })
+            .await;
     }
 }
