@@ -973,7 +973,7 @@ async fn replace_conversation_persists_and_emits_reset() {
 }
 
 #[tokio::test]
-async fn atomic_image_rewrite_preserves_message_metadata_and_tool_pairing() {
+async fn image_projection_preserves_canonical_images_and_is_scoped_to_model_route() {
     use sampling_types::conversation::{
         ContentPart, SyntheticReason, UserItem, conversation_image_groups,
     };
@@ -1011,25 +1011,59 @@ async fn atomic_image_rewrite_preserves_message_metadata_and_tool_pairing() {
     h.handle.begin_turn_capture();
     h.handle.push_user_message(user);
     h.handle.push_tool_result(tool_result);
-    let groups = conversation_image_groups(&h.handle.get_conversation().await);
-    let rewrites = groups
+    let materialized = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    let groups = conversation_image_groups(&materialized.surface);
+    let sideband_id = "00000000-0000-0000-0000-000000000007".to_owned();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Sideband(
+            crate::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: crate::SidebandPurpose::ImageDescription,
+                source_refs: vec![materialized.input_ref.clone()],
+            },
+        ))
+        .await
+        .unwrap();
+    let shadows = groups
         .iter()
-        .map(|group| crate::ImageRewrite {
-            item_index: group.item_index,
+        .map(|group| crate::ImageShadow {
+            source: materialized.surface_ids[group.item_index],
             fingerprint: group.fingerprint.clone(),
-            expected_image_count: group.image_count(),
-            replacement: (group.item_index == 0).then(|| "converted user image".to_owned()),
+            image_count: group.image_count(),
+            replacement: if group.item_index == 0 {
+                "converted user image".to_owned()
+            } else {
+                "image description unavailable".to_owned()
+            },
+            provenance: if group.item_index == 0 {
+                crate::ImageShadowSource::Description {
+                    result_ref: crate::TimelineRangeRef {
+                        timeline_id: sideband_id.clone(),
+                        first_seq: 2,
+                        last_seq: 2,
+                    },
+                }
+            } else {
+                crate::ImageShadowSource::Unavailable
+            },
         })
         .collect();
 
     let report = h
         .handle
-        .rewrite_images_and_ack(rewrites, "images permanently removed".to_owned())
+        .record_image_projection_and_ack(crate::ImageProjectionEvent {
+            runtime: sampling_types::model_image_input_key(&test_config()),
+            source_revision: materialized.surface_revision,
+            shadows,
+        })
         .await
         .unwrap();
-    assert_eq!(report.converted_images, 1);
-    assert_eq!(report.dropped_images, 2);
-    assert_eq!(report.unmatched_images, 0);
+    assert_eq!(report.described_images, 1);
+    assert_eq!(report.unavailable_images, 2);
 
     let conversation = h.handle.get_conversation().await;
     let ConversationItem::User(user) = &conversation[0] else {
@@ -1037,11 +1071,8 @@ async fn atomic_image_rewrite_preserves_message_metadata_and_tool_pairing() {
     };
     assert_eq!(user.synthetic_reason, Some(SyntheticReason::Interjection));
     assert_eq!(user.prompt_index, Some(7));
-    assert!(user.content.iter().any(
-        |part| matches!(part, ContentPart::Text { text } if text.as_ref() == "converted user image")
-    ));
     assert!(
-        !user
+        user
             .content
             .iter()
             .any(|part| matches!(part, ContentPart::Image { .. }))
@@ -1051,24 +1082,51 @@ async fn atomic_image_rewrite_preserves_message_metadata_and_tool_pairing() {
         panic!("expected tool result");
     };
     assert_eq!(result.tool_call_id, "call_7");
-    assert!(result.content.contains("images permanently removed"));
+    assert_eq!(result.content.as_ref(), "Read image file");
     assert!(matches!(
         result.images.as_slice(),
-        [ContentPart::Text { text }] if text.as_ref() == "keep-me"
+        [ContentPart::Text { text }, ContentPart::Image { .. }, ContentPart::Image { .. }]
+            if text.as_ref() == "keep-me"
     ));
     let capture = h.handle.take_turn_messages().await.unwrap();
     assert_eq!(capture.messages.len(), conversation.len());
-    assert!(conversation_image_groups(&capture.messages).is_empty());
+    assert_eq!(conversation_image_groups(&capture.messages).len(), 2);
+
+    let projected = h
+        .handle
+        .build_request("test-timeline", vec![], None)
+        .await
+        .unwrap();
+    assert!(conversation_image_groups(&projected.items).is_empty());
+    assert!(projected.items[0].text_content().contains("converted user image"));
+    assert!(projected.items[1]
+        .text_content()
+        .contains("image description unavailable"));
+
+    let mut other_route = test_config();
+    other_route.model = "vision-model".to_owned();
+    h.handle.update_sampling_config(other_route);
+    let restored = h
+        .handle
+        .build_request("test-timeline", vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(conversation_image_groups(&restored.items).len(), 2);
     assert!(
         h.drain_persistence()
             .iter()
-            .filter_map(persisted_messages)
-            .any(|event| event.cause == crate::MessageCause::ImageRewrite)
+            .any(|record| matches!(
+                record,
+                PersistenceRecord::Timeline(crate::TimelineEvent {
+                    kind: crate::TimelineEventKind::ImageProjection(_),
+                    ..
+                })
+            ))
     );
 }
 
 #[tokio::test]
-async fn image_rewrite_retries_an_uncertain_persistence_failure() {
+async fn image_projection_retries_an_uncertain_persistence_failure() {
     use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
 
     let user = ConversationItem::User(UserItem {
@@ -1077,27 +1135,39 @@ async fn image_rewrite_retries_an_uncertain_persistence_failure() {
         }],
         ..Default::default()
     });
-    let groups = conversation_image_groups(std::slice::from_ref(&user));
-    let rewrite = crate::ImageRewrite {
-        item_index: groups[0].item_index,
-        fingerprint: groups[0].fingerprint.clone(),
-        expected_image_count: groups[0].image_count(),
-        replacement: Some("converted image".to_owned()),
-    };
     let mut h = TestHarness::with_manual_timeline_ack(vec![user.clone()]);
-    let handle = h.handle.clone();
-    let rewrite_future = async move {
-        handle
-            .rewrite_images_and_ack(vec![rewrite], "dropped".to_owned())
-            .await
+    let materialized = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    let groups = conversation_image_groups(&materialized.surface);
+    let projection = crate::ImageProjectionEvent {
+        runtime: sampling_types::model_image_input_key(&test_config()),
+        source_revision: materialized.surface_revision,
+        shadows: vec![crate::ImageShadow {
+            source: materialized.surface_ids[groups[0].item_index],
+            fingerprint: groups[0].fingerprint.clone(),
+            image_count: groups[0].image_count(),
+            replacement: "image description unavailable".to_owned(),
+            provenance: crate::ImageShadowSource::Unavailable,
+        }],
     };
+    let handle = h.handle.clone();
+    let projection_future = async move { handle.record_image_projection_and_ack(projection).await };
     let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
-    let (report, ()) = tokio::join!(rewrite_future, retry);
-    assert!(report.is_some());
-    assert_ne!(
+    let (report, ()) = tokio::join!(projection_future, retry);
+    assert_eq!(report.unwrap().unavailable_images, 1);
+    assert_eq!(
         serde_json::to_vec(&h.handle.get_conversation().await).unwrap(),
         serde_json::to_vec(&vec![user]).unwrap(),
     );
+    let materialized = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    assert_eq!(materialized.active_image_projections.len(), 1);
 }
 
 #[tokio::test]

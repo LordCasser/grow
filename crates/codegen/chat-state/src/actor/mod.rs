@@ -458,12 +458,8 @@ impl ChatStateActor {
                 let report = self.prune_tool_results(plan).await;
                 let _ = reply.send(report);
             }
-            ChatStateCommand::RewriteImagesAndAck {
-                rewrites,
-                dropped_placeholder,
-                reply,
-            } => {
-                let report = self.rewrite_images(rewrites, &dropped_placeholder).await;
+            ChatStateCommand::RecordImageProjectionAndAck { projection, reply } => {
+                let report = self.record_image_projection(projection).await;
                 let _ = reply.send(report);
             }
             ChatStateCommand::RepairHistory {
@@ -554,6 +550,10 @@ impl ChatStateActor {
                         surface_revision: self.state.timeline.surface_revision(),
                         surface: self.state.timeline.surface().to_vec(),
                         surface_ids: self.state.timeline.surface_ids().to_vec(),
+                        active_image_projections: self
+                            .state
+                            .timeline
+                            .active_image_projections(),
                         active_control_contexts: self.state.timeline.active_control_contexts(),
                     }
                 });

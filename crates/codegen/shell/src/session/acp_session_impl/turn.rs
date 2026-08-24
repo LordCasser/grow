@@ -1809,6 +1809,7 @@ impl SessionActor {
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
+        let mut image_projection_retries: u8 = 0;
         let structured_output_validator = json_schema.as_ref().map(|schema| {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
         });
@@ -1932,14 +1933,6 @@ impl SessionActor {
                 );
             }
             self.maybe_inject_mcp_reminder().await;
-            let rewritten_images = self.rewrite_images_for_known_text_model().await?;
-            if rewritten_images.total_images() > 0 {
-                tracing::info!(
-                    converted_images = rewritten_images.converted_images,
-                    dropped_images = rewritten_images.dropped_images,
-                    "degraded canonical image context for known text-only model"
-                );
-            }
             if self.tool_context.task_output_token_budget.is_none() {
                 self.refresh_byok_credential().await;
             }
@@ -1951,6 +1944,14 @@ impl SessionActor {
                 if Self::is_auth_compact_error(&e) {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
+            }
+            let projected_images = self.project_images_for_known_text_model().await?;
+            if projected_images.total_images() > 0 {
+                tracing::info!(
+                    described_images = projected_images.described_images,
+                    unavailable_images = projected_images.unavailable_images,
+                    "installed target-model ImageShadows without changing canonical images"
+                );
             }
             let mut effective_tools: Vec<ToolSpec> = self.turn_base_tool_specs(&tool_definitions);
             if structured_output_tool && let Some(schema) = json_schema.clone() {
@@ -1996,21 +1997,23 @@ impl SessionActor {
                     .clone()
                     .map(sampling_types::JsonOutputFormat::JsonSchema);
             }
-            let defensive_strip_count = if request.image_count() > 0
-                && self.unsupported_current_model_for_images().await.is_some()
+            if request.image_count() > 0
+                && let Some(model) = self.unsupported_current_model_for_images().await
             {
-                request.strip_images_with_placeholder(
-                    super::sampler_turn::UNSUPPORTED_IMAGE_PLACEHOLDER,
-                )
-            } else {
-                0
-            };
-            if defensive_strip_count > 0 {
+                image_projection_retries = image_projection_retries.saturating_add(1);
+                if image_projection_retries > 2 {
+                    return Err(acp::Error::internal_error().data(format!(
+                        "text-only model {model} still has unprojected image input after two Surface retries"
+                    )));
+                }
                 tracing::info!(
-                    defensive_strip_count,
-                    "defensively removed images appended after canonical text-model recovery"
+                    model,
+                    image_projection_retries,
+                    "Surface changed after ImageShadow installation; rebuilding request projection"
                 );
+                continue;
             }
+            image_projection_retries = 0;
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)

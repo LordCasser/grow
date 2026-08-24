@@ -3,7 +3,7 @@
 //! recovery, and per-response usage recording.
 use super::*;
 
-pub(super) const UNSUPPORTED_IMAGE_PLACEHOLDER: &str = "[Images removed: the active model does not support image input and no usable auxiliary description was available.]";
+pub(super) const UNSUPPORTED_IMAGE_PLACEHOLDER: &str = "[Images omitted from this request: the active model does not support image input and no usable auxiliary description was available. The original images remain in session history.]";
 const IMAGE_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
 const PERMISSION_JUDGMENT_MAX_ATTEMPTS: usize = 2;
 const PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS: u32 = 1_024;
@@ -140,56 +140,15 @@ pub(super) fn is_image_input_unsupported(
     text_only_model || model_rejects_images || (names_image_content && image_type_rejected_as_text)
 }
 
-fn model_image_input_key(
-    config: &sampling_types::SamplingConfig,
-) -> tools::types::resources::ModelImageInputKey {
-    model_image_input_key_parts(
-        &config.model,
-        &config.api_backend,
-        &config.base_url,
-        &config.query_params,
-    )
-}
-
 fn sampler_model_image_input_key(
     config: &sampler::SamplerConfig,
-) -> tools::types::resources::ModelImageInputKey {
-    model_image_input_key_parts(
+) -> sampling_types::ModelImageInputKey {
+    sampling_types::model_image_input_key_from_parts(
         &config.model,
         &config.api_backend,
         &config.base_url,
         &config.query_params,
     )
-}
-
-fn model_image_input_key_parts(
-    model: &str,
-    api_backend: &sampling_types::ApiBackend,
-    base_url: &str,
-    query_params: &indexmap::IndexMap<String, String>,
-) -> tools::types::resources::ModelImageInputKey {
-    use sha2::{Digest, Sha256};
-    let api_backend = match api_backend {
-        sampling_types::ApiBackend::ChatCompletions => "chat_completions",
-        sampling_types::ApiBackend::Responses => "responses",
-        sampling_types::ApiBackend::Messages => "messages",
-    };
-    // The configured query is part of the effective provider route (Azure and
-    // compatible gateways commonly select deployments this way). Sort it so
-    // equivalent maps share one identity; only the digest is persisted, never
-    // query values that may contain credentials.
-    let mut query = query_params.iter().collect::<Vec<_>>();
-    query.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-    let mut endpoint = Sha256::new();
-    endpoint.update(base_url.as_bytes());
-    for (key, value) in query {
-        endpoint.update([0]);
-        endpoint.update(key.as_bytes());
-        endpoint.update([b'=']);
-        endpoint.update(value.as_bytes());
-    }
-    let endpoint_fingerprint = format!("{:x}", endpoint.finalize());
-    tools::types::resources::ModelImageInputKey::new(model, api_backend, endpoint_fingerprint)
 }
 /// Auth-failure detector for tool errors. Matches strictly on HTTP 401
 /// when the error carries a structured status code, mirroring
@@ -218,17 +177,17 @@ pub(super) fn is_auth_tool_error(err: &tool_runtime::ToolError) -> bool {
 impl SessionActor {
     pub(super) async fn current_model_image_input_key(
         &self,
-    ) -> Option<tools::types::resources::ModelImageInputKey> {
+    ) -> Option<sampling_types::ModelImageInputKey> {
         self.chat_state_handle
             .get_sampling_config()
             .await
             .as_ref()
-            .map(model_image_input_key)
+            .map(sampling_types::model_image_input_key)
     }
 
     async fn model_image_input_is_unsupported(
         &self,
-        key: &tools::types::resources::ModelImageInputKey,
+        key: &sampling_types::ModelImageInputKey,
     ) -> bool {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let resources = bridge.shared_resources().await;
@@ -240,7 +199,7 @@ impl SessionActor {
 
     pub(super) async fn record_unsupported_model_image_input(
         &self,
-        key: tools::types::resources::ModelImageInputKey,
+        key: sampling_types::ModelImageInputKey,
     ) -> std::io::Result<bool> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge
@@ -257,11 +216,11 @@ impl SessionActor {
 
     async fn resolve_image_description_route(
         &self,
-        rejected_key: &tools::types::resources::ModelImageInputKey,
+        rejected_key: &sampling_types::ModelImageInputKey,
     ) -> Option<(
         sampler::SamplingClient,
         String,
-        tools::types::resources::ModelImageInputKey,
+        sampling_types::ModelImageInputKey,
     )> {
         let configured_model = self.image_description_model.read().clone()?;
         let mut sampler_config = match self.resolve_aux_sampler_config(&configured_model).await {
@@ -306,47 +265,67 @@ impl SessionActor {
         Some((client, model, auxiliary_key))
     }
 
-    fn image_recovery_notification(report: chat_state::ImageRewriteReport) -> Option<String> {
-        match (report.converted_images, report.dropped_images) {
+    fn image_recovery_notification(report: chat_state::ImageProjectionReport) -> Option<String> {
+        match (report.described_images, report.unavailable_images) {
             (0, 0) => None,
-            (converted, 0) => Some(format!(
-                "当前模型不支持图片输入；已使用辅助模型将 {converted} 张图片转换为文字描述并继续。"
+            (described, 0) => Some(format!(
+                "当前模型不支持图片输入；已在当前模型投影中用辅助描述替代 {described} 张图片，原图仍保留在会话中。"
             )),
-            (0, dropped) => Some(format!(
-                "当前模型不支持图片输入；辅助多模态模型不可用，已移除 {dropped} 张图片并继续。"
+            (0, unavailable) => Some(format!(
+                "当前模型不支持图片输入；辅助多模态模型不可用，当前模型投影省略了 {unavailable} 张图片，原图仍保留在会话中。"
             )),
-            (converted, dropped) => Some(format!(
-                "当前模型不支持图片输入；已转换 {converted} 张图片，并移除 {dropped} 张无法转换的图片，随后继续。"
+            (described, unavailable) => Some(format!(
+                "当前模型不支持图片输入；当前模型投影以描述替代 {described} 张图片，并省略 {unavailable} 张无法描述的图片；原图仍保留在会话中。"
             )),
         }
     }
 
-    /// Permanently degrade all canonical image groups for one text-only model
-    /// runtime, then acknowledge the actor-serialized persistence before the
-    /// caller rebuilds a request.
-    async fn rewrite_conversation_images_for_text_model(
+    /// Build and durably bind ImageShadows for one text-only model runtime.
+    /// Canonical images remain on Timeline Surface; only the matching request
+    /// projection consumes these descriptions/placeholders.
+    async fn project_conversation_images_for_text_model_once(
         &self,
-        rejected_key: &tools::types::resources::ModelImageInputKey,
-    ) -> Option<chat_state::ImageRewriteReport> {
+        rejected_key: &sampling_types::ModelImageInputKey,
+    ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
         use sampling_types::conversation::{ConversationImageSource, conversation_image_groups};
 
+        let sampling_config = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?;
+        let runtime = sampling_types::model_image_input_key(&sampling_config);
         let materialized = self
             .chat_state_handle
             .materialize_timeline(self.session_info.id.to_string())
-            .await?;
-        let input_ref = materialized.input_ref;
+            .await
+            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?;
+        let input_ref = materialized.input_ref.clone();
+        let active = materialized.active_image_projections.get(&runtime);
         let conversation = materialized.surface;
-        let groups = conversation_image_groups(&conversation);
+        let groups = conversation_image_groups(&conversation)
+            .into_iter()
+            .filter(|group| {
+                let Some(source) = materialized.surface_ids.get(group.item_index) else {
+                    return true;
+                };
+                !active.and_then(|shadows| shadows.get(source)).is_some_and(|shadow| {
+                    shadow.fingerprint == group.fingerprint
+                        && shadow.image_count == group.image_count()
+                })
+            })
+            .collect::<Vec<_>>();
         if groups.is_empty() {
-            return Some(chat_state::ImageRewriteReport::default());
+            return Ok(chat_state::ImageProjectionReport::default());
         }
-        let mut rewrites = groups
+        let mut shadows = groups
             .iter()
-            .map(|group| chat_state::ImageRewrite {
-                item_index: group.item_index,
+            .map(|group| chat_state::ImageShadow {
+                source: materialized.surface_ids[group.item_index],
                 fingerprint: group.fingerprint.clone(),
-                expected_image_count: group.image_count(),
-                replacement: None,
+                image_count: group.image_count(),
+                replacement: UNSUPPORTED_IMAGE_PLACEHOLDER.to_owned(),
+                provenance: chat_state::ImageShadowSource::Unavailable,
             })
             .collect::<Vec<_>>();
 
@@ -356,7 +335,7 @@ impl SessionActor {
             let (outline, current_query) =
                 crate::session::image_describe::build_read_context(&conversation);
             let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
-            for (group, rewrite) in groups.iter().zip(rewrites.iter_mut()) {
+            for (group, shadow) in groups.iter().zip(shadows.iter_mut()) {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     tracing::warn!(
@@ -385,12 +364,14 @@ impl SessionActor {
                     &source_context,
                     &group.fingerprint,
                 );
-                if let Some(description) = self.image_describe_cache.get(&cache_key) {
-                    rewrite.replacement = Some(
+                if let Some(cached) = self.image_describe_cache.get(&cache_key) {
+                    shadow.replacement =
                         crate::session::image_describe::render_image_description_block(
-                            &description,
-                        ),
-                    );
+                            &cached.description,
+                        );
+                    shadow.provenance = chat_state::ImageShadowSource::Description {
+                        result_ref: cached.result_ref,
+                    };
                     continue;
                 }
                 let prompt_text = crate::session::image_describe::build_describe_prompt(
@@ -422,24 +403,82 @@ impl SessionActor {
                         continue;
                     }
                 };
-                if let Err(error) = sideband.attempt_all_sources(&request, None).await {
+                if let Err(error) = sideband
+                    .attempt_selected(
+                        &request,
+                        vec![input_ref.clone()],
+                        Some(materialized.surface_revision),
+                        vec![shadow.source],
+                        vec![shadow.source],
+                        "image-group",
+                        None,
+                    )
+                    .await
+                {
                     tracing::warn!(%error, model, "failed to commit image description attempt");
                     continue;
                 }
                 let timeout = remaining.min(crate::session::image_describe::DESCRIBE_TIMEOUT);
                 let described: Result<
-                    String,
+                    (String, chat_state::TimelineRangeRef),
                     crate::session::image_describe::DescribeError,
                 > = async {
                     match tokio::time::timeout(timeout, client.conversation_collect(request)).await {
-                    Ok(Ok(response)) => {
-                        let raw = response.assistant_text();
-                        let description = raw.trim().to_owned();
-                        if description.is_empty() {
+                        Ok(Ok(response)) => {
+                            let raw = response.assistant_text();
+                            let description = raw.trim().to_owned();
+                            if description.is_empty() {
+                                sideband
+                                    .fail(
+                                        chat_state::SidebandOutcome::Failed,
+                                        "image describe model returned no content",
+                                    )
+                                    .await
+                                    .map_err(|error| {
+                                        crate::session::image_describe::DescribeError::Sideband(
+                                            error.to_string(),
+                                        )
+                                    })?;
+                                Err(crate::session::image_describe::DescribeError::EmptyResponse)
+                            } else {
+                                let usage = sideband_usage(&response);
+                                let finish = sideband_finish(&response);
+                                let result_ref = sideband
+                                    .complete(raw, None, usage, finish, Vec::new())
+                                    .await
+                                    .map_err(|error| {
+                                        crate::session::image_describe::DescribeError::Sideband(
+                                            error.to_string(),
+                                        )
+                                    })?;
+                                self.image_describe_cache.insert(
+                                    cache_key,
+                                    description.clone(),
+                                    result_ref.clone(),
+                                );
+                                Ok((description, result_ref))
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            let info = sampler::SamplingErrorInfo::from(&error);
+                            sideband
+                                .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                                .await
+                                .map_err(|record_error| {
+                                    crate::session::image_describe::DescribeError::Sideband(
+                                        record_error.to_string(),
+                                    )
+                                })?;
+                            Err(crate::session::image_describe::DescribeError::Sampling(info))
+                        }
+                        Err(_) => {
                             sideband
                                 .fail(
-                                    chat_state::SidebandOutcome::Failed,
-                                    "image describe model returned no content",
+                                    chat_state::SidebandOutcome::Cancelled,
+                                    format!(
+                                        "image describe call timed out after {}s",
+                                        timeout.as_secs()
+                                    ),
                                 )
                                 .await
                                 .map_err(|error| {
@@ -447,62 +486,19 @@ impl SessionActor {
                                         error.to_string(),
                                     )
                                 })?;
-                            Err(crate::session::image_describe::DescribeError::EmptyResponse)
-                        } else {
-                            let usage = sideband_usage(&response);
-                            let finish = sideband_finish(&response);
-                            sideband
-                                .complete(raw, None, usage, finish, Vec::new())
-                                .await
-                                .map_err(|error| {
-                                    crate::session::image_describe::DescribeError::Sideband(
-                                        error.to_string(),
-                                    )
-                                })?;
-                            self.image_describe_cache
-                                .insert(cache_key, description.clone());
-                            Ok(description)
+                            Err(crate::session::image_describe::DescribeError::Timeout(timeout))
                         }
-                    }
-                    Ok(Err(error)) => {
-                        let info = sampler::SamplingErrorInfo::from(&error);
-                        sideband
-                            .fail(chat_state::SidebandOutcome::Failed, error.to_string())
-                            .await
-                            .map_err(|record_error| {
-                                crate::session::image_describe::DescribeError::Sideband(
-                                    record_error.to_string(),
-                                )
-                            })?;
-                        Err(crate::session::image_describe::DescribeError::Sampling(info))
-                    }
-                    Err(_) => {
-                        sideband
-                            .fail(
-                                chat_state::SidebandOutcome::Cancelled,
-                                format!(
-                                    "image describe call timed out after {}s",
-                                    timeout.as_secs()
-                                ),
-                            )
-                            .await
-                            .map_err(|error| {
-                                crate::session::image_describe::DescribeError::Sideband(
-                                    error.to_string(),
-                                )
-                            })?;
-                        Err(crate::session::image_describe::DescribeError::Timeout(timeout))
-                    }
                     }
                 }
                 .await;
                 match described {
-                    Ok(description) => {
-                        rewrite.replacement = Some(
+                    Ok((description, result_ref)) => {
+                        shadow.replacement =
                             crate::session::image_describe::render_image_description_block(
                                 &description,
-                            ),
-                        );
+                            );
+                        shadow.provenance =
+                            chat_state::ImageShadowSource::Description { result_ref };
                     }
                     Err(crate::session::image_describe::DescribeError::Sampling(info))
                         if is_image_input_unsupported(&info, group.image_count()) =>
@@ -529,7 +525,7 @@ impl SessionActor {
                             %error,
                             model,
                             item_index = group.item_index,
-                            "auxiliary image description failed; dropping this image group"
+                            "auxiliary image description failed; omitting this group from the text-model projection"
                         );
                     }
                 }
@@ -538,39 +534,59 @@ impl SessionActor {
 
         let report = self
             .chat_state_handle
-            .rewrite_images_and_ack(rewrites, UNSUPPORTED_IMAGE_PLACEHOLDER.to_owned())
+            .record_image_projection_and_ack(chat_state::ImageProjectionEvent {
+                runtime,
+                source_revision: materialized.surface_revision,
+                shadows,
+            })
             .await?;
-        if report.unmatched_images > 0 {
-            tracing::warn!(
-                unmatched_images = report.unmatched_images,
-                "image rewrite snapshot changed before atomic commit; unmatched images were removed"
-            );
-        }
         if let Some(message) = Self::image_recovery_notification(report) {
-            self.send_grow_notification(GrowSessionUpdate::ImageDropped {
+            self.send_grow_notification(GrowSessionUpdate::ImageProjected {
                 notes: vec![message],
             })
             .await;
         }
-        Some(report)
+        Ok(report)
+    }
+
+    async fn project_conversation_images_for_text_model(
+        &self,
+        rejected_key: &sampling_types::ModelImageInputKey,
+    ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
+        for attempt in 0..3 {
+            match self
+                .project_conversation_images_for_text_model_once(rejected_key)
+                .await
+            {
+                Err(chat_state::TimelineWriteError::SurfaceChanged { .. }) if attempt < 2 => {
+                    tracing::info!(
+                        attempt = attempt + 1,
+                        "image projection source changed; rebuilding from the new Surface"
+                    );
+                }
+                result => return result,
+            }
+        }
+        unreachable!("bounded image projection loop always returns")
     }
 
     /// Pre-sampling gate for runtimes already present in the negative cache.
     /// Unknown runtimes remain optimistic and receive the original images.
-    pub(super) async fn rewrite_images_for_known_text_model(
+    pub(super) async fn project_images_for_known_text_model(
         &self,
-    ) -> Result<chat_state::ImageRewriteReport, acp::Error> {
+    ) -> Result<chat_state::ImageProjectionReport, acp::Error> {
         let Some(key) = self.current_model_image_input_key().await else {
-            return Ok(chat_state::ImageRewriteReport::default());
+            return Ok(chat_state::ImageProjectionReport::default());
         };
         if !self.model_image_input_is_unsupported(&key).await {
-            return Ok(chat_state::ImageRewriteReport::default());
+            return Ok(chat_state::ImageProjectionReport::default());
         }
-        self.rewrite_conversation_images_for_text_model(&key)
+        self.project_conversation_images_for_text_model(&key)
             .await
-            .ok_or_else(|| {
-                acp::Error::internal_error()
-                    .data("failed to persist text-only image recovery; sampling was not resumed")
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "failed to persist text-only image projection: {error}; sampling was not resumed"
+                ))
             })
     }
 
@@ -1417,7 +1433,7 @@ impl SessionActor {
     /// `update_config`.
     pub(crate) async fn prepare_sampler_for_turn(
         &self,
-    ) -> tools::types::resources::ModelImageInputKey {
+    ) -> sampling_types::ModelImageInputKey {
         self.refresh_byok_credential().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
@@ -1445,7 +1461,7 @@ impl SessionActor {
         self: &Arc<Self>,
         error: sampler::SamplingErrorInfo,
         request_image_count: usize,
-        request_image_input_key: Option<tools::types::resources::ModelImageInputKey>,
+        request_image_input_key: Option<sampling_types::ModelImageInputKey>,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use sampler::SamplingErrorKind;
         if is_image_input_unsupported(&error, request_image_count)
@@ -1464,16 +1480,16 @@ impl SessionActor {
                 model,
                 request_image_count,
                 first_rejection,
-                "model explicitly rejected image input; rewriting canonical image context"
+                "model explicitly rejected image input; installing target-model ImageShadows"
             );
-            if self
-                .rewrite_conversation_images_for_text_model(&key)
+            self
+                .project_conversation_images_for_text_model(&key)
                 .await
-                .is_none()
-            {
-                return Err(acp::Error::internal_error()
-                    .data("failed to persist text-only image recovery; sampling was not resumed"));
-            }
+                .map_err(|projection_error| {
+                    acp::Error::internal_error().data(format!(
+                        "failed to persist text-only image projection: {projection_error}; sampling was not resumed"
+                    ))
+                })?;
             return Ok(SamplerFailureRecovery::ImageInputUnsupportedAndResubmit);
         }
         if self.tool_context.task_output_token_budget.is_some() {
@@ -2084,10 +2100,24 @@ mod image_input_rejection_tests {
             "deployment".to_owned() => "text".to_owned(),
             "api-version".to_owned() => "2026-01-01".to_owned(),
         };
-        let left = model_image_input_key_parts("model", &backend, "https://api.test", &left);
-        let reordered =
-            model_image_input_key_parts("model", &backend, "https://api.test", &reordered);
-        let text = model_image_input_key_parts("model", &backend, "https://api.test", &text);
+        let left = sampling_types::model_image_input_key_from_parts(
+            "model",
+            &backend,
+            "https://api.test",
+            &left,
+        );
+        let reordered = sampling_types::model_image_input_key_from_parts(
+            "model",
+            &backend,
+            "https://api.test",
+            &reordered,
+        );
+        let text = sampling_types::model_image_input_key_from_parts(
+            "model",
+            &backend,
+            "https://api.test",
+            &text,
+        );
         assert_eq!(
             left, reordered,
             "query insertion order is not route identity"

@@ -54,6 +54,10 @@ impl ChatStateActor {
                     .saturating_add(super::state::estimate_item_tokens(&item));
             }
         }
+        let mut items = self.state.timeline.surface().to_vec();
+        let runtime = sampling_types::model_image_input_key(&self.state.sampling_config);
+        project_image_shadows(&self.state.timeline, &runtime, &mut items);
+
         // Measure the exact serialized body and evict only once it approaches
         // the 50 MB ceiling. `conversation_body_bytes` is wire-accurate yet
         // cheap — it skips the multi-MB base64 escape scan (see its docs) — so
@@ -61,15 +65,12 @@ impl ChatStateActor {
         // Eviction rewrites earlier turns and busts the KV-cache prefix, so we
         // only pay it when the body is actually near the limit (the original
         // behavior — evicting every turn — caused chronic cache misses).
-        let body_bytes = conversation_body_bytes(self.state.timeline.surface());
-        let inline_images = inline_image_count(self.state.timeline.surface());
+        let body_bytes = conversation_body_bytes(&items);
+        let inline_images = inline_image_count(&items);
         let needs_image_compaction = body_bytes >= IMAGE_COMPACT_TRIGGER_BYTES;
 
-        // Only allocate the mutable working copy when image eviction is needed.
         let mut eviction: Option<ImageEvictionOutcome> = None;
-        let items = if needs_image_compaction {
-            let mut items = self.state.timeline.surface().to_vec();
-
+        if needs_image_compaction {
             // Step 1: When the body nears the 50 MB ceiling, evict oldest
             // images down to the low-water mark (not just under the trigger).
             // Reclaiming a batch frees headroom for many subsequent image
@@ -80,13 +81,7 @@ impl ChatStateActor {
                 body_bytes,
                 IMAGE_COMPACT_RECLAIM_TARGET_BYTES,
             ));
-
-            items
-        } else {
-            // Hot path: no image eviction —
-            // clone directly into the request without any intermediate mutation passes.
-            self.state.timeline.surface().to_vec()
-        };
+        }
 
         // Per-turn image-budget record for local verification. Emitted on the
         // ChatState event channel (chat-state can't reach the shell's unified
@@ -122,6 +117,38 @@ impl ChatStateActor {
             json_output: None,
         })
     }
+}
+
+/// Apply durable, target-model ImageShadows to a request projection. Source
+/// images stay on Timeline Surface and no projection for another model route
+/// can affect this request.
+fn project_image_shadows(
+    timeline: &crate::Timeline,
+    runtime: &sampling_types::ModelImageInputKey,
+    items: &mut [ConversationItem],
+) -> usize {
+    use sampling_types::conversation::{
+        conversation_image_groups, replace_item_images_with_text,
+    };
+
+    let active = timeline.active_image_projections();
+    let Some(shadows) = active.get(runtime) else {
+        return 0;
+    };
+    let groups = conversation_image_groups(items)
+        .into_iter()
+        .map(|group| (group.item_index, group))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut projected = 0usize;
+    for (index, source) in timeline.surface_ids().iter().copied().enumerate() {
+        let (Some(shadow), Some(group)) = (shadows.get(&source), groups.get(&index)) else {
+            continue;
+        };
+        if shadow.fingerprint == group.fingerprint && shadow.image_count == group.image_count() {
+            projected += replace_item_images_with_text(&mut items[index], &shadow.replacement);
+        }
+    }
+    projected
 }
 
 /// Build the sticky provider route from causal lineage and model identity.

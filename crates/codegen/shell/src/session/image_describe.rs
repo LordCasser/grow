@@ -207,7 +207,12 @@ fn content_fingerprint_urls(image_urls: &[std::sync::Arc<str>]) -> String {
 /// image content, and describe-prompt fingerprint.
 #[derive(Debug, Default)]
 pub struct ImageDescribeCache {
-    inner: Mutex<HashMap<(String, String, String), String>>,
+    inner: Mutex<HashMap<(String, String, String), CachedImageDescription>>,
+}
+#[derive(Debug, Clone)]
+pub struct CachedImageDescription {
+    pub description: String,
+    pub result_ref: chat_state::TimelineRangeRef,
 }
 impl ImageDescribeCache {
     pub fn new() -> Self {
@@ -229,12 +234,23 @@ impl ImageDescribeCache {
         (group_key.to_owned(), content_fp, prompt_fp)
     }
 
-    pub fn get(&self, key: &(String, String, String)) -> Option<String> {
+    pub fn get(&self, key: &(String, String, String)) -> Option<CachedImageDescription> {
         self.inner.lock().get(key).cloned()
     }
 
-    pub fn insert(&self, key: (String, String, String), description: String) {
-        self.inner.lock().insert(key, description);
+    pub fn insert(
+        &self,
+        key: (String, String, String),
+        description: String,
+        result_ref: chat_state::TimelineRangeRef,
+    ) {
+        self.inner.lock().insert(
+            key,
+            CachedImageDescription {
+                description,
+                result_ref,
+            },
+        );
     }
 }
 /// Build the `<image_files>` envelope that lists the workspace paths
@@ -551,11 +567,19 @@ mod tests {
             "/workspace/scan.pdf",
         );
         assert!(cache.get(&key).is_none());
-        cache.insert(key.clone(), "Pages contain scanned invoices.".into());
-        assert_eq!(
-            cache.get(&key).as_deref(),
-            Some("Pages contain scanned invoices.")
+        let result_ref = chat_state::TimelineRangeRef {
+            timeline_id: "00000000-0000-0000-0000-000000000001".into(),
+            first_seq: 2,
+            last_seq: 2,
+        };
+        cache.insert(
+            key.clone(),
+            "Pages contain scanned invoices.".into(),
+            result_ref.clone(),
         );
+        let cached = cache.get(&key).unwrap();
+        assert_eq!(cached.description, "Pages contain scanned invoices.");
+        assert_eq!(cached.result_ref, result_ref);
     }
     #[test]
     fn description_block_format_is_stable() {

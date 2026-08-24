@@ -836,6 +836,9 @@ pub enum SessionUpdate {
     /// Prompt images dropped before send (integrity / upscale-cap). The
     /// model is told via a system-reminder; this surfaces them to the UI.
     ImageDropped { notes: Vec<String> },
+    /// Canonical images retained while a text-only model route consumes
+    /// durable ImageShadows in its request projection.
+    ImageProjected { notes: Vec<String> },
     /// Memory file listing for the pager's /memory modal.
     MemoryFiles { files: Vec<MemoryFileInfo> },
     WorkflowUpdated {

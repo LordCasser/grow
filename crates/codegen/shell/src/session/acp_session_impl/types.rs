@@ -20,8 +20,8 @@ pub(crate) enum SamplerFailureRecovery {
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
     /// The active runtime explicitly rejected image input. Its negative
-    /// capability and canonical image rewrite were persisted; the turn should
-    /// rebuild the now text-only history.
+    /// capability and target-model ImageShadows were persisted; the turn
+    /// should rebuild a text-only request projection over canonical history.
     ImageInputUnsupportedAndResubmit,
     /// A BYOK helper or newly available configured key replaced the credential.
     /// `credential` records what the rejected request actually sent so retry

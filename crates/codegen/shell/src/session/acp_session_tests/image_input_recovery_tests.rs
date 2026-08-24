@@ -200,16 +200,13 @@ fn explicit_image_400_retries_once_without_images_and_completes_turn() {
             assert_eq!(count_wire_images(requests[1].body.as_ref().unwrap()), 0);
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(!conversation.iter().any(|item| {
-                matches!(item, ConversationItem::User(user) if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. })))
-            }));
             assert!(conversation.iter().any(|item| {
-                matches!(item, ConversationItem::User(user) if user.content.iter().any(|part| matches!(part, ContentPart::Text { text } if text.contains("Images removed"))))
+                matches!(item, ConversationItem::User(user) if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. })))
             }));
             assert!(actor.unsupported_current_model_for_images().await.is_some());
 
-            let mut image_dropped_count = 0;
-            let mut image_dropped_notes = Vec::new();
+            let mut image_projected_count = 0;
+            let mut image_projected_notes = Vec::new();
             let mut terminal_retry_failure = false;
             while let Ok(message) = gateway_rx.try_recv() {
                 let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
@@ -221,9 +218,9 @@ fn explicit_image_400_retries_once_without_images_and_completes_turn() {
                 let notification: crate::extensions::notification::SessionNotification =
                     serde_json::from_str(args.request.params.get()).unwrap();
                 match notification.update {
-                    GrowSessionUpdate::ImageDropped { notes } => {
-                        image_dropped_count += 1;
-                        image_dropped_notes.extend(notes);
+                    GrowSessionUpdate::ImageProjected { notes } => {
+                        image_projected_count += 1;
+                        image_projected_notes.extend(notes);
                     }
                     GrowSessionUpdate::RetryState(
                         crate::extensions::notification::RetryState::Failed { .. },
@@ -231,11 +228,11 @@ fn explicit_image_400_retries_once_without_images_and_completes_turn() {
                     _ => {}
                 }
             }
-            assert_eq!(image_dropped_count, 1);
+            assert_eq!(image_projected_count, 1);
             assert!(
-                image_dropped_notes
+                image_projected_notes
                     .iter()
-                    .any(|note| note.contains("已移除 1 张图片并继续"))
+                    .any(|note| note.contains("当前模型投影省略了 1 张图片"))
             );
             assert!(!terminal_retry_failure);
         }));
@@ -304,13 +301,16 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
             assert!(count_wire_images(requests[1].body.as_ref().unwrap()) > 0);
             assert_eq!(requests[1].body.as_ref().unwrap()["model"], "vision-model");
             assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
+            assert!(requests[2]
+                .body
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("code E42"));
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(
-                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
-            );
             assert!(conversation.iter().any(|item| {
-                matches!(item, ConversationItem::User(user) if user.content.iter().any(|part| matches!(part, ContentPart::Text { text } if text.contains("code E42"))))
+                matches!(item, ConversationItem::User(user) if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. })))
             }));
 
             let mut notes = Vec::new();
@@ -325,21 +325,21 @@ fn explicit_image_400_uses_auxiliary_description_then_retries_without_images() {
                 let notification: crate::extensions::notification::SessionNotification =
                     serde_json::from_str(args.request.params.get()).unwrap();
                 match notification.update {
-                    GrowSessionUpdate::ImageDropped { notes: current } => notes.extend(current),
+                    GrowSessionUpdate::ImageProjected { notes: current } => notes.extend(current),
                     GrowSessionUpdate::RetryState(
                         crate::extensions::notification::RetryState::Failed { .. },
                     ) => terminal_retry_failure = true,
                     _ => {}
                 }
             }
-            assert!(notes.iter().any(|note| note.contains("已使用辅助模型将 1 张图片转换")));
+            assert!(notes.iter().any(|note| note.contains("用辅助描述替代 1 张图片")));
             assert!(!terminal_retry_failure);
         }));
     });
 }
 
 #[test]
-fn auxiliary_image_400_is_cached_for_aux_runtime_then_images_are_removed() {
+fn auxiliary_image_400_is_cached_for_aux_runtime_while_original_images_remain() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -395,11 +395,12 @@ fn auxiliary_image_400_is_cached_for_aux_runtime_then_images_are_removed() {
                 .collect();
             assert_eq!(requests.len(), 3);
             assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
-            assert!(
+            assert_eq!(
                 sampling_types::conversation::conversation_image_groups(
                     &actor.chat_state_handle.get_conversation().await
                 )
-                .is_empty()
+                .len(),
+                1
             );
 
             let mut auxiliary_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -425,14 +426,14 @@ fn auxiliary_image_400_is_cached_for_aux_runtime_then_images_are_removed() {
                 }
                 let notification: crate::extensions::notification::SessionNotification =
                     serde_json::from_str(args.request.params.get()).unwrap();
-                if let GrowSessionUpdate::ImageDropped { notes: current } = notification.update {
+                if let GrowSessionUpdate::ImageProjected { notes: current } = notification.update {
                     notes.extend(current);
                 }
             }
             assert!(
                 notes
                     .iter()
-                    .any(|note| note.contains("已移除 1 张图片并继续"))
+                    .any(|note| note.contains("当前模型投影省略了 1 张图片"))
             );
         }));
     });

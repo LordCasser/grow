@@ -101,29 +101,30 @@ After an explicit rejection, the shell groups all canonical `User` and
 `ToolResult` images by message. Within one bounded recovery operation, a
 configured auxiliary runtime that is distinct from the rejected runtime gets
 one description request per group, with attachment count and order in its
-prompt. Successful groups become sanitized description blocks. Failed groups,
-or every group when no auxiliary runtime is usable, become explicit removal
-text. Only the auxiliary runtime's own explicit image HTTP 400 enters its
-negative cache; resolution, transport, timeout, and empty-response failures do
-not teach capability.
+prompt. Each successful description is completed in an `image-description`
+Sideband; failed groups, or every group when no auxiliary runtime is usable,
+receive explicit request-only omission text. Only the auxiliary runtime's own
+explicit image HTTP 400 enters its negative cache; resolution, transport,
+timeout, and empty-response failures do not teach capability.
 
-The chat-state actor compares message position plus image-group fingerprint,
-removes every current image, and persists the entire rewrite atomically before
-acknowledging it. Message order, prompt indices, synthetic metadata, ordinary
-text, and tool call/result pairing remain unchanged. The turn then rebuilds an
-image-free request and resubmits through a dedicated recovery outcome that
-does not consume ordinary retry budget or emit a failed turn. An image-count
-assertion plus request-copy strip is the final loop guard; the canonical actor
-rewrite is the normal path.
+The chat-state actor atomically records one log-only `ImageProjection` fact.
+The negative cache, Timeline fact and request builder share the same
+`ModelImageInputKey`; no consumer computes a parallel route identity. The fact
+binds that target model/backend/endpoint route, source Surface revision,
+stable Surface IDs, image-group fingerprints and Sideband result provenance.
+It never changes canonical messages. Request assembly applies only the active
+route's live `ImageShadow`s and then enforces the independent 50 MB transport
+budget on that request copy. A known text-only route that still produces an
+image-bearing request retries projection from a fresh Surface at most twice
+and then fails; it never silently strips an unaccounted request.
 
-Canonical removal is session-wide and is not reversed by switching models.
-User attachment assets and original `read_file` source files remain available,
-so reading them again can create new image messages. If the active runtime is
-already in the negative cache, newly appended images enter the same
-conversion/removal operation before sampling instead of provoking another
-400. Capability remains isolated by model/backend/endpoint, while the history
-rewrite is shared by the session. `ImageDropped` reports whether images were
-all converted, all removed, or mixed. No OCR backend participates in this
-recovery path.
+Switching to another route therefore exposes the original images immediately,
+while switching back reuses valid shadows. Surface replacement invalidates
+shadows structurally through new Surface IDs; ordinary appends preserve old
+ones and project only newly appended image groups. The resubmission does not
+consume ordinary retry budget or emit a failed turn. `ImageProjected` reports
+described and unavailable groups; `ImageDropped` remains reserved for images
+actually discarded during input normalization. No OCR backend participates in
+this recovery path.
 
 An Active Goal reload restores the v7 objective, definition revision, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then re-arms idle continuation. Goal owns no persisted plan, board, planner phase, or stage lease. Older Goal architectures and invalid v7 snapshots are rejected without migration instead of reviving a second lifecycle model.

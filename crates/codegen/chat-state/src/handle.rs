@@ -9,8 +9,8 @@ use sampling_types::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::{
-    ChatStateCommand, ConditionalToolResultOutcome, ImageRewrite, ImageRewriteReport, PruneError,
-    PruneReport, RepairHistoryError, TimelineWriteError,
+    ChatStateCommand, ConditionalToolResultOutcome, ImageProjectionReport, PruneError, PruneReport,
+    RepairHistoryError, TimelineWriteError,
 };
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
@@ -299,28 +299,25 @@ impl ChatStateHandle {
         .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
-    /// Atomically rewrite all canonical image groups and await the persisted
-    /// actor mutation and its durable history replacement. Returns `None`
-    /// when either actor delivery or persistence fails.
-    pub async fn rewrite_images_and_ack(
+    /// Durably record target-model ImageShadows while leaving source images on
+    /// the canonical Surface. The actor rejects stale source revisions.
+    pub async fn record_image_projection_and_ack(
         &self,
-        rewrites: Vec<ImageRewrite>,
-        dropped_placeholder: String,
-    ) -> Option<ImageRewriteReport> {
-        self.query("RewriteImagesAndAck", |reply| {
-            ChatStateCommand::RewriteImagesAndAck {
-                rewrites,
-                dropped_placeholder,
+        projection: crate::ImageProjectionEvent,
+    ) -> Result<ImageProjectionReport, TimelineWriteError> {
+        self.query("RecordImageProjectionAndAck", |reply| {
+            ChatStateCommand::RecordImageProjectionAndAck {
+                projection,
                 reply,
             }
         })
         .await
-        .flatten()
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
     }
 
     /// Prune the tool results selected by `plan` inside the actor and await
     /// the report. The actor trims each selected item's content to
-    /// head + marker + tail, re-estimates `total_tokens` (never upward), and
+    /// head + marker + tail, projects the signed Surface token delta, and
     /// persists the canonical Timeline replacement.
     ///
     /// Returns `Err(PruneError::ActorUnavailable)` when the actor is dead or

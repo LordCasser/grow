@@ -296,6 +296,13 @@ fn dimensions(event: &TimelineEventKind, state: &str) -> (String, String, String
         TimelineEventKind::Compaction(_) => {
             coordinates("meta", "governance", "core", "compaction", state)
         }
+        TimelineEventKind::ImageProjection(_) => coordinates(
+            "meta",
+            "governance",
+            "core",
+            "projection.image_shadow",
+            state,
+        ),
         TimelineEventKind::Recovery(_) => {
             coordinates("meta", "governance", "core", "context.recovery", state)
         }
@@ -383,7 +390,6 @@ fn message_dimensions(message: &MessageEvent) -> (String, String, String, String
         crate::MessageCause::IntegrityRepair
             | crate::MessageCause::Compaction
             | crate::MessageCause::ToolResultPrune
-            | crate::MessageCause::ImageRewrite
             | crate::MessageCause::ContextRebuild
             | crate::MessageCause::Rewind
     );
@@ -393,7 +399,6 @@ fn message_dimensions(message: &MessageEvent) -> (String, String, String, String
             crate::MessageCause::Rewind => "context.branch",
             crate::MessageCause::ToolResultPrune => "replacement.range_ref",
             crate::MessageCause::IntegrityRepair => "context.repair",
-            crate::MessageCause::ImageRewrite => "context.image_rewrite",
             crate::MessageCause::ContextRebuild => "context.rebuild",
             _ => unreachable!(),
         };
@@ -589,6 +594,20 @@ fn describe(
             ),
         },
         TimelineEventKind::Compaction(event) => describe_compaction(event),
+        TimelineEventKind::ImageProjection(projection) => tuple(
+            "projection",
+            "image_shadow",
+            "installed",
+            None,
+            None,
+            Some(projection.runtime.model().to_owned()),
+            None,
+            format!(
+                "{} image group(s) projected for {}",
+                projection.shadows.len(),
+                projection.runtime.model()
+            ),
+        ),
         TimelineEventKind::Recovery(RecoveryEvent {
             action,
             correlation_id,

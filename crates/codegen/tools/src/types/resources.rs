@@ -748,6 +748,7 @@ register_resource!("grow_build", "WebCitation", WebCitationCounter);
 /// runtime. The endpoint is represented by a fingerprint so session state does
 /// not persist credentials or other sensitive URL components.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelImageInputKey {
     model: String,
     api_backend: String,
@@ -768,6 +769,16 @@ impl ModelImageInputKey {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    pub fn is_valid(&self) -> bool {
+        [
+            self.model.as_str(),
+            self.api_backend.as_str(),
+            self.endpoint_fingerprint.as_str(),
+        ]
+        .into_iter()
+        .all(|value| !value.trim().is_empty())
     }
 }
 

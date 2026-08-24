@@ -404,8 +404,8 @@ pub enum ContentPart {
 ///
 /// Groups deliberately follow message boundaries: a `User` item or a
 /// `ToolResult` is described in one auxiliary-model call so attachment order
-/// remains meaningful. The fingerprint is an ephemeral compare-and-swap guard
-/// used by chat-state; it is not persisted as session data.
+/// remains meaningful. The fingerprint binds a durable ImageShadow to the
+/// exact ordered payloads without persisting those payloads a second time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationImageGroup {
     pub item_index: usize,

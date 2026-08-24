@@ -293,6 +293,7 @@ fn handle_session_notification_inner(
         | GrowSessionUpdate::AutoCompactCancelled { .. }
         | GrowSessionUpdate::RetryState(_)
         | GrowSessionUpdate::ImageDropped { .. }
+        | GrowSessionUpdate::ImageProjected { .. }
         | GrowSessionUpdate::MemoryFlushCompleted { .. }
         | GrowSessionUpdate::MemoryDreamCompleted { .. }
         | GrowSessionUpdate::MemorySessionSaved { .. }) => {
@@ -1211,6 +1212,12 @@ pub(super) fn apply_session_event(
         GrowSessionUpdate::ImageDropped { notes } => {
             let message = notes.join("\n");
             tracing::info!("Image dropped: {message}");
+            scrollback.push_block(RenderBlock::system(message));
+            true
+        }
+        GrowSessionUpdate::ImageProjected { notes } => {
+            let message = notes.join("\n");
+            tracing::info!("Image projected: {message}");
             scrollback.push_block(RenderBlock::system(message));
             true
         }

@@ -612,71 +612,37 @@ impl ChatStateActor {
         });
     }
 
-    /// Rewrite all current image groups against an optimistic snapshot in one
-    /// actor transaction. A mismatched or newly appended group is removed
-    /// rather than retained: once the active runtime is known to reject image
-    /// input, the postcondition is a canonical history with no images.
-    pub(super) async fn rewrite_images(
+    /// Commit target-model ImageShadows as one log-only Timeline fact. Source
+    /// images remain canonical and become visible again when the model route
+    /// changes; validation rejects stale or unproven descriptions.
+    pub(super) async fn record_image_projection(
         &mut self,
-        rewrites: Vec<crate::commands::ImageRewrite>,
-        dropped_placeholder: &str,
-    ) -> Option<crate::commands::ImageRewriteReport> {
-        use std::collections::BTreeMap;
-
-        use sampling_types::conversation::{
-            conversation_image_groups, replace_item_images_with_text,
-        };
-
-        let mut report = crate::commands::ImageRewriteReport::default();
-        let mut expected = rewrites
-            .into_iter()
-            .map(|rewrite| ((rewrite.item_index, rewrite.fingerprint.clone()), rewrite))
-            .collect::<BTreeMap<_, _>>();
-        let groups = conversation_image_groups(self.state.timeline.surface());
-        if groups.is_empty() {
-            report.unmatched_images = expected
-                .values()
-                .map(|rewrite| rewrite.expected_image_count)
-                .sum();
-            return Some(report);
+        projection: crate::ImageProjectionEvent,
+    ) -> Result<crate::commands::ImageProjectionReport, crate::commands::TimelineWriteError> {
+        let actual = self.state.timeline.surface_revision();
+        if projection.source_revision != actual {
+            return Err(crate::commands::TimelineWriteError::SurfaceChanged {
+                expected: projection.source_revision,
+                actual,
+            });
         }
-
-        let mut conversation = self.state.timeline.surface().to_vec();
-        for group in groups {
-            let key = (group.item_index, group.fingerprint.clone());
-            let rewrite = expected.remove(&key);
-            let replacement = rewrite
-                .as_ref()
-                .and_then(|rewrite| rewrite.replacement.as_deref())
-                .filter(|text| !text.trim().is_empty());
-            let text = replacement.unwrap_or(dropped_placeholder);
-            let removed = replace_item_images_with_text(&mut conversation[group.item_index], text);
-            if replacement.is_some() {
-                report.converted_images += removed;
-            } else {
-                report.dropped_images += removed;
-            }
-            if rewrite.is_none() {
-                report.unmatched_images += removed;
+        let mut candidate = self.state.timeline.clone();
+        let event = candidate.record(crate::TimelineEventKind::ImageProjection(
+            projection.clone(),
+        ))?;
+        self.commit_timeline_event(event).await?;
+        let mut report = crate::commands::ImageProjectionReport::default();
+        for shadow in projection.shadows {
+            match shadow.provenance {
+                crate::ImageShadowSource::Description { .. } => {
+                    report.described_images += shadow.image_count;
+                }
+                crate::ImageShadowSource::Unavailable => {
+                    report.unavailable_images += shadow.image_count;
+                }
             }
         }
-        report.unmatched_images += expected
-            .values()
-            .map(|rewrite| rewrite.expected_image_count)
-            .sum::<usize>();
-        debug_assert_eq!(
-            conversation.len(),
-            self.state.timeline.surface_len(),
-            "image rewrite must preserve conversation item identity"
-        );
-        if let Err(error) = self
-            .replace_conversation_durably(conversation, MessageCause::ImageRewrite)
-            .await
-        {
-            tracing::warn!(%error, "image rewrite Timeline event was not committed");
-            return None;
-        }
-        Some(report)
+        Ok(report)
     }
 
     /// Seed provider-reported accounting without mutating Timeline-derived

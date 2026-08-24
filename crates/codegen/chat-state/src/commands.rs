@@ -39,28 +39,16 @@ pub struct ModelMetadata {
     pub model_fingerprint: Option<String>,
 }
 
-/// Compare-and-swap input for one canonical conversation image group.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageRewrite {
-    pub item_index: usize,
-    pub fingerprint: String,
-    pub expected_image_count: usize,
-    /// Sanitized auxiliary description. `None` means the group must be
-    /// permanently removed because no usable description was produced.
-    pub replacement: Option<String>,
-}
-
-/// Counts from an actor-serialized canonical image rewrite.
+/// Counts from an actor-serialized target-model image projection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ImageRewriteReport {
-    pub converted_images: usize,
-    pub dropped_images: usize,
-    pub unmatched_images: usize,
+pub struct ImageProjectionReport {
+    pub described_images: usize,
+    pub unavailable_images: usize,
 }
 
-impl ImageRewriteReport {
+impl ImageProjectionReport {
     pub fn total_images(self) -> usize {
-        self.converted_images + self.dropped_images
+        self.described_images + self.unavailable_images
     }
 }
 
@@ -241,13 +229,12 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
-    /// Atomically replace every canonical user/tool-result image with either
-    /// an auxiliary description or an explicit removal marker. Matching and
-    /// mutation happen inside the actor so concurrent appends cannot be lost.
-    RewriteImagesAndAck {
-        rewrites: Vec<ImageRewrite>,
-        dropped_placeholder: String,
-        reply: oneshot::Sender<Option<ImageRewriteReport>>,
+    /// Record target-model ImageShadows without mutating the canonical Surface.
+    /// Timeline validation binds every shadow to the current Surface revision,
+    /// source identity, image fingerprint, and optional Sideband result.
+    RecordImageProjectionAndAck {
+        projection: crate::ImageProjectionEvent,
+        reply: oneshot::Sender<Result<ImageProjectionReport, TimelineWriteError>>,
     },
 
     /// Atomically prune oversized tool-result contents in the stored

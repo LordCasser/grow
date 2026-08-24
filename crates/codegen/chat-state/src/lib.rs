@@ -43,8 +43,8 @@ pub use actor::state::{
     estimate_tool_definitions_tokens, estimate_tool_specs_tokens,
 };
 pub use commands::{
-    ConditionalToolResultOutcome, ImageRewrite, ImageRewriteReport, ModelMetadata, PruneError,
-    PruneReport, RepairHistoryError, TimelineWriteError,
+    ConditionalToolResultOutcome, ImageProjectionReport, ModelMetadata, PruneError, PruneReport,
+    RepairHistoryError, TimelineWriteError,
 };
 pub use events::ChatStateEvent;
 pub use handle::ChatStateHandle;
@@ -60,8 +60,9 @@ pub use sideband::{
 };
 pub use timeline::{
     ActiveControlContext, CompactionEvent, ControlContext, ControlContextActivation,
-    ControlContextLayer, ControlEvent, EventSeq, MAX_WORKFLOW_RUN_ID_BYTES, MessageCause,
-    MessageEvent, ObservationEvent, PromptRecord, RecoveryEvent, RequestEvent, RequestUsage,
+    ControlContextLayer, ControlEvent, EventSeq, ImageProjectionEvent,
+    ImageShadow, ImageShadowSource, MAX_WORKFLOW_RUN_ID_BYTES, MessageCause, MessageEvent,
+    ObservationEvent, PromptRecord, RecoveryEvent, RequestEvent, RequestUsage,
     SessionTitleEvent, SessionTitleSource, StepEvent, StepId, SubagentContextSource, SubagentEvent,
     SubagentOutcome, SubagentResultEvent, SubagentSeedEvent, SubagentSpawnEvent,
     SubagentTerminalEvent, SurfaceId, SurfaceOp, SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline,

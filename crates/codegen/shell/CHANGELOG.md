@@ -20,7 +20,9 @@
 
 - Ordinary sampling requests now carry a stable cache-lineage key derived from Timeline identity, rewind branch, and the full model route. Appends preserve it; fork, rewind, or model-route changes invalidate it.
 - A Behavior transition now atomically commits its Control snapshot and model-visible live-tail item. The item remains at its causal Surface position across requests, while later switches append a new transition and Normal explicitly retires older special protocols; system-head rewriting is gone.
-- Timeline schema v9 rejects pre-atomic v8 logs; no compatibility projection is retained.
+- Tool-result shedding now has one path: auto-compaction emits a pre-prune plan and the chat-state actor commits one validated Timeline replacement. Request-copy and turn-age pruning were removed.
+- Text-only model recovery now records route-scoped ImageShadows with Sideband provenance. Original images remain canonical, another model route sees them immediately, and only the request projection is image-free.
+- Timeline schema v12 rejects all earlier logs; no compatibility projection is retained.
 
 完整发布说明见 [changelogs/1.1.11.md](changelogs/1.1.11.md)。
 

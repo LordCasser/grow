@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 11;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 12;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -78,6 +78,34 @@ pub struct SurfaceRange {
     pub shadowed: Vec<SurfaceId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImageShadowSource {
+    Description { result_ref: crate::TimelineRangeRef },
+    Unavailable,
+}
+
+/// One target-model shadow for an image-bearing Surface item. The source item
+/// remains unchanged; request projection replaces its images only when the
+/// active runtime matches the owning [`ImageProjectionEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageShadow {
+    pub source: SurfaceId,
+    pub fingerprint: String,
+    pub image_count: usize,
+    pub replacement: String,
+    pub provenance: ImageShadowSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageProjectionEvent {
+    pub runtime: sampling_types::ModelImageInputKey,
+    pub source_revision: u64,
+    pub shadows: Vec<ImageShadow>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageCause {
@@ -88,7 +116,6 @@ pub enum MessageCause {
     IntegrityRepair,
     Compaction,
     ToolResultPrune,
-    ImageRewrite,
     MemoryContext,
     ContextRebuild,
     Rewind,
@@ -584,6 +611,7 @@ pub enum TimelineEventKind {
     Tool(ToolEvent),
     Workflow(WorkflowEvent),
     Compaction(CompactionEvent),
+    ImageProjection(ImageProjectionEvent),
     Recovery(RecoveryEvent),
     Observation(ObservationEvent),
     Control(ControlEvent),
@@ -740,6 +768,8 @@ pub enum TimelineError {
     InvalidToolResultPrune,
     #[error("tool-result prune changed fields other than content")]
     ToolResultIdentityChanged,
+    #[error("image projection does not match the current Surface or its Sideband provenance")]
+    InvalidImageProjection,
     #[error("control revision {actual} must be greater than the previous revision {previous}")]
     NonMonotonicControlRevision { previous: u64, actual: u64 },
     #[error("control model context must be one non-empty synthetic text reminder after system")]
@@ -908,6 +938,32 @@ impl Timeline {
 
     pub fn surface_ids(&self) -> &[SurfaceId] {
         &self.surface_ids
+    }
+
+    /// Current target-model image shadows keyed by their still-live Surface
+    /// identity. Replacements invalidate shadows structurally because they
+    /// create new Surface IDs; ordinary appends leave prior shadows active.
+    pub fn active_image_projections(
+        &self,
+    ) -> BTreeMap<sampling_types::ModelImageInputKey, BTreeMap<SurfaceId, ImageShadow>> {
+        let current = self.surface_ids.iter().copied().collect::<BTreeSet<_>>();
+        let mut active = BTreeMap::<
+            sampling_types::ModelImageInputKey,
+            BTreeMap<SurfaceId, ImageShadow>,
+        >::new();
+        for event in &self.events {
+            let TimelineEventKind::ImageProjection(projection) = &event.kind else {
+                continue;
+            };
+            let runtime = active.entry(projection.runtime.clone()).or_default();
+            for shadow in &projection.shadows {
+                if current.contains(&shadow.source) {
+                    runtime.insert(shadow.source, shadow.clone());
+                }
+            }
+        }
+        active.retain(|_, shadows| !shadows.is_empty());
+        active
     }
 
     /// Effective model context for each Control layer, whether or not its
@@ -1111,8 +1167,8 @@ impl Timeline {
     /// Original branch leaves unloaded by completed compaction transactions.
     ///
     /// A compaction target names the Surface nodes visible at summary time,
-    /// but content-only replacements such as tool-result pruning and image
-    /// rewriting create newer Surface identities before compaction. Recall
+    /// but content-only tool-result pruning creates newer Surface identities
+    /// before compaction. Recall
     /// consumes the unmodified branch transcript, whose items retain their
     /// earlier identities. Fold replacement provenance here so both views use
     /// the same leaf coordinates instead of silently losing recallability
@@ -1950,6 +2006,51 @@ impl Timeline {
             }
             self.validate_surface_range(target)?;
         }
+        if let TimelineEventKind::ImageProjection(projection) = &event.kind {
+            if !projection.runtime.is_valid()
+                || projection.source_revision != self.surface_revision
+                || projection.shadows.is_empty()
+            {
+                return Err(TimelineError::InvalidImageProjection);
+            }
+            let groups = sampling_types::conversation::conversation_image_groups(&self.surface)
+                .into_iter()
+                .filter_map(|group| {
+                    self.surface_ids
+                        .get(group.item_index)
+                        .copied()
+                        .map(|source| (source, group))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let mut sources = BTreeSet::new();
+            for shadow in &projection.shadows {
+                let group = groups.get(&shadow.source);
+                if !sources.insert(shadow.source)
+                    || shadow.replacement.trim().is_empty()
+                    || !group.is_some_and(|group| {
+                        group.fingerprint == shadow.fingerprint
+                            && group.image_count() == shadow.image_count
+                    })
+                {
+                    return Err(TimelineError::InvalidImageProjection);
+                }
+                if let ImageShadowSource::Description { result_ref } = &shadow.provenance {
+                    let valid_ref = result_ref.validate().is_ok()
+                        && result_ref.first_seq == result_ref.last_seq
+                        && self.events.iter().any(|event| {
+                            matches!(
+                                &event.kind,
+                                TimelineEventKind::Sideband(spawn)
+                                    if spawn.sideband_id == result_ref.timeline_id
+                                        && spawn.purpose == crate::SidebandPurpose::ImageDescription
+                            )
+                        });
+                    if !valid_ref {
+                        return Err(TimelineError::InvalidImageProjection);
+                    }
+                }
+            }
+        }
         if let TimelineEventKind::Messages(messages) = &event.kind {
             if messages.cause == MessageCause::ContextRebuild && self.next_prompt_index() != 0 {
                 return Err(TimelineError::ContextRebuildAfterTurn);
@@ -2292,7 +2393,6 @@ impl Timeline {
                     MessageCause::IntegrityRepair
                     | MessageCause::Compaction
                     | MessageCause::ToolResultPrune
-                    | MessageCause::ImageRewrite
                     | MessageCause::Rewind => false,
                 };
                 if !valid {
@@ -2330,8 +2430,6 @@ impl Timeline {
                     MessageCause::ToolResultPrune if replaces_all => {
                         validate_tool_result_prune(replaced, messages)?;
                     }
-                    MessageCause::ImageRewrite
-                        if replaces_all && validate_image_rewrite(replaced, &messages.items) => {}
                     MessageCause::ContextRebuild if replaces_all => {}
                     MessageCause::IntegrityRepair | MessageCause::Rewind if replaces_all => {}
                     MessageCause::Seed
@@ -2341,7 +2439,6 @@ impl Timeline {
                     | MessageCause::IntegrityRepair
                     | MessageCause::Compaction
                     | MessageCause::ToolResultPrune
-                    | MessageCause::ImageRewrite
                     | MessageCause::MemoryContext
                     | MessageCause::ContextRebuild
                     | MessageCause::Rewind => {
@@ -2817,6 +2914,7 @@ impl LifecycleFold {
                 ));
             }
             TimelineEventKind::Messages(_)
+            | TimelineEventKind::ImageProjection(_)
             | TimelineEventKind::Recovery(_)
             | TimelineEventKind::Observation(_)
             | TimelineEventKind::SessionTitle(_)
@@ -2981,8 +3079,7 @@ fn replacement_branch_leaves(
                 .collect::<Vec<_>>();
             replacement.iter().map(|_| leaves.clone()).collect()
         }
-        MessageCause::ToolResultPrune | MessageCause::ImageRewrite
-            if previous.len() == replacement.len() =>
+        MessageCause::ToolResultPrune if previous.len() == replacement.len() =>
         {
             previous.iter().map(|entry| entry.leaves.clone()).collect()
         }
@@ -3012,7 +3109,6 @@ fn replacement_branch_leaves(
         | MessageCause::ToolResult
         | MessageCause::MemoryContext
         | MessageCause::ToolResultPrune
-        | MessageCause::ImageRewrite
         | MessageCause::ContextRebuild
         | MessageCause::Rewind => (0..replacement.len()).map(own_leaf).collect(),
     }
@@ -3047,39 +3143,6 @@ fn valid_workflow_run_id(run_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn validate_image_rewrite(replaced: &[ConversationItem], replacement: &[ConversationItem]) -> bool {
-    if replaced.len() != replacement.len() {
-        return false;
-    }
-    let mut changed = false;
-    for (before, after) in replaced.iter().zip(replacement) {
-        if conversation_items_match(before, after) {
-            continue;
-        }
-        let valid = match (before, after) {
-            (ConversationItem::User(before), ConversationItem::User(after)) => {
-                let mut before_metadata = before.clone();
-                let mut after_metadata = after.clone();
-                before_metadata.content.clear();
-                after_metadata.content.clear();
-                conversation_items_match(
-                    &ConversationItem::User(before_metadata),
-                    &ConversationItem::User(after_metadata),
-                ) && validate_user_image_rewrite(&before.content, &after.content)
-            }
-            (ConversationItem::ToolResult(before), ConversationItem::ToolResult(after)) => {
-                validate_tool_result_image_rewrite(before, after)
-            }
-            _ => false,
-        };
-        if !valid {
-            return false;
-        }
-        changed = true;
-    }
-    changed
-}
-
 fn valid_system_layout(items: &[ConversationItem]) -> bool {
     items
         .iter()
@@ -3108,83 +3171,6 @@ fn replacement_preserves_system_head(
         }
         _ => replacement_systems.is_empty(),
     }
-}
-
-fn validate_user_image_rewrite(
-    before: &[sampling_types::ContentPart],
-    after: &[sampling_types::ContentPart],
-) -> bool {
-    let mut after_index = 0;
-    let mut inserted_replacement = false;
-    for part in before {
-        match part {
-            sampling_types::ContentPart::Image { .. } if !inserted_replacement => {
-                let Some(sampling_types::ContentPart::Text { text }) = after.get(after_index)
-                else {
-                    return false;
-                };
-                if text.trim().is_empty() {
-                    return false;
-                }
-                inserted_replacement = true;
-                after_index += 1;
-            }
-            sampling_types::ContentPart::Image { .. } => {}
-            sampling_types::ContentPart::Text { .. } => {
-                let Some(after_part) = after.get(after_index) else {
-                    return false;
-                };
-                if serde_json::to_value(part).ok() != serde_json::to_value(after_part).ok() {
-                    return false;
-                }
-                after_index += 1;
-            }
-        }
-    }
-    inserted_replacement
-        && after_index == after.len()
-        && after
-            .iter()
-            .all(|part| !matches!(part, sampling_types::ContentPart::Image { .. }))
-}
-
-fn validate_tool_result_image_rewrite(
-    before: &sampling_types::ToolResultItem,
-    after: &sampling_types::ToolResultItem,
-) -> bool {
-    if before.tool_call_id != after.tool_call_id
-        || !before
-            .images
-            .iter()
-            .any(|part| matches!(part, sampling_types::ContentPart::Image { .. }))
-    {
-        return false;
-    }
-    let retained = before
-        .images
-        .iter()
-        .filter(|part| !matches!(part, sampling_types::ContentPart::Image { .. }))
-        .collect::<Vec<_>>();
-    if retained.len() != after.images.len()
-        || retained.iter().zip(&after.images).any(|(before, after)| {
-            serde_json::to_value(before).ok() != serde_json::to_value(after).ok()
-        })
-    {
-        return false;
-    }
-    let replacement = if before.content.is_empty() {
-        after.content.as_ref()
-    } else {
-        let Some(replacement) = after
-            .content
-            .strip_prefix(before.content.as_ref())
-            .and_then(|suffix| suffix.strip_prefix("\n\n"))
-        else {
-            return false;
-        };
-        replacement
-    };
-    !replacement.trim().is_empty()
 }
 
 fn validate_tool_result_prune(
@@ -4668,32 +4654,72 @@ mod tests {
     }
 
     #[test]
-    fn image_and_memory_operations_cannot_mutate_unrelated_message_fields() {
-        let mut timeline = Timeline::from_seed(vec![
-            ConversationItem::system("system"),
-            ConversationItem::user("original"),
-        ])
-        .unwrap();
+    fn image_projection_is_log_only_and_bound_to_a_live_surface_item() {
+        use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
 
+        let image = ConversationItem::User(UserItem {
+            content: vec![ContentPart::Image {
+                url: "data:image/png;base64,original".into(),
+            }],
+            ..Default::default()
+        });
+        let mut timeline = Timeline::from_seed(vec![image.clone()]).unwrap();
+        let before_revision = timeline.surface_revision();
+        let group = conversation_image_groups(timeline.surface()).remove(0);
+        let runtime = sampling_types::ModelImageInputKey::new(
+            "text-model",
+            "messages",
+            "endpoint",
+        );
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                runtime: runtime.clone(),
+                source_revision: before_revision,
+                shadows: vec![ImageShadow {
+                    source: timeline.surface_ids()[0],
+                    fingerprint: group.fingerprint.clone(),
+                    image_count: group.image_count(),
+                    replacement: "image description unavailable".into(),
+                    provenance: ImageShadowSource::Unavailable,
+                }],
+            }))
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(timeline.surface()).unwrap(),
+            serde_json::to_vec(std::slice::from_ref(&image)).unwrap(),
+        );
+        assert_eq!(timeline.surface_revision(), before_revision);
+        assert_eq!(timeline.active_image_projections()[&runtime].len(), 1);
+
+        let source = timeline.surface_ids()[0];
         assert!(matches!(
-            timeline.replace_all(
-                vec![
-                    ConversationItem::system("system"),
-                    ConversationItem::user("forged image rewrite"),
-                ],
-                MessageCause::ImageRewrite,
-            ),
-            Err(TimelineError::InvalidMessageShape)
+            timeline.record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                runtime,
+                source_revision: before_revision,
+                shadows: vec![ImageShadow {
+                    source,
+                    fingerprint: "wrong-source".into(),
+                    image_count: 1,
+                    replacement: "forged".into(),
+                    provenance: ImageShadowSource::Unavailable,
+                }],
+            })),
+            Err(TimelineError::InvalidImageProjection)
         ));
         assert!(matches!(
-            timeline.replace_all(
-                vec![
-                    ConversationItem::system("new system"),
-                    ConversationItem::user("forged body rewrite"),
-                ],
-                MessageCause::MemoryContext,
-            ),
-            Err(TimelineError::InvalidMessageShape)
+            timeline.record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                runtime: sampling_types::ModelImageInputKey::new("", "messages", "endpoint"),
+                source_revision: before_revision,
+                shadows: vec![ImageShadow {
+                    source,
+                    fingerprint: group.fingerprint.clone(),
+                    image_count: group.image_count(),
+                    replacement: "forged".into(),
+                    provenance: ImageShadowSource::Unavailable,
+                }],
+            })),
+            Err(TimelineError::InvalidImageProjection)
         ));
     }
 

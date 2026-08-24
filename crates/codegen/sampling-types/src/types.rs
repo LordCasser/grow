@@ -304,6 +304,7 @@ pub enum ToolType {
 // The canonical definitions now live there; this re-export keeps
 // all existing `crate::sampling::types::ToolDefinition` imports working.
 pub use tools::types::definition::{FunctionTool, ToolDefinition};
+pub use tools::types::resources::ModelImageInputKey;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
@@ -878,6 +879,46 @@ pub struct SamplingConfig {
     /// API request body so the upstream emits per-chunk argument deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
+}
+
+/// Stable, secret-free identity of one configured model transport for image
+/// capability and request projection. This is the only route-key constructor;
+/// callers must not independently hash endpoint configuration.
+pub fn model_image_input_key(config: &SamplingConfig) -> ModelImageInputKey {
+    model_image_input_key_from_parts(
+        &config.model,
+        &config.api_backend,
+        &config.base_url,
+        &config.query_params,
+    )
+}
+
+pub fn model_image_input_key_from_parts(
+    model: &str,
+    api_backend: &ApiBackend,
+    base_url: &str,
+    query_params: &indexmap::IndexMap<String, String>,
+) -> ModelImageInputKey {
+    let api_backend = match api_backend {
+        ApiBackend::ChatCompletions => "chat_completions",
+        ApiBackend::Responses => "responses",
+        ApiBackend::Messages => "messages",
+    };
+    let mut query = query_params.iter().collect::<Vec<_>>();
+    query.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let mut endpoint = blake3::Hasher::new();
+    endpoint.update(base_url.as_bytes());
+    for (key, value) in query {
+        endpoint.update(&[0]);
+        endpoint.update(key.as_bytes());
+        endpoint.update(b"=");
+        endpoint.update(value.as_bytes());
+    }
+    ModelImageInputKey::new(
+        model,
+        api_backend,
+        endpoint.finalize().to_hex().to_string(),
+    )
 }
 
 // ============ Responses API wrapper ============

@@ -150,6 +150,7 @@ impl OpenedSession {
             surface_revision: timeline.surface_revision(),
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
+            active_image_projections: timeline.active_image_projections(),
             active_control_contexts: timeline.active_control_contexts(),
         })
     }
@@ -239,6 +240,7 @@ impl JsonlStorageAdapter {
             surface_revision: timeline.surface_revision(),
             surface: timeline.surface().to_vec(),
             surface_ids: timeline.surface_ids().to_vec(),
+            active_image_projections: timeline.active_image_projections(),
             active_control_contexts: timeline.active_control_contexts(),
         })
     }

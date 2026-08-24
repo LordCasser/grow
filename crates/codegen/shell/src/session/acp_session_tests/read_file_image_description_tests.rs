@@ -88,25 +88,43 @@ async fn known_text_only_model_degrades_read_file_image_before_sampling() {
                 "read_file must keep ImageContent"
             );
 
-            let report = actor.rewrite_images_for_known_text_model().await.unwrap();
-            assert_eq!(report.converted_images, 0);
-            assert_eq!(report.dropped_images, 1);
+            let report = actor.project_images_for_known_text_model().await.unwrap();
+            assert_eq!(report.described_images, 0);
+            assert_eq!(report.unavailable_images, 1);
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(
-                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&conversation).len(),
+                1
             );
             let ConversationItem::ToolResult(result) = conversation.last().unwrap() else {
                 panic!("expected tool result");
             };
             assert_eq!(result.tool_call_id, "read-image-1");
-            assert!(result.images.is_empty());
-            assert!(result.content.contains("Images removed"));
+            assert_eq!(result.images.len(), 1);
+            assert_eq!(result.content.as_ref(), "Read image file: /workspace/image.png");
+
+            let request = actor
+                .chat_state_handle
+                .build_request(&actor.session_info.id.to_string(), vec![], None)
+                .await
+                .unwrap();
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&request.items).is_empty()
+            );
+            assert!(
+                request
+                    .items
+                    .last()
+                    .unwrap()
+                    .text_content()
+                    .contains("Images omitted")
+            );
         })
         .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pdf_extracted_images_stay_one_ordered_group_then_are_permanently_removed() {
+async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_projected() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -155,21 +173,40 @@ async fn pdf_extracted_images_stay_one_ordered_group_then_are_permanently_remove
             actor.chat_state_handle.push_user_message(deferred[0].clone());
 
             mark_current_model_as_text_only(&actor).await;
-            let report = actor.rewrite_images_for_known_text_model().await.unwrap();
-            assert_eq!(report.dropped_images, 2);
+            let report = actor.project_images_for_known_text_model().await.unwrap();
+            assert_eq!(report.unavailable_images, 2);
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(sampling_types::conversation::conversation_image_groups(&conversation).is_empty());
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&conversation).len(),
+                1
+            );
             assert!(conversation.iter().any(|item| {
                 matches!(item, ConversationItem::ToolResult(result) if result.content.contains("PDF text"))
             }));
 
+            let text_request = actor
+                .chat_state_handle
+                .build_request(&actor.session_info.id.to_string(), vec![], None)
+                .await
+                .unwrap();
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&text_request.items)
+                    .is_empty()
+            );
+
             let mut vision_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
             vision_config.model = "vision-model".to_owned();
             actor.chat_state_handle.update_sampling_config(vision_config);
-            assert!(sampling_types::conversation::conversation_image_groups(
-                &actor.chat_state_handle.get_conversation().await
-            )
-            .is_empty());
+            let vision_request = actor
+                .chat_state_handle
+                .build_request(&actor.session_info.id.to_string(), vec![], None)
+                .await
+                .unwrap();
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&vision_request.items)
+                    .len(),
+                1
+            );
         })
         .await;
 }
